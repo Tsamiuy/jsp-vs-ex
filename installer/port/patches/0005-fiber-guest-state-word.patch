@@ -1,0 +1,190 @@
+Patch 0005: cellFiber keeps the guest CellFiberPpu state word, so an SPU job can signal a PPU fiber.
+
+libfiber keeps a fiber's state in the guest struct (word 0: READY 0x01, RUNNING 0x02, WAITING 0x08, PENDING 0x10, DONE 0x40; +0x08
+scheduler; +0x19 priority). The game's SPU job wakes a parked fiber with GETLLAR/PUTLLC on that line and treats a zero word as an
+unused slot. Done on the toolkit's own scheduler instead of a second one, after the v0.15 port's fiber code (jstars/port/jstars_fiber.cpp).
+
+diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+--- a/libs/spurs/cellFiber.c
++++ b/libs/spurs/cellFiber.c
+@@ -108,6 +108,52 @@
+ static Fiber* s_fibers;
+ static u64    s_seq;
+ 
++/* ---------------------------------------------------------------------------
++ * The guest CellFiberPpu state word
++ *
++ * libfiber keeps a fiber's state in the guest CellFiberPpu, and SPU code reads and changes it there: J-Stars' SPU
++ * job signals a parked PPU fiber with a GETLLAR/PUTLLC on the fiber's line instead of a PPU SendSignal. Word 0 holds
++ * the state flags, +0x08 the scheduler, the byte at +0x19 the priority. The SPU side does
++ *     w == 0 or w & DONE  -> error, no signal
++ *     w & WAITING         -> w = (w & ~WAITING) | READY, and links the fiber into the scheduler's list
++ *     otherwise           -> w |= PENDING (its next WaitSignal returns at once)
++ * ASSUMPTION: flag values and offsets as read from that SPU job by the v0.15 port (this repository's
++ * jstars-notes/FINDINGS.md section 6, jstars/port/jstars_fiber.cpp); not yet checked against the SDK headers.
++ * The host state stays authoritative for the PPU side; the word is kept in step with it, and a WAIT_SIGNAL fiber
++ * whose word lost WAITING was signalled from the SPU. Read-modify-writes take the lock-line lock, the lock PUTLLC
++ * commits under, so a PPU update never overwrites an SPU one in flight.
++ * -----------------------------------------------------------------------*/
++enum {
++    GF_READY = 0x01, GF_RUNNING = 0x02, GF_WAITING = 0x08, GF_PENDING = 0x10, GF_DONE = 0x40,
++};
++#define GF_OFF_NEXT   0x04u
++#define GF_OFF_SCHED  0x08u
++#define GF_OFF_PRIO   0x19u
++
++static u32 gf_raw_get(u32 ea)
++{
++    u32 raw; memcpy(&raw, vm_base + ea, 4);
++    return ps3_bswap32(raw);
++}
++
++/* w = (w & keep) | set, atomically against SPU lock-line updates; returns the old word. */
++static u32 gf_update(u32 ea, u32 keep, u32 set)
++{
++    spu_lockline_lock();
++    u32 old = gf_raw_get(ea);
++    u32 raw = ps3_bswap32((old & keep) | set);
++    memcpy(vm_base + ea, &raw, 4);
++    if (spu_coh_line_reserved(ea)) spu_coh_notify_write(ea);
++    spu_lockline_unlock();
++    return old;
++}
++
++/* Signalled from the SPU while parked in WaitSignal: the word lost WAITING. The lock is held. */
++static int gf_spu_woke(const Fiber* f)
++{
++    return f->state == F_WAIT_SIGNAL && !(gf_raw_get(f->ea) & GF_WAITING);
++}
++
+ /* The fiber running on this host thread, if any. */
+ static PPU_THREAD_LOCAL Fiber* t_cur;
+ 
+@@ -147,6 +193,7 @@
+ {
+     Fiber* best = NULL;
+     for (Fiber* f = s_fibers; f; f = f->next) {
++        if (f->sched == s && gf_spu_woke(f)) f->state = F_READY;
+         if (f->sched != s || f->state != F_READY) continue;
+         if (!best || f->priority < best->priority ||
+             (f->priority == best->priority && f->seq < best->seq))
+@@ -155,14 +202,6 @@
+     return best;
+ }
+ 
+-/* Every fiber of the scheduler has ended (or it has none). */
+-static int all_done(const Sched* s)
+-{
+-    for (const Fiber* f = s_fibers; f; f = f->next)
+-        if (f->sched == s && f->state != F_DONE) return 0;
+-    return 1;
+-}
+-
+ /* ---------------------------------------------------------------------------
+  * Host context switching: ucontext on POSIX, fibers on Windows. RunFibers' own context is the "back" one every fiber
+  * returns to when it blocks, yields or ends.
+@@ -243,6 +282,7 @@
+ {
+     f->status = status;
+     f->state  = F_DONE;
++    gf_update(f->ea, 0, GF_DONE);
+     for (Fiber* g = s_fibers; g; g = g->next)
+         if (g->state == F_WAIT_JOIN && g->join_ea == f->ea) g->state = F_READY;
+ }
+@@ -402,6 +442,11 @@
+         f->seq   = s_seq++;
+         f->next  = s_fibers;
+         s_fibers = f;
++        /* The guest fields the SPU-side signal reads. */
++        gf_update(fiber_ea, 0, GF_READY);
++        vm_write32(fiber_ea + GF_OFF_NEXT, 0);
++        vm_write32(fiber_ea + GF_OFF_SCHED, sched_ea);
++        vm_write8(fiber_ea + GF_OFF_PRIO, (u8)priority);
+     }
+     UNLOCK();
+     if (rc != CELL_OK) {
+@@ -430,12 +475,14 @@
+ 
+     for (;;) {
+         Fiber* f = pick_runnable(s);
+-        if (!f) {
+-            if (all_done(s)) break;
+-            WAIT();              /* its fibers wait for a signal, or a join, that another thread delivers */
+-            continue;
+-        }
++        /* Nothing runnable: return, as libfiber's RunFibers does once every fiber waits or has ended. The caller
++         * runs the scheduler again when it is told to (J-Stars' job workers: on their event queue). Blocking here
++         * instead never woke for a signal the SPU makes in the guest word, which no host condition variable sees.
++         * ASSUMPTION: return semantics as the v0.15 port (jstars_fiber.cpp run_fibers), which reached the
++         * menus with it. */
++        if (!f) break;
+         f->state = F_RUNNING;
++        gf_update(f->ea, GF_PENDING, GF_RUNNING);
+         UNLOCK();
+ 
+         ppu_context* saved_active = g_active_ctx;
+@@ -448,6 +495,8 @@
+         LOCK();
+         if (f->state == F_DONE)
+             host_destroy(f);     /* off its stack now; the Fiber stays for JoinFiber's status */
++        else if (f->state == F_READY)
++            gf_update(f->ea, GF_PENDING, GF_READY);      /* yielded */
+     }
+     s->running = 0;
+     UNLOCK();
+@@ -460,10 +509,21 @@
+     if (!f) return (s32)CELL_FIBER_ERROR_PERM;
+ 
+     LOCK();
+-    if (f->signal_pending) {
+-        f->signal_pending = 0;
+-        UNLOCK();
+-        return CELL_OK;
++    /* A signal that came first, from SendSignal or from the SPU (PENDING in the guest word). */
++    {
++        spu_lockline_lock();
++        u32 w = gf_raw_get(f->ea);
++        int pending = f->signal_pending || (w & GF_PENDING);
++        u32 nw = pending ? (w & ~(u32)GF_PENDING) : ((w & ~(u32)(GF_READY | GF_RUNNING)) | GF_WAITING);
++        u32 raw = ps3_bswap32(nw);
++        memcpy(vm_base + f->ea, &raw, 4);
++        if (spu_coh_line_reserved(f->ea)) spu_coh_notify_write(f->ea);
++        spu_lockline_unlock();
++        if (pending) {
++            f->signal_pending = 0;
++            UNLOCK();
++            return CELL_OK;
++        }
+     }
+     f->state = F_WAIT_SIGNAL;
+     UNLOCK();
+@@ -479,11 +539,18 @@
+     LOCK();
+     Fiber* f = find_fiber(ea);
+     if (!f) { UNLOCK(); return (s32)CELL_FIBER_ERROR_INVAL; }
+-    if (f->state == F_WAIT_SIGNAL)  f->state = F_READY;
+-    else if (f->state != F_DONE)    f->signal_pending = 1;
++    u32 woken = 0;
++    if (f->state == F_WAIT_SIGNAL) {
++        f->state = F_READY;
++        gf_update(f->ea, ~(u32)GF_WAITING, GF_READY);   /* the transition the SPU-side signal makes */
++        woken = 1;
++    } else if (f->state != F_DONE) {
++        f->signal_pending = 1;
++        gf_update(f->ea, ~0u, GF_PENDING);
++    }
+     UNLOCK();
+     WAKE();
+-    if (numWorker) vm_write32((u32)(uintptr_t)numWorker, 0);
++    if (numWorker) vm_write32((u32)(uintptr_t)numWorker, woken);
+     return CELL_OK;
+ }
+ 
+@@ -495,6 +562,7 @@
+     LOCK();
+     f->state = F_READY;
+     f->seq   = s_seq++;          /* behind the other fibers of its priority */
++    gf_update(f->ea, GF_PENDING, GF_READY);
+     UNLOCK();
+     host_yield(f);
+     return CELL_OK;

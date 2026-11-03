@@ -1,0 +1,34 @@
+Patch 2001: expose the default GCM context and the title's context slot, and dump the last jump/call words on a bad branch.
+
+The game calls cellGcmSetDefaultCommandBuffer three times per frame and expects libgcm's behaviour: gCellGcmCurrentContext is pointed
+back at the default context cellGcmInit built (no rewind). The runtime only zeroed a host struct, so the game's default-ring writes
+went into its own segment and the FIFO walker lost sync.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1693,6 +1693,11 @@ static void gcm_fifo_dump_around(u32 getoff)
+         fprintf(stderr, "[FIFOSTEP] io=%08X w=%08X  type=%u method=0x%04X count=%u\n",
+                 s_tr_off[k], w, w >> 29, w & 0x1FFCu, (w >> 18) & 0x7FFu);
+     }
++    for (u32 q = 0; q < 8; q++) {
++        u32 k = (s_cf_i + q) % 8;
++        if (s_cf_w[k]) fprintf(stderr, "[FIFOCF] jump/call at io=%08X w=%08X\n", s_cf_off[k], s_cf_w[k]);
++    }
++    fprintf(stderr, "[FIFOCF] calloff=%08X getoff=%08X put=%08X\n", s_fifo_calloff, getoff, vm_read32(GCM_CONTROL_GUEST_ADDR));
+     for (int k = -20; k <= 2; k++) {
+         u32 io = getoff + (u32)(k * 4);
+         u32 ea = gcm_io2ea(io);
+@@ -4169,6 +4174,12 @@ void cellGcmInitDefaultFifoMode(s32 mode)
+     s_default_fifo_mode = mode;
+ }
+
++/* The default context's EA and the title's gCellGcmCurrentContext slot, for a
++ * title that implements the libgcm repoint itself (the port's override of
++ * cellGcmSetDefaultCommandBuffer). 0 before cellGcmInit. */
++u32 cellGcm_default_context_ea(void)  { return s_gcm_context_ea; }
++u32 cellGcm_context_slot_ea(void)     { return s_gcm_ctx_out_ea; }
++
+ /* Set command buffer to defaults (reset put/get pointers) */
+ void cellGcmSetDefaultCommandBuffer(void)
+ {

@@ -1,0 +1,62 @@
+Patch 2002: run the recorded batch without presenting when the per-frame vertex buffer or draw records would overflow.
+
+After the opening movie the game's frame starts with a depth-only pass of 634 draws whose vertices add up to exactly MAX_VERTICES
+(393216). Every later op of the frame then got no vertex slots and was not recorded, so each flip presented the bare clear. The
+backend now renders what is recorded and continues in the other half. VP_NO_MIDFLUSH=1 restores the old truncation.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index bc05a30..e242499 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7014,6 +7014,35 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
+     return o;
+ }
+
++/* J-Stars: a frame that does not fit the per-frame vertex buffer (or the draw
++ * records) used to be truncated silently -- the first big pass (the depth-only
++ * shadow pass, 634 draws = exactly MAX_VERTICES vertices) took every slot and
++ * the colour pass, post chain and display pass that followed recorded nothing,
++ * so every flip showed the bare clear. Run what is recorded without presenting,
++ * which empties the buffers, and keep recording the same guest frame.
++ * Offscreen render targets keep their contents across the split; display draws
++ * recorded before a split are lost (the backbuffer is cleared per batch).
++ * VP_NO_MIDFLUSH=1 restores the old truncation. Idea from the v0.15
++ * notes (FINDINGS.md section 22, vp_flush_if_full), written fresh for v0.18. */
++static void vp_flush_if_full(u32 guest_count, int indexed)
++{
++    static int off = -1;
++    if (off < 0) off = getenv("VP_NO_MIDFLUSH") ? 1 : 0;
++    if (off || !s_d3d.initialized || s_d3d.draw_count == 0) return;
++    u32 used = s_d3d.vp_vb_offset / VP_VERT_STRIDE;
++    int full = used + guest_count * 3u > MAX_VERTICES || s_d3d.draw_count + 8 >= MAX_DRAWS;
++    if (indexed && s_d3d.vp_ib_offset + guest_count * 3u > VP_MAX_INDICES) full = 1;
++    if (!full) return;
++    static u32 n = 0;
++    if (n < 20 || (n % 1000) == 0)
++        fprintf(stderr, "[MIDFLUSH] #%u records=%u vertices=%u/%u -> run without present\n",
++                n, s_d3d.draw_count, used, (u32)MAX_VERTICES);
++    n++;
++    s_present_this_frame = 0;
++    render_frame();
++    s_present_this_frame = 1;
++}
++
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+@@ -7035,6 +7064,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+
+     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
+     if (count == 0 || count > MAX_VERTICES) return;
++    vp_flush_if_full(count, 0);
+     vs_arrays(s_d3d.current_rsx_state, primitive, count);
+
+     /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
+@@ -7281,6 +7311,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+     if (!s_d3d.pipeline_ready) return;
+     if (count == 0 || count > MAX_VERTICES) return;
+     if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;
++    vp_flush_if_full(count, 1);
+
+     /* Expand through the VP path (indices resolved CPU-side): QUADS -> two
+      * triangles per quad, TRIANGLES straight through, STRIP/FAN -> triangle

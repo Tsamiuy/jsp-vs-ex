@@ -1,0 +1,46 @@
+Patch 6002: g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.)
+
+The generic (NID table) dispatch path sets g_hle_inflight[tid] on entry but never clears it on return, so a thread that had finished
+its HLE call and was running lifted code still showed that call as in flight. The slot is cleared after the handler returns and the
+name is recorded in a new g_hle_last[tid]. Diagnostics only.
+
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -124,4 +124,5 @@
+  * set on entry, cleared on every exit path by the guard below. */
+ #define PS3_HLE_INFLIGHT_MAX 64
+ extern "C" const char* g_hle_inflight[PS3_HLE_INFLIGHT_MAX] = { nullptr };
++extern "C" const char* g_hle_last[PS3_HLE_INFLIGHT_MAX] = { nullptr };   /* last HLE call per thread (patch 6002) */
+
+@@ -719,4 +720,9 @@
+             g_ctx[i].fn(ctx);
+             { unsigned t = (unsigned)ctx->thread_id;
+               if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = nullptr; }
++            { static const void* seen[256]; unsigned h = (unsigned)(((uintptr_t)&g_ctx[i] >> 3) * 2654435761u) & 255u, p = 0;
++              while (p < 256 && seen[h] && seen[h] != (const void*)&g_ctx[i]) { h = (h + 1) & 255u; p++; }
++              if (p < 256 && !seen[h]) { seen[h] = (const void*)&g_ctx[i];
++                fprintf(stderr, "[hle-first] ctx %s tid=%u r=0x%08X\n", g_ctx[i].name, (unsigned)ctx->thread_id,
++                        (uint32_t)ctx->gpr[3]); } }
+             return;
+@@ -808,5 +814,5 @@
+     ps3_msf("hle:%s", e->name);
+     { unsigned t = (unsigned)ctx->thread_id;
+-      if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = e->name; }
++      if (t < PS3_HLE_INFLIGHT_MAX) g_hle_last[t] = g_hle_inflight[t] = e->name; }
+     if (nid == 0xD0B1D189u /*cellGcmSetTile*/ || nid == 0xDC09357Eu /*SetDisplayBuffer*/) {
+         static int _g=0; if (PS3_LOG_FIRST(_g, 8))
+@@ -818,4 +824,13 @@
+     uint64_t r = fn(ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6],
+                     ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10]);
+     ctx->gpr[3] = r;   /* PPC return value */
++    { unsigned t = (unsigned)ctx->thread_id;
++      if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = nullptr; }
++    /* [hle-first]: each table-dispatched import once, with its first return value (diagnostic: which imports the
++     * game calls, in order, and which answer an error). Racy table, tolerates a missed or doubled line. */
++    { static const void* seen[1024]; unsigned h = (unsigned)(((uintptr_t)e >> 4) * 2654435761u) & 1023u, p = 0;
++      while (p < 1024 && seen[h] && seen[h] != (const void*)e) { h = (h + 1) & 1023u; p++; }
++      if (p < 1024 && !seen[h]) { seen[h] = (const void*)e;
++        fprintf(stderr, "[hle-first] %s nid=0x%08X tid=%u r=0x%08X\n", e->name ? e->name : "?", nid,
++                (unsigned)ctx->thread_id, (uint32_t)r); } }
+     /* PS3_HLE_PTRCHECK: the guest stores HLE return values as guest pointers, so

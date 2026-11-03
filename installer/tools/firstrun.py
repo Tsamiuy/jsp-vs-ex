@@ -12,10 +12,12 @@ llvm-mingw with CMake and Ninja (toolchain/, hash-pinned in installer/tools/tool
 Steps (each leaves build/markers/<step>.done holding a fingerprint of its inputs; a re-run skips a finished step whose inputs are
 unchanged and says which input changed otherwise; a marker in the old plain format counts as stale):
   checks  preflight, one line per check: "OK code ...", "WARN code ..." or "FAIL code ..." (codes in PREFLIGHT below)
-  lift    PPU: ppu_loader.py, ppu_lifter.py  -> build/analysis, build/recompiled   (the SETUP.md pipeline)
-  spu     the 18 JOBCRT jobs embedded in the EBOOT -> build/spu (jsp_spu.py: scan, wrap, lift, spu_workloads.c)
+  lift    PPU: ppu_loader.py, ppu_lifter.py  -> build/analysis, build/recompiled   (the SETUP.md pipeline; the v18 tree adds find_functions.py)
+  spu     the 18 JOBCRT jobs embedded in the EBOOT -> build/spu (jsp_spu.py, or lift_jobs.py for the v18 tree: scan, wrap, lift, spu_workloads.c)
   build   cmake + ninja with the bundled llvm-mingw (cmake/llvm-mingw.cmake; the same commands in build/build-port.cmd) -> build/port/JStarsRecomp.exe
   place   game/JStarsRecomp.exe, game/EBOOT.elf, game/run/, paths.txt for the launcher
+Which tree is built is written by assemble_payload.py into <root>/tree.txt: "v15" (this repository's jstars/port on the v0.15 toolkit,
+no file = v15) or "v18" (installer/port: the glue in port/, the ps3recomp v0.18.0 toolkit with installer/port/patches applied, exe jsp.exe).
 Exit code 0 when everything asked for passed. The last line is "RESULT: ...". The log (--log) is appended to.
 
 Portable zip (layout of --interactive --portable adapted from the same installer):
@@ -65,6 +67,8 @@ PROFILE = {
 TITLE_IDS = PROFILE["titles"]
 CODE_END = PROFILE["code_end"]
 EXE = PROFILE["exe"]
+TOC = "0x8d3888"          # r2 of the lifted code (both regions); the v18 lifter takes it as --toc
+TREE_EXE = {"v15": EXE, "v18": "jsp.exe"}
 # ======================================================================================================================
 STEPS = ["checks", "lift", "spu", "build", "place"]
 WIN = os.name == "nt"
@@ -403,6 +407,16 @@ def digest(d):
 MARKER_TAG = "fp1 "     # a marker is "fp1 " + JSON of the step's inputs; anything else is an old plain marker and counts as stale
 
 
+def payload_tree(root):
+    """'v18' when <root>/tree.txt says so, else 'v15' (payloads made before the file existed)."""
+    f = pathlib.Path(root) / "tree.txt"
+    try:
+        v = f.read_text().split()[0]
+    except (OSError, IndexError):
+        return "v15"
+    return v if v in TREE_EXE else "v15"
+
+
 class Ctx:
     def __init__(self, a, region, tid):
         self.a, self.region, self.tid = a, region, tid
@@ -412,6 +426,8 @@ class Ctx:
         self.eboot = pathlib.Path(a.eboot)
         self.py = [sys.executable, "-X", "utf8"]
         self._cache = {}
+        self.tree = payload_tree(self.root)
+        self.exe = TREE_EXE[self.tree]
 
     def cached(self, key, fn):
         if key not in self._cache:
@@ -429,8 +445,10 @@ class Ctx:
         eb = self.cached("eboot", lambda: sha(self.eboot))
         tools = self.cached("tools", lambda: tree_hash(self.tools))
         if step == "lift":
-            return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools}
+            return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, **({"tree": "v18"} if self.tree == "v18" else {})}
         if step == "spu":
+            if self.tree == "v18":
+                return {"eboot": eb, "toolkit_tools": tools, "lift_jobs": self.cached("lift_jobs", lambda: tree_hash(self.root / "tools" / "lift_jobs.py"))}
             return {"eboot": eb, "toolkit_tools": tools, "jsp_spu": self.cached("jsp_spu", lambda: tree_hash(self.root / "tools" / "jsp_spu.py"))}
         if step == "build":
             return {"lift": digest(self.inputs("lift")), "spu": digest(self.inputs("spu")),
@@ -511,9 +529,19 @@ def step_lift(c):
     ok, t1 = run("lift: ppu_loader", [*c.py, c.tools / "ppu_loader.py", e, "-o", str(an) + os.sep], an / "ppu_loader.log")
     if not ok:
         return False
-    ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", an / "EBOOT.functions.json",
+    funcs, jobs_args, t3 = an / "EBOOT.functions.json", ["--jobs"], 0
+    if c.tree == "v18":
+        # the v0.18 lifter wants the function list completed by find_functions.py and the TOC value
+        funcs = an / "functions.json"
+        ok, t3 = run("lift: find_functions", [*c.py, c.tools / "find_functions.py", e, "--seed-json", an / "EBOOT.functions.json",
+                                              "--output", funcs], an / "find_functions.log")
+        if not ok:
+            return False
+        jobs_args = ["--toc", TOC, "-j"]   # --toc goes before the job count; the pair is spliced in front of it
+    ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", funcs,
                                       "--hle-stubs", an / "EBOOT.imports.json", "--code-end", CODE_END[c.region],
-                                      "--chunks", "64", "--jobs", str(c.a.jobs), "--output", out], out / "lift.log")
+                                      "--chunks", "64", *jobs_args, str(c.a.jobs), "--output", out], out / "lift.log")
+    t1 += t3
     if not ok:
         return False
     n = len(list(out.glob("ppu_recomp_*.cpp")))
@@ -522,6 +550,12 @@ def step_lift(c):
 
 
 def step_spu(c):
+    if c.tree == "v18":
+        ok, _ = run("spu: jobs", [*c.py, c.root / "tools" / "lift_jobs.py", "--eboot", c.eboot, "--ps3recomp", c.root / "ps3recomp",
+                                  "--out", c.build / "spu", "-j", str(min(4, c.a.jobs))], c.build / "spu.log")
+        n = len(list((c.build / "spu").glob("*/spu_recomp.c")))
+        say(f"[spu] {n} lifted job images")
+        return ok and n > 0 and (c.build / "spu" / "spu_workloads.c").is_file()
     ok, _ = run("spu: jobs", [*c.py, c.root / "tools" / "jsp_spu.py", c.eboot, "--tools", c.tools, "--work", c.build / "spuwork",
                               "--out", c.build / "spu", "--jobs", str(min(4, c.a.jobs))], c.build / "spu.log")
     n = len(list((c.build / "spu").glob("*/spu_recomp.c")))
@@ -642,7 +676,7 @@ def step_build(c):
         if not ok:
             return False
     ok, _ = run("build: ninja", bld, c.build / "build.log", env=env)
-    return ok and (b / EXE).is_file()
+    return ok and (b / c.exe).is_file()
 
 
 def vfs_root(disc):
@@ -655,7 +689,8 @@ def vfs_root(disc):
 def step_place(c):
     game = c.root / "game"
     (game / "run").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(c.build / "port" / EXE, game / EXE)
+    exe = c.exe
+    shutil.copy2(c.build / "port" / exe, game / exe)
     shutil.copy2(c.eboot, game / "EBOOT.elf")   # the player's own decrypted file, copied into the player's own install
     if (c.root / "ex_logo_A.rgba").is_file():   # the "EX" in the title logo (toolkit patch 0006; JSP_EX_LOGO=0 turns it off)
         shutil.copy2(c.root / "ex_logo_A.rgba", game / "ex_logo_A.rgba")
@@ -672,10 +707,10 @@ def step_place(c):
     hd = lambda p: pack_path(str(pathlib.Path(p)).replace(chr(92), "/"), c.root)
     pathlib.Path(a.devflash).mkdir(parents=True, exist_ok=True)   # main() set it; see there
     lines = [f"PS3_VFS_ROOT={disc}", f"PS3_HDD0_ROOT={hd(a.hdd0)}", f"PS3_DEV_FLASH={hd(a.devflash)}",
-             f"PS3_TITLE={PROFILE['game_title_env']}", "PS3_VERBOSE=0", f"EXE={EXE}", "ELF=EBOOT.elf"]
+             f"PS3_TITLE={PROFILE['game_title_env']}", "PS3_VERBOSE=0", f"EXE={exe}", "ELF=EBOOT.elf"]
     pathlib.Path(a.hdd0).mkdir(parents=True, exist_ok=True)   # relative to the folder if inside; see unpack_path
     (c.root / "paths.txt").write_text("\n".join(lines) + "\n")
-    say(f"[place] {game / EXE} ({(game / EXE).stat().st_size / 1e6:.0f} MB), paths.txt for the launcher")
+    say(f"[place] {game / exe} ({(game / exe).stat().st_size / 1e6:.0f} MB), paths.txt for the launcher")
     build_settings_window(c.root)
     return True
 

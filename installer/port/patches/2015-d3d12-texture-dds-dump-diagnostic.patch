@@ -1,0 +1,76 @@
+Patch 2015 (diagnostic, off by default): TEX_DDS_DUMP=<from_frame>:<max> writes level 0 of BC1/BC3 uploads as .dds files named by
+guest offset; a capture manifest op ends with fh=<fragment-program code hash>; FP_DUMP_FROM=<frame> writes every program compiled
+from that frame to a .hlsl file named by its hash; FP_PICK also takes a comma list.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1565,6 +1565,11 @@
+ 
+ /* Shared 24-bit BMP writer for readbacks. R8G8B8A8_UNORM straight; the half/
+  * float RT formats are |v|-tonemapped so signed/HDR data is visible. */
++/* latest fragment-program code hash per program address, so a capture manifest can name the program (fh=) and a dump
++ * (FP_DUMP_FROM) can be matched to it: the address is reused by the title, the hash is not. */
++static u32 s_fpa_tab[4096], s_fph_tab[4096];
++static u32 s_fph_lookup(u32 a) { u32 k = (a >> 6) & 4095u; return s_fpa_tab[k] == a ? s_fph_tab[k] : 0u; }
++
+ static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
+                           u32 pitch, u32 dxgi)
+ {
+@@ -1720,11 +1725,11 @@
+                         r->cc[0], r->cc[1], r->cc[2], r->cc[3]);
+             else {
+                 fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
+-                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
++                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X fh=0x%08X\n",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+-                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
++                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw, s_fph_lookup(r->fp_addr));
+                 for (int u = 0; u < 4; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
+@@ -2375,6 +2380,16 @@
+     { static const char* fpk = (const char*)1; static u32 wantf = 0; static int done = 0;
+       if (fpk == (const char*)1) { fpk = getenv("FP_PICK");
+                                    wantf = fpk ? (u32)strtoul(fpk, NULL, 16) : 0; }
++      /* FP_DUMP_FROM=<frame>: write every program first compiled at or after that frame to duck_fp_<addr>.hlsl. */
++      { static int dfrom = -2; if (dfrom == -2) { const char* e = getenv("FP_DUMP_FROM"); dfrom = e ? atoi(e) : -1; }
++        if (dfrom >= 0 && (int)s_d3d.frame_count >= dfrom) { char pn[64]; snprintf(pn, sizeof pn, "duck_fh_%08X.hlsl", rsx_fp_code_hash(vm_base + off, 0x10000));
++            FILE* f = fopen(pn, "w"); if (f) { fprintf(f, "/* fp_addr=0x%08X, %d instrs */%s", fp_addr, n, hlsl); fclose(f); } } }
++      /* FP_PICK may be a comma list "a,b,c": each program is written to duck_fp_<addr>.hlsl. */
++      if (fpk && strchr(fpk, ',')) { const char* q = fpk;
++          while (q && *q) { u32 v = (u32)strtoul(q, NULL, 16);
++              if (v == fp_addr) { char pn[64]; snprintf(pn, sizeof pn, "duck_fp_%08X.hlsl", fp_addr);
++                  FILE* f = fopen(pn, "w"); if (f) { fprintf(f, "/* fp_addr=0x%08X, %d instrs */%s", fp_addr, n, hlsl); fclose(f); } }
++              q = strchr(q, ','); if (q) q++; } }
+       if (wantf && !done && fp_addr == wantf) { done = 1;
+           FILE* f = fopen("duck_fp.hlsl", "w");
+           if (f) { fprintf(f, "/* fp_addr=0x%08X, %d instrs */%s", fp_addr, n, hlsl);
+@@ -2795,6 +2810,7 @@
+         }
+     }
+ 
++    { u32 k = (fp_addr >> 6) & 4095u; s_fpa_tab[k] = fp_addr; s_fph_tab[k] = uhash; }
+     s_perf_pso_calls++;
+     /* Keyed on the code, not on where it lives. The compiled shader reads its
+      * inline constants from the draw's own fp_addr (fp_k[], refilled per draw),
+@@ -3569,6 +3585,17 @@
+       } }
+     }   /* end per-face conversion */
+     off = _off0; mapped = _map0;
++    /* TEX_DDS_DUMP=<from_frame>:<max> (diagnostic): write level 0 of BC1/BC3 uploads as .dds (name = guest offset). */
++    { static int dd = -2; static u32 d_from = 0, d_max = 0, d_n = 0;
++      if (dd == -2) { const char* e = getenv("TEX_DDS_DUMP"); dd = e ? 1 : 0;
++                      if (e) { d_from = (u32)strtoul(e, NULL, 10); const char* c = strchr(e, ':'); d_max = c ? (u32)atoi(c + 1) : 64; } }
++      if (dd == 1 && !cube && (tl.fmt == RSX_TEXFMT_BC1 || tl.fmt == RSX_TEXFMT_BC3) && s_d3d.frame_count >= d_from && d_n < d_max) {
++        char pn[96]; snprintf(pn, sizeof pn, "texdds_%08X_%ux%u_%s.dds", off, w, h, tl.fmt == RSX_TEXFMT_BC1 ? "bc1" : "bc3");
++        FILE* f = fopen(pn, "wb");
++        if (f) { u32 hd[32] = {0}; u32 bsz = ((w + 3) / 4) * ((h + 3) / 4) * (tl.fmt == RSX_TEXFMT_BC1 ? 8u : 16u);
++          hd[0] = 0x20534444; hd[1] = 124; hd[2] = 0x81007; hd[3] = h; hd[4] = w; hd[5] = bsz; hd[7] = 1;
++          hd[19] = 32; hd[20] = 4; hd[21] = tl.fmt == RSX_TEXFMT_BC1 ? 0x31545844 : 0x35545844; hd[27] = 0x1000;
++          fwrite(hd, 4, 32, f); fwrite(vm_base + off, 1, bsz, f); fclose(f); d_n++; } } }
+     /* Patch 2013: the title logo's "+" becomes "EX" (JSP_EX_LOGO=0 = off). */
+     if (!cube && tl.fmt == RSX_TEXFMT_BC3 && !tl.swizzled)
+         { jex_apply(vm_base + off, w, h, 1, (u8*)mapped, pitch);

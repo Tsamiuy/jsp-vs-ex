@@ -1,0 +1,116 @@
+Patch 2012: texture mip chains (TEX_MIPS, default on; TEX_MIPS=0 = level 0 only).
+
+Every guest texture was uploaded with MipLevels = 1, so minified ground and water sampled level 0 and showed grain and shimmer.
+Uploads now take the RSX chain from rsx_texture_mip_chain, place it with GetCopyableFootprints, create the resource with that many
+levels and expose all of them through the per-draw SRVs. Cubes and DXT textures with a size not a multiple of 4 keep one level.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 96bdf6e..38b1f25 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -201,6 +201,7 @@ typedef struct {
+     u32 off, w, h, fmt; /* current contents (resource reused when dims match) */
+     u32 csum;           /* sparse checksum of the source bytes last uploaded */
+     int cube;           /* resource is a 6-face cube, sampled as TextureCube */
++    u32 levels;         /* mip levels uploaded (TEX_MIPS, default on; 1 = level 0 only) */
+     u32 key;            /* the ORIGINAL bound offset -- the cache lookup key.
+                          * off is the RESOLVED source after TEX_OFF_BIAS/TEX_REMAP
+                          * shift it, so keying on off never matches the raw offset
+@@ -3160,12 +3161,34 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+      * format rsx_texture_decode unpacks. */
+     u32 pitch = (tl.dst_row_bytes + 255) & ~255u;
+     int fresh = 0;
++    /* Mip chain (from the v0.15 tex-mips patch, jstars-notes/patches/tex-mips): RSX
++     * level layout from rsx_texture_mip_chain, D3D placement from
++     * GetCopyableFootprints. TEX_MIPS=0 = level 0 only. Cubes keep one level. */
++    static int s_mips_on = -1;
++    if (s_mips_on < 0) { const char* e = getenv("TEX_MIPS"); s_mips_on = e ? atoi(e) : 1; }
++    rsx_tex_level mlv[RSX_MAX_TEXTURE_LEVELS];
++    D3D12_PLACED_SUBRESOURCE_FOOTPRINT mfp[RSX_MAX_TEXTURE_LEVELS];
++    UINT64 mtotal = 0;
++    u32 levels = 1;
++    if (s_mips_on && !cube && mips > 1 && !(dxt && ((w & 3u) || (h & 3u)))) {
++        levels = rsx_texture_mip_chain(fmt, w, h, mips, 0u, mlv);
++        if (levels > 1) {
++            D3D12_RESOURCE_DESC md = {0};
++            md.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++            md.Width = w; md.Height = h; md.DepthOrArraySize = 1;
++            md.MipLevels = (UINT16)levels; md.Format = dxfmt; md.SampleDesc.Count = 1;
++            md.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++            s_d3d.device->lpVtbl->GetCopyableFootprints(s_d3d.device, &md, 0, levels, 0,
++                                                        mfp, NULL, NULL, &mtotal);
++            if (!mtotal || mfp[0].Footprint.RowPitch != pitch || mfp[0].Offset != 0) levels = 1;
++        } else levels = 1;
++    }
+ 
+     /* Also recreate when the CUBE-ness changes: a slot holding a 2D texture of
+      * the same dimensions would otherwise be reused with 1 array slice while the
+      * cube path copies 6 subresources and writes a 6x upload buffer -- which
+      * crashes. */
+-    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube)) {
++    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube || t->levels != levels)) {
+         t->res->lpVtbl->Release(t->res); t->res = NULL;
+         if (t->up) { t->up->lpVtbl->Release(t->up); t->up = NULL; }
+     }
+@@ -3175,7 +3198,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+         td.Width = w; td.Height = h;
+         td.DepthOrArraySize = cube ? 6 : 1;   /* cube = 6 array slices */
+-        td.MipLevels = 1;
++        td.MipLevels = (UINT16)levels;
+         td.Format = dxfmt; td.SampleDesc.Count = 1;
+         td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+         if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
+@@ -3187,7 +3210,8 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     }
+     /* Stage the decoded image in the ring, or in the slot's own upload
+      * buffer when the ring is full or could not be made. */
+-    const u64 up_bytes = (u64)pitch * (dxt ? blkrows : h) * (cube ? 6 : 1);
++    u64 up_bytes = (u64)pitch * (dxt ? blkrows : h) * (cube ? 6 : 1);
++    if (levels > 1) up_bytes = mtotal;   /* whole chain */
+     const u32 fi = s_d3d.frame_index;
+     if (!s_d3d.tex_ring) {
+         D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
+@@ -3544,6 +3568,11 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+       } }
+     }   /* end per-face conversion */
+     off = _off0; mapped = _map0;
++    /* Levels 1.. into their own footprints (level 0 is at offset 0). */
++    for (u32 _l = 1; _l < levels; _l++)
++        rsx_texture_decode(_map0 + mfp[_l].Offset, mfp[_l].Footprint.RowPitch,
++                           vm_base + off + mlv[_l].offset, mlv[_l].w, mlv[_l].h,
++                           &mlv[_l].tl, rsx_texture_argb_is_rgba());
+     if (up_res != s_d3d.tex_ring) t->up->lpVtbl->Unmap(t->up, 0, NULL);
+ 
+     if (!fresh) {   /* reused resource: PSR -> COPY_DEST first */
+@@ -3568,6 +3597,12 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+         src.PlacedFootprint.Offset  = up_base + (u64)_f * pitch * _face_rows;
+         s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
+     }
++    for (u32 _l = 1; _l < levels; _l++) {
++        dst.SubresourceIndex = _l;
++        src.PlacedFootprint = mfp[_l];
++        src.PlacedFootprint.Offset += up_base;
++        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
++    }
+     {
+         D3D12_RESOURCE_BARRIER b = {0};
+         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+@@ -3579,7 +3614,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     }
+ 
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+-    t->cube = cube; t->used = 1;
++    t->cube = cube; t->used = 1; t->levels = levels;
+     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+       t->csum = TEX_CSUM(vm_base + off, nb); }
+     #undef TEX_CSUM
+@@ -4069,7 +4104,7 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+     sv.Format = fmt;
+     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+     sv.Shader4ComponentMapping = mapping;
+-    sv.Texture2D.MipLevels = 1;
++    sv.Texture2D.MipLevels = (UINT)-1;   /* every level the resource has (render and depth targets have one) */
+     if (cube) {   /* must match the TextureCube declaration in the HLSL */
+         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+         sv.TextureCube.MipLevels = 1;

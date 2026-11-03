@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Assemble the installer payload (what jsp.iss copies into {app}): this repository's port, built on the player's PC.
+"""Assemble the installer payload (what jsp.iss copies into {app}): a port of the game, built on the player's PC.
+
+Two trees (--tree): "v18" (default) is installer/port, the glue for the ps3recomp v0.18.0 toolkit, with installer/port/patches applied
+to the exported toolkit (installer/tools/export_toolkit.py); "v15" is this repository's earlier port (jstars/port) on the v0.15
+toolkit as described below. firstrun.py reads <payload>/tree.txt to know which recipe to run.
 
 Layout adapted from the maintainer's installer for another PS3 port (same MIT licence). The payload holds only code that
 is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
@@ -9,12 +13,14 @@ image in git; the compiler is the bundled llvm-mingw (toolchain.json); no Visual
 
     python installer/tools/assemble_payload.py [--out build/installer/payload] [--repo DIR] [--python DIR]
                                                [--launcher EXE] [--art DIR] [--toolchain-cache DIR]
+                                               [--tree v18|v15] [--toolkit-repo GIT_DIR] [--no-fetch]
 
 Toolchain: llvm-mingw, CMake and Ninja come from the cache that fetch_toolchain.py filled from installer/tools/toolchain.json
 (hash-pinned; each tree must carry the manifest's hash in fetched.json), minus the entries' "prune" globs, with their licence
 texts in licenses/<group>/. The patches in installer/patches/ are applied to the payload's copy of the port and the toolkit.
 
-Needs Git on PATH and the submodule checked out (apply_toolkit.py exports the pinned commit). Refuses to finish when the
+Needs Git on PATH and the submodule checked out (apply_toolkit.py / export_toolkit.py export the pinned commit; the v18 toolkit
+tag is fetched into the submodule once, on the machine that builds the installer, when it is not there yet). Refuses to finish when the
 payload holds a file of a kind the game ships (.elf .bin .sfo .psarc .edat .self .sprx).
 """
 import argparse
@@ -53,6 +59,18 @@ exit /b 0
 FORBIDDEN = {".elf", ".bin", ".sfo", ".psarc", ".edat", ".self", ".sprx"}
 PORT_FILES = ("CMakeLists.txt", "config.toml", "main.cpp", "stubs.cpp", "jstars_fiber.cpp", "jstars_debug.cpp",
               "jstars_game.cpp", "jstars_sysutil.cpp", "exit_label_dark.inc", "exit_label_light.inc")
+NOTICE_V18 = """J-Stars Victory VS EX: Fan Revival
+An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
+No game files are included or downloaded: the port is built on your PC from your own copy of the game.
+This program contacts no server: no update check, no crash report, no telemetry.
+
+The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
+Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.18.0 with this project's patches).
+More in licenses/jstars-port-NOTICE.md.
+Python (PSF licence, toolchain/python/LICENSE.txt) is the Windows embeddable package. The build uses the bundled llvm-mingw
+(LLVM: Apache-2.0 with LLVM exception; MinGW-w64 and winpthreads: see licenses/llvm-mingw/), CMake (BSD-3-Clause) and Ninja
+(Apache-2.0); their licence texts are in licenses/. Nothing from Microsoft is needed or included.
+"""
 NOTICE = """J-Stars Victory VS EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
@@ -182,15 +200,20 @@ def main(argv=None):
                     help="an FFmpeg source or headers folder (libavcodec/avcodec.h ...) whose majors match the RPCS3 DLLs (default: "
                          "the ffmpeg-headers entry of fetch_toolchain.py's cache): the payload gets libavcodec/ and libavutil/ "
                          "headers so the game is built with the opening-movie decoder (skipped with a warning when absent)")
+    ap.add_argument("--tree", choices=("v18", "v15"), default="v18", help="which port to build on the player's PC")
+    ap.add_argument("--toolkit-repo", default=str(ROOT / "third_party/ps3recomp"), help="git checkout the v18 toolkit is exported from")
+    ap.add_argument("--no-fetch", action="store_true", help="do not fetch the v18 toolkit tag when the checkout lacks it")
     a = ap.parse_args(argv)
     pub, out = pathlib.Path(a.repo), pathlib.Path(a.out)
     if out.exists():
         shutil.rmtree(out)
     (out / "licenses").mkdir(parents=True)
     (out / "VERSION.txt").write_text((ROOT / "installer/VERSION").read_text().strip() + "\n")
-    (out / "NOTICE.txt").write_text(NOTICE)
+    (out / "NOTICE.txt").write_text(NOTICE_V18 if a.tree == "v18" else NOTICE)
+    (out / "tree.txt").write_text(a.tree + "\n")
     (out / "tools").mkdir()
-    for n in ("firstrun.py", "jsp_spu.py", "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
+    spu_tool = "lift_jobs.py" if a.tree == "v18" else "jsp_spu.py"
+    for n in ("firstrun.py", spu_tool, "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
         shutil.copy2(ROOT / "installer/tools" / n, out / "tools" / n)
     shutil.move(out / "tools" / "firstrun.py", out / "firstrun.py")
     # the Start-menu "Make a support bundle" entry: support_bundle.py sits beside firstrun.py (it imports scrub() from it)
@@ -208,28 +231,41 @@ def main(argv=None):
     shutil.copy2(a.launcher, out / "jsp-launcher.exe")
     for n in ("setup", "launcher", "uninstall"):
         shutil.copy2(pathlib.Path(a.art) / f"jsp-{n}.ico", out / f"jsp-{n}.ico")
-    # the port sources
-    (out / "port").mkdir()
-    for n in PORT_FILES:
-        # As the repository stores them (LF): Git for Windows' default core.autocrlf=true checks them out with CRLF, and
-        # patch 0002 (LF, applied byte for byte with core.autocrlf=false) then fails on port/CMakeLists.txt.
-        data = (pub / "jstars/port" / n).read_bytes()
-        if b"\0" not in data:
-            data = data.replace(b"\r\n", b"\n")
-        (out / "port" / n).write_bytes(data)
-        shutil.copystat(pub / "jstars/port" / n, out / "port" / n)
     shutil.copy2(pub / "LICENSE", out / "licenses/jstars-port-LICENSE.txt")
     shutil.copy2(pub / "NOTICE.md", out / "licenses/jstars-port-NOTICE.md")
-    # the toolkit: pinned v0.15.0 + this repository's patch + SMAA files, applied here
-    r = subprocess.run([sys.executable, "-I", str(pub / "tools/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
-                       capture_output=True, text=True)
-    if r.returncode:
-        print("apply_toolkit failed:\n" + r.stdout + r.stderr, file=sys.stderr)
-        return 1
-    print(r.stdout.strip().splitlines()[0])
-    shutil.copy2(out / "ps3recomp/LICENSE", out / "licenses/ps3recomp-LICENSE.txt")
-    if not apply_patches(out):
-        return 1
+    if a.tree == "v18":
+        # the glue (installer/port/jsp) and the pinned toolkit with installer/port/patches applied
+        shutil.copytree(ROOT / "installer/port/jsp", out / "port")
+        sys.path.insert(0, str(ROOT / "installer/tools"))
+        import export_toolkit
+        try:
+            names = export_toolkit.export(a.toolkit_repo, out / "ps3recomp", fetch=not a.no_fetch)
+        except RuntimeError as e:
+            print("export_toolkit failed:\n" + str(e), file=sys.stderr)
+            return 1
+        print(f"ps3recomp {export_toolkit.TAG} exported, {len(names)} patches applied")
+        shutil.copy2(out / "ps3recomp/LICENSE", out / "licenses/ps3recomp-LICENSE.txt")
+    else:
+        # the port sources
+        (out / "port").mkdir()
+        for n in PORT_FILES:
+            # As the repository stores them (LF): Git for Windows' default core.autocrlf=true checks them out with CRLF, and
+            # patch 0002 (LF, applied byte for byte with core.autocrlf=false) then fails on port/CMakeLists.txt.
+            data = (pub / "jstars/port" / n).read_bytes()
+            if b"\0" not in data:
+                data = data.replace(b"\r\n", b"\n")
+            (out / "port" / n).write_bytes(data)
+            shutil.copystat(pub / "jstars/port" / n, out / "port" / n)
+        # the toolkit: pinned v0.15.0 + this repository's patch + SMAA files, applied here
+        r = subprocess.run([sys.executable, "-I", str(pub / "tools/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
+                           capture_output=True, text=True)
+        if r.returncode:
+            print("apply_toolkit failed:\n" + r.stdout + r.stderr, file=sys.stderr)
+            return 1
+        print(r.stdout.strip().splitlines()[0])
+        shutil.copy2(out / "ps3recomp/LICENSE", out / "licenses/ps3recomp-LICENSE.txt")
+        if not apply_patches(out):
+            return 1
     (out / "cmake").mkdir()
     shutil.copy2(ROOT / "installer/tools/llvm-mingw.cmake", out / "cmake/llvm-mingw.cmake")
     tfiles, tprob = collect_toolchain(os.path.abspath(a.toolchain_cache))

@@ -1,0 +1,249 @@
+Patch 2013: optional replacement of a region of the title logo with art that is supplied separately (JSP_EX_LOGO=0 turns it off).
+
+vp_upload_tex_slot: after level 0 of a linear BC3 texture is copied, jex_apply (new libs/video/jsp_ex_logo.h) hashes the source bytes
+of a 1024 x 531/532 texture and, for the two logo layers, composites an RGBA file over a block-aligned rectangle and re-encodes only
+the BC3 blocks that changed. The art is read from JSP_EX_LOGO_ART, the exe directory or the working directory; without that file
+nothing is changed (the installer does not ship one). No game data is stored in the patch.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -24,6 +24,7 @@
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
++#include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -3568,6 +3569,10 @@
+       } }
+     }   /* end per-face conversion */
+     off = _off0; mapped = _map0;
++    /* Patch 2013: the title logo's "+" becomes "EX" (JSP_EX_LOGO=0 = off). */
++    if (!cube && tl.fmt == RSX_TEXFMT_BC3 && !tl.swizzled)
++        { jex_apply(vm_base + off, w, h, 1, (u8*)mapped, pitch);
++          jex_apply_small(vm_base + off, w, h, 1, (u8*)mapped, pitch); }
+     /* Levels 1.. into their own footprints (level 0 is at offset 0). */
+     for (u32 _l = 1; _l < levels; _l++)
+         rsx_texture_decode(_map0 + mfp[_l].Offset, mfp[_l].Footprint.RowPitch,
+diff --git a/libs/video/jsp_ex_logo.h b/libs/video/jsp_ex_logo.h
+new file mode 100644
+--- /dev/null
++++ b/libs/video/jsp_ex_logo.h
+@@ -0,0 +1,215 @@
++/* Patch 2013: optional replacement of a region of the title logo (art supplied separately),
++ * JSP_EX_LOGO=0 turns it off.
++ *
++ * The logo is the DXT5 texture 1024 x 531 (532 rows stored) of progress_scene_title_logo_*_ALL; two of its four layers
++ * hold the "+" (ef and logo; hashes below are FNV-1a-64 over the 544,768 stored bytes, the same on US/JP/EU).
++ * When one of them is uploaded, the blocks (187..225, 104..125) are decoded from the upload buffer, the cross is
++ * cleared, our own art (variant A of tools/art/ex_logo.py: port/runtime/gcm/ex_logo_A.rgba, 156 x 88 straight-alpha
++ * RGBA, loaded at run time from JSP_EX_LOGO_ART, the exe directory or the working directory) is composited over
++ * what the game drew and only the blocks that changed are encoded back to BC3. No game data is stored here.
++ */
++#ifndef JSP_EX_LOGO_H
++#define JSP_EX_LOGO_H
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdint.h>
++#ifdef _WIN32
++#include <windows.h>
++#endif
++
++#define JEX_X0 748
++#define JEX_Y0 416
++#define JEX_W 156
++#define JEX_H 88
++#define JEX_BYTES 544768u   /* 4096 * 133 block rows */
++
++static int jex_enabled(void) {
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("JSP_EX_LOGO"); on = e ? atoi(e) : 1; }
++    return on;
++}
++
++static const uint8_t* jex_art(void) {
++    static int tried = 0; static uint8_t* art = NULL;
++    if (tried) return art;
++    tried = 1;
++    char path[1024]; const char* env = getenv("JSP_EX_LOGO_ART");
++    for (int k = 0; k < 3 && !art; k++) {
++        path[0] = 0;
++        if (k == 0 && env) snprintf(path, sizeof path, "%s", env);
++#ifdef _WIN32
++        else if (k == 1) { DWORD n = GetModuleFileNameA(NULL, path, sizeof path - 20);
++            while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
++            strcpy(path + n, "ex_logo_A.rgba"); }
++#endif
++        else if (k == 2) strcpy(path, "ex_logo_A.rgba");
++        if (!path[0]) continue;
++        FILE* f = fopen(path, "rb");
++        if (!f) continue;
++        art = (uint8_t*)malloc(JEX_W * JEX_H * 4);
++        if (fread(art, 1, JEX_W * JEX_H * 4, f) != (size_t)JEX_W * JEX_H * 4) { free(art); art = NULL; }
++        fclose(f);
++        if (art) fprintf(stderr, "[EXLOGO] art %s%c", path, 10);
++    }
++    if (!art) fprintf(stderr, "[EXLOGO] ex_logo_A.rgba not found (JSP_EX_LOGO_ART): logo left as is%c", 10);
++    return art;
++}
++
++static uint64_t jex_fnv64(const uint8_t* p, size_t n) {
++    uint64_t h = 0xcbf29ce484222325ull;
++    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001b3ull; }
++    return h;
++}
++
++static void jex_c565(uint16_t c, int* o) {
++    o[0] = ((c >> 11) & 31) * 255 / 31; o[1] = ((c >> 5) & 63) * 255 / 63; o[2] = (c & 31) * 255 / 31;
++}
++
++static void jex_bc3_decode(const uint8_t* b, uint8_t* px /* 16 x RGBA */) {
++    int a[8]; a[0] = b[0]; a[1] = b[1];
++    if (a[0] > a[1]) for (int i = 1; i < 7; i++) a[i + 1] = ((7 - i) * a[0] + i * a[1]) / 7;
++    else { for (int i = 1; i < 5; i++) a[i + 1] = ((5 - i) * a[0] + i * a[1]) / 5; a[6] = 0; a[7] = 255; }
++    uint64_t ab = 0; for (int i = 0; i < 6; i++) ab |= (uint64_t)b[2 + i] << (8 * i);
++    uint16_t c0 = b[8] | (b[9] << 8), c1 = b[10] | (b[11] << 8);
++    int col[4][3]; jex_c565(c0, col[0]); jex_c565(c1, col[1]);   /* BC3 colour part is always 4-colour */
++    for (int k = 0; k < 3; k++) { col[2][k] = (2 * col[0][k] + col[1][k]) / 3; col[3][k] = (col[0][k] + 2 * col[1][k]) / 3; }
++    uint32_t cb = b[12] | (b[13] << 8) | (b[14] << 16) | ((uint32_t)b[15] << 24);
++    for (int i = 0; i < 16; i++) {
++        const int* c = col[(cb >> (2 * i)) & 3];
++        px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = a[(ab >> (3 * i)) & 7];
++    }
++}
++
++static uint16_t jex_p565(const int* c) { return (uint16_t)(((c[0] * 31 + 127) / 255) << 11 | ((c[1] * 63 + 127) / 255) << 5 | ((c[2] * 31 + 127) / 255)); }
++
++static void jex_bc3_encode(const uint8_t* px, uint8_t* b) {
++    int amin = 255, amax = 0, n = 0, lo[3] = {255, 255, 255}, hi[3] = {0, 0, 0};
++    for (int i = 0; i < 16; i++) {
++        int a = px[i * 4 + 3]; if (a < amin) amin = a; if (a > amax) amax = a;
++        if (a == 0) continue;
++        n++; for (int k = 0; k < 3; k++) { int v = px[i * 4 + k]; if (v < lo[k]) lo[k] = v; if (v > hi[k]) hi[k] = v; }
++    }
++    int al[8]; al[0] = amax; al[1] = amin;
++    for (int i = 1; i < 7; i++) al[i + 1] = ((7 - i) * al[0] + i * al[1]) / 7;
++    uint64_t ab = 0;
++    if (amax == amin) { al[7] = amax; }
++    for (int i = 0; i < 16; i++) {
++        int best = 0, bd = 1 << 30, a = px[i * 4 + 3];
++        for (int j = 0; j < 8; j++) { int d = abs(a - al[j]); if (d < bd) { bd = d; best = j; } }
++        ab |= (uint64_t)best << (3 * i);
++    }
++    b[0] = (uint8_t)amax; b[1] = (uint8_t)amin;
++    for (int i = 0; i < 6; i++) b[2 + i] = (uint8_t)(ab >> (8 * i));
++    int e0[3] = {0, 0, 0}, e1[3] = {0, 0, 0};
++    if (n) for (int k = 0; k < 3; k++) { int ins = (hi[k] - lo[k]) / 16; e0[k] = hi[k] - ins; e1[k] = lo[k] + ins; }
++    uint16_t c0 = jex_p565(e0), c1 = jex_p565(e1);
++    if (c0 < c1) { uint16_t t = c0; c0 = c1; c1 = t; }
++    int col[4][3]; jex_c565(c0, col[0]); jex_c565(c1, col[1]);
++    for (int k = 0; k < 3; k++) { col[2][k] = (2 * col[0][k] + col[1][k]) / 3; col[3][k] = (col[0][k] + 2 * col[1][k]) / 3; }
++    uint32_t cb = 0;
++    if (c0 != c1) for (int i = 0; i < 16; i++) {
++        int best = 0, bd = 1 << 30;
++        for (int j = 0; j < 4; j++) {
++            int d = 0; for (int k = 0; k < 3; k++) { int t = px[i * 4 + k] - col[j][k]; d += t * t; }
++            if (d < bd) { bd = d; best = j; }
++        }
++        cb |= (uint32_t)best << (2 * i);
++    }
++    b[8] = c0 & 255; b[9] = c0 >> 8; b[10] = c1 & 255; b[11] = c1 >> 8;
++    for (int i = 0; i < 4; i++) b[12 + i] = (uint8_t)(cb >> (8 * i));
++}
++
++/* Called after level 0 of a texture was copied to dst (rows of `pitch` bytes, one row per block row); src is the guest
++ * texture. Returns 1 when the logo was patched. */
++static int jex_apply(const uint8_t* src, uint32_t w, uint32_t h, int is_bc3_linear, uint8_t* dst, uint32_t pitch) {
++    if (!is_bc3_linear || w != 1024 || (h != 531 && h != 532) || !jex_enabled()) return 0;
++    uint64_t hh = jex_fnv64(src, JEX_BYTES);
++    int layer = hh == 0x8103875aa670528cull ? 1 : hh == 0x716bb472d9e1e9ecull ? 2 : 0;   /* ef, logo */
++    if (!layer) return 0;
++    const uint8_t* art = jex_art();
++    if (!art) return 0;
++    static uint8_t rgba[JEX_W * JEX_H * 4];
++    for (int by = 0; by < JEX_H / 4; by++) for (int bx = 0; bx < JEX_W / 4; bx++) {
++        uint8_t px[64]; jex_bc3_decode(dst + (size_t)(JEX_Y0 / 4 + by) * pitch + (size_t)(JEX_X0 / 4 + bx) * 16, px);
++        for (int i = 0; i < 16; i++) memcpy(rgba + ((by * 4 + i / 4) * JEX_W + bx * 4 + i % 4) * 4, px + i * 4, 4);
++    }
++    /* clear the cross (tools/art/ex_logo.py CROSS 751,428..825,502, keeping the S outline x<767 && y<446) and lay the art over */
++    static uint8_t orig[JEX_W * JEX_H * 4];
++    memcpy(orig, rgba, sizeof orig);
++    for (int y = 0; y < JEX_H; y++) for (int x = 0; x < JEX_W; x++) {
++        int X = JEX_X0 + x, Y = JEX_Y0 + y; uint8_t* p = rgba + (y * JEX_W + x) * 4; const uint8_t* s = art + (y * JEX_W + x) * 4;
++        if (X >= 751 && X < 825 && Y >= 428 && Y < 502 && (X >= 767 || Y >= 446)) p[0] = p[1] = p[2] = p[3] = 0;
++        int sa = s[3];
++        if (sa == 255) memcpy(p, s, 4);
++        else if (sa) {
++            int da = p[3], oa = sa * 255 + da * (255 - sa);   /* straight-alpha "over", scaled by 255 */
++            for (int k = 0; k < 3; k++) p[k] = (uint8_t)((s[k] * sa * 255 + p[k] * da * (255 - sa)) / (oa ? oa : 1));
++            p[3] = (uint8_t)((oa + 127) / 255);
++        }
++    }
++    int changed = 0;
++    for (int by = 0; by < JEX_H / 4; by++) for (int bx = 0; bx < JEX_W / 4; bx++) {
++        uint8_t px[64], po[64];
++        for (int i = 0; i < 16; i++) {
++            memcpy(px + i * 4, rgba + ((by * 4 + i / 4) * JEX_W + bx * 4 + i % 4) * 4, 4);
++            memcpy(po + i * 4, orig + ((by * 4 + i / 4) * JEX_W + bx * 4 + i % 4) * 4, 4);
++        }
++        if (!memcmp(px, po, 64)) continue;
++        jex_bc3_encode(px, dst + (size_t)(JEX_Y0 / 4 + by) * pitch + (size_t)(JEX_X0 / 4 + bx) * 16);
++        changed++;
++    }
++    fprintf(stderr, "[EXLOGO] %s layer patched, %d of %d blocks re-encoded%c", layer == 1 ? "ef" : "logo", changed,
++            (JEX_W / 4) * (JEX_H / 4), 10);
++    return 1;
++}
++
++/* The title scene draws a pre-scaled copy of the logo: DXT5 241 x 136 (33,184 bytes, FNV-1a-64 below), a 0.2755 scale of the 1024 x 531
++ * layers: small = (full - (72, 30)) * 0.2755 + (5.0, 3.5) (fitted on the alpha of the four layers, mean squared error 83 of 255^2;
++ * ASSUMPTION: same bytes on every region). The same cross clear and art, box-filtered into that grid. */
++#define JEXS_SC 0.2755
++static int jex_apply_small(const uint8_t* src, uint32_t w, uint32_t h, int is_bc3_linear, uint8_t* dst, uint32_t pitch) {
++    if (!is_bc3_linear || w != 241 || h != 136 || !jex_enabled()) return 0;
++    if (jex_fnv64(src, 61u * 34u * 16u) != 0xdcd2950bec4ee40eull) return 0;
++    const uint8_t* art = jex_art();
++    if (!art) return 0;
++    enum { X0 = 188, Y0 = 108, BW = 14, BH = 7, PW = BW * 4, PH = BH * 4 };
++    static uint8_t rgba[PW * PH * 4], orig[PW * PH * 4];
++    for (int by = 0; by < BH; by++) for (int bx = 0; bx < BW; bx++) {
++        uint8_t px[64]; jex_bc3_decode(dst + (size_t)(Y0 / 4 + by) * pitch + (size_t)(X0 / 4 + bx) * 16, px);
++        for (int i = 0; i < 16; i++) memcpy(rgba + ((by * 4 + i / 4) * PW + bx * 4 + i % 4) * 4, px + i * 4, 4);
++    }
++    memcpy(orig, rgba, sizeof orig);
++    for (int y = 0; y < PH; y++) for (int x = 0; x < PW; x++) {
++        double xc = 72.0 + (X0 + x - 5.0) / JEXS_SC, yc = 30.0 + (Y0 + y - 3.5) / JEXS_SC, hw = 0.5 / JEXS_SC;
++        uint8_t* p = rgba + (y * PW + x) * 4;
++        if (xc >= 751 - 2 && xc < 825 + 2 && yc >= 428 - 2 && yc < 502 + 2 && (xc >= 767 || yc >= 446)) p[0] = p[1] = p[2] = p[3] = 0;
++        double ps[3] = {0, 0, 0}, as = 0; int n = 0;       /* premultiplied box average of the art over the footprint */
++        for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
++            int ax = (int)(xc - hw + (i + 0.5) * 2 * hw / 4) - JEX_X0, ay = (int)(yc - hw + (j + 0.5) * 2 * hw / 4) - JEX_Y0;
++            n++;
++            if (ax < 0 || ay < 0 || ax >= JEX_W || ay >= JEX_H) continue;
++            const uint8_t* s = art + (ay * JEX_W + ax) * 4;
++            for (int k = 0; k < 3; k++) ps[k] += s[k] * (double)s[3];
++            as += s[3];
++        }
++        if (as <= 0) continue;
++        double sa = as / n / 255.0, da = p[3] / 255.0, oa = sa + da * (1 - sa);
++        for (int k = 0; k < 3; k++) { double sc = ps[k] / as; p[k] = (uint8_t)((sc * sa + p[k] * da * (1 - sa)) / oa + 0.5); }
++        p[3] = (uint8_t)(oa * 255 + 0.5);
++    }
++    int changed = 0;
++    for (int by = 0; by < BH; by++) for (int bx = 0; bx < BW; bx++) {
++        uint8_t px[64], po[64];
++        for (int i = 0; i < 16; i++) {
++            memcpy(px + i * 4, rgba + ((by * 4 + i / 4) * PW + bx * 4 + i % 4) * 4, 4);
++            memcpy(po + i * 4, orig + ((by * 4 + i / 4) * PW + bx * 4 + i % 4) * 4, 4);
++        }
++        if (!memcmp(px, po, 64)) continue;
++        jex_bc3_encode(px, dst + (size_t)(Y0 / 4 + by) * pitch + (size_t)(X0 / 4 + bx) * 16);
++        changed++;
++    }
++    fprintf(stderr, "[EXLOGO] 241x136 title logo patched, %d of %d blocks re-encoded%c", changed, BW * BH, 10);
++    return 1;
++}
++#endif

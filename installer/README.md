@@ -27,9 +27,12 @@ installer and the program contact no server: no update check, no crash report, n
 |---|---|
 | `installer/jsp.iss` | The Inno Setup 6 script: disc and EBOOT checks, RPCS3 page, Portable task, install, build step, uninstall; it compiles the settings window (`launcher/JStarsLauncher.cs` as `jsp-settings.exe`, with the C# compiler that comes with Windows) that the shortcuts open |
 | `installer/launcher/launcher.c` | `jsp-launcher.exe`, a small program the installer's shortcuts start. It checks that the disc folder exists (message box if not), reads `paths.txt` and `play_settings.txt`, leaves the power plan alone (`CPU_BOOST=1` sets its maximum processor state to 100 % while the game runs and puts the old values back afterwards) and starts the built game. It does not replace `launcher/JStarsLauncher.cs` |
-| `installer/tools/assemble_payload.py` | Collects what setup copies: port sources, the patched toolkit (via `tools/toolkit/apply_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences |
+| `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`--tree v18`, the default: `installer/port`; or `--tree v15`: `jstars/port`), the patched toolkit (v18: `export_toolkit.py`; v15: `tools/toolkit/apply_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
 | `installer/tools/firstrun.py` | The build step that runs on the player's PC after setup copied the files. Preflight checks with named codes, then resumable steps whose markers hold an input fingerprint; a new log per run in `logs\firstrun-<time>.log` (the newest five are kept) |
-| `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them (from `jstars/spu_jobs/`, arguments instead of fixed folders) |
+| `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them with the v0.15 tools (from `jstars/spu_jobs/`, arguments instead of fixed folders); used by the `v15` tree |
+| `installer/tools/lift_jobs.py` | The same for the v0.18.0 tools (the `v18` tree): scan, wrap, lift, `spu_workloads.c` |
+| `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.18.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
+| `installer/port/jsp/`, `installer/port/patches/` | The `v18` port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
 | `installer/tools/installer_art.py` | Draws the wizard images and icons at build time (needs Pillow and the IBM Plex Mono Bold font file); nothing generated is committed |
 | `installer/tools/ex_logo_art.py` | Draws `ex_logo_A.rgba`, the "EX" that toolkit patch 0006 puts in place of the "+" in the title logo, from polygons (our own art, needs Pillow and numpy); `assemble_payload.py` runs it and `firstrun.py` places the file next to `JStarsRecomp.exe`. `JSP_EX_LOGO=0` in the settings file keeps the "+" |
 | `installer/tools/installer_music.py`, `installer/music/` | Renders the six opt-in music tracks (formulas, credits and sources in `tracks.tsv`) to WAV files at build time with plain Python; the wizard's "Enable Music?" box (bottom left, off by default, silent installs never play) loops one at random. Credits and licence in `NOTICE.md` |
@@ -63,6 +66,7 @@ python installer\tools\installer_art.py
 python installer\tools\installer_music.py
 build\installer\toolchain-cache\trees\llvm-mingw\bin\x86_64-w64-mingw32-clang.exe -O2 -mwindows -s -o build\installer\jsp-launcher.exe installer\launcher\launcher.c
 python installer\tools\assemble_payload.py
+rem (--tree v15 stages the earlier jstars/port instead; --toolkit-repo and --no-fetch: see the script)
 ISCC.exe /DPayload=%CD%\build\installer\payload /O%CD%\build\installer\out %CD%\installer\jsp.iss
 python installer\tools\assemble_portable.py
 ```
@@ -73,6 +77,9 @@ fails with "Invalid file handle". `fetch_toolchain.py --check --strict` validate
 The FFmpeg entry is GitHub's zip of the n9.0.1 tag: GitHub does not promise the same bytes forever, so a hash mismatch there
 most likely means it was re-packed (check the tag, then refill). Its majors (avcodec 63, avutil 61) must match the RPCS3 DLLs
 players have; firstrun.py's check M1 warns when they do not.
+The `v18` toolkit is taken from the submodule
+`third_party/ps3recomp`: when that checkout is at another commit (the v0.15 pin), `assemble_payload.py` fetches the `v0.18.0` tag
+into it once, on the machine that builds the installer; the player's PC needs no network.
 `assemble_payload.py` refuses to finish when the payload holds a file kind that the game ships (`.elf`, `.bin`, `.sfo`,
 `.psarc`, `.edat`, `.self`, `.sprx`), and `assemble_portable.py` refuses a payload that already holds first-run output.
 

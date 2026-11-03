@@ -1,0 +1,134 @@
+Patch 1002: a job chain parked on its guard stays parked until the next cellSpursJobGuardNotify.
+
+The chain walker waited 20 s on a closed guard and then ended the walker thread. On the PS3 a chain that reaches its GUARD sleeps
+there for as long as the application queues no work and wakes on the next notify; the game's control chains (guard, job, sync, next)
+do exactly that between submissions. With the give-up, a notify after a quiet spell found no walker. jg_wait now waits without a
+timeout and leaves only when the guard opens or the instance shuts down.
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -2323,6 +2323,7 @@
+     u16 max_grab;
+     int run_count;
+     volatile long running;   /* 1 while a host thread walks this chain */
++    volatile long shutdown;  /* cellSpursShutdownJobChain: leave the guard wait, end the walk */
+ } s_jobchains[MAX_JOBCHAINS];
+
+ static void jc_dump_commands(const char* tag, u32 ea, int max_words)
+@@ -2611,11 +2612,15 @@
+      * OBSERVED zero, which threw away any notify that arrived while the job
+      * was still running -- the title notified 6 times and the chain completed
+      * 2 laps, so the thread waiting on the other 4 completions never woke. */
+-    s_jobguards[i].pending++;
++    _InterlockedIncrement((volatile long*)&s_jobguards[i].pending);
+     { u32 remaining = (s_jobguards[i].pending >= s_jobguards[i].reset)
+                     ? 0u : s_jobguards[i].reset - s_jobguards[i].pending;
+       s_jobguards[i].count = remaining;
+       vm_write32(ea, remaining); }
++    { static volatile long total = 0;     /* the first 8 are logged below; then one line per 1024 */
++      long t = _InterlockedIncrement(&total);
++      if (t > 8 && (t & 1023) == 0)
++          printf("[cellSpurs] JobGuardNotify: %ld notifies so far\n", t); }
+     { static int _n = 0;
+       if (PS3_LOG_FIRST(_n, 8))
+           printf("[cellSpurs] JobGuardNotify(0x%08X) -> %u remaining\n",
+@@ -2634,19 +2639,27 @@
+     return CELL_OK;
+ }
+
+-/* Wait for a guard to be released. Returns 1 if it opened, 0 on timeout (the
+- * chain then gives up this pass rather than spinning the walker thread
+- * forever). An unknown guard opens immediately -- a chain guarded by something
+- * we never saw initialised must not deadlock the walker. */
+-static int jg_wait(u32 ea)
++/* Wait for a guard to be released, as the SPURS job manager does: the chain
++ * sleeps on the guard for as long as the application has nothing to hand it
++ * (J-Stars' 20 control chains sit here whenever the game queues no work) and
++ * wakes on the next cellSpursJobGuardNotify. Returns 1 if it opened, 0 if the
++ * chain was shut down meanwhile (cellSpursShutdownJobChain sets
++ * s_jobchains[slot].shutdown). There is no timeout: the old 20 s give-up ended
++ * the walker thread, so a notify arriving later (a job submitted after a
++ * quiet spell) found nothing to run it. An unknown guard opens immediately --
++ * a chain guarded by something we never saw initialised must not deadlock the
++ * walker. */
++static int jg_wait(u32 ea, int slot)
+ {
+     int i = jg_find(ea);
+     if (i < 0) return 1;
+-    for (int spin = 0; spin < 20000; spin++) {     /* ~20 s at 1 ms */
++    for (;;) {
++        if (s_jobchains[slot].shutdown) return 0;
+         if (s_jobguards[i].pending >= s_jobguards[i].reset) {
+             /* Consume exactly one release worth of credits, so notifies that
+              * arrived during the previous lap still count. */
+-            s_jobguards[i].pending -= s_jobguards[i].reset;
++            _InterlockedExchangeAdd((volatile long*)&s_jobguards[i].pending,
++                                    -(long)s_jobguards[i].reset);
+             if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
+             s_jobguards[i].count = s_jobguards[i].reset;
+             vm_write32(ea, s_jobguards[i].count);
+@@ -2658,8 +2671,6 @@
+         usleep(1000);
+ #endif
+     }
+-    printf("[cellSpurs] guard 0x%08X still closed after 20 s -- chain gives up\n", ea);
+-    return 0;
+ }
+
+ /* Tell the application a lap of chain work is done.
+@@ -2748,7 +2759,7 @@
+     }
+ }
+
+-static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
++static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc, int slot)
+ {
+     u32 pc = entry_ea, ret_pc = 0;
+     int jobs = 0;
+@@ -2762,6 +2773,7 @@
+     int idle = 0;
+     for (;; idle++) {
+         if (idle > 4096) break;
++        if (s_jobchains[slot].shutdown) return;
+         u64 cmd = vm_read64(pc);
+         u32 op  = (u32)(cmd & 7);
+         u32 ext = (u32)(cmd & 127);
+@@ -2799,7 +2811,7 @@
+         }
+         if (op == 7 && ext == (7 | (1 << 3))) {           /* GUARD */
+             u32 g_ea = (u32)(cmd & ~127ull);
+-            if (!jg_wait(g_ea)) return;                  /* still closed */
++            if (!jg_wait(g_ea, slot)) return;            /* chain shut down */
+             pc += 8; continue;
+         }
+         /* NOP(0) / SYNC+LWSYNC(2, one virtual SPU: nothing to wait for) /
+@@ -2823,7 +2835,7 @@
+     { const char* d = getenv("SPURS_JC_DELAY");
+       if (d && *d) Sleep((unsigned)atoi(d)); }
+     jc_execute(s_jobchains[slot].entry_ea, s_jobchains[slot].jc_ea,
+-               s_jobchains[slot].size_desc);
++               s_jobchains[slot].size_desc, slot);
+     s_jobchains[slot].running = 0;
+     /* Tell the application the chain is done. Without this the walk finishes
+      * in silence and a thread waiting on the attached queue never runs again. */
+@@ -2860,6 +2872,7 @@
+         if (s_off || !s_jobchains[i].entry_ea) return CELL_OK;
+         /* Coalesce: a chain already being walked must not start twice. */
+         if (_InterlockedCompareExchange(&s_jobchains[i].running, 1, 0) == 0) {
++            s_jobchains[i].shutdown = 0;
+             HANDLE th = CreateThread(NULL, 1u << 20, jc_thread, (LPVOID)(intptr_t)i, 0, NULL);
+             if (th) CloseHandle(th);
+             else s_jobchains[i].running = 0;
+@@ -2894,7 +2907,10 @@
+     if (PS3_LOG_FIRST(_n, 8)) printf("[cellSpurs] ShutdownJobChain(jc=0x%08X)\n", (u32)jc_ea);
+     for (int i = 0; i < MAX_JOBCHAINS; i++) {
+         if (s_jobchains[i].jc_ea == (u32)jc_ea) {
+-            s_jobchains[i].running = 0;   /* stop the walker; Join can now succeed */
++            /* Wake a walker parked on its guard; jc_thread clears `running`
++             * when it leaves, which is what Join waits for. A chain that is
++             * not being walked has nothing to stop. */
++            if (s_jobchains[i].running) s_jobchains[i].shutdown = 1;
+             return CELL_OK;
+         }
+     }

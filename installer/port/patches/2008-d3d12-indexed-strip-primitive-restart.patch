@@ -1,0 +1,82 @@
+Patch 2008: primitive restart for indexed TRIANGLE_STRIP / TRIANGLE_FAN draws in the D3D12 backend. (Upstream candidate.)
+
+upload_strip_vp_indexed expanded every index into the strip, including the restart sentinel (0xFFFF in the character meshes), so each
+restart fetched a vertex from garbage memory and the next triangles fanned out from it. rsx_state now keeps the restart setting and
+the expansion splits the strip at the sentinel.
+
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7147,20 +7147,35 @@
+     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+     if (!state->vertex_attribs[0].enabled) return 0;
+     if (count < 3) return 0;
+-    u32 tris = count - 2;
+     u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+-    if (tris * 3 > maxv) tris = maxv / 3;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    u32 o = 0;
++    /* (J-Stars: the characters are indexed strips with a restart
++     * index; without the cut the sentinel is fetched as a vertex and the
++     * strip fans out to garbage). Restart rule as in the RSX dispatch layer
++     * (rsx_dsp_restart_index_enabled): a 16-bit index buffer ignores a
++     * sentinel that does not fit in 16 bits. */
++    const int idx_u32 = (((state->index_array_dma >> 4) & 0xF) != 1);
++    const int rs_on = state->restart_index_enable &&
++                      (idx_u32 || state->restart_index <= 0xFFFFu);
++    const u32 rs_idx = state->restart_index;
++    u32 o = 0, n = 0, p0 = 0, p1 = 0, seg0 = 0;
+     vc_begin_draw();
+-    for (u32 t = 0; t < tris; t++) {
+-        u32 i0 = fan ? 0 : t;
+-        u32 i1 = t + 1, i2 = t + 2;
+-        if (!fan && (t & 1)) { u32 tmp = i1; i1 = i2; i2 = tmp; }
+-        read_vp_vertex_cached(state, read_guest_index(state, first + i0), &out[o*16]); o++;
+-        read_vp_vertex_cached(state, read_guest_index(state, first + i1), &out[o*16]); o++;
+-        read_vp_vertex_cached(state, read_guest_index(state, first + i2), &out[o*16]); o++;
++    for (u32 k = 0; k < count; k++) {
++        const u32 ix = read_guest_index(state, first + k);
++        if (rs_on && ix == rs_idx) { static int _nr = 0; if (PS3_LOG_FIRST(_nr, 4)) fprintf(stderr, "[STRIPRS] restart 0x%X at %u of %u (u32=%d)%c", ix, k, count, idx_u32, 10); n = 0; continue; }
++        if (n == 0) { seg0 = p0 = ix; n = 1; continue; }
++        if (n == 1) { p1 = ix; n = 2; continue; }
++        if (o + 3 > maxv) break;
++        const u32 t = n - 2;
++        u32 a = fan ? seg0 : p0, b = p1, c = ix;
++        if (!fan && (t & 1)) { u32 tmp = b; b = c; c = tmp; }
++        read_vp_vertex_cached(state, a, &out[o*16]); o++;
++        read_vp_vertex_cached(state, b, &out[o*16]); o++;
++        read_vp_vertex_cached(state, c, &out[o*16]); o++;
++        if (!fan) p0 = p1;
++        p1 = ix;
++        n++;
+     }
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -929,6 +929,14 @@
+         state->index_array_offset = data;
+         return 0;
+     }
++    if (method == 0x00001DAC) {   /* NV4097_SET_RESTART_INDEX_ENABLE */
++        state->restart_index_enable = data;
++        return 0;
++    }
++    if (method == 0x00001DB0) {   /* NV4097_SET_RESTART_INDEX */
++        state->restart_index = data;
++        return 0;
++    }
+     if (method == NV4097_SET_INDEX_ARRAY_DMA) {
+         state->index_array_dma = data;
+         return 0;
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -350,6 +350,8 @@
+     u32 begin_epoch;
+     u32 index_array_offset;
+     u32 index_array_dma;
++    u32 restart_index_enable;   /* NV4097_SET_RESTART_INDEX_ENABLE 0x1DAC */
++    u32 restart_index;          /* NV4097_SET_RESTART_INDEX 0x1DB0 */
+ 
+     /* Shader state */
+     /* RSX viewport transform (SET_VIEWPORT_OFFSET 0x0A20 / _SCALE 0x0A30,
