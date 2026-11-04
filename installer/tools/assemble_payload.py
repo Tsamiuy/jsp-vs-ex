@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Assemble the installer payload (what jsp.iss copies into {app}): a port of the game, built on the player's PC.
 
-Two trees (--tree): "v18" (default) is installer/port, the glue for the ps3recomp v0.18.0 toolkit, with installer/port/patches applied
-to the exported toolkit (installer/tools/export_toolkit.py); "v15" is this repository's earlier port (jstars/port) on the v0.15
-toolkit as described below. firstrun.py reads <payload>/tree.txt to know which recipe to run.
+Two trees (--tree): "v15" (default) is this repository's earlier port (jstars/port) on the v0.15 toolkit as described below;
+"v18" is installer/port, the glue for the ps3recomp v0.18.0 toolkit, with installer/port/patches applied to the exported toolkit
+(installer/tools/export_toolkit.py). v18 stays opt-in until its open issues (sound, fight speed, fight graphics) are fixed. firstrun.py reads <payload>/tree.txt to know which recipe to run.
 
 Layout adapted from the maintainer's installer for another PS3 port (same MIT licence). The payload holds only code that
 is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
@@ -13,7 +13,7 @@ image in git; the compiler is the bundled llvm-mingw (toolchain.json); no Visual
 
     python installer/tools/assemble_payload.py [--out build/installer/payload] [--repo DIR] [--python DIR]
                                                [--launcher EXE] [--art DIR] [--toolchain-cache DIR]
-                                               [--tree v18|v15] [--toolkit-repo GIT_DIR] [--no-fetch]
+                                               [--tree v15|v18] [--toolkit-repo GIT_DIR] [--no-fetch]
 
 Toolchain: llvm-mingw, CMake and Ninja come from the cache that fetch_toolchain.py filled from installer/tools/toolchain.json
 (hash-pinned; each tree must carry the manifest's hash in fetched.json), minus the entries' "prune" globs, with their licence
@@ -200,7 +200,7 @@ def main(argv=None):
                     help="an FFmpeg source or headers folder (libavcodec/avcodec.h ...) whose majors match the RPCS3 DLLs (default: "
                          "the ffmpeg-headers entry of fetch_toolchain.py's cache): the payload gets libavcodec/ and libavutil/ "
                          "headers so the game is built with the opening-movie decoder (skipped with a warning when absent)")
-    ap.add_argument("--tree", choices=("v18", "v15"), default="v18", help="which port to build on the player's PC")
+    ap.add_argument("--tree", choices=("v15", "v18"), default="v15", help="which port to build on the player's PC (v18: opt-in)")
     ap.add_argument("--toolkit-repo", default=str(ROOT / "third_party/ps3recomp"), help="git checkout the v18 toolkit is exported from")
     ap.add_argument("--no-fetch", action="store_true", help="do not fetch the v18 toolkit tag when the checkout lacks it")
     a = ap.parse_args(argv)

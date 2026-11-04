@@ -27,7 +27,7 @@ installer and the program contact no server: no update check, no crash report, n
 |---|---|
 | `installer/jsp.iss` | The Inno Setup 6 script: disc and EBOOT checks, RPCS3 page, Portable task, install, build step, uninstall; it compiles the settings window (`launcher/JStarsLauncher.cs` as `jsp-settings.exe`, with the C# compiler that comes with Windows) that the shortcuts open |
 | `installer/launcher/launcher.c` | `jsp-launcher.exe`, a small program the installer's shortcuts start. It checks that the disc folder exists (message box if not), reads `paths.txt` and `play_settings.txt`, leaves the power plan alone (`CPU_BOOST=1` sets its maximum processor state to 100 % while the game runs and puts the old values back afterwards) and starts the built game. It does not replace `launcher/JStarsLauncher.cs` |
-| `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`--tree v18`, the default: `installer/port`; or `--tree v15`: `jstars/port`), the patched toolkit (v18: `export_toolkit.py`; v15: `tools/toolkit/apply_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
+| `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`--tree v15`, the default: `jstars/port`; or `--tree v18`, opt-in until its open issues are fixed: `installer/port`), the patched toolkit (v18: `export_toolkit.py`; v15: `tools/toolkit/apply_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
 | `installer/tools/firstrun.py` | The build step that runs on the player's PC after setup copied the files. Preflight checks with named codes, then resumable steps whose markers hold an input fingerprint; a new log per run in `logs\firstrun-<time>.log` (the newest five are kept) |
 | `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them with the v0.15 tools (from `jstars/spu_jobs/`, arguments instead of fixed folders); used by the `v15` tree |
 | `installer/tools/lift_jobs.py` | The same for the v0.18.0 tools (the `v18` tree): scan, wrap, lift, `spu_workloads.c` |
@@ -67,7 +67,7 @@ python installer\tools\installer_art.py
 python installer\tools\installer_music.py
 build\installer\toolchain-cache\trees\llvm-mingw\bin\x86_64-w64-mingw32-clang.exe -O2 -mwindows -s -o build\installer\jsp-launcher.exe installer\launcher\launcher.c
 python installer\tools\assemble_payload.py
-rem (--tree v15 stages the earlier jstars/port instead; --toolkit-repo and --no-fetch: see the script)
+rem (--tree v18 stages the v0.18.0 port in installer/port instead; --toolkit-repo and --no-fetch: see the script)
 ISCC.exe /DPayload=%CD%\build\installer\payload /O%CD%\build\installer\out %CD%\installer\jsp.iss
 python installer\tools\assemble_portable.py
 ```
