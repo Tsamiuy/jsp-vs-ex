@@ -184,6 +184,10 @@ __pycache__/
 !/installer/port/patches/
 /installer/port/patches/*
 !/installer/port/patches/*.patch
+!/installer/port/test/
+/installer/port/test/*
+!/installer/port/test/*.txt
+!/installer/port/test/*.cmd
 # One licence text that has no stable download address; the other licence texts are fetched with pinned hashes
 !/installer/licenses/
 /installer/licenses/*
