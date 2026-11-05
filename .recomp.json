@@ -14,9 +14,9 @@
   "approach": "Static recompilation of the PPU code and the SPU jobs with ps3recomp, HLE system libraries, Direct3D 12 RSX backend",
   "maintainers": [{"name": "Tsamiuy", "link": "https://github.com/Tsamiuy"}],
   "links": [
-    {"label": "Repository", "url": "https://github.com/Tsamiuy/JSP-Project"},
-    {"label": "Status notes", "url": "https://github.com/Tsamiuy/JSP-Project/blob/main/docs/notes/STATUS.md"},
-    {"label": "Setup", "url": "https://github.com/Tsamiuy/JSP-Project/blob/main/docs/notes/SETUP.md"}
+    {"label": "Repository", "url": "https://github.com/Tsamiuy/jsp-vs-ex"},
+    {"label": "Status notes", "url": "https://github.com/Tsamiuy/jsp-vs-ex/blob/main/docs/notes/STATUS.md"},
+    {"label": "Setup", "url": "https://github.com/Tsamiuy/jsp-vs-ex/blob/main/docs/notes/SETUP.md"}
   ],
   "help": ["Testing on other Windows machines", "The glow layer around effects", "Output resolution above 1280x720"],
   "tags": ["spu", "d3d12"],

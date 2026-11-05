@@ -32,7 +32,7 @@ ascii_logo = _load("ascii_logo")
 NAME = "J-Stars Victory VS EX"
 TAGLINE = "Unofficial fan project. No game files included."
 DISCORD = "https://discord.gg/h3j2wFwqvn"
-DEFAULT_REPO = "https://github.com/Tsamiuy/JSP-Project"  # ASSUMPTION: final public repo URL; override with --repo
+DEFAULT_REPO = "https://github.com/Tsamiuy/jsp-vs-ex"  # ASSUMPTION: final public repo URL; override with --repo
 DESCRIPTION = ("J-Stars Victory VS EX is an unofficial fan project: a PC port of a PS3 crossover fighter, "
                "made by static recompilation. No game files included.")
 W, INNER = 80, 76  # box width and text width
