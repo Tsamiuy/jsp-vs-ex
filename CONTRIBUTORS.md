@@ -21,4 +21,6 @@ Keep the list to names or handles you are happy to have public.
 
 ## Contributors
 
-- [undecuple](https://github.com/undecuple): public-readiness review, issues and pull requests (README, NOTICE, licence, community files, wording, removal of personal details, `.recomp.json`).
+- [undecuple](https://github.com/undecuple): the Windows installer (bundled compiler, portable zip, launcher, support bundle), the
+  "EX" title logo, the banner and logo art, the roadmap, CI and the issue forms, and the public-readiness review (README, NOTICE,
+  licence, community files, wording, removal of personal details, `.recomp.json`).
