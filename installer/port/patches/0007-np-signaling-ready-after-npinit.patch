@@ -1,0 +1,32 @@
+sceNpSignaling: usable after sceNpInit (sceNpSignalingInit has no NID)
+
+sceNpSignalingInit is not a firmware export, so a title never calls it: on the console signaling is usable once
+sceNpInit has run, and a title creates its context straight after sceNpInit. CreateCtx and the other calls returned
+NOT_INITIALIZED for such a title. Accept either, as sceNpBasic does.
+
+
+diff --git a/libs/network/sceNpSignaling.c b/libs/network/sceNpSignaling.c
+index b8416442..17df8fbd 100644
+--- a/libs/network/sceNpSignaling.c
++++ b/libs/network/sceNpSignaling.c
+@@ -22,6 +22,11 @@ typedef struct {
+ 
+ static SignalingCtx s_ctx[SCE_NP_SIGNALING_CTX_MAX];
+ 
++/* sceNpSignalingInit is not a firmware export (no NID): on the console signaling is usable once sceNpInit has run,
++ * so a title calls sceNpSignalingCreateCtx straight after sceNpInit. Accept either, as sceNpBasic does. */
++int np_is_initialized(void);
++static int signaling_ready(void) { return s_initialized || np_is_initialized(); }
++
+ /* Lifecycle */
+ 
+ s32 sceNpSignalingInit(void)
+@@ -49,7 +54,7 @@ s32 sceNpSignalingCreateCtx(const void* npId, SceNpSignalingHandler handler,
+     (void)npId;
+     printf("[sceNpSignaling] CreateCtx()\n");
+ 
+-    if (!s_initialized) return (s32)SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED;
++    if (!signaling_ready()) return (s32)SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED;
+     if (!ctxId) return (s32)SCE_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+ 
+     for (int i = 0; i < SCE_NP_SIGNALING_CTX_MAX; i++) {

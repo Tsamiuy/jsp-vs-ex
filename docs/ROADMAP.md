@@ -47,6 +47,9 @@ each frame. Online is opt-in: the port connects only when you choose online play
 pick.
 Every gameplay option in a match is the same for all players; ranked uses one fixed rule set.
 
+- 🔧 **The game's own Online Battle over a [psnr](https://github.com/sp00nznet/psnr) server** (experimental, opt-in; how
+  to try it: `installer/README.md`, "Online Battle"): in a test of two copies on one PC, both reached a Friendly Match
+  room and played into the fight. Not yet tried on Windows or between two PCs
 - 📋 **Online matches with rollback netcode:** 1v1 first, then 2v2, and 3v3 if the engine allows it (see section 3);
   direct connection first ([details](FEATURES.md#online-rollback))
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
@@ -70,7 +73,8 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 - Distributing any game files: no disc image, EBOOT, firmware, recompiled game code or game assets. You bring your own
   copy of the game, and the port is built from it on your PC
-- Anything that needs PSN: the game's own online mode and Cross-Save stay unavailable
+- Anything that needs PSN: Cross-Save stays unavailable, and online play goes through a psnr server (section 4), never
+  PSN
 
 ## In short
 
