@@ -33,6 +33,11 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: python3 tools/ci/repo_checks.py --commits "$BASE..$HEAD"
 
+      - name: Features page matches docs/features.tsv and ROADMAP.md
+        run: |
+          python3 tools/test_features.py
+          python3 tools/features.py --check
+
       - name: Shell scripts parse
         # .gitattributes keeps *.sh stored and checked out with LF.
         run: |

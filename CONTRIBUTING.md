@@ -23,3 +23,9 @@ Thanks for looking. This is a small work-in-progress fan project. Keep changes s
 
 The notes in `docs/notes/` are a working log. When you add to them, state what was measured and what is
 only a guess, and keep game data out of them.
+
+## Features page
+
+`docs/FEATURES.md` is generated: edit `docs/features.tsv` (its format is at the top of `tools/features.py`), then run
+`python3 tools/features.py`. A ROADMAP line that covers a row links to it as `FEATURES.md#<id>` and carries the
+marker for its status; `python3 tools/features.py --check` (also run by CI) reports any mismatch.
