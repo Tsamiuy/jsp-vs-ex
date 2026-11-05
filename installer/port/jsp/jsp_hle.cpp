@@ -40,14 +40,19 @@ void l10n_ucs2_to_utf8(ppu_context* ctx)
 
 /* cellNetCtlGetState (0x8B3EBA69). v0.18.0 answers an offline GetState with CELL_NET_CTL_ERROR_NOT_INITIALIZED
  * (its LittleBigPlanet workaround). A console with no network, after cellNetCtlInit, returns CELL_OK and
- * state = Disconnected (0); J-Stars polls it every frame after the opening movie. Report the hardware result. */
+ * state = Disconnected (0); J-Stars polls it every frame after the opening movie. Report the hardware result.
+ * Online (PS3_NET_ONLINE, the runtime's switch) the console has its IP: IPObtained (3). The game's net manager
+ * (func_004561CC @0x004561CC) stores state > 1 as "connected", and Online Battle raises "You have lost connection
+ * to PSN" (error 0x2A, @0x004812EC) when it reads 0 there during an online session. */
+extern "C" int ps3_netctl_online(void);   /* libs/network/cellNetCtl.c */
 void netctl_get_state(ppu_context* ctx)
 {
     const uint32_t state_ea = (uint32_t)ctx->gpr[3];
     if (!state_ea) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80130106u; return; }  /* INVALID_ADDR */
-    vm_write32(state_ea, 0);   /* CELL_NET_CTL_STATE_Disconnected */
+    const int online = ps3_netctl_online();
+    vm_write32(state_ea, online ? 3u : 0u);   /* CELL_NET_CTL_STATE_IPObtained : CELL_NET_CTL_STATE_Disconnected */
     static int n = 0;
-    if (n++ < 3) std::printf("[jsp-net] cellNetCtlGetState -> CELL_OK, Disconnected\n");
+    if (n++ < 3) std::printf("[jsp-net] cellNetCtlGetState -> CELL_OK, %s\n", online ? "IPObtained" : "Disconnected");
     ctx->gpr[3] = CELL_OK;
 }
 

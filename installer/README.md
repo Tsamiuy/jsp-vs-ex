@@ -182,6 +182,33 @@ The first rule that applies wins; files of different rules are never merged. The
 
 With none of them the defaults apply (`settings: none found`). The installed game data (saves) stays where `paths.txt` says.
 
+## Online Battle (experimental)
+
+The game's own Online Battle can run against a [psnr](https://github.com/sp00nznet/psnr) server instead of PSN: a small
+matchmaking server (MIT) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
+match itself goes peer to peer between the players' games, through the server's relay when a direct link fails. It is in
+the `v18` tree only (an installer assembled with `--tree v18`, see above). Online is off unless these settings are
+present. Setting up the server: see the psnr README (it has a `Setup.cmd` for Windows; players need TCP 36100 on the
+server, and UDP between each other or the relay).
+
+Add to the settings file (see above) of each player:
+
+    PS3_NET_ONLINE=1
+    PSNR_SERVER=192.168.1.20:36100
+    PS3_NP_ONLINE_ID=yourname
+
+`PSNR_SERVER` is the server's address and port; `PS3_NP_ONLINE_ID` is the name other players see (up to 16 characters).
+Then Main Menu > Online Battle > Friendly Match: one player uses Create a Room, the others Search for a Room.
+
+Two copies on one PC need a second settings file with another name and `PS3_NET_P2P_PORT=3659` (the default is 3658),
+started with `jsp-launcher.exe --settings <file>`, and their own save data: `PS3_GAMEDATA_ROOT=<folder>` in that file,
+with a copy of your save folder in it.
+
+What has been tested, and what has not: two copies on one Linux PC under Proton, talking to a psnr server on the same
+PC, reached a Friendly Match room together, started the battle and played into the fight with data going both ways.
+Not yet: Windows, two PCs, a fight to its end, Rank Match. Rollback netcode is planned (see `docs/ROADMAP.md`); until
+then the game's own netcode runs the match.
+
 ## Checks before the build
 
 `firstrun.py` prints one line per check, `OK`, `WARN` or `FAIL` and a code; any FAIL stops it before anything is built.
