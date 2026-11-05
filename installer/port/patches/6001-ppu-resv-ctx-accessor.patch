@@ -1,0 +1,22 @@
+Patch 6001: export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.)
+
+ppu_report_guest_lrs() prints only each thread's last direct call site. To read a thread's call chain the port needs the context
+itself; g_resv_ctxs is file-static. This adds a read-only accessor, used by the port's JSP_THREADDUMP_MS diagnostic.
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -920,6 +920,13 @@
+     long i = _InterlockedExchangeAdd(&g_resv_ctx_n, 1);
+     if (i < PPU_RESV_MAX) g_resv_ctxs[i] = c;
+ }
++/* i-th registered guest thread context (registration order), or null past the end. Read-only diagnostics. */
++extern "C" ppu_context* ppu_resv_ctx_at(long i)
++{
++    long n = g_resv_ctx_n; if (n > PPU_RESV_MAX) n = PPU_RESV_MAX;
++    if (i < 0 || i >= n) return 0;
++    return g_resv_ctxs[i];
++}
+ /* Where every guest thread is, as a GUEST address.
+  *
+  * This is the probe the tree was missing. A thread stuck in lifted code is

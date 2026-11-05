@@ -45,6 +45,13 @@ def units():
     for rel, txt in (("ps3recomp/tools/ppu_lifter.py", "a"), ("ps3recomp/src/x.c", "x"), ("port/main.cpp", "m"), ("tools/jsp_spu.py", "j")):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(txt)
+    # which tree a payload holds: tree.txt, none = v15; the v18 tree has its own exe name and its own SPU tool in the step fingerprint
+    check("payload_tree: no file is v15", firstrun.payload_tree(root) == "v15")
+    (root / "tree.txt").write_text("v18\n")
+    check("payload_tree: v18", firstrun.payload_tree(root) == "v18")
+    (root / "tree.txt").write_text("nonsense\n")
+    check("payload_tree: unknown value is v15", firstrun.payload_tree(root) == "v15")
+    (root / "tree.txt").unlink()
     eboot = tmp / "EBOOT.elf"
     eboot.write_bytes(b"\x7fELF" + b"1")
     vs = tmp / "tc"

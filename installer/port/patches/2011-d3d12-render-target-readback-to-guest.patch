@@ -1,0 +1,212 @@
+Patch 2011: optional write-back of small main-memory colour render targets to guest memory (RT_READBACK=1, default OFF).
+
+The game's exposure loop (PPU) reads the average-luminance target that the post chain draws into main memory. The backend never
+wrote any render target back, so the PPU averaged zeros. This copies such a target to guest memory after the frame.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index cccb756..96bdf6e 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3778,6 +3778,29 @@ static void rec_zeta(D3D12DrawRecord* dr)
+     dr->no_color = st->color_target == 0 && dr->zeta_off != 0;
+ }
+ 
++/* Small colour targets the CPU reads back (@0x0055C5A4 reads the 20x11
++ * average-luminance surface the post chain writes into main memory; the v0.15
++ * v0.15 finding "luminance target never read back", color-exposure notes).
++ * current_rt_off() notes every non-display surface drawn to with its guest
++ * clip, pitch and context DMA; render_frame() copies the ones that live in main
++ * memory and are small back to guest memory after the batch. */
++typedef struct { u32 off, cw, ch, pitch, dma; int touched; } RtReadNote;
++#define RT_READ_NOTES 24
++static RtReadNote s_rtread_notes[RT_READ_NOTES];
++static void rtread_note(u32 off, const rsx_state* st)
++{
++    if (!off || !st) return;
++    int free_i = -1;
++    for (int i = 0; i < RT_READ_NOTES; i++) {
++        if (s_rtread_notes[i].off == off) { free_i = i; break; }
++        if (free_i < 0 && !s_rtread_notes[i].off) free_i = i;
++    }
++    if (free_i < 0) return;
++    RtReadNote* n = &s_rtread_notes[free_i];
++    n->off = off; n->cw = st->surface_clip_w; n->ch = st->surface_clip_h;
++    n->pitch = st->surface_color_pitch[0]; n->dma = st->dma_color[0]; n->touched = 1;
++}
++
+ /* Which offscreen surface (if any) does the current RSX state render to?
+  * Returns 0 for a display buffer (backbuffer), else the surface's RAW RSX
+  * offset. RTs are keyed by raw offset -- a texture bound at the same raw
+@@ -3836,6 +3859,7 @@ static u32 current_rt_off(u32* out_w, u32* out_h, u32 out_mrt[3])
+     if (w < 16 || w > 2048 || h < 16 || h > 2048) { w = 0; h = 0; }
+     if (out_w) *out_w = w;
+     if (out_h) *out_h = h;
++    if (sel == 0) rtread_note(raw, st);
+     return raw;
+ }
+ 
+@@ -4544,6 +4568,120 @@ static void guest_fb_present(u32 fi)
+ }
+ 
+ 
++/* RT_READBACK=1 (default OFF, the guest's exposure loop did not
++ * pick the data up in the title scene; RT_READBACK=0 off, RT_READBACK_MAXPX=<n> pixel cap,
++ * default 4096): copy the small main-memory colour targets drawn this batch back
++ * to guest memory. The GPU writes them; the PPU reads them (the HDR exposure
++ * loop averages the 20x11 luminance target). Targets in local memory (context
++ * DMA 0xFEED0000) are never read by the CPU and stay on the GPU. */
++static ID3D12Resource* s_rb_buf; static u32 s_rb_cap;
++typedef struct { int slot; u32 cw, ch, pitch, gpitch, off, boff; } RbJob;
++static RbJob s_rb_jobs[8]; static int s_rb_njobs;
++static u32 rtread_maxpx(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("RT_READBACK_MAXPX"); v = e ? atoi(e) : 4096; }
++    return (u32)v;
++}
++static int rtread_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("RT_READBACK"); v = e ? atoi(e) : 0; }
++    return v;
++}
++static void rtread_issue(void)
++{
++    s_rb_njobs = 0;
++    if (!rtread_on()) return;
++    u32 total = 0;
++    for (int n = 0; n < RT_READ_NOTES; n++) {
++        RtReadNote* nt = &s_rtread_notes[n];
++        if (!nt->off || !nt->touched) continue;
++        nt->touched = 0;
++        if (nt->dma != 0xFEED0001u) continue;                 /* main memory only */
++        const u32 cw = nt->cw, ch = nt->ch;
++        if (!cw || !ch || (u64)cw * ch > rtread_maxpx()) continue;
++        int slot = off_rt_find(nt->off);
++        if (slot < 0) continue;
++        OffRT* r = &s_d3d.off_rt[slot];
++        if (r->dxgi != (u32)DXGI_FORMAT_R8G8B8A8_UNORM || cw > r->w || ch > r->h) continue;
++        if (s_rb_njobs >= 8) break;
++        const u32 pitch = (cw * 4u + 255u) & ~255u;
++        const u32 gpitch = nt->pitch ? nt->pitch : cw * 4u;
++        if (gpitch < cw * 4u) continue;                       /* never overrun a row */
++        RbJob* j = &s_rb_jobs[s_rb_njobs];
++        j->slot = slot; j->cw = cw; j->ch = ch; j->pitch = pitch; j->gpitch = gpitch;
++        j->off = nt->off; j->boff = total;
++        total += pitch * ch;
++        s_rb_njobs++;
++    }
++    if (!s_rb_njobs) return;
++    if (!s_rb_buf || s_rb_cap < total) {
++        if (s_rb_buf) { s_rb_buf->lpVtbl->Release(s_rb_buf); s_rb_buf = NULL; }
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_READBACK;
++        D3D12_RESOURCE_DESC rd = {0};
++        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        rd.Width = total > 65536 ? total : 65536; rd.Height = 1; rd.DepthOrArraySize = 1;
++        rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
++                s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
++                NULL, &IID_ID3D12Resource, (void**)&s_rb_buf)) || !s_rb_buf) {
++            s_rb_buf = NULL; s_rb_njobs = 0; return; }
++        s_rb_cap = (u32)rd.Width;
++    }
++    for (int k = 0; k < s_rb_njobs; k++) {
++        RbJob* j = &s_rb_jobs[k];
++        OffRT* r = &s_d3d.off_rt[j->slot];
++        const D3D12_RESOURCE_STATES prev = r->st;
++        off_rt_transition(j->slot, D3D12_RESOURCE_STATE_COPY_SOURCE);
++        D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
++        dst.pResource = s_rb_buf; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++        dst.PlacedFootprint.Offset = j->boff;
++        dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++        dst.PlacedFootprint.Footprint.Width = j->cw; dst.PlacedFootprint.Footprint.Height = j->ch;
++        dst.PlacedFootprint.Footprint.Depth = 1; dst.PlacedFootprint.Footprint.RowPitch = j->pitch;
++        src.pResource = r->res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++        D3D12_BOX box = {0, 0, 0, j->cw, j->ch, 1};
++        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, &box);
++        off_rt_transition(j->slot, prev);
++    }
++}
++static void rtread_finish(void)
++{
++    if (!s_rb_njobs || !s_rb_buf) { s_rb_njobs = 0; return; }
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    wait_for_gpu();
++    void* mapped = NULL;
++    D3D12_RANGE rr = {0, s_rb_cap};
++    if (SUCCEEDED(s_rb_buf->lpVtbl->Map(s_rb_buf, 0, &rr, &mapped)) && mapped) {
++        for (int k = 0; k < s_rb_njobs; k++) {
++            RbJob* j = &s_rb_jobs[k];
++            const u32 goff = cellGcmResolveLocated(0, j->off);
++            if (goff == 0xFFFFFFFFu || !goff) continue;
++            u64 sum = 0;
++            for (u32 y = 0; y < j->ch; y++) {
++                const u8* s = (const u8*)mapped + j->boff + (size_t)y * j->pitch;
++                u8* d = vm_base + goff + (size_t)y * j->gpitch;
++                for (u32 x = 0; x < j->cw; x++) {   /* R8G8B8A8 -> big-endian A8R8G8B8 */
++                    d[x*4+0] = s[x*4+3]; d[x*4+1] = s[x*4+0];
++                    d[x*4+2] = s[x*4+1]; d[x*4+3] = s[x*4+2];
++                    sum += (u64)s[x*4] + s[x*4+1] + s[x*4+2];
++                }
++            }
++            { static int n = 0;
++              if (n < 6 || (n % 600) == 0)
++                  fprintf(stderr, "[RTREAD] off=0x%08X %ux%u gpitch=%u -> ea 0x%X meanRGB=%u%c",
++                          j->off, j->cw, j->ch, j->gpitch, goff,
++                          (unsigned)(sum / ((u64)j->cw * j->ch * 3u)), 10);
++              n++; }
++        }
++        D3D12_RANGE wr = {0, 0};
++        s_rb_buf->lpVtbl->Unmap(s_rb_buf, 0, &wr);
++    }
++    s_rb_njobs = 0;
++}
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -5823,10 +5961,12 @@ skip_dump_consider: ;
+         s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &barrier);
+     }
+ 
++    rtread_issue();
+     /* Close and execute */
+     s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
+     s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cmd_lists);
++    rtread_finish();
+ 
+     /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
+      * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 7d3cad2..daf2014 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -555,6 +555,11 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
+         return 0;
+       } }
++    /* Colour-surface DMA contexts (outside the 0x200/0x280 surface ranges). */
++    if (method == 0x194) { state->dma_color[0] = data; return 0; }
++    if (method == 0x18C) { state->dma_color[1] = data; return 0; }
++    if (method == 0x2B8) { state->dma_color[2] = data; return 0; }
++    if (method == 0x2BC) { state->dma_color[3] = data; return 0; }
+     if ((method >= 0x200 && method <= 0x23C) ||
+         (method >= 0x280 && method <= 0x28C))
+         return process_surface_method(state, method, data);
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 0574b32..867fa0a 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -262,6 +262,10 @@ typedef struct rsx_state {
+     u32 surface_color_pitch[RSX_MAX_RENDER_TARGETS];
+     u32 surface_zeta_offset;
+     u32 surface_zeta_pitch;
++    /* SET_CONTEXT_DMA_COLOR_A/B/C/D (0x194/0x18C/0x2B8/0x2BC): 0xFEED0000 = local
++     * memory, 0xFEED0001 = main memory. Says where a colour surface lives, so a
++     * render target in main memory can be written back for the CPU. */
++    u32 dma_color[4];
+     u32 surface_clip_x, surface_clip_y;
+     u32 surface_clip_w, surface_clip_h;
+     u32 color_target;

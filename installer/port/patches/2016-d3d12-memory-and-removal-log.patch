@@ -1,0 +1,30 @@
+Patch 2016 (diagnostic, always on, one line per 30 s): [RSXMEM] logs process working set, pagefile use, pipeline count and
+GetDeviceRemovedReason, to catch memory growth before a device loss in a long fight.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -41,6 +41,7 @@
+ #include <initguid.h>
+ 
+ /* D3D12 headers */
++#include <psapi.h>
+ #include <d3d12.h>
+ #include <d3d12sdklayers.h>   /* ID3D12Debug / ID3D12InfoQueue */
+ #include <dxgi1_4.h>
+@@ -6250,6 +6251,15 @@
+             fprintf(stderr, "[RSXFPS] renders/s=%.1f presents/s=%.1f frame_count=%u draws=%u\n",
+                     s_tframes * 1000.0 / (double)(tnow - s_tt0),
+                     s_tpres * 1000.0 / (double)(tnow - s_tt0), s_d3d.frame_count, s_dbg_last_draws);
++        /* Patch 2016: [RSXMEM] every 30 s: process memory, pipeline count, device-removed reason (device loss hunt). */
++        { static ULONGLONG s_mt = 0;
++          if (tnow - s_mt >= 30000) { s_mt = tnow;
++            PROCESS_MEMORY_COUNTERS pmc; memset(&pmc, 0, sizeof pmc); pmc.cb = sizeof pmc;
++            K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc);
++            fprintf(stderr, "[RSXMEM] t=%llus frame=%u ws=%lluMB pagefile=%lluMB pipelines=%d removed=0x%08lX\n",
++                    (unsigned long long)(tnow / 1000), s_d3d.frame_count, (unsigned long long)(pmc.WorkingSetSize >> 20),
++                    (unsigned long long)(pmc.PagefileUsage >> 20), s_d3d.vp_fp_n,
++                    (long)s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device)); } }
+         if (tnow - s_tt0 >= 1000) s_tpres = 0;
+         if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
+             extern char g_rsx_title_base[128];

@@ -322,6 +322,22 @@ begin
   Result := PyReady;
 end;
 
+{ One command-line argument in quotes, read back by Python exactly. A trailing backslash would escape the closing quote
+  (Windows' rule: backslashes before a quote are halved), so they are doubled: a disc folder picked as the PS3_GAME folder
+  of a mounted image becomes "G:\" and split the rest of the line ("unrecognized arguments"). }
+function ArgQ(S: String): String;
+var
+  N: Integer;
+begin
+  N := Length(S);
+  Result := S;
+  while (N > 0) and (S[N] = '\') do begin
+    Result := Result + '\';
+    N := N - 1;
+  end;
+  Result := '"' + Result + '"';
+end;
+
 { Runs the helper; its stdout (redacted JSON) goes to the log. Args must hold no cmd metacharacters (the RPCS3 folder is checked by PathProblem first). }
 function RunHelper(Args: String): Integer;
 var
@@ -357,8 +373,8 @@ begin
   RpcsFoundDir := ''; PreDisc := ''; PreEboot := ''; SaveFound := 0;
   Ini := ExpandConstant('{tmp}\rpcs3_find.ini');
   DeleteFile(Ini);
-  Args := 'find --ini "' + Ini + '"';
-  if Dir <> '' then Args := Args + ' --rpcs3 "' + Dir + '"';
+  Args := 'find --ini ' + ArgQ(Ini);
+  if Dir <> '' then Args := Args + ' --rpcs3 ' + ArgQ(Dir);
   RunHelper(Args);
   if not FileExists(Ini) then begin
     Result := 'The search could not run. Fill in the next pages yourself.';
@@ -431,7 +447,7 @@ begin
   Ini := ExpandConstant('{tmp}\rpcs3_save.ini');
   DeleteFile(Ini);
   DeleteFile(Lst);
-  RunHelper('save-plan --rpcs3 "' + RpcsFoundDir + '" --hdd0 "' + HddDir + '" --ini "' + Ini + '" --list "' + Lst + '"');
+  RunHelper('save-plan --rpcs3 ' + ArgQ(RpcsFoundDir) + ' --hdd0 ' + ArgQ(HddDir) + ' --ini ' + ArgQ(Ini) + ' --list ' + ArgQ(Lst));
   if FileExists(Ini) and FileExists(Lst) then begin
     SavePlan := GetIniString('save', 'plan', '', Ini);
     SaveCopies := StrToIntDef(GetIniString('save', 'copies', '0', Ini), 0);
@@ -474,7 +490,7 @@ procedure SaveImportRun;
 begin
   SaveNote := '';
   if not ImportSave then Exit;
-  if RunHelper('save-copy --rpcs3 "' + RpcsFoundDir + '" --hdd0 "' + HddDir + '" --plan ' + SavePlan) = 0 then
+  if RunHelper('save-copy --rpcs3 ' + ArgQ(RpcsFoundDir) + ' --hdd0 ' + ArgQ(HddDir) + ' --plan ' + SavePlan) = 0 then
     SaveNote := 'Your RPCS3 save was copied into the game''s save folder.'
   else
     SaveNote := 'Your RPCS3 save was NOT copied: it changed after the list was shown, or the copy failed. Nothing was overwritten by a failed copy; run setup again to see a new list.';
@@ -777,21 +793,6 @@ begin
     '2.5 GB more, in your user data folder) runs the first time' + NewLine + 'you start the game.';
 end;
 
-{ One command-line argument in quotes, read back by Python exactly. A trailing backslash would escape the closing quote
-  (Windows' rule: backslashes before a quote are halved), so they are doubled: a disc folder picked as the PS3_GAME folder
-  of a mounted image becomes "G:\" and split the rest of the line ("unrecognized arguments"). }
-function ArgQ(S: String): String;
-var
-  N: Integer;
-begin
-  N := Length(S);
-  Result := S;
-  while (N > 0) and (S[N] = '\') do begin
-    Result := Result + '\';
-    N := N - 1;
-  end;
-  Result := '"' + Result + '"';
-end;
 
 { Where saves (hdd0) and play_settings.txt live: the install folder for the Portable task, else the per-user data folder.
   firstrun.py and the launcher read the same choice from jsp-install.ini [install] portable. }

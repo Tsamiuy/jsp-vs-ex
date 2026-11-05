@@ -1,0 +1,85 @@
+Patch 1001: cellSpursInitializeWithAttribute2 (NID 0x30AA96C4) and cellSpursAttributeEnableSystemWorkload (NID 0x9DCBCB5D).
+
+The game allocates a 0x2000-byte CellSpurs2 and initialises it through the "2" entry point (nSpus 6, revision 2); both names were in
+the NID table but had no implementation, so the instance was never set up. The "2" variant shares spurs_initialize_common with the
+other initialisers and clears the whole 0x2000 block. The system workload is SPURS's own management workload: the host scheduler
+serves guest workloads only, so the attribute call is accepted and ignored.
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -528,7 +528,7 @@
+
+ static DWORD WINAPI spurs_kernel_thread(LPVOID p);
+
+-static s32 spurs_initialize_common(u32 spurs_ea, u32 nspus, const char* prefix)
++static s32 spurs_initialize_common(u32 spurs_ea, u32 nspus, const char* prefix, u32 inst_size)
+ {
+     if (!nspus || nspus > 6) return CELL_SPURS_CORE_ERROR_INVAL;
+     AcquireSRWLockExclusive(&s_inst_directory_lock);
+@@ -557,7 +557,7 @@
+     /* Real BE instance: zero it, then the few live fields. (The global
+      * workload table is NOT wiped here — the title may init several SPURS
+      * instances before adding workloads to any of them.) */
+-    memset(vm_base + spurs_ea, 0, SPURS_INST_SIZE);
++    memset(vm_base + spurs_ea, 0, inst_size);
+     *(vm_base + spurs_ea + SPURS_NSPUS) = (u8)si->nspus;
+     vm_write64(spurs_ea + SPURS_WKL_FLAG, 0xFFFFFFFFFFFFFFFFull); /* no receiver */
+
+@@ -578,7 +578,7 @@
+     (void)spuPriority; (void)ppuPriority; (void)exitIfNoWork;
+     if (!spurs)
+         return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+-    return spurs_initialize_common((u32)(uintptr_t)spurs, (u32)nSpus, NULL);
++    return spurs_initialize_common((u32)(uintptr_t)spurs, (u32)nSpus, NULL, SPURS_INST_SIZE);
+ }
+
+ s32 cellSpursInitializeWithAttribute(CellSpurs* spurs,
+@@ -588,7 +588,31 @@
+         return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+     u32 spurs_ea = (u32)(uintptr_t)spurs;
+     attr = GUEST_PTR(attr, const CellSpursAttribute*);
+-    return spurs_initialize_common(spurs_ea, attr->nSpus, (const char*)attr->prefix);
++    return spurs_initialize_common(spurs_ea, attr->nSpus, (const char*)attr->prefix, SPURS_INST_SIZE);
++}
++
++/* NID 0x30AA96C4: the CellSpurs2 (0x2000-byte) variant of the above; same attribute,
++ * the caller's instance block is twice as large, so clear all of it. */
++s32 cellSpursInitializeWithAttribute2(CellSpurs* spurs,
++                                      const CellSpursAttribute* attr)
++{
++    if (!spurs || !attr)
++        return CELL_SPURS_CORE_ERROR_NULL_POINTER;
++    u32 spurs_ea = (u32)(uintptr_t)spurs;
++    attr = GUEST_PTR(attr, const CellSpursAttribute*);
++    return spurs_initialize_common(spurs_ea, attr->nSpus, (const char*)attr->prefix, 2 * SPURS_INST_SIZE);
++}
++
++/* NID 0x9DCBCB5D: (attr, const u8 priority[8], u32 maxSpu, const bool isPreemptible[8]).
++ * The system workload (SPURS's own management workload) has no host counterpart: the
++ * scheduler here serves guest workloads only. Accepted and ignored. */
++s32 cellSpursAttributeEnableSystemWorkload(CellSpursAttribute* attr,
++                                           const u8 priority[8], u32 maxSpu,
++                                           const u8 isPreemptible[8])
++{
++    (void)priority; (void)maxSpu; (void)isPreemptible;
++    if (!attr) return CELL_SPURS_CORE_ERROR_NULL_POINTER;
++    return CELL_OK;
+ }
+
+ static void spurs_cancel_attached_queues(u32 spurs_ea);  /* defined with the queue table */
+diff --git a/libs/spurs/cellSpurs.h b/libs/spurs/cellSpurs.h
+--- a/libs/spurs/cellSpurs.h
++++ b/libs/spurs/cellSpurs.h
+@@ -201,6 +201,11 @@
+                         s32 ppuPriority, u8 exitIfNoWork);
+ s32 cellSpursInitializeWithAttribute(CellSpurs* spurs,
+                                      const CellSpursAttribute* attr);
++s32 cellSpursInitializeWithAttribute2(CellSpurs* spurs,
++                                      const CellSpursAttribute* attr);
++s32 cellSpursAttributeEnableSystemWorkload(CellSpursAttribute* attr,
++                                           const u8 priority[8], u32 maxSpu,
++                                           const u8 isPreemptible[8]);
+ s32 cellSpursFinalize(CellSpurs* spurs);
+
+ s32 cellSpursAttributeInitialize(CellSpursAttribute* attr, s32 nSpus,

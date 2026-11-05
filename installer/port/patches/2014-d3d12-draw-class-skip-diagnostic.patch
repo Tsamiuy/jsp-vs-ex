@@ -1,0 +1,43 @@
+Patch 2014 (diagnostic, off by default): DRAW_SKIP_CLASS=noend|topo:N|blend:0|1 drops the vertex-program draws of one class before
+submission; DRAW_CLASS_STATS=1 logs how many draws of the frame are VP, have a fragment program without END, are blended, and per
+topology.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4913,6 +4913,35 @@
+       if (lim < 0) { const char* e = getenv("DRAW_LIMIT"); lim = e ? atoi(e) : 0; }
+       if (lim > 0 && s_d3d.draw_count > (u32)lim) s_d3d.draw_count = (u32)lim; }
+ 
++    /* DRAW_SKIP_CLASS=noend|topo:N|blend:0/1|ztest (shard hunt, diagnostic): drop the VP draws of one class; DRAW_CLASS_STATS=1 logs the populations. */
++    { static const char* sc = (const char*)1; static int st = -1;
++      if (sc == (const char*)1) { sc = getenv("DRAW_SKIP_CLASS"); const char* e = getenv("DRAW_CLASS_STATS"); st = e ? atoi(e) : 0; }
++      if (sc || st) {
++        u32 keep = 0, n_noend = 0, n_vp = 0, topo_n[16] = {0}, n_blend = 0, n_skip = 0;
++        extern u32 cellGcmResolveLocated(int local, u32 offset);
++        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
++            const typeof(s_d3d.draws[0])* D = &s_d3d.draws[_d];
++            int drop = 0;
++            if (!D->is_clear && D->is_vp) {
++                u32 o = cellGcmResolveLocated((D->fp_addr & 3u) == 1, D->fp_addr & ~3u);
++                int noend = (o != 0xFFFFFFFFu) && rsx_fp_program_size(vm_base + o, 0x10000) == 0;
++                n_vp++; n_noend += noend; topo_n[D->topology & 15]++; n_blend += D->blend ? 1 : 0;
++                if (sc) {
++                    if (!strcmp(sc, "noend")) drop = noend;
++                    else if (!strncmp(sc, "topo:", 5)) drop = (int)(D->topology == (u32)atoi(sc + 5));
++                    else if (!strncmp(sc, "blend:", 6)) drop = (D->blend != 0) == (atoi(sc + 6) != 0);
++                }
++            }
++            if (drop) { n_skip++; continue; }
++            if (keep != _d) s_d3d.draws[keep] = s_d3d.draws[_d];
++            keep++;
++        }
++        static int nl = 0;
++        if (st && (nl++ % 200) == 0) { fprintf(stderr, "[CLASS] vp-in-ED10000=%u noend=%u blend=%u skipped=%u topo:", n_vp, n_noend, n_blend, n_skip);
++            for (int t = 0; t < 16; t++) if (topo_n[t]) fprintf(stderr, " %d=%u", t, topo_n[t]); fprintf(stderr, "\n"); }
++        s_d3d.draw_count = keep;
++      } }
++
+     /* DRAW_SKIP_TEX=<hex raw offset>: drop every op binding that texture on
+      * unit 0. The ducks sit behind the water's slab geometry, so removing the
+      * occluder is the way to see whether the duck itself renders. Diagnostic. */

@@ -1,0 +1,18 @@
+Patch 2006: the NV308A image-from-CPU data window is 0x700 words, not 0x100. (Upstream candidate.)
+
+The inline-transfer handler in cellGcmSys.c accepted COLOR data methods 0x0400-0x07FC only, i.e. the first 256 words of an inline
+transfer; every later word of a longer cellGcmSetInlineTransfer was dropped. The hardware window is COLOR[0x700] at methods
+0x0400-0x1FFC.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1376,7 +1376,7 @@
+         case 0x0308: s_gcm2d.size_out = data; return;
+         case 0x030C: return;                /* SIZE_IN */
+         }
+-        if (method >= 0x0400 && method <= 0x07FC) {
++        if (method >= 0x0400 && method <= 0x1FFC) {
+             /* COLOR data word: write into the destination surface. Inline
+              * transfers use format Y32 (4 bytes/px, one row per point.y).
+              * DMA 0xFEED0000 = local memory, 0xFEED0001 = main memory. */

@@ -1,0 +1,28 @@
+Patch 0004: the HLE fast path stores the caller's TOC in its ABI slot, as the import stub would.
+
+ps3_hle_call's fast forms (sys_lwmutex_lock/unlock) return before _TocGuard, the only place that writes r2 to 0x28(r1). The lifted
+import stub is just ps3_hle_call(nid), so it never runs the glink stub's `std r2,40(r1)`, yet the caller still reloads r2 from that
+slot after the call and got whatever its frame held there. The fast path now writes the slot too.
+
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -254,8 +254,17 @@
+ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
+ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+ {
+-    if (const hle_fast_fn f = hle_fast(nid))
++    /* The fast path skips _TocGuard below, but the caller still reloads r2 with
++     * `ld r2,0x28(r1)` after the import: the glink stub it called would have
++     * stored r2 there first (`std r2,40(r1)`), and our stub does not. Without
++     * this store the caller loads whatever its frame held at 0x28 -- J-Stars'
++     * heap lock (func_005EDFD4 -> sys_lwmutex_lock) came back with
++     * r2=0x6580E15E, every TOC-relative load after it read unmapped zeroes, and
++     * the allocator handed out NULL. Store it as the stub does. */
++    if (const hle_fast_fn f = hle_fast(nid)) {
++        vm_write64(ctx->gpr[1] + 0x28, ctx->gpr[2]);
+         if (f(ctx)) return;
++    }
+ 
+     /* HLE_BT_EVERY=<n>: dump the calling thread's guest stack every nth HLE
+      * call it makes. WAITBT_EVERY only samples threads that are blocking on an

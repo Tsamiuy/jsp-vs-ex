@@ -1,0 +1,28 @@
+Patch 2018: a depth buffer sampled as a texture goes through the guest's component crossbar.
+
+The character fragment program reads its shadow maps as D24S8 buffers bound as A8R8G8B8 (format 0xA5, remap 0xAA93: x = A = the high
+byte of the depth); the backend bound the colour copy with the identity mapping, so the shadow term was noise (dark coats lavender,
+orange hair yellow). RSX_DS_REMAP=0 restores the identity mapping.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5243,8 +5243,17 @@
+                 if (crt >= 0) {
+                     dr->tex_rt[_u] = crt;
+                     dr->tex_ds[_u] = ds;
++                    /* the guest reads this depth buffer through its own texture format and
++                     * component crossbar. The J-Stars shadow maps are D24S8 buffers bound as
++                     * A8R8G8B8 (0xA5) with crossbar 0xAA93, i.e. x = A = the HIGH depth byte; the
++                     * colour copy holds the guest's A8R8G8B8 bytes (R=mid, A=high), so the default
++                     * identity mapping gave x = the mid byte and the shadow term was noise.
++                     * RSX_DS_REMAP=0 restores the identity mapping. */
++                    static int dsr = -1; if (dsr < 0) { const char* e = getenv("RSX_DS_REMAP"); dsr = e ? atoi(e) : 1; }
++                    u32 dsbf = dr->tex[_u].fmt & 0x9F;
+                     srv_write(wslot, s_d3d.off_rt[crt].res, (DXGI_FORMAT)s_d3d.off_rt[crt].dxgi,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                              (dsr && dsbf == 0x85) ? rsx_remap_to_d3d(dr->tex[_u].ctrl1, dsbf)
++                                                    : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+                     continue;
+                 }
+             }

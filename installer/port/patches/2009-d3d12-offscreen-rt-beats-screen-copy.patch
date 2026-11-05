@@ -1,0 +1,18 @@
+Patch 2009: a display-sized texture that is an offscreen render target is no longer sampled from the screen copy.
+
+The pre-pass bound the previous frame copy to every sampler whose texture is as large as the display, before it looked for an
+offscreen render target with that offset. The 3D title scene is drawn into a 1280x720 target that the post chain samples, so the
+post chain read the wrong image. The offscreen target now wins.
+
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4963,7 +4963,8 @@
+             }
+             /* Display-sized sampler source -> the rendered frame. */
+             if (dr->tex[_u].set && s_screen_copy &&
+-                dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height) {
++                dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height &&
++                off_rt_find(dr->tex[_u].raw) < 0) {   /* a display-sized offscreen RT is its own producer */
+                 static int en = -1;
+                 if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }
+                 if (en) {

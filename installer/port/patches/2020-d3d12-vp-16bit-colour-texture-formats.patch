@@ -1,0 +1,125 @@
+Patch 2020: the vertex-program texture binding path records the 16-bit colour formats.
+
+It only recorded formats 0x81/85/8B/86-88/9A; a unit set to any other format (A1R5G5B5, A4R4G4B4, R5G6B5, R5G5B5A1, D1R5G5B5,
+D8R8G8B8) kept the previous texture, so the character-select labels were drawn with the wrong texture. The layout and decode code
+already handles these formats. RSX_TEX_FMT16=0 restores the old behaviour. Diagnostics: TEX_DDS_OFF, ATLAS_VTX, TEXSKIP_DBG.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3042,6 +3042,13 @@
+     return h;
+ }
+ 
++/* TEX_DDS_OFF=<hex>[,<hex>...] limits TEX_DDS_DUMP to those guest offsets (no count limit). */
++static int dds_off_match(u32 off, const char* list)
++{
++    while (*list) { char* e; u32 v = (u32)strtoul(list, &e, 16); if (v == off) return 1; if (e == list) break; list = (*e == ',') ? e + 1 : e; if (!*e) break; }
++    return 0;
++}
++
+ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 tpitch)
+ {
+     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
+@@ -3651,7 +3658,7 @@
+     { static int dd = -2; static u32 d_from = 0, d_max = 0, d_n = 0;
+       if (dd == -2) { const char* e = getenv("TEX_DDS_DUMP"); dd = e ? 1 : 0;
+                       if (e) { d_from = (u32)strtoul(e, NULL, 10); const char* c = strchr(e, ':'); d_max = c ? (u32)atoi(c + 1) : 64; } }
+-      if (dd == 1 && !cube && (tl.fmt == RSX_TEXFMT_BC1 || tl.fmt == RSX_TEXFMT_BC3) && s_d3d.frame_count >= d_from && d_n < d_max) {
++      if (dd == 1 && !cube && (tl.fmt == RSX_TEXFMT_BC1 || tl.fmt == RSX_TEXFMT_BC3) && s_d3d.frame_count >= d_from && (getenv("TEX_DDS_OFF") ? dds_off_match(off, getenv("TEX_DDS_OFF")) : d_n < d_max)) {
+         char pn[96]; snprintf(pn, sizeof pn, "texdds_%08X_%ux%u_%s.dds", off, w, h, tl.fmt == RSX_TEXFMT_BC1 ? "bc1" : "bc3");
+         FILE* f = fopen(pn, "wb");
+         if (f) { u32 hd[32] = {0}; u32 bsz = ((w + 3) / 4) * ((h + 3) / 4) * (tl.fmt == RSX_TEXFMT_BC1 ? 8u : 16u);
+@@ -6967,6 +6974,32 @@
+                   ai, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], nfin, nnan, 10); } } }
+ }
+ 
++static int tex16_on(void) { static int on = -1; if (on < 0) { const char* e = getenv("RSX_TEX_FMT16"); on = e ? atoi(e) : 1; } return on; }
++/* ATLAS_VTX=<hex raw tex0 offset>:<from frame>:<max draws> prints the converted vertices (as written to the vertex buffer, 6 per quad) of the draws that
++ * bind that texture on unit 0: enabled attribute formats, then every vertex with each enabled attribute. Diagnostic. */
++static void atlas_vtx_dump(const char* path, const rsx_state* state, u32 first, u32 count, const VPSlot* out)
++{
++    static const char* av = (const char*)1; static u32 want = 0, from = 0, mx = 0, nd = 0;
++    if (av == (const char*)1) { av = getenv("ATLAS_VTX");
++        if (av) { want = (u32)strtoul(av, NULL, 16); const char* c = strchr(av, ':'); from = c ? (u32)atoi(c + 1) : 0;
++                  const char* c2 = c ? strchr(c + 1, ':') : NULL; mx = c2 ? (u32)atoi(c2 + 1) : 4; } }
++    if (!want || s_d3d.cur_texs[0].raw != want || s_d3d.frame_count < from || nd >= mx) return;
++    nd++;
++    fprintf(stderr, "[ATLASVTX] draw %u %s first=%u verts=%u frame=%u attrs:", nd, path, first, count, (u32)s_d3d.frame_count);
++    for (int a = 0; a < 16; a++) if (state->vertex_attribs[a].enabled)
++        fprintf(stderr, " a%d(type=%u size=%u stride=%u off=0x%X)", a, state->vertex_attribs[a].type, state->vertex_attribs[a].size,
++                state->vertex_attribs[a].stride, state->vertex_attribs[a].offset);
++    { const rsx_texture_state* T = &state->textures[0];
++      fprintf(stderr, " | tex0 off=0x%X fmt=0x%X addr=0x%X ctl0=0x%08X ctl1=0x%08X filt=0x%X rect=0x%X ctl3=0x%X", T->offset, T->format, T->address, T->control0, T->control1, T->filter, T->image_rect, T->control3); }
++    fprintf(stderr, "%c", 10);
++    for (u32 k = 0; k < count && k < 400; k++) {
++        fprintf(stderr, "[ATLASVTX] v%u", k);
++        for (int a = 0; a < 16; a++) if (state->vertex_attribs[a].enabled) {
++            const float* v = out[k*16 + a].v;
++            fprintf(stderr, " a%d=(%g,%g,%g,%g)", a, v[0], v[1], v[2], v[3]); }
++        fprintf(stderr, "%c", 10); }
++}
++
+ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+ {
+     extern uint8_t* vm_base;
+@@ -6994,6 +7027,7 @@
+                     c[k][8].v[0],c[k][8].v[1]);
+               fclose(f); } } }
+     }
++    atlas_vtx_dump("quads", state, first, o, out);
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
+ }
+@@ -7058,6 +7092,7 @@
+                 out[k*16+2].v[0],out[k*16+2].v[1],out[k*16+2].v[2],
+                 out[k*16+9].v[0],out[k*16+9].v[1],out[k*16+9].v[2],out[k*16+9].v[3]);
+           fclose(f); } } }
++    atlas_vtx_dump("tris", state, first, count, out);
+     s_d3d.vp_vb_offset += count * VP_VERT_STRIDE;
+     return count;
+ }
+@@ -7089,6 +7124,7 @@
+         read_vp_vertex_cached(state, first + i1, &out[o*16]); o++;
+         read_vp_vertex_cached(state, first + i2, &out[o*16]); o++;
+     }
++    atlas_vtx_dump("strip", state, first, o, out);
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
+ }
+@@ -7149,6 +7185,7 @@
+                 fclose(f);
+             } } }
+     }
++    atlas_vtx_dump("iquads", state, first, o, out);
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
+ }
+@@ -7993,7 +8030,11 @@
+         (base_fmt == 0x81 /* B8 */ || base_fmt == 0x85 /* A8R8G8B8 */ ||
+          base_fmt == 0x8B /* G8B8: LBP's font atlas */ ||
+          (base_fmt >= 0x86 && base_fmt <= 0x88) /* DXT1/23/45 */ ||
+-         base_fmt == 0x9A /* W16Z16Y16X16 half-float: RTT intermediates */)) {
++         base_fmt == 0x9A /* W16Z16Y16X16 half-float: RTT intermediates */ ||
++         /* the 16-bit colour formats and D8R8G8B8 are decoded by rsx_texture_layout/decode, but were missing here, so a unit set to one
++          * of them kept the PREVIOUS texture: J-Stars' CPU-level label (A4R4G4B4 148x30) was drawn with the text atlas. RSX_TEX_FMT16=0 = old. */
++         (tex16_on() && (base_fmt == 0x82 || base_fmt == 0x83 || base_fmt == 0x84 || base_fmt == 0x97 ||
++                         base_fmt == 0x9D || base_fmt == 0x9E)))) {
+         /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
+          * then IO table) instead of trusting the format's location bits. A
+          * texture the guest built in main memory but tagged local resolves to
+@@ -8054,6 +8095,14 @@
+                         unit, (tex->format >> 8) & 0xFFu, width, height,
+                         (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset, 10); } }
+         s_d3d.cur_texs[unit].set = 1;
++    } else if (unit < VP_TEX_UNITS) {
++        /* TEXSKIP_DBG=1: a bound format the VP path does not take (the unit keeps its PREVIOUS texture). */
++        static int sk = -1; if (sk < 0) sk = getenv("TEXSKIP_DBG") ? 1 : 0;
++        static u32 seen[64]; static int ns = 0; int f = 0;
++        for (int i = 0; i < ns; i++) if (seen[i] == base_fmt) f = 1;
++        if (sk && !f && ns < 64) { seen[ns++] = base_fmt;
++            fprintf(stderr, "[TEXSKIP] unit=%u fmt=0x%02X (raw 0x%02X) %ux%u off=0x%X ctl0=0x%08X frame=%u%c", unit, base_fmt, (tex->format >> 8) & 0xFFu,
++                    width, height, offset, tex->control0, (u32)s_d3d.frame_count, 10); }
+     }
+     if (base_fmt == 0x81 /* B8 */) {
+         s_d3d.tex_src_offset = cellGcmResolveLocated((tex->format & 3) == 1, offset);

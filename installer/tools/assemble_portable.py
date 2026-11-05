@@ -27,7 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from assemble_payload import FORBIDDEN  # noqa: E402
 
 FIXED_DATE = (1980, 1, 1, 0, 0, 0)
-REQUIRED = ("firstrun.py", "support_bundle.py", "support-bundle.cmd", "tools/jsp_spu.py", "jsp-launcher.exe", "toolchain/python/python.exe", "toolchain/llvm-mingw/bin/clang.exe", "toolchain/cmake/bin/cmake.exe", "toolchain/ninja/ninja.exe", "cmake/llvm-mingw.cmake", "VERSION.txt", "NOTICE.txt",
+REQUIRED = ("firstrun.py", "support_bundle.py", "support-bundle.cmd", "jsp-launcher.exe", "toolchain/python/python.exe", "toolchain/llvm-mingw/bin/clang.exe", "toolchain/cmake/bin/cmake.exe", "toolchain/ninja/ninja.exe", "cmake/llvm-mingw.cmake", "VERSION.txt", "NOTICE.txt",
             "licenses/jstars-port-LICENSE.txt", "licenses/ps3recomp-LICENSE.txt", "port/CMakeLists.txt",
             "ps3recomp/tools/ppu_lifter.py")
 FIRST_RUN_OUTPUT = ("build", "hdd0", "game", "logs", "paths.txt", "jsp-install.ini", "play_settings.txt", "run.cmd")
@@ -86,7 +86,9 @@ def main(argv=None):
     ap.add_argument("--top", default="JSP Fan Revival", help="top folder inside the zip")
     a = ap.parse_args(argv)
     pay, out = pathlib.Path(a.payload), pathlib.Path(a.out)
-    problems = [f"missing from the payload: {r}" for r in REQUIRED if not (pay / r).is_file()]
+    tree = (pay / "tree.txt").read_text().split()[0] if (pay / "tree.txt").is_file() else "v15"   # which port assemble_payload.py staged
+    spu_tool = "tools/lift_jobs.py" if tree == "v18" else "tools/jsp_spu.py"
+    problems = [f"missing from the payload: {r}" for r in (*REQUIRED, spu_tool, "tree.txt") if not (pay / r).is_file() and not (r == "tree.txt" and tree == "v15")]
     problems += [f"first-run output in the payload: {n}" for n in FIRST_RUN_OUTPUT if (pay / n).exists()]
     entries = {}
     for p in sorted(pay.rglob("*")):
