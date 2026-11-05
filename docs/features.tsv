@@ -5,14 +5,16 @@ ex-logo	port	Display	EX in the title logo	The title logo shows EX in place of th
 split-screen-layout	port	Display	Split-screen layout	Larger views and a solo-style HUD in 2-player split screen	planned	-	Parked in the notes
 brightness-glare	port	Display	Brightness and glare	Brightness and glare options	planned	-	Parked in the notes
 dlss	port	Display	DLSS	DLSS upscaling	planned	-	Parked in the notes
+fps-counter	port	Display	FPS counter	The game's own frames per second, bottom left, fading in with the title screen	available	off	FPS_COUNTER=1 or the launcher's “FPS counter (bottom left)” box
 launcher	port	Input and launcher	Launcher	A window to start the game, pick resolution and window size, choose how to play, rebind keys and set the fight HUD size	available	on	[LAUNCHER.md](docs/notes/LAUNCHER.md)
 input-modes	port	Input and launcher	Keyboard, mouse or controller	Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings	available	controller	Hands-on tests of mouse mode and rebinds are pending in the notes
 dualsense	port	Input and launcher	DualSense	A DualSense or DualSense Edge over USB or Bluetooth is read directly	in progress	on	Hands-on tests of the buttons are pending
 second-player	port	Input and launcher	Second player	A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before	available	on	
 hud-size	port	Input and launcher	Fight HUD size	Scales the fight HUD; split screen stays at full size	available	1.00	UI_SCALE=0.50..1.00
 exit-game	port	Menus and modes	Exit Game	In Options, the PSN-only Cross-Save entry is now Exit Game, with a Yes/No box	available	on	EXIT_OPTION=0 turns it off
-training-mode	port	Menus and modes	Training Mode	Free Battle offers Free Battle or Training: the game's own character select, partner slots locked, a 0-star computer fighter stands still, nobody is KO'd and health refills 1.5 s after the last hit, unlimited time, no J-Points	available	opt-in (menu choice)	Scripted keyboard runs pass. Not tested yet: KOs in a normal Free Battle right after Training, a human Player 2, a mouse click on the Training box. [TRAINING_MODE.md](docs/notes/TRAINING_MODE.md)
+training-mode	port	Menus and modes	Training Mode	Free Battle offers Free Battle or Training: the game's own character select, partner slots locked, a 0-star computer fighter stands still, nobody is KO'd and health refills 1 s after the combo number has gone away, unlimited time, no J-Points	available	opt-in (menu choice)	Scripted keyboard runs pass. Not tested yet: KOs in a normal Free Battle right after Training, a human Player 2, a mouse click on the Training box. [TRAINING_MODE.md](docs/notes/TRAINING_MODE.md)
 training-options	port	Menus and modes	Training options	Infinite Stamina, infinite support, unlimited Victory Burst	planned	off	
+hide-hud	port	Menus and modes	Hide HUD in Training	A “Hide HUD” row in the Training settings hides every HUD draw of the fight, name tags included, for screenshots; the HUD shows again while the pause menu is open	available	off	Scripted keyboard run passes. [TRAINING_MODE.md](docs/notes/TRAINING_MODE.md)
 training-2p	port	Menus and modes	Two players in Training	Two local players in Training	planned	off	
 ko-count	port	Menus and modes	KO count	KO count up to 5 as a match option in every mode except Training	planned	off	
 match-sizes	port	Menus and modes	1v1 and 3v3 matches	1v1 and 3v3 beside the usual 2v2 (3v3 only if the engine allows it)	planned	off	
