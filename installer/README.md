@@ -33,6 +33,7 @@ installer and the program contact no server: no update check, no crash report, n
 | `installer/tools/lift_jobs.py` | The same for the v0.18.0 tools (the `v18` tree): scan, wrap, lift, `spu_workloads.c` |
 | `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.18.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
 | `installer/port/jsp/`, `installer/port/patches/` | The `v18` port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
+| `installer/port/test/` | Scripted pad routes for testing the installed `v18` game without a controller (see "Test routes" below) |
 | `installer/tools/installer_art.py` | Draws the wizard images and icons at build time (needs Pillow and the IBM Plex Mono Bold font file); nothing generated is committed |
 | `installer/tools/ex_logo_art.py` | Draws `ex_logo_A.rgba`, the "EX" that toolkit patch 0006 puts in place of the "+" in the title logo, from polygons (our own art, needs Pillow and numpy); `assemble_payload.py` runs it and `firstrun.py` places the file next to `JStarsRecomp.exe`. `JSP_EX_LOGO=0` in the settings file keeps the "+" |
 | `installer/tools/installer_music.py`, `installer/music/` | Renders the six opt-in music tracks (formulas, credits and sources in `tracks.tsv`) to WAV files at build time with plain Python; the wizard's "Enable Music?" box (bottom left, off by default, silent installs never play) loops one at random. Credits and licence in `NOTICE.md` |
@@ -48,6 +49,25 @@ installer and the program contact no server: no update check, no crash report, n
 | `installer/patches/` | Small patches the payload applies to its own copy of the port and the toolkit (this repository's files are not changed): 0001 to 0003 so that clang builds them, 0006 the optional "EX" in the title logo |
 | `installer/licenses/LGPL-2.1.txt` | The one licence text kept in the tree (some MinGW-w64 headers are LGPL-2.1+); the others are fetched with pinned hashes |
 | `installer/tools/firstrun_selftest.py`, `portable_selftest.py`, `make_fixture.py` | Host checks of `firstrun.py` and the portable path, up to the compile; `make_fixture.py` writes a small fake disc folder (no game data) |
+
+## Test routes
+
+`installer/port/test/` holds two scripted pad routes and `run-route.cmd`, which runs the installed game with one of them:
+
+    installer\port\test\run-route.cmd installer\port\test\fight-route-us.txt "C:\path\to\the\install folder"
+
+The runner puts the route's one event line into `PAD_SCRIPT`, sets `PAD_CLOCK=flips` and starts `jsp-launcher.exe`; the
+game's pad library then presses the buttons at the given display flips, so a run reaches the same screen each time
+without a controller. Events are `time:mask` or `time:mask:polls` (hold length), comma-separated; the masks are listed in
+each file.
+
+- `fight-route-us.txt`: US disc with an existing save. Main Menu, Free Battle, Ichigo + Gintoki + Luffy (support) against
+  Goku + Naruto, random stage. The fight is on screen at about flip 28400; SQUARE presses from 28700 attack.
+- `fight-route-eu-firstboot.txt`: EU disc on a fresh install (no save). It answers the first-boot save dialog, then
+  follows the same route 600 flips later; the fight is on screen at about flip 28500.
+
+A fresh US install shows the same first-boot dialog, which `fight-route-us.txt` does not answer: start the game once and
+create the save, or use the EU file's first five events as a prefix (not tried on US).
 
 ## Building the installer (Windows)
 
