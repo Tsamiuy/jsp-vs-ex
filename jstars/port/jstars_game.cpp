@@ -42,6 +42,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>        /* GetTickCount64 */
+#include <tlhelp32.h>       /* SIX_WATCH: the game's threads */
 
 #include "ps3emu/error_codes.h"
 #include "ppu_recomp.h"     /* ppu_context, vm_base */
@@ -74,6 +75,7 @@ extern "C" int  cellOskDialog_choice_open(const wchar_t* prompt, const wchar_t* 
 extern "C" void rsx_d3d12_request_close(void);                   /* rsx_d3d12_backend.c */
 extern "C" int (*g_rsx_copy_rects)(short (*rects)[6], int max);   /* rsx_d3d12_backend.c */
 extern "C" const uint32_t* (*g_rsx_stamp)(short* x, short* y, short* w, short* h, short* show_w, short* show_h);   /* rsx_d3d12_backend.c */
+extern "C" const uint32_t* (*g_rsx_stamp2)(short* x, short* y, short* w, short* h, short* show_w, short* show_h);  /* rsx_d3d12_backend.c */
 extern "C" int (*g_ppu_icall_hook)(uint32_t target, uint64_t* gpr);   /* ppu_loader.cpp */
 
 namespace {
@@ -619,6 +621,13 @@ int menu_layout(int* cursor, const short (**rects)[4], int* count)
  * the bottom-left corner, the map and timer toward the bottom-right corner.
  * Everything in between (name tags and markers that follow the fighters,
  * the full-screen copy, dialogs) keeps its size and place. */
+bool training_active();
+/* Training setting "Hide HUD" (the maintainer 11-04, for screenshots): every HUD draw of the fight, name tags included,
+ * is shrunk to nothing off screen; the scene and full-screen effects stay. Through the same hook as UI_SCALE,
+ * so HUD pieces that hook does not see (FINDINGS "UI size") would stay. */
+static bool env_on(const char* n) { const char* e = std::getenv(n); return e && *e && *e != '0'; }
+bool g_set_hidehud = env_on("HIDEHUD_TEST");   /* HIDEHUD_TEST=1 (test only): on from the start; empty or 0 is off */
+
 float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
 {
     static float s = -1.0f;
@@ -628,7 +637,8 @@ float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
         if (s < 0.5f) s = 0.5f;
         if (s > 1.0f) s = 1.0f;
     }
-    if (s >= 1.0f || (rt_off & 0x0FFFFFFFu) != 0x0C6ABF40u) return 1.0f;
+    const bool hide = g_set_hidehud && training_active();
+    if ((s >= 1.0f && !hide) || (rt_off & 0x0FFFFFFFu) != 0x0C6ABF40u) return 1.0f;
     { static int dbg = -1; static uint32_t last = 0xFFFFFFFFu;
       if (dbg < 0) dbg = std::getenv("UI_SCALE_DBG") ? 1 : 0;
       const uint32_t st = vm_read32(0x0094DEC4u);
@@ -648,12 +658,30 @@ float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
      * position there split the bars from the plate (the maintainer 10-30, pf1). So they are told apart by order and height:
      * the first part of another height ends them for that frame. */
     static bool tags = false;
+    /* The Victory Burst banner (a row per fighter: star, "Friendship Burst!" text, name bar, 720p y 555-630,
+     * x 640-1240) sits across the bottom-left and bottom-right areas: shrunk by area its star went to the
+     * corner, its bar and name to the map's corner and its text stayed (the maintainer 11-04 screenshot). The fight
+     * HUD is hidden while it shows, so a frame with banner pieces keeps the whole bottom at full size. The
+     * piece that tells: the "Friendship Burst!" text (centre x 0.15..0.35, 0.3..0.45 wide, 0.055..0.078 high,
+     * on screen), where no fight HUD part sits; looked at after the name tags, which have the same width but
+     * are taller and also come off screen (vb7 log). Seen in this frame or the one before. */
+    static bool banner_prev = false, banner_cur = false;
+    static float s_bbox[4] = { 0, 0, 0, 0 };   /* UI_SCALE_DBG: the first banner piece of the frame */
     if (box[2] - box[0] > 1.8f && box[3] - box[1] > 1.8f) {   /* full-screen pass */
         /* only the scene copy (exactly -1..1) starts a frame; other big quads
          * (fades, the vs5 overlay at +-1.05) come later in the same frame */
-        if (box[0] > -1.001f && box[1] > -1.001f && box[2] < 1.001f && box[3] < 1.001f) { split = false; tags = true; }
+        if (box[0] > -1.001f && box[1] > -1.001f && box[2] < 1.001f && box[3] < 1.001f) {
+            split = false; tags = true;
+            if (banner_cur != banner_prev) {
+                static int bdbg = -1; if (bdbg < 0) bdbg = std::getenv("UI_SCALE_DBG") ? 1 : 0;
+                if (bdbg) std::fprintf(stderr, "[UIDBG] burst banner %s t=%llu (%+.3f..%+.3f, %+.3f..%+.3f)\n", banner_cur ? "on" : "off",
+                                       (unsigned long long)GetTickCount64(), s_bbox[0], s_bbox[2], s_bbox[1], s_bbox[3]);
+            }
+            banner_prev = banner_cur; banner_cur = false;
+        }
         return 1.0f;
     }
+    if (hide) { *ax = 8.0f; *ay = 8.0f; return 0.0001f; }   /* Hide HUD: to a point well off screen */
     if (box[0] <= -0.99f && box[2] >= -0.01f && box[2] <= 0.01f && box[1] >= 0.62f && box[3] >= 0.99f) split = true;
     if (box[0] <= -0.99f && box[2] >= -0.01f && box[2] <= 0.01f && box[1] <= -0.99f && box[3] > -0.4f && box[3] < -0.3f) split = true;   /* bottom box, drawn first */
     if (box[0] <= -0.99f && box[2] >= 0.99f && box[3] - box[1] < 0.1f && box[1] > 0.6f && box[3] < 0.7f) split = true;   /* separator strip */
@@ -663,9 +691,13 @@ float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
         if (w < 0.7f && ((h > 0.03f && h < 0.05f) || (h > 0.078f && h < 0.098f) || (h > 0.19f && h < 0.22f))) return 1.0f;
         tags = false;
     }
+    { const float bcx = (box[0] + box[2]) * 0.5f, bcy = (box[1] + box[3]) * 0.5f, bw = box[2] - box[0], bh = box[3] - box[1];
+      if (box[0] > -1.0f && box[2] < 1.0f && bcy > -0.76f && bcy < -0.48f && bh > 0.055f && bh < 0.078f &&
+          bcx > 0.15f && bcx < 0.35f && bw > 0.3f && bw < 0.45f)
+      { if (!banner_cur) { s_bbox[0] = box[0]; s_bbox[1] = box[1]; s_bbox[2] = box[2]; s_bbox[3] = box[3]; } banner_cur = true; } }
     const float cx = (box[0] + box[2]) * 0.5f, cy = (box[1] + box[3]) * 0.5f;
     if (cy > 0.65f) { *ax = 0.0f; *ay = 1.0f; return s; }                  /* top: y < 126 px (bars, emblem, its pointer) */
-    if (cy < -0.45f) {                                                     /* bottom: y > 522 px */
+    if (cy < -0.45f && !banner_prev && !banner_cur) {                      /* bottom: y > 522 px */
         if (cx < 0.2f)  { *ax = -1.0f; *ay = -1.0f; return s; }            /* x < 768 px */
         if (cx > 0.45f) { *ax = 1.0f;  *ay = -1.0f; return s; }            /* x > 928 px */
     }
@@ -867,6 +899,11 @@ bool training_active() { return g_training_test || g_training_mode; }
  * which checks for the KO right after subtracting, so the cap has to happen
  * before it runs: the indirect-call hook shrinks the damage to leave 1 health. */
 struct TrainFighter { uint32_t obj; unsigned long long last_hit; };
+/* The gauges over the characters (class 0x00879DA0) show the combo number: +0x3EC is 1 while it is up and
+ * +0x3F0 the hit count; both go back to 0 when it goes away, about 0.9 s after the last hit of a combo (pf3). */
+uint32_t g_combo_gauge[8]; int g_ncombo_gauge = 0;
+unsigned long long g_combo_end = 0;   /* when the last combo number went away */
+bool g_combo_up = false;
 TrainFighter g_train[8];
 volatile int g_train_count = 0;
 
@@ -904,6 +941,102 @@ FILE* bal_file()
     return g_bal;
 }
 
+/* No knockdowns in Training (the maintainer 11-03), so every attack can be tried on the dummy: the first time a hit comes
+ * from an attack file (slots of 0x9C bytes, reaction at +0x39) or a projectile file (rows of 232 bytes, reaction at
+ * +0xAF), every damaging entry whose reaction knocks down is set to 1, a plain flinch (numbers: Balance/Knockdowns.md).
+ * The old bytes are kept and put back when the Training fight ends. TRAINING_KNOCKDOWN=1 keeps the game's own. */
+extern bool g_tb_mode;
+struct KdUndo { uint32_t ea; uint8_t v; };
+std::vector<KdUndo> g_kd_undo;
+std::vector<uint32_t> g_kd_files;
+/* Off since 11-05 (the maintainer: the normal Training Mode, fighters get knocked away like normal); TRAINING_NO_KNOCKDOWN=1 turns it on again. */
+bool training_no_knockdown() { static const bool on = std::getenv("TRAINING_NO_KNOCKDOWN") != nullptr; return on && training_active() && !g_tb_mode; }
+bool kd_knocks(uint8_t v) { return (v >= 3 && v <= 6) || (v >= 8 && v <= 12) || v == 14 || (v >= 17 && v <= 21); }
+void kd_flatten(uint32_t base, uint32_t stride, uint32_t dmg_off, uint32_t react_off)
+{
+    if (!training_no_knockdown()) return;
+    for (uint32_t b : g_kd_files) if (b == base) return;
+    g_kd_files.push_back(base);
+    const uint32_t n = vm_read32(base);
+    int changed = 0;
+    for (uint32_t k = 0; k < n && k < 2000; k++) {
+        const uint32_t e = base + 0x10u + k * stride;
+        const uint8_t v = vm_read8(e + react_off);
+        (void)dmg_off;   /* rows without damage count too: Gintoki's special knocked down from them (nk1) */
+        if (!kd_knocks(v)) continue;
+        g_kd_undo.push_back({ e + react_off, v });
+        vm_write8(e + react_off, 1);
+        changed++;
+    }
+    std::printf("[training] no knockdowns: file %08X, %d of %u entries\n", base, changed, n); std::fflush(stdout);
+}
+void kd_restore()
+{
+    if (g_kd_files.empty()) return;
+    for (const KdUndo& u : g_kd_undo) vm_write8(u.ea, u.v);
+    std::printf("[training] knockdowns put back: %zu entries\n", g_kd_undo.size()); std::fflush(stdout);
+    g_kd_undo.clear(); g_kd_files.clear();
+}
+/* At the start of a Training fight, find every loaded attack file and projectile file and flatten them before any
+ * hit: done only at the first hit, a fighter's first special still knocked the dummy down (Gintoki, nk2). A file is
+ * the entry count, three zero words, then the entries, in the packs' area (0x41000000-0x42000000 in nk3). At least
+ * 85% of the entries with damage must look right: damage below 100000 (attack +0x28, projectile +0x9C), a ratio of 0
+ * to 1 (+0x2C, +0xA0) and a known reaction number. Checked against all 42 fighters' files on disk: only Dio's and
+ * Dai's attack files fail, and those still get flattened at their first hit. */
+void kd_flatten_all()
+{
+    int found = 0;
+    for (uint32_t base = 0x41000000u; base < 0x42000000u; base += 0x10) {
+        const uint32_t cnt = vm_read32(base);
+        if (cnt < 10 || cnt > 2000 || vm_read32(base + 4) || vm_read32(base + 8) || vm_read32(base + 12)) continue;
+        for (int kind = 0; kind < 2; kind++) {
+            const uint32_t stride = kind ? 232u : 0x9Cu, dmg = kind ? 0x9Cu : 0x28u, ratio = kind ? 0xA0u : 0x2Cu, react = kind ? 0xAFu : 0x39u;
+            if (kind == 0 && cnt % 10) continue;
+            if (base + 0x10u + cnt * stride >= 0x42000000u) continue;
+            uint32_t with = 0, bad = 0;
+            for (uint32_t k = 0; k < cnt && bad < 200; k++) {
+                const uint32_t e = base + 0x10u + k * stride, d = vm_read32(e + dmg);
+                if (!d) continue;
+                union { uint32_t u; float f; } r; r.u = vm_read32(e + ratio);
+                const uint8_t v = vm_read8(e + react);
+                if (!(d < 100000u && r.f >= 0.0f && r.f <= 1.0f && (v <= 26 || v == 128 || v == 204 || v == 255))) bad++;
+                with++;
+            }
+            if (with >= (kind ? 5u : 10u) && bad * 100 <= with * 15) { kd_flatten(base, stride, dmg, react); found++; break; }
+        }
+    }
+    std::printf("[training] no knockdowns: %d files found at the fight start\n", found); std::fflush(stdout);
+}
+
+/* The projectile file a hit record's row (+0x9C) belongs to: the row count at +0, then 3 zero words. */
+uint32_t kd_bullet_file(uint32_t row)
+{
+    for (uint32_t k = 0; row && k < 1000; k++) {
+        const uint32_t base = row - 0x10u - k * 232u, cnt = vm_read32(base);
+        if (cnt > k && cnt < 1000 && vm_read32(base + 4) == 0 && vm_read32(base + 8) == 0 && vm_read32(base + 12) == 0) return base;
+    }
+    return 0;
+}
+
+/* KD_DUMP=1 (test only): kd_dump.bin gets the hit fighter's owner object (from -0x400, 0x2400 bytes) and its
+ * health object (from -0x400, 0x800 bytes) every 100 ms in a Training fight, and right at each hit. */
+volatile uint32_t g_kd_owner = 0, g_kd_obj = 0; volatile unsigned long long g_kd_hit_ms = 0;
+void kd_dump(bool at_hit)
+{
+    static const bool on = std::getenv("KD_DUMP") != nullptr;
+    if (!on || !g_kd_owner) return;
+    static FILE* f = std::fopen("kd_dump.bin", "wb");
+    static unsigned long long last = 0;
+    const unsigned long long now = GetTickCount64();
+    if (!f || (!at_hit && now - last < 100)) return;
+    last = now;
+    const uint32_t hdr[4] = { (uint32_t)now, at_hit ? 1u : 0u, g_kd_owner, g_kd_obj };
+    std::fwrite(hdr, 4, 4, f);
+    for (uint32_t k = 0; k < 0x900; k++) { const uint32_t v = vm_read32(g_kd_owner - 0x400 + k * 4); std::fwrite(&v, 4, 1, f); }
+    for (uint32_t k = 0; k < 0x200; k++) { const uint32_t v = vm_read32(g_kd_obj - 0x400 + k * 4); std::fwrite(&v, 4, 1, f); }
+    std::fflush(f);
+}
+
 void bal_hit(uint32_t obj, const uint64_t* gpr, int32_t cur, int32_t rec, int32_t d90, int32_t d94)
 {
     FILE* f = bal_file();
@@ -923,6 +1056,7 @@ void bal_hit(uint32_t obj, const uint64_t* gpr, int32_t cur, int32_t rec, int32_
     std::fprintf(f, "\n");
     /* The pending hit records this damage came from (fighter +0x230, 0xB0 each). */
     const uint32_t owner = (uint32_t)gpr[27];   /* func_00082944 keeps the record owner there */
+    g_kd_owner = owner; g_kd_obj = obj; g_kd_hit_ms = GetTickCount64();
     const uint32_t pending = vm_read32(owner + 0x22C);
     for (uint32_t i = 0; i < pending && i < 4; i++) {
         std::fprintf(f, "%llu rec %u", GetTickCount64(), i);
@@ -934,7 +1068,40 @@ void bal_hit(uint32_t obj, const uint64_t* gpr, int32_t cur, int32_t rec, int32_
             if (vm_read32(base) == 0x1B8u || (vm_read32(base + 4) == 0 && vm_read32(base + 8) == 0 && vm_read32(base + 12) == 0 &&
                                               vm_read32(base) >= k && vm_read32(base) <= 800 && vm_read32(base) % 10 == 0)) {
                 std::fprintf(f, " row %u hit %u file %08X", k / 10, k % 10, base);
+                kd_flatten(base, 0x9Cu, 0x28u, 0x39u);
                 /* BAL_TEST=<row>,<hit>,<damage>,<gauge>: change one attack slot in memory after the first logged hit */
+                /* KD_FLINCH=<n> (test only): after the first logged hit, every slot of that attack file whose reaction
+                 * byte (+0x39: 1 flinch, 3 heavy flinch, 6 knocked away) is above n is set to n. */
+                /* KD_SETFILE=<file> (test only): on every logged hit, the number in that file (if changed) is written to
+                 * the reaction byte of every slot with damage in this attack file, so one run can try each value. */
+                if (const char* kf = std::getenv("KD_SETFILE")) {
+                    static int applied = -1;
+                    int v = -1;
+                    if (FILE* ff = std::fopen(kf, "r")) { if (std::fscanf(ff, "%d", &v) != 1) v = -1; std::fclose(ff); }
+                    if (v >= 0 && v != applied) {
+                        applied = v;
+                        const uint32_t n = vm_read32(base);
+                        for (uint32_t k2 = 0; k2 < n && k2 < 2000; k2++) {
+                            const uint32_t s2 = base + 0x10u + k2 * 0x9Cu;
+                            if (vm_read32(s2 + 0x28)) vm_write8(s2 + 0x39, (uint8_t)v);
+                        }
+                        std::fprintf(f, " kd-set %d", v);
+                    }
+                }
+                static bool kd_done = false;
+                if (!kd_done) {
+                    kd_done = true;
+                    if (const char* e = std::getenv("KD_FLINCH")) {
+                        const int lim = std::atoi(e);
+                        const uint32_t n = vm_read32(base);
+                        int changed = 0;
+                        for (uint32_t k2 = 0; k2 < n && k2 < 2000; k2++) {
+                            const uint32_t s2 = base + 0x10u + k2 * 0x9Cu;
+                            if ((int)vm_read8(s2 + 0x39) > lim) { vm_write8(s2 + 0x39, (uint8_t)lim); changed++; }
+                        }
+                        std::fprintf(f, " kd-flinch %d slots", changed);
+                    }
+                }
                 static bool bal_test_done = false;
                 if (!bal_test_done) {
                     bal_test_done = true;
@@ -951,12 +1118,36 @@ void bal_hit(uint32_t obj, const uint64_t* gpr, int32_t cur, int32_t rec, int32_
                 break;
             }
         }
+        if (const uint32_t bf = kd_bullet_file(vm_read32(rec + 0x9C))) kd_flatten(bf, 232u, 0x9Cu, 0xAFu);
+        /* KD_BULLET=<n> (test only): the first projectile hit's file (rows of 232 bytes from +0x10, the row count
+         * at +0) gets n in every damaging row's reaction byte, +0xAF (the same numbers as attack slot +0x39). */
+        if (const char* kb = std::getenv("KD_BULLET")) {
+            static bool kb_done = false;
+            const uint32_t row = vm_read32(rec + 0x9C);
+            if (!kb_done && row) {
+                for (uint32_t k = 0; k < 1000; k++) {
+                    const uint32_t base = row - 0x10u - k * 232u;
+                    const uint32_t cnt = vm_read32(base);
+                    if (cnt > k && cnt < 1000 && vm_read32(base + 4) == 0 && vm_read32(base + 8) == 0 && vm_read32(base + 12) == 0) {
+                        kb_done = true;
+                        int changed = 0;
+                        for (uint32_t r = 0; r < cnt; r++) {
+                            const uint32_t q = base + 0x10u + r * 232u;
+                            if (vm_read32(q + 0x9C)) { vm_write8(q + 0xAF, (uint8_t)std::atoi(kb)); changed++; }
+                        }
+                        std::fprintf(f, " kd-bullet file %08X row %u, %d rows", base, k, changed);
+                        break;
+                    }
+                }
+            }
+        }
         const uint32_t mod = vm_read32(rec + 0x94);
         if (mod) std::fprintf(f, " mod %08X %08X %08X %08X", vm_read32(mod), vm_read32(mod + 4), vm_read32(mod + 8), vm_read32(mod + 12));
         for (uint32_t o = 0; o < 0xB0; o += 4) std::fprintf(f, " %08X", vm_read32(rec + o));
         std::fprintf(f, "\n");
     }
     std::fflush(f);
+    kd_dump(true);
 }
 
 void bal_note_fighter(uint32_t obj)
@@ -1169,6 +1360,7 @@ struct PauseSetting { const char* name; bool* on; uint32_t text; };
 const PauseSetting k_settings[] = {
     { "Unlimited Stamina", &g_set_stamina, 15 },
     { "Free Camera", &g_set_freecam, 18 },
+    { "Hide HUD", &g_set_hidehud, 21 },
 };
 const int k_setting_count = (int)(sizeof k_settings / sizeof k_settings[0]);
 const uint32_t k_text_row = 12, k_text_back = 13;
@@ -1520,6 +1712,30 @@ void tb_place(const uint32_t* obj)
 }
 
 /* The partner stands behind P1's left, as far back as k_tb_support_back, for the whole fight. */
+/* Training (the maintainer 11-03): at the start of the fight the opponent is moved to k_train_apart in front of Player 1, on
+ * the line between their spawns, and held there (x and z; height is free, so it can still fall and lie down), so
+ * every skill reaches it without walking and it can't be knocked away. Off since 11-05 (the maintainer: the normal Training Mode,
+ * normal spawns and knockdowns); TRAINING_HOLD=1 turns it on again. */
+const float k_train_apart = 2.5f;
+void pin_dummy()
+{
+    static const bool off = !(std::getenv("TRAINING_HOLD") && std::getenv("TRAINING_HOLD")[0] == '1');   /* off unless TRAINING_HOLD=1 (the maintainer 11-05) */
+    static float px = 0, pz = 0; static uint32_t pinned = 0;
+    if (off || !training_active() || g_tb_mode) return;
+    if (!training_fight_scene()) { pinned = 0; return; }
+    uint32_t obj[2];
+    if (!pinned) {   /* once per fight: looking the places up again each frame drifted with Player 1 (nk1) */
+        if (!tb_fighters(obj)) return;
+        pinned = obj[1];
+        const float ax = cam_get(obj[0] - 0x70), az = cam_get(obj[0] - 0x68), bx = cam_get(obj[1] - 0x70), bz = cam_get(obj[1] - 0x68);
+        const float dx = bx - ax, dz = bz - az, len = std::sqrt(dx * dx + dz * dz);
+        px = len > 0.01f ? ax + dx / len * k_train_apart : bx; pz = len > 0.01f ? az + dz / len * k_train_apart : bz;
+        std::printf("[training] opponent held at %.1f %.1f, %.1f in front of player 1 (was %.1f away)\n", px, pz, k_train_apart, len); std::fflush(stdout);
+    }
+    cam_put(pinned - 0x70, px); cam_put(pinned - 0x68, pz);
+    cam_put(pinned - 0x60, px); cam_put(pinned - 0x58, pz);
+}
+
 void tb_place_partner()
 {
     if (!g_tb_place[2] || !g_tb_spawned) return;
@@ -1722,9 +1938,207 @@ void settings_tick()
 struct AutoFight { bool on; int stage; int step; unsigned long long t0, t, press_until; uint16_t button; bool p1_moved; };
 AutoFight g_auto = { false, -1, 0, 0, 0, 0, 0, false };
 
+void pf_note_hud(uint32_t o);
+extern uint32_t g_vg_arc;
+
+volatile bool g_six_loading = false;   /* SIX_ICALL: from leaving the character select to the fight */
+
+/* SIX_WATCH=<hex guest address> (test only): a hardware data breakpoint (debug register 0, 4 bytes, read or
+ * write) on that guest word in every thread of the game, set from a helper thread once the match is being picked.
+ * Each distinct host instruction address that touches it is kept with a count and printed as an offset into
+ * JStarsRecomp.exe ("[sixwatch] +0x..."), to be named with llvm-symbolizer and the build-pdb symbols: that names
+ * the recompiled game function (func_XXXXXXXX) that reads the slot. */
+uint32_t g_six_role_ea[2] = { 0, 0 };
+struct SixHit { uint64_t rip; unsigned n; uint64_t callers[8]; int ncallers; };
+SixHit g_six_hits[64]; volatile int g_six_nhits = 0;
+LONG CALLBACK six_veh(EXCEPTION_POINTERS* e)
+{
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    /* SIX_3V3=2: debug registers 1 and 2 sit on the two Support units' role words; right after the game writes
+     * one, a Support (3) becomes a partner (2), before anything reads it */
+    if (e->ContextRecord->Dr6 & 6) {
+        extern uint32_t g_six_role_ea[2];
+        for (int k = 0; k < 2; k++)
+            if ((e->ContextRecord->Dr6 & (2ull << k)) && g_six_role_ea[k] && vm_read32(g_six_role_ea[k]) == 3u) vm_write32(g_six_role_ea[k], 2u);
+        e->ContextRecord->Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (!(e->ContextRecord->Dr6 & 1)) return EXCEPTION_CONTINUE_SEARCH;
+    const uint64_t rip = e->ContextRecord->Rip;
+    int i = 0;
+    while (i < g_six_nhits && g_six_hits[i].rip != rip) i++;
+    if (i == g_six_nhits && g_six_nhits < 64) {
+        g_six_hits[i].rip = rip; g_six_hits[i].n = 0; g_six_hits[i].ncallers = 0;
+        /* who called it: host frames unwound from the faulting context (named the same way, func_XXXXXXXX) */
+        CONTEXT c = *e->ContextRecord;
+        for (int f = 0; f < 8; f++) {
+            DWORD64 img = 0;
+            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &img, nullptr);
+            if (!fn) break;
+            void* hd = nullptr; DWORD64 est = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, c.Rip, fn, &c, &hd, &est, nullptr);
+            if (!c.Rip) break;
+            g_six_hits[i].callers[g_six_hits[i].ncallers++] = c.Rip;
+        }
+        g_six_nhits = i + 1;
+    }
+    if (i < 64) g_six_hits[i].n++;
+    e->ContextRecord->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+DWORD WINAPI six_arm(LPVOID p)
+{
+    const uint64_t host = (uint64_t)(vm_base + (uint32_t)(uintptr_t)p);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    THREADENTRY32 te; te.dwSize = sizeof te;
+    int armed = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+        HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+        if (!th) continue;
+        if (SuspendThread(th) != (DWORD)-1) {
+            CONTEXT c = {}; c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            if (GetThreadContext(th, &c)) {
+                if (host != (uint64_t)vm_base) {
+                    c.Dr0 = host;
+                    c.Dr7 = (c.Dr7 & ~0xF0003ull) | 1ull | (3ull << 16) | (3ull << 18);   /* L0, read/write, 4 bytes */
+                }
+                if (g_six_role_ea[0]) {   /* L1, L2: write only (01), 4 bytes */
+                    c.Dr1 = (uint64_t)(vm_base + g_six_role_ea[0]); c.Dr2 = (uint64_t)(vm_base + g_six_role_ea[1]);
+                    c.Dr7 = (c.Dr7 & ~(0xFFull << 20) & ~0x3Cull) | (1ull << 2) | (1ull << 4) | (1ull << 20) | (3ull << 22) | (1ull << 24) | (3ull << 26);
+                }
+                if (SetThreadContext(th, &c)) armed++;
+            }
+            ResumeThread(th);
+        }
+        CloseHandle(th);
+    }
+    CloseHandle(snap);
+    std::printf("[sixwatch] guest %08X (host %llX) armed in %d threads, exe base %p\n", (uint32_t)(uintptr_t)p,
+                (unsigned long long)host, armed, (void*)GetModuleHandleA(nullptr));
+    std::fflush(stdout);
+    return 0;
+}
+/* SIX_STACKS=<seconds> (test only): that long after the character select is left, from a helper thread, every
+ * other thread of the game is paused and its host call stack (12 frames) printed as exe offsets, to name with
+ * llvm-symbolizer on build-pdb: where a stuck "Now loading" waits. Once. */
+DWORD WINAPI six_stacks(LPVOID)
+{
+    const uint64_t base = (uint64_t)GetModuleHandleA(nullptr);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    THREADENTRY32 te; te.dwSize = sizeof te;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == GetCurrentThreadId()) continue;
+        HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+        if (!th) continue;
+        if (SuspendThread(th) != (DWORD)-1) {
+            CONTEXT c = {}; c.ContextFlags = CONTEXT_FULL;
+            if (GetThreadContext(th, &c)) {
+                std::printf("[sixstack] thread %lu:", te.th32ThreadID);
+                for (int f = 0; f < 12 && c.Rip; f++) {
+                    const uint64_t rip = c.Rip;
+                    if (rip >= base && rip < base + 0x10000000ull) std::printf(" +0x%llX", (unsigned long long)(rip - base));
+                    else std::printf(" (%llX)", (unsigned long long)rip);
+                    DWORD64 img = 0;
+                    PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &img, nullptr);
+                    if (!fn) break;
+                    void* hd = nullptr; DWORD64 est = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, c.Rip, fn, &c, &hd, &est, nullptr);
+                }
+                std::printf("\n");
+            }
+            ResumeThread(th);
+        }
+        CloseHandle(th);
+    }
+    CloseHandle(snap);
+    std::fflush(stdout);
+    return 0;
+}
+void six_stacks_tick(bool picking)
+{
+    static const char* e = std::getenv("SIX_STACKS");
+    static unsigned long long left = 0; static bool done = false, was = false;
+    if (!e || done) return;
+    const unsigned long long now = GetTickCount64();
+    if (was && !picking && !left) left = now;
+    was = picking;
+    if (left && now - left >= (unsigned long long)std::atoi(e) * 1000ull) {
+        done = true;
+        HANDLE t = CreateThread(nullptr, 0, six_stacks, nullptr, 0, nullptr);
+        if (t) { WaitForSingleObject(t, 10000); CloseHandle(t); }
+    }
+}
+void six_watch_tick(bool picking)
+{
+    six_stacks_tick(picking);
+    static const char* e0 = std::getenv("SIX_WATCH");
+    static const bool role = std::getenv("SIX_3V3") && std::getenv("SIX_3V3")[0] == '2';
+    static const char* e = e0 ? e0 : (role ? "0" : nullptr);
+    static bool armed = false; static int printed = 0;
+    if (!e) return;
+    if (role && !g_six_role_ea[0]) {
+        const uint32_t w = vm_read32(vm_read32(0x008D3888u - 0x7A90u));
+        if (w > 0x10000u && w < 0xF0000000u) {
+            g_six_role_ea[0] = w + 0x60 + 4 * 0x94 + 8; g_six_role_ea[1] = w + 0x60 + 5 * 0x94 + 8;
+            std::printf("[six] role watch on %08X %08X\n", g_six_role_ea[0], g_six_role_ea[1]); std::fflush(stdout);
+        }
+    }
+    /* armed again every half second until 20 s after the character select is left: the match is loaded by threads
+     * made after the first arming (sixwatch: no game hit after the select) */
+    static unsigned long long last = 0, left = 0;
+    const unsigned long long now = GetTickCount64();
+    if (armed && !picking && !left) left = now;
+    if (picking) left = 0;
+    const bool again = armed && now - last > 500 && (picking || (left && now - left < 20000));
+    if ((!armed && picking) || again) {
+        if (!armed) AddVectoredExceptionHandler(1, six_veh);
+        armed = true; last = now;
+        HANDLE t = CreateThread(nullptr, 0, six_arm, (LPVOID)(uintptr_t)std::strtoul(e, nullptr, 16), 0, nullptr);
+        if (t) { WaitForSingleObject(t, 5000); CloseHandle(t); }
+    }
+    const uint64_t base = (uint64_t)GetModuleHandleA(nullptr);
+    while (printed < g_six_nhits) {
+        const SixHit& h = g_six_hits[printed++];
+        std::printf("[sixwatch] new hit +0x%llX at %llu callers", (unsigned long long)(h.rip - base), GetTickCount64());
+        for (int f = 0; f < h.ncallers; f++) std::printf(" +0x%llX", (unsigned long long)(h.callers[f] - base));
+        std::printf("\n");
+        std::fflush(stdout);
+    }
+}
 int training_icall(uint32_t target, uint64_t* gpr)
 {
     if (g_probe_on == 1) probe_icall(target, (uint32_t)gpr[3], (uint32_t)gpr[4]);
+    /* SIX_ICALL=1 (test only): calls into the setup-table functions (0x00183528..0x00186E00) while the match loads,
+     * each target with its first arguments, the first 6 times each, to find what asks which slot is a Support. */
+    { static const bool on = std::getenv("SIX_ICALL") != nullptr;
+      /* the call func_001855B4 makes with its stack copy of the 6 slots (r5; slot 0's character at +0x18): the
+       * battle side's receiver */
+      if (on) {
+          const uint32_t c0 = vm_read32(0x009540F0u), c1 = vm_read32(0x009540F0u + 0x2C);
+          for (int ri = 3; ri <= 6 && c0; ri++) {
+              const uint32_t r = (uint32_t)gpr[ri];
+              if (r < 0x00010000u || r >= 0xF0000000u || (r & 3)) continue;
+              for (uint32_t o = 0; o <= 0x30; o += 4)
+                  if (vm_read32(r + o) == c0 && vm_read32(r + o + 0x2C) == c1) {
+                      static int n = 0;
+                      if (n++ < 12) { std::printf("[sixcall] receiver %08X r%d=%08X (+0x%X) r3=%08X\n", target, ri, r, o, (uint32_t)gpr[3]); std::fflush(stdout); }
+                      break;
+                  }
+          }
+      }
+      if (on && target >= 0x00183528u && target < 0x00186E00u) {
+          static uint32_t seen[256]; static int cnt[256]; static int ns = 0;
+          int i = 0; while (i < ns && seen[i] != target) i++;
+          if (i == ns && ns < 256) { seen[ns] = target; cnt[ns] = 0; ns++; }
+          if (i < 256 && cnt[i]++ < 6) {
+              std::printf("[sixcall] %08X r3=%08X r4=%d r5=%d r6=%d\n", target, (uint32_t)gpr[3], (int)(int32_t)gpr[4],
+                          (int)(int32_t)gpr[5], (int)(int32_t)gpr[6]);
+              std::fflush(stdout);
+          }
+      } }
     if (g_tb_mode) {
         /* Battle HUD parts share a layout: slot 0x10 updates, slot 0x14 draws, +0x14 is 0 until they come in.
          * Skipping the draw hides the minimap, the timer, the top bar and the arc in the middle. */
@@ -1740,6 +2154,18 @@ int training_icall(uint32_t target, uint64_t* gpr)
                 const bool hide = vt == 0x00879FA0u || vt == 0x0087A160u || vt == 0x0087A2E0u || vt == 0x0087A1E0u || vt == 0x0087A260u;
                 if (hide && target == vm_read32(vm_read32(vt + 0x14))) return 1;
             }
+        }
+    }
+    { static const bool pf = std::getenv("PROBE_FADE") != nullptr;
+      const uint32_t o = (uint32_t)gpr[3];
+      if (pf && o > 0x40000000u && o < 0x4CA30000u && (o & 3) == 0) { const uint32_t vt = vm_read32(o); if (vt >= 0x00879000u && vt < 0x0087B000u) pf_note_hud(o); } }
+    if (training_active()) {
+        const uint32_t o = (uint32_t)gpr[3];
+        if (o > 0x40000000u && o < 0x4CA30000u && (o & 3) == 0 && vm_read32(o) == 0x0087A1E0u) g_vg_arc = o;
+        if (o > 0x40000000u && o < 0x4CA30000u && (o & 3) == 0 && vm_read32(o) == 0x00879DA0u) {
+            int i = 0;
+            for (; i < g_ncombo_gauge; i++) if (g_combo_gauge[i] == o) break;
+            if (i == g_ncombo_gauge && g_ncombo_gauge < 8) g_combo_gauge[g_ncombo_gauge++] = o;
         }
     }
     if (target == k_cam_update && vm_read32((uint32_t)gpr[3]) == k_cam_vt) {
@@ -1787,8 +2213,28 @@ int training_icall(uint32_t target, uint64_t* gpr)
         for (int k = 0; k < g_ndummy; k++)
             if (g_dummy_pads[k] == o && !(training_active() && g_set_turnbased)) { gpr[3] = 0; return 1; }
     }
+    /* SIX_PROBE: func_0008A540 makes a fighter's health object (class 0x00875198, 0x230 bytes) through a factory call;
+     * the host frames above it name the battle code that creates the fighters (llvm-symbolizer on build-pdb). */
+    if (target == 0x0008A540u) {
+        static const bool sp = std::getenv("SIX_PROBE") != nullptr; static int n = 0;
+        if (sp && n < 12) { n++;
+            void* fr[16]; const USHORT nf = RtlCaptureStackBackTrace(0, 16, fr, nullptr);
+            const uint64_t base = (uint64_t)GetModuleHandleA(nullptr);
+            std::printf("[six] health object made (#%d) at %llu, frames", n, GetTickCount64());
+            for (USHORT f = 0; f < nf; f++) std::printf(" +0x%llX", (unsigned long long)((uint64_t)fr[f] - base));
+            std::printf("\n"); std::fflush(stdout); }
+    }
     if (target == 0x00085CECu) {
         g_hud_ms = GetTickCount64();
+        /* SIX_PROBE: a fighter's health object and its class (vtable), and the TOC entries that hold that vtable,
+         * so its constructor -- run once per fighter while the match loads -- can be found by r2 offset. Once. */
+        { static const bool sp = std::getenv("SIX_PROBE") != nullptr; static bool done = false;
+          if (sp && !done) { done = true;
+              const uint32_t o = (uint32_t)gpr[3], vt = vm_read32(o);
+              std::printf("[six] health object %08X, vtable %08X\n", o, vt);
+              for (int32_t off = -0x8000; off < 0x8000; off += 4)
+                  if (vm_read32(0x008D3888u + (uint32_t)off) == vt) std::printf("[six] TOC r2%s0x%X holds that vtable\n", off < 0 ? "-" : "+", off < 0 ? -off : off);
+              std::fflush(stdout); } }
         if (training_active() && training_fight_scene()) bal_note_fighter((uint32_t)gpr[3]);
     }
     if (target == 0x00085CECu && training_low() > 0) {   /* health getter: the HUD reads every fighter */
@@ -1828,20 +2274,75 @@ int training_icall(uint32_t target, uint64_t* gpr)
     return 0;
 }
 
-/* Once per pad poll: refill whoever has not been hit for 1.5 s. */
+
+/* Once per pad poll: refill whoever has been hit, 1 s after the combo number has gone away (the maintainer 11-03).
+ * If no combo number came up after the hit, the old rule: 1.5 s without a hit. */
 void training_tick()
 {
-    if (!training_fight_scene()) { g_train_count = 0; g_npads = 0; g_ndummy = 0; return; }
+    { /* KD_STUNFILE=<file> (test only): when the number in the file changes, write it to the last hit fighter's
+       * build-up (health object +0x1A4) once, so the next hit shows whether that level knocks down. */
+      static const char* kf = std::getenv("KD_STUNFILE");
+      static int last = -1; static unsigned long long t = 0;
+      if (kf && g_kd_obj && GetTickCount64() - t > 200) {
+          t = GetTickCount64();
+          int v = -1;
+          if (FILE* ff = std::fopen(kf, "r")) { if (std::fscanf(ff, "%d", &v) != 1) v = -1; std::fclose(ff); }
+          if (v >= 0 && v != last) {
+              last = v; vm_write32(g_kd_obj + 0x1A4, (uint32_t)v);
+              if (FILE* f = bal_file()) { std::fprintf(f, "%llu kd-stun %d\n", GetTickCount64(), v); std::fflush(f); }
+          }
+      }
+    }
+    { /* KD_CLEAR=<file> (test only): mode 1 holds the hit fighter's owner +0x1B8 and -0x70 at 0, mode 2 its health
+       * object +0x1AC at 0: candidates for the get-up immunity (pin3). */
+      static const char* kf = std::getenv("KD_CLEAR");
+      static int mode = 0; static unsigned long long t = 0;
+      if (kf && GetTickCount64() - t > 200) { t = GetTickCount64(); int v = 0; if (FILE* ff = std::fopen(kf, "r")) { if (std::fscanf(ff, "%d", &v) != 1) v = 0; std::fclose(ff); } mode = v; }
+      if (kf && g_kd_owner && mode == 1) { vm_write32(g_kd_owner + 0x1B8, 0); vm_write32(g_kd_owner - 0x70, 0); }
+      if (kf && g_kd_obj && mode == 2) vm_write32(g_kd_obj + 0x1AC, 0);
+    }
+    { /* OAM_RECOVER=<n> (test only): once per fight, every loaded get-up action file (dmg_recover .oam: 232 bytes,
+       * OAFB, motion 200) gets n at +0x40, which holds 64 in every fighter's data. */
+      static const char* e = std::getenv("OAM_RECOVER");
+      static bool done = false;
+      if (!training_fight_scene()) done = false;
+      else if (e && !done && g_kd_owner) {
+          done = true;
+          int n = 0;
+          for (uint32_t ea = 0x40000000u; ea < 0x4CA30000u; ea += 0x10) {
+              if (vm_read32(ea) != 0x4F414642u || vm_read32(ea + 4) != 2u || vm_read32(ea + 0x4C) != 0x00C8FFFFu || vm_read32(ea + 0x44) != 8u) continue;
+              vm_write32(ea + 0x40, (uint32_t)std::atoi(e)); n++;
+          }
+          if (FILE* f = bal_file()) { std::fprintf(f, "%llu oam-recover %d files set to %d\n", GetTickCount64(), n, std::atoi(e)); std::fflush(f); }
+      }
+    }
+    pin_dummy();
+    { static bool scanned = false; static unsigned long long up = 0;   /* once per Training fight, 1 s in, before the first hit */
+      if (!training_fight_scene()) { scanned = false; up = 0; }
+      else if (!up) up = GetTickCount64();
+      else if (!scanned && training_no_knockdown() && GetTickCount64() - up > 1000) { scanned = true; kd_flatten_all(); } }
+    if (training_no_knockdown() && training_fight_scene())   /* the too-many-hits build-up (health object +0x1A4, knockdown at 150) */
+        for (int i = 0; i < g_train_count; i++) vm_write32(g_train[i].obj + 0x1A4, 0);
+    kd_dump(false);
+    if (!training_fight_scene()) { g_train_count = 0; g_npads = 0; g_ndummy = 0; g_ncombo_gauge = 0; g_combo_up = false; kd_restore(); return; }
     const unsigned long long now = GetTickCount64();
+    bool up = false;
+    for (int k = 0; k < g_ncombo_gauge; k++)
+        if (vm_read32(g_combo_gauge[k]) == 0x00879DA0u && vm_read32(g_combo_gauge[k] + 0x3EC) != 0) up = true;
+    if (g_combo_up && !up) g_combo_end = now;
+    g_combo_up = up;
     for (int i = 0; i < g_train_count; i++) {
         const uint32_t obj = g_train[i].obj;
-        if (g_train[i].last_hit == 0 || now - g_train[i].last_hit < 1500) continue;   /* 0: not hit yet */
+        const unsigned long long hit = g_train[i].last_hit;
+        if (hit == 0 || up) continue;   /* 0: not hit yet; up: the combo number is still showing */
+        const bool shown = g_combo_end > hit;   /* a combo number came and went after this hit */
+        if (shown ? now - g_combo_end < 1000 : now - hit < 1500) continue;
         const uint32_t max = vm_read32(obj + 0x98);
         if (max == 0 || max > 1000000) continue;
         if (vm_read32(obj + 0x90) < max || vm_read32(obj + 0x94) < max) {
             vm_write32(obj + 0x94, max);
             vm_write32(obj + 0x90, max);
-            std::printf("[training] refill 0x%08X to %u\n", obj, max / 100);
+            std::printf("[training] refill 0x%08X to %u at %llu (combo number gone at %llu)\n", obj, max / 100, now, g_combo_end);
         }
     }
 }
@@ -1976,6 +2477,7 @@ void training_charsel(uint16_t* b, uint16_t* lx)
  * The game is 2 frames ahead of the frame being drawn (screenshots tm5: the padlock at 153 with the
  * box at 406), so the pictures use the value from 2 frames ago. Runs once per drawn frame. */
 int g_slide_drawn = 732;
+float g_lock_white = 0.0f;   /* how far the screen has faded to white, for the padlock (0 none, 1 white) */
 
 void stage_slide_tick()
 {
@@ -1986,6 +2488,17 @@ void stage_slide_tick()
     g_slide_drawn = hist[1];
     hist[1] = hist[0];
     hist[0] = off == 0 && vm_read32(box + 0x2C) == 0 ? -1 : off;
+    /* Finish fades the screen to white: the screen's state (+0x48) is 9 while it is up, 0xD on Start,
+     * 0xE while it fades (500 ms, pf1) and 0xF once it is white. The padlock fades with it. */
+    static unsigned long long fade_t0 = 0;
+    const uint32_t state = vm_read32(g_seen_stage.obj + 0x48);
+    const unsigned long long now = GetTickCount64();
+    if (state == 0xE && fade_t0 == 0) fade_t0 = now;
+    if (state >= 1 && state < 0xD) fade_t0 = 0;   /* 0 comes after 0xF, while the frames drawn still show the box (cf3) */
+    float w = 0.0f;
+    if (state == 0xF || (state == 0 && fade_t0)) w = 1.0f;
+    else if (fade_t0 && now > fade_t0 + 50) w = (float)(now - fade_t0 - 50) / 500.0f;   /* the frame drawn is 2 frames behind */
+    g_lock_white = w > 1.0f ? 1.0f : w;
 }
 
 /* The 0-star look: the game draws 1 lit star and 4 empty ones, so the second
@@ -2040,6 +2553,72 @@ void stage_lock(uint16_t* b, uint16_t* lx)
 }
 
 /* The padlock on the time limit box, 24x24, on a dark badge that covers the left arrow. */
+/* FPS_COUNTER=1 ("FPS counter" in the launcher, the maintainer 11-04): the game's own frames per second (its flips, as the
+ * window title counts them), small in the bottom-left corner. White on a dark box, drawn at twice the shown size so
+ * it stays sharp; redrawn when the number changes, counted over the last second. */
+extern "C" unsigned cellGcm_flip_request_count(void);
+const uint32_t* fps_stamp(short* x, short* y, short* w, short* h, short* show_w, short* show_h)
+{
+    const int W = 136, H = 44;
+    static uint32_t out[136 * 44];
+    static unsigned long long t0 = 0;
+    static unsigned f0 = 0;
+    static int fps = -1, drawn = -2;
+    const unsigned long long now = GetTickCount64();
+    const unsigned flips = cellGcm_flip_request_count();
+    /* Hidden through the logos and the opening movie (scene steps 0-2, then 3 for the black moment between): it comes
+     * with the title screen (step 4, title1/title2 runs), fading in from black over half a second as the title does,
+     * and stays from then on. */
+    static unsigned long long shown_at = 0;
+    if (!shown_at) {
+        if (vm_read32(0x0094DEC4u) != 4) return nullptr;
+        shown_at = now;
+    }
+    if (t0 == 0) { t0 = now; f0 = flips; }
+    if (now - t0 >= 1000) { fps = (int)((flips - f0) * 1000ull / (now - t0)); t0 = now; f0 = flips; }
+    if (drawn != fps) {
+        drawn = fps;
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (bm && bits) {
+            HGDIOBJ old = SelectObject(dc, bm);
+            uint32_t* p = (uint32_t*)bits;
+            for (int i = 0; i < W * H; i++) p[i] = 0x00181818u;
+            SetBkMode(dc, TRANSPARENT);
+            HFONT f = CreateFontW(34, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HGDIOBJ oldf = SelectObject(dc, f);
+            wchar_t txt[24];
+            if (fps < 0) swprintf(txt, 24, L"FPS --"); else swprintf(txt, 24, L"FPS %d", fps);
+            SetTextColor(dc, RGB(255, 255, 255));
+            RECT rc = { 0, 0, W, H };
+            DrawTextW(dc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(dc, oldf); DeleteObject(f);
+            GdiFlush();
+            for (int i = 0; i < W * H; i++) {
+                const uint32_t c = p[i];
+                out[i] = 0xFF000000u | ((c & 0xFF) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFF);
+            }
+            SelectObject(dc, old);
+            DeleteObject(bm);
+        }
+        DeleteDC(dc);
+    }
+    *x = 8; *y = 720 - 8 - 22; *w = (short)W; *h = (short)H; *show_w = 68; *show_h = 22;
+    if (now - shown_at >= 500) return out;
+    static uint32_t fading[136 * 44];   /* the picture scaled toward black: the stamp has no transparency */
+    const uint32_t k = (uint32_t)((now - shown_at) * 256 / 500);
+    for (int i = 0; i < W * H; i++) {
+        uint32_t c = 0xFF000000u;
+        for (int sft = 0; sft < 24; sft += 8) c |= ((((out[i] >> sft) & 255) * k) >> 8) << sft;
+        fading[i] = c;
+    }
+    return fading;
+}
+
 const uint32_t* stage_lock_stamp(short* x, short* y, short* w, short* h, short* show_w, short* show_h)
 {
     if (const uint32_t* menu = tb_stamp(x, y, w, h, show_w, show_h)) return menu;
@@ -2062,9 +2641,17 @@ const uint32_t* stage_lock_stamp(short* x, short* y, short* w, short* h, short* 
         }
     }
     const int off = g_slide_drawn;
-    if (off < 0 || 674 + off >= 1280) return nullptr;
+    if (off < 0 || 674 + off >= 1280 || g_lock_white >= 1.0f) return nullptr;
     *x = (short)(674 + off); *y = 371; *w = 24; *h = 24; *show_w = 24; *show_h = 24;
-    return px;
+    if (g_lock_white <= 0.0f) return px;
+    static uint32_t faded[24 * 24];   /* the game fades to white, so each colour moves toward white */
+    const uint32_t k = (uint32_t)(g_lock_white * 256.0f);
+    for (int i = 0; i < 24 * 24; i++) {
+        uint32_t c = 0xFF000000u;
+        for (int sft = 0; sft < 24; sft += 8) c |= ((((px[i] >> sft) & 255) * (256 - k) + 255 * k) >> 8) << sft;
+        faded[i] = c;
+    }
+    return faded;
 }
 
 /* Turn-based always fights on Namek. The screen's stage is +0x6C (0 Namek, st5). The list starts on Yoshiwara
@@ -2191,7 +2778,13 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
     switch (g_auto.step) {
     case 0:   /* movie, title, save dialog: Cross until the main menu is up */
         if (menu) { g_auto.step = 1; g_auto.t = now; g_auto.press_until = 0; auto_log("main menu"); break; }
-        if (now - g_auto.t0 > 3000) auto_press(CROSS, now, 120, 1000);
+        /* Left and Cross in turn: with no save yet the game asks first, and Left then Cross goes on to the main
+         * menu without making one (the maintainer 11-04); on the title and with a save, Left is just another button. */
+        if (now - g_auto.t0 > 3000 && now - g_auto.t >= 1000) {
+            static bool left = false;
+            auto_press(left ? (uint16_t)0x0080 : CROSS, now, 120, 1000);
+            left = !left;
+        }
         break;
     case 1:   /* down to Free Battle, then in, as Training */
         if (now - g_auto.t < 400) break;
@@ -2330,6 +2923,97 @@ void free_battle_box(uint16_t* b, uint16_t* lx, uint16_t* ly)
 bool g_exit_filter_on = false;
 bool g_free_battle_box = true;
 
+/* PROBE_FADE=1 (test only): raw dumps to probe_fade.bin for finding the stage select fade and the combo number.
+ * Records: kind (1 stage select screen, 2 time box, 3 battle HUD part), ms, object, vtable, buttons, then words. */
+uint32_t g_pf_hud[128]; int g_pf_nhud = 0;
+void pf_note_hud(uint32_t o)
+{
+    for (int i = 0; i < g_pf_nhud; i++) if (g_pf_hud[i] == o) return;
+    if (g_pf_nhud < 128) g_pf_hud[g_pf_nhud++] = o;
+}
+void pf_rec(FILE* f, uint32_t kind, uint32_t obj, uint32_t b, uint32_t words)
+{
+    const uint32_t hdr[6] = { kind, (uint32_t)GetTickCount64(), obj, vm_read32(obj), b, words };
+    std::fwrite(hdr, 4, 6, f);
+    for (uint32_t k = 0; k < words; k++) { const uint32_t v = vm_read32(obj + k * 4); std::fwrite(&v, 4, 1, f); }
+}
+void fade_probe_tick(uint16_t b)
+{
+    static FILE* f = nullptr;
+    if (!f) f = std::fopen("probe_fade.bin", "wb");
+    if (!f) return;
+    static unsigned long long stage_seen = 0, hud_last = 0;
+    static uint32_t st = 0, box = 0;
+    const unsigned long long now = GetTickCount64();
+    if (on_stagesel()) { stage_seen = now; st = g_seen_stage.obj; box = g_seen_stage_time.obj; }
+    if (st && now - stage_seen < 4000) { pf_rec(f, 1, st, b, 0x100); pf_rec(f, 2, box, b, 0x40); }
+    if (training_fight_scene() && now - hud_last >= (std::getenv("PROBE_VG2") ? 100u : 50u)) {
+        hud_last = now;
+        if (!std::getenv("PROBE_VG2")) for (int i = 0; i < g_pf_nhud; i++) pf_rec(f, 3, g_pf_hud[i], b, 0x100);
+        if (std::getenv("PROBE_VG2")) { if (g_vg_arc) pf_rec(f, 5, g_vg_arc, b, 0x100); pf_rec(f, 4, 0x4902A000u, b, 0x400); }
+    }
+    if (!training_fight_scene() && !(st && now - stage_seen < 4000)) g_pf_nhud = 0;
+    std::fflush(f);
+}
+
+
+/* PROBE_VG=1 (test only): the middle arc's value (HUD part 0x0087A1E0, +0x2C) follows the Victory Gauge. Each
+ * time it changes, guest memory is searched for the same number (as a 32-bit integer, as a float, and as a
+ * float of value / 1000), keeping the addresses that held the new value every time. */
+uint32_t g_vg_arc = 0;
+void vg_probe_tick()
+{
+    static std::vector<uint32_t> cand[3];
+    static bool first[3] = { true, true, true };
+    static uint32_t last = 0;
+    if (!g_vg_arc || vm_read32(g_vg_arc) != 0x0087A1E0u || !training_fight_scene()) return;
+    /* VG_SET=<n> (test only): once one address besides the arc is left, write n there on every pad read,
+     * and dump 0x800 bytes around it once (vg_dump.bin, from address - 0x400). */
+    static const int vg_set = std::getenv("VG_SET") ? std::atoi(std::getenv("VG_SET")) : -1;
+    if (vg_set >= 0 && cand[0].size() == 2) {
+        const uint32_t ea = cand[0][0] == g_vg_arc + 0x2C ? cand[0][1] : cand[0][0];
+        static bool dumped = false;
+        if (!dumped) {
+            dumped = true;
+            if (FILE* f = std::fopen("vg_dump.bin", "wb")) { std::fwrite(&ea, 4, 1, f); std::fwrite(vm_base + ea - 0x400, 1, 0x800, f); std::fclose(f); }
+            std::printf("[vg] holding 0x%08X at %d\n", ea, vg_set); std::fflush(stdout);
+        }
+        static int writes = 0;
+        static const bool once = std::getenv("VG_ONCE") != nullptr;
+        if (!once || writes++ == 0) vm_write32(ea, (uint32_t)vg_set);
+        static unsigned long long lastlog = 0;
+        const unsigned long long now = GetTickCount64();
+        if (now - lastlog >= 200) {
+            lastlog = now;
+            std::printf("[vg] t %llu value %d words", now, (int32_t)vm_read32(ea));
+            for (int k = -8; k < 8; k++) std::printf(" %08X", vm_read32(ea + k * 4));
+            std::printf("\n");
+        }
+    }
+    const uint32_t v = vm_read32(g_vg_arc + 0x2C);
+    if (v == last || v == 0) return;
+    last = v;
+    union { float f; uint32_t u; } a, b; a.f = (float)v; b.f = (float)v / 1000.0f;
+    const uint32_t want[3] = { v, a.u, b.u };
+    auto big = [](const uint8_t* q) { return ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3]; };
+    static const uint32_t ranges[][2] = { { 0x00800000u, 0x00A00000u }, { 0x10000000u, 0x10100000u }, { 0x40000000u, 0x4CA30000u } };
+    for (int k = 0; k < 3; k++) {
+        std::vector<uint32_t> keep;
+        if (first[k]) {
+            for (const auto& r : ranges)
+                for (uint32_t ea = r[0]; ea < r[1]; ea += 4) if (big(vm_base + ea) == want[k]) keep.push_back(ea);
+            first[k] = false;
+        } else {
+            for (uint32_t ea : cand[k]) if (big(vm_base + ea) == want[k]) keep.push_back(ea);
+        }
+        cand[k].swap(keep);
+        std::printf("[vg] arc %u: %s %zu left:", v, k == 0 ? "int" : k == 1 ? "float" : "float/1000", cand[k].size());
+        for (size_t i = 0; i < cand[k].size() && i < 12; i++) std::printf(" %08X", cand[k][i]);
+        std::printf("\n");
+    }
+    std::fflush(stdout);
+}
+
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
@@ -2397,6 +3081,153 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
                 std::printf("[tgs] character select packs pointed at character_select_tgs\n");
             }
         }
+        /* SIX_PROBE=1 (test only, the maintainer 11-05: can a match hold 6 fighters?): the battle setup table (0x009540E4,
+         * 0x2C a slot) dumped, 12 slots, whenever the character select is left or a fight starts. FORCE_SLOTS=
+         * "slot:id[:ctl[:stars]],..." writes those slots while the character select is up (+0x08 = 1 takes part,
+         * +0x0C the character, +0x00 the controller, +0x18 the stars). */
+        { static const bool sp = std::getenv("SIX_PROBE") != nullptr;
+          static bool was_cs = false, was_fight = false;
+          const bool cs = on_charsel(), fight = training_fight_scene() || vm_read32(0x0094DEC4u) == 0x14;
+          if (sp && ((was_cs && !cs) || (fight && !was_fight))) {
+              std::printf("[six] setup at %s:\n", fight && !was_fight ? "fight start" : "leaving character select");
+              for (int k = 0; k < 12; k++) {
+                  std::printf("[six]  slot %2d:", k);
+                  for (uint32_t o = 0; o < 0x2C; o += 4) std::printf(" %08X", vm_read32(setup_field(k, o)));
+                  std::printf("\n");
+              }
+              std::fflush(stdout);
+              /* The battle world (func_00030A14: *(TOC-0x7A90)): per team a list of unit indices at +0x34 + team*0x18
+               * (-1 = none; func_00031968 walks 4 of them), and unit records of 0x94 bytes at +0x60 + index*0x94. */
+              { const uint32_t w = vm_read32(vm_read32(0x008D3888u - 0x7A90u));
+                std::printf("[six] battle world %08X\n", w);
+                if (w > 0x10000u && w < 0xF0000000u) {
+                    for (int t = 0; t < 2; t++) {
+                        std::printf("[six]  team %d units:", t);
+                        for (int k = 0; k < 6; k++) std::printf(" %d", (int)(int32_t)vm_read32(w + 0x34 + t * 0x18 + k * 4));
+                        std::printf("\n");
+                    }
+                    for (int u = 0; u < 8; u++) {
+                        std::printf("[six]  unit %d:", u);
+                        for (uint32_t o = 0; o < 0x40; o += 4) std::printf(" %08X", vm_read32(w + 0x60 + u * 0x94 + o));
+                        std::printf("\n");
+                    }
+                }
+                std::fflush(stdout); }
+              /* Where else are the team's characters? The VS screen has three boxes a team (the maintainer's screenshot): look
+               * for P1's character followed by the partner's at a fixed step, in the game's data and its heap, and
+               * show the word one more step on (a third member's place?). */
+              const uint32_t c0 = vm_read32(setup_field(0, 0x0C)), c1 = vm_read32(setup_field(1, 0x0C));
+              const uint32_t c2 = vm_read32(setup_field(2, 0x0C)), c3 = vm_read32(setup_field(3, 0x0C));
+              static const uint32_t ranges[][2] = { { 0x00800000u, 0x00A00000u }, { 0x10000000u, 0x10200000u }, { 0x40000000u, 0x4CA30000u } };
+              int found = 0;
+              /* the battle's own copy: all four fighters in slot order at one step, then what follows (Supports?) */
+              if (fight && !was_fight) {
+                  int nb = 0;
+                  for (const auto& rg : ranges)
+                      for (uint32_t ea = rg[0]; ea < rg[1] && nb < 30; ea += 4) {
+                          if (vm_read32(ea) != c0) continue;
+                          for (uint32_t st = 4; st <= 0x1000 && nb < 30; st += 4)
+                              if (vm_read32(ea + st) == c1 && vm_read32(ea + 2 * st) == c2 && vm_read32(ea + 3 * st) == c3) {
+                                  nb++;
+                                  std::printf("[six] copy? %08X step %u: then %08X %08X | words before: %08X %08X %08X\n", ea, st,
+                                              vm_read32(ea + 4 * st), vm_read32(ea + 5 * st), vm_read32(ea - 4), vm_read32(ea - 8), vm_read32(ea - 12));
+                              }
+                      }
+                  std::fflush(stdout);
+              }
+              for (const auto& rg : ranges)
+                  for (uint32_t ea = rg[0]; ea < rg[1] && found < 40; ea += 4) {
+                      if (vm_read32(ea) != c0) continue;
+                      for (uint32_t st = 4; st <= 0x200; st += 4) {
+                          if (vm_read32(ea + st) != c1) continue;
+                          /* the other team should sit nearby with the same step */
+                          bool other = false; uint32_t ost = 0;
+                          for (uint32_t o = 4; o <= 0x800 && !other; o += 4)
+                              if (vm_read32(ea + o) == c2 && vm_read32(ea + o + st) == c3) { other = true; ost = o; }
+                          if (!other) continue;   /* both teams with the same step: a team list, not chance */
+                          std::printf("[six] %08X: %u then %u %+d later, next %08X | team 2 at %+d: %u %u, its next %08X\n", ea, c0, c1,
+                                      (int)st, vm_read32(ea + 2 * st), (int)ost, c2, c3, vm_read32(ea + ost + 2 * st));
+                          if (++found >= 40) break;
+                      }
+                  }
+              std::fflush(stdout);
+          }
+          /* SIX_POKE="addr[,addr...]" (test only): from leaving the character select until the fight, write character
+           * 34 at those addresses every poll, to see whether one of them is the VS screen's 3rd box. */
+          { static bool between = false;
+            if (was_cs && !cs) between = true;
+            if (fight) between = false;
+            g_six_loading = between;
+            if (between) if (const char* e = std::getenv("SIX_POKE")) {
+                const char* q = e;
+                while (*q) { char* end; const uint32_t a = (uint32_t)std::strtoul(q, &end, 16); if (end == q) break;
+                             if (a) vm_write32(a, 34u); q = (*end == ',') ? end + 1 : end; if (*end != ',') break; }
+            } }
+          /* Which TOC entries point at or near the setup table, so the game code that reads it can be found in the
+           * recompiled sources by its r2 offset. Once. */
+          { static bool toc_done = false;
+            if (sp && !toc_done) { toc_done = true;
+                const uint32_t toc = 0x008D3888u;
+                for (int32_t off = -0x8000; off < 0x8000; off += 4) {
+                    const uint32_t v = vm_read32(toc + (uint32_t)off);
+                    if (v >= 0x00953F00u && v < 0x00954300u)
+                        std::printf("[six] TOC %+d (r2 %s0x%X) = %08X (setup %+d)\n", off, off < 0 ? "-" : "+", off < 0 ? -off : off,
+                                    v, (int)(v - 0x009540E4u));
+                }
+                std::fflush(stdout); } }
+          six_watch_tick(cs);
+          /* SIX_LOADDUMP=1 (test only): the 6 battle-world unit records in full, every 3 s while the match loads,
+           * to compare a normal load with a stuck 3v3 one */
+          { static const bool ld = std::getenv("SIX_LOADDUMP") != nullptr; static unsigned long long last = 0;
+            const unsigned long long now = GetTickCount64();
+            if (ld && g_six_loading && now - last > 3000) { last = now;
+                const uint32_t w = vm_read32(vm_read32(0x008D3888u - 0x7A90u));
+                if (w > 0x10000u && w < 0xF0000000u) {
+                    std::printf("[sixload] t=%llu world %08X head", now, w);
+                    for (uint32_t o = 0; o < 0x60; o += 4) std::printf(" %08X", vm_read32(w + o));
+                    std::printf("\n");
+                    for (int u = 0; u < 6; u++) {
+                        std::printf("[sixload]  unit %d:", u);
+                        for (uint32_t o = 0; o < 0x94; o += 4) std::printf(" %08X", vm_read32(w + 0x60 + (uint32_t)u * 0x94u + o));
+                        std::printf("\n");
+                    }
+                    std::fflush(stdout);
+                } } }
+          /* SIX_3V3=1 (test only): while the match loads, every battle-world unit marked as a Support (+0x08 = 3) is
+           * marked as a partner (2), so the battle builder (func_000ED344) makes it a fighter: 3 against 3. */
+          { static const bool on3 = std::getenv("SIX_3V3") && std::getenv("SIX_3V3")[0] == '1';   /* mode 2: the role watch in six_veh */
+            if (on3 && g_six_loading) {
+                const uint32_t w = vm_read32(vm_read32(0x008D3888u - 0x7A90u));
+                if (w > 0x10000u && w < 0xF0000000u)
+                    for (int u = 0; u < 6; u++) {
+                        const uint32_t rec = w + 0x60 + (uint32_t)u * 0x94u;
+                        if (vm_read32(rec + 8) == 3u) {
+                            vm_write32(rec + 8, 2u);
+                            static int n = 0;
+                            if (n++ < 12) { std::printf("[six] unit %d: Support -> partner (char %u, team %u)\n", u, vm_read32(rec) >> 16, vm_read32(rec + 0xC)); std::fflush(stdout); }
+                        }
+                    }
+            } }
+          was_cs = cs; was_fight = fight;
+          if (cs) if (const char* e = std::getenv("FORCE_SLOTS")) {
+              const char* q = e;
+              while (*q) {
+                  int s = -1, id = -1, ctl = -1, st = -1, used = 0;
+                  if (std::sscanf(q, "%d:%d%n", &s, &id, &used) < 2) break;
+                  q += used;
+                  if (*q == ':') { int u2 = 0; if (std::sscanf(q, ":%d%n", &ctl, &u2) == 1) q += u2; }
+                  if (*q == ':') { int u3 = 0; if (std::sscanf(q, ":%d%n", &st, &u3) == 1) q += u3; }
+                  int team = -1;
+                  if (*q == ':') { int u4 = 0; if (std::sscanf(q, ":%d%n", &team, &u4) == 1) q += u4; }
+                  if (s >= 0 && s < 12) {
+                      vm_write32(setup_field(s, 0x08), 1); vm_write32(setup_field(s, 0x0C), (uint32_t)id);   /* +0x08: 1 takes part, 2 not (six1 dump) */
+                      if (ctl >= 0) vm_write32(setup_field(s, 0x00), (uint32_t)ctl);
+                      if (st >= 0) vm_write32(setup_field(s, 0x18), (uint32_t)st);
+                      if (team >= 0) vm_write32(setup_field(s, 0x10), (uint32_t)team);   /* +0x10: the team, 0 or 1 */
+                  }
+                  if (*q == ',') q++; else break;
+              }
+          } }
         auto_fight(b, lx, ly);
         if (g_free_battle_box) free_battle_box(b, lx, ly);
         tb_list_rows(*b);
@@ -2445,6 +3276,8 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
             pause_tick(b); settings_tick(); tb_tick(b, lx, ly);
             if (!g_tb_running) freecam_tick(b, lx, ly);
         }
+        { static const bool pf = std::getenv("PROBE_FADE") != nullptr; if (pf) fade_probe_tick(*b); }
+        { static const bool pv = std::getenv("PROBE_VG") != nullptr; if (pv) vg_probe_tick(); }
         if (g_probe_on != 2 && std::getenv("TRAINING_PROBE")) probe_tick();
         probe_flag_tick();
     }
@@ -2471,6 +3304,7 @@ extern "C" void jstars_register_game_overrides(void)
     g_ppu_icall_hook = training_icall;
     g_rsx_copy_rects = training_copy_rects;
     g_rsx_stamp = stage_lock_stamp;
+    if (env_on("FPS_COUNTER")) g_rsx_stamp2 = fps_stamp;
     g_cellpad_filter = game_pad_filter;
     g_cellpad_rstick_filter = freecam_rstick;
     const char* ma = std::getenv("MENU_ARROWS_DPAD");
