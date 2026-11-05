@@ -42,7 +42,7 @@ Numbers seen in the data but not tried: 128, 204, 255 (a few slots, likely unuse
 
 ## By character
 
-Only hits with damage and a knockdown number. Build-up is each hit's "too many hits" number. "Move" is the input from that fighter's page where the row is known; rows without one are not tied to an input yet.
+Only hits with damage and a knockdown number. "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in a fighter's damage list. Each hit's build-up (its "too many hits" number) is in the Knockdowns section of that fighter's page. "Move" is the input from that fighter's page where the row is known; rows without one are not tied to an input yet.
 
 ### 000 Luffy
 
