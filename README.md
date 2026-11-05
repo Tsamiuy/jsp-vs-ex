@@ -42,9 +42,9 @@ the decrypted file, see RPCS3 and its documentation.
 ## Known problems
 
 - Online and Cross-Save upload need PSN and do nothing (Cross-Save is now "Exit Game").
-- The glow layer around effects is still missing.
-- Building `main` against an unchanged ps3recomp has not been tried; the notes build against a checkout with local
-  changes, kept as patches in `jstars-notes/patches`.
+- A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `toolkit/ps3recomp-local.patch`, see
+  [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine; the notes build from a local checkout
+  with the same changes. The installer applies the same patch for you.
 - Read [docs/SCRIPTS.md](docs/SCRIPTS.md) before running the scripts: they change your power plan and mount the disc image.
 
 ## Contributing
