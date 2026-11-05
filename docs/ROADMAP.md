@@ -4,7 +4,7 @@ What is planned, in rough order. ✅ done · 🔧 in progress · 📋 planned. N
 not promised. Options that change gameplay are opt-in; display and input improvements may default on.
 What the port adds today: [FEATURES.md](FEATURES.md). Dated state and evidence: [notes/STATUS.md](notes/STATUS.md).
 The ✅ items describe the default build, the port in `jstars/port` on the ps3recomp v0.15 toolkit. A second port on the
-v0.18.0 toolkit is proposed as an opt-in installer choice (#59, open).
+v0.18.0 toolkit is proposed as an opt-in installer choice (#2, open).
 
 ## 1. Playable on Windows from your own copy  🔧
 
@@ -13,7 +13,7 @@ v0.18.0 toolkit is proposed as an opt-in installer choice (#59, open).
 | ✅ | Boots through the opening movie (with sound), the title screen and every Main Menu entry |
 | ✅ | Fights at about 29 frames per second on the maps tested, with music and effects (the maintainer's runs on one Windows machine) |
 | ✅ | **Installer** with a bundled compiler, on the PCs tested so far: it builds the port on your PC from your own disc copy and your own decrypted EBOOT (from your own copy, see RPCS3 and its documentation); nothing of the game is shipped or downloaded. A portable zip is built from the same files |
-| 🔧 | Menus with art and text on Windows 10: compressed textures whose size is not a multiple of 4 are now decoded on the CPU (#81, checked on Windows 11; not yet confirmed on Windows 10) |
+| 🔧 | Menus with art and text on Windows 10: compressed textures whose size is not a multiple of 4 are now decoded on the CPU (checked on Windows 11; not yet confirmed on Windows 10) |
 | 🔧 | Installer runs on more PCs: each report on an issue is checked against the logs (the Start menu's support bundle collects them) |
 | ✅ | **Long sessions:** the fight freeze (capped log counters overflowed after minutes in a fight) is fixed; a 30-minute scripted run and a 20-minute normal session had no freeze |
 | 🔧 | A fight that stayed a flat brown screen on one launch was seen once and not reproduced |
@@ -26,7 +26,7 @@ v0.18.0 toolkit is proposed as an opt-in installer choice (#59, open).
 - ✅ Keyboard, keyboard and mouse, or controller, each with its own bindings; a keyboard or a second controller as player 2
 - 🔧 DualSense and DualSense Edge read directly (USB or Bluetooth); hands-on tests of the buttons are pending
 - ✅ Launcher with resolution, window size, input choice, rebinds and the fight HUD size
-- 🔧 "EX" in place of the "+" in the title logo, matching the port's name (optional, `JSP_EX_LOGO=0` keeps the "+"; merged in #82; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy of the logo is not yet confirmed)
+- 🔧 "EX" in place of the "+" in the title logo, matching the port's name (optional, `JSP_EX_LOGO=0` keeps the "+"; merged; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy of the logo is not yet confirmed)
 - 📋 Split-screen layout, brightness and glare (parked in the notes)
 
 ## 3. Modes and match options (opt-in)  🔧
@@ -61,9 +61,9 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 ## Platforms
 
-- Windows 11, x64, with Direct3D 12: the target today (Windows 10 partly: the menu fix in #81 is not yet confirmed there)
+- Windows 11, x64, with Direct3D 12: the target today (Windows 10 partly: the menu fix is not yet confirmed there)
 - Linux through Proton or Wine: not supported yet. The default build has not been run under Proton since the
-  thread-local fix (#62); the v0.18.0 port in #59 reaches fights under Proton in its tests
+  thread-local fix (installer patch 0003); the v0.18.0 port in #2 reaches fights under Proton in its tests
 
 ## Not planned
 

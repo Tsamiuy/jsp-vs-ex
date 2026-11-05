@@ -14,10 +14,10 @@ installer and the program contact no server: no update check, no crash report, n
 | Setup | What | State | Tested on |
 |---|---|---|---|
 | Windows 10/11, native | Inno Setup wizard, build step with the bundled llvm-mingw, launcher, portable zip | implemented, not run on Windows | - |
-| Windows 10/11, native | The earlier version of this installer, which needed Visual Studio 2022 Build Tools (replaced by this change) | tried by the maintainer, reported in issue #49 | see the issue |
+| Windows 10/11, native | The earlier version of this installer, which needed Visual Studio 2022 Build Tools (replaced by this change) | tried by the maintainer, reported in issue #5 | see the issue |
 | Linux, Windows exe under Wine/Proton | Wizard pages, silent install and uninstall, the lift and SPU steps with the bundled Windows Python, the compile with the bundled Windows llvm-mingw (CPU only, no game started) | verified, one run each: silent install and uninstall, the lift and SPU steps, the compile (no game started). Not run: the wizard walk with the Portable box ticked | Proton-GE (Wine reports 2 CPUs), US disc and its decrypted `EBOOT.elf` |
 | Any host with Python 3 | `firstrun_selftest.py`, `portable_selftest.py` (everything up to the compile) | verified | Linux, real US disc folder and `EBOOT.elf` |
-| Windows 10/11, native | The launcher's disc check and CPU boost; whether the boost changes the sound problem seen in #49 | implemented, untested (compiled on Linux only) | - |
+| Windows 10/11, native | The launcher's disc check and CPU boost; whether the boost changes the sound problem seen in #5 | implemented, untested (compiled on Linux only) | - |
 
 "Verified" means a run on that setup; "implemented" means the code is in but was not run there.
 
