@@ -39,6 +39,14 @@ The fight data says other characters have other max health (3500, 4000 and 4500 
 - Whether the opponent's hits push it back by the same numbers is inferred, because the dummy never attacked.
 - The value itself is not found in memory. Only the marker's screen position was seen moving with it.
 
+## Knockdown and getting up (2026-11-03, Gintoki vs a 0-star Koro-sensei, runs kd1-kd3)
+
+- **The chain, logged on the hit fighter (motion log):** a knock-away hit starts action 57 `dmg_blow` (or 56 `dmg_blow_spin`), then 62 `dmg_bound_big` (about 1.1 s on the ground), 60 `dmg_down` (one frame), then 64 `dmg_recover`, the get-up, about 0.95 s, then stand. Light hits give 47 `dmg_front`, heavier ones 51 `dmg_heavy_front` or 132 `dmg_middle_front`, in the air 49. Action numbers are the `.oam` order (GAME_MAP.md); 47-81 are named in `NNN_aft_act_module`.
+- **The full table of reaction numbers and every fighter's knockdown hits: [Knockdowns.md](Knockdowns.md)** (tested value by value in run kv1, `KD_SETFILE`, test only).
+- **What knocks down: the hit's reaction strength, byte +0x39 of the attack slot** (`param_attack`, 0x9C per hit, 0x618 per row). Gintoki: weak hits 1, the first hit of Square x3 is 3, its last hit (row 2 hit 6) is 6 and knocks away; that slot also has +0x44 = 20.0 (2.0 on the others) and +0x50 = 10.0, likely the push and the lift. In kd1/kd2 every knockdown came from a slot with 6, not from a hit count.
+- **Tested (kd3, `KD_FLINCH=1`, test only):** after the first hit the port lowers +0x39 to 1 in every slot of that attack file (71 slots on Gintoki). `dmg_blow` went from 3 to 0 and the fighter in the air (49) from 8 to 0; light flinches went from 22 to 54. Knockdowns still came from Gintoki's special combo ender (action 91, `dmg_blow_spin`), so special and projectile hits keep their own reaction in another table (not found), and 51 still showed 3 times.
+- **Projectiles, too many hits and the get-up (later the same day):** see [Knockdowns.md](Knockdowns.md): projectile reaction at row +0xAF, build-up knockdown at 150, get-up immunity until about 2.0 s after the get-up starts and the get-up file's 64.
+
 ## KO count to win
 
 The match ends when a team's KO count reaches its limit, 3 by default. Tested 2026-10-31 on red's side, Gintoki vs Koro-sensei.

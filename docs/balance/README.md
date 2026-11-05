@@ -5,6 +5,7 @@ Every character's combat numbers and where they live. Started 2026-10-30, in pro
 | File | What is in it |
 |---|---|
 | [Shared.md](Shared.md) | Health, Stamina, damage, the Victory Burst gauge and the KO count to win |
+| [Knockdowns.md](Knockdowns.md) | The reaction number of each hit (what knocks down), and every fighter's knockdown hits by row |
 | [Support.md](Support.md) | Support characters, draft |
 | [Gintoki](../character-details/028-gintoki.md) | Character 028: skills linked to rows, projectiles and Stamina from logged sessions |
 | [Luffy](../character-details/000-luffy.md) | Character 000, 76 rows. Two play sessions: 42 of 66 rows tied to moves, 11 of 18 Stamina actions, modes split where the log allows |
