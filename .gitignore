@@ -19,6 +19,7 @@
 !/docs/
 /docs/*
 !/docs/*.md
+!/docs/features.tsv
 !/docs/notes/
 /docs/notes/*
 !/docs/notes/*.md
@@ -67,6 +68,8 @@
 # Helper tools
 !/tools/
 /tools/*
+!/tools/features.py
+!/tools/test_features.py
 !/tools/site/
 /tools/site/*
 !/tools/site/*.py

@@ -1,0 +1,32 @@
+id	kind	area	feature	detail	status	evidence	note
+resolution	port	Display	Higher resolution	Renders at 720p, 1440p, 4K or 5K (5K not tested). Measured in a match on one machine: 1440p about 29.0 and 4K about 28.4 frames per second	available	720p	RES_SCALE=1..4; [RESOLUTION.md](docs/notes/RESOLUTION.md)
+window-fullscreen	port	Display	Resizable window and borderless fullscreen	The window can be resized; F11 or the launcher's fullscreen option gives borderless fullscreen	available	window	FULLSCREEN
+ex-logo	port	Display	EX in the title logo	The title logo shows EX in place of the +, matching the port's name	in progress	on	JSP_EX_LOGO=0 keeps the +; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy is not yet confirmed
+split-screen-layout	port	Display	Split-screen layout	Larger views and a solo-style HUD in 2-player split screen	planned	-	Parked in the notes
+brightness-glare	port	Display	Brightness and glare	Brightness and glare options	planned	-	Parked in the notes
+dlss	port	Display	DLSS	DLSS upscaling	planned	-	Parked in the notes
+launcher	port	Input and launcher	Launcher	A window to start the game, pick resolution and window size, choose how to play, rebind keys and set the fight HUD size	available	on	[LAUNCHER.md](docs/notes/LAUNCHER.md)
+input-modes	port	Input and launcher	Keyboard, mouse or controller	Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings	available	controller	Hands-on tests of mouse mode and rebinds are pending in the notes
+dualsense	port	Input and launcher	DualSense	A DualSense or DualSense Edge over USB or Bluetooth is read directly	in progress	on	Hands-on tests of the buttons are pending
+second-player	port	Input and launcher	Second player	A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before	available	on	
+hud-size	port	Input and launcher	Fight HUD size	Scales the fight HUD; split screen stays at full size	available	1.00	UI_SCALE=0.50..1.00
+exit-game	port	Menus and modes	Exit Game	In Options, the PSN-only Cross-Save entry is now Exit Game, with a Yes/No box	available	on	EXIT_OPTION=0 turns it off
+training-mode	port	Menus and modes	Training Mode	Free Battle offers Free Battle or Training: the game's own character select, partner slots locked, a 0-star computer fighter stands still, nobody is KO'd and health refills 1.5 s after the last hit, unlimited time, no J-Points	available	opt-in (menu choice)	Scripted keyboard runs pass. Not tested yet: KOs in a normal Free Battle right after Training, a human Player 2, a mouse click on the Training box. [TRAINING_MODE.md](docs/notes/TRAINING_MODE.md)
+training-options	port	Menus and modes	Training options	Infinite Stamina, infinite support, unlimited Victory Burst	planned	off	
+training-2p	port	Menus and modes	Two players in Training	Two local players in Training	planned	off	
+ko-count	port	Menus and modes	KO count	KO count up to 5 as a match option in every mode except Training	planned	off	
+match-sizes	port	Menus and modes	1v1 and 3v3 matches	1v1 and 3v3 beside the usual 2v2 (3v3 only if the engine allows it)	planned	off	
+own-music	port	Menus and modes	Your own music	Your own music files in place of the game's tracks (your files, never shipped)	planned	off	
+unlock-all	port	Menus and modes	Unlock all	An unlock-all switch for the progression bars and J-Points, as a save edit with a backup	planned	off	
+fp-bem	port	Rendering	Bump-mapped texture instructions	The fp-bem instructions are decompiled instead of rejected, so the ground draws	available	on	FP_BEM=0 keeps the old reject
+online-rollback	port	Online	Online matches with rollback netcode	1v1 first, then 2v2, and 3v3 if the engine allows it; direct connection first	planned	opt-in	
+spectating	port	Online	Spectating	The host opens the lobby to watchers; each watcher's camera changes only what they see	planned	opt-in	
+lobbies-ranked	port	Online	Lobbies, matchmaking, ranked	Lobbies, matchmaking and a ranked mode with one fixed rule set	planned	opt-in	
+online-training	port	Online	Online Training	Training for up to 4 players online	planned	opt-in	
+online-victory-road	port	Online	Online co-op Victory Road	Victory Road together online (the largest online item)	planned	opt-in	
+colour-palettes	port	After 1.0	Colour palettes	Character palettes made on your PC from your own game's textures; packs by other people stay outside this repository	planned	off	
+boot-menus	game	Boot and menus	Opening movie, title and Main Menu	Opening movie with sound, title screen, every Main Menu entry	works	[STATUS.md](docs/notes/STATUS.md)	Online and Cross-Save need PSN
+fights	game	Fights	Fights	Free Battle fights with music and effects	works	[STATUS.md](docs/notes/STATUS.md)	About 29 frames per second on the maps tested, on one Windows machine
+long-sessions	game	Fights	Long sessions	Fights and menus for as long as you play	works	[FREEZE_FIX.md](docs/notes/FREEZE_FIX.md)	A 30-minute scripted run and a 20-minute normal session had no freeze
+effects-glow	game	Fights	Glow around effects	The glow layer around skill effects	works	[STATUS.md](docs/notes/STATUS.md)	Compared by eye with RPCS3 screenshots, no pixel comparison
+cross-save	game	Online	Cross-Save	Upload and download save data through PSN	n/a	PSN is gone	Replaced by Exit Game
