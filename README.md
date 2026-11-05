@@ -1,10 +1,10 @@
 <p align="center"><img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS EX, Fan Revival. White ASCII art on black: a star with a 3D J inside on the left; on the right the title J-Stars Victory, the letters VS-EX and Fan Revival; below them: unofficial fan project, no game files included, you need your own copy."></p>
 
-# JSP-Project (work in progress)
+# J-Stars Victory VS EX, Fan Revival (work in progress)
 
 **J-Stars Victory VS+: unofficial PC port (static recompilation)**
 
-[![CI](https://github.com/Tsamiuy/JSP-Project/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsamiuy/JSP-Project/actions/workflows/ci.yml)
+[![CI](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Status: work in progress](https://img.shields.io/badge/status-work%20in%20progress-orange)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D6)

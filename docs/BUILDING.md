@@ -26,8 +26,8 @@ The submodule stays unchanged. `tools/toolkit/apply_toolkit.py` copies its pinne
 applies `toolkit/ps3recomp-local.patch` there. It needs Python 3.8 or newer and Git, nothing else.
 
 ```
-git clone --recurse-submodules https://github.com/Tsamiuy/JSP-Project.git
-cd JSP-Project
+git clone --recurse-submodules https://github.com/Tsamiuy/jsp-vs-ex.git
+cd jsp-vs-ex
 python tools\toolkit\apply_toolkit.py
 ```
 

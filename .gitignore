@@ -1,4 +1,4 @@
-# JSP-Project: ignore everything by default, then allow only our own text and code.
+# jsp-vs-ex: ignore everything by default, then allow only our own text and code.
 /*
 !/.gitignore
 !/README.md
