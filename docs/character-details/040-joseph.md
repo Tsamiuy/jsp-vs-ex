@@ -142,6 +142,74 @@ The input is the last press before the hit, so a combo's later hits may show the
 
 Actions with a Stamina cost that landed a hit: 29: 50, 88: 100, 89: 100, 131: 50.
 
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md).
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 1 |  | 2 | 21 | launched, then down | 70 | 5 |
+| 2 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 200 | 20 |
+| 2 |  | 6 | 6 | knocked away (dmg_blow) | 40 | 8 |
+| 3 |  | 0 | 6 | knocked away (dmg_blow) | 250 | 70 |
+| 4 |  | 0 | 6 | knocked away (dmg_blow) | 500 | 300 |
+| 4 |  | 6 | 6 | knocked away (dmg_blow) | 45 | 8 |
+| 6 |  | 5 | 6 | knocked away (dmg_blow) | 50 | 5 |
+| 14 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 450 | 250 |
+| 14 |  | 1 | 6 | knocked away (dmg_blow) | 170 | 250 |
+| 14 |  | 2 | 3 | lifted off the feet; lands and goes down unless hit again | 85 | 125 |
+| 14 |  | 3 | 3 | lifted off the feet; lands and goes down unless hit again | 85 | 125 |
+| 15 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 400 | 250 |
+| 15 |  | 1 | 4 | knocked down, big bounce | 120 | 200 |
+| 15 |  | 2 | 17 | big knock away (dmg_conspicuous_blow) | 120 | 200 |
+| 16 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 600 | 350 |
+| 18 |  | 0 | 4 | knocked down, big bounce | 50 | 20 |
+| 18 |  | 1 | 4 | knocked down, big bounce | 50 | 10 |
+| 22 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 5 |
+| 28 |  | 4 | 5 | spun away (dmg_blow_spin) | 10 | 2 |
+| 29 |  | 0 | 5 | spun away (dmg_blow_spin) | 200 | 50 |
+| 30 |  | 0 | 5 | spun away (dmg_blow_spin) | 300 | 50 |
+| 31 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 30 | 0 |
+| 32 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 30 | 0 |
+| 34 |  | 0 | 4 | knocked down, big bounce | 200 | 10 |
+| 35 |  | 0 | 4 | knocked down, big bounce | 200 | 10 |
+| 36 |  | 1 | 4 | knocked down, big bounce | 35 | 0 |
+| 36 |  | 8 | 4 | knocked down, big bounce | 20 | 5 |
+| 36 |  | 9 | 4 | knocked down, big bounce | 35 | 0 |
+| 37 |  | 0 | 21 | launched, then down | 300 | 20 |
+| 37 |  | 1 | 4 | knocked down, big bounce | 35 | 0 |
+| 37 |  | 3 | 11 | shocked, then down (dmg_shock) | 35 | 0 |
+| 37 |  | 9 | 4 | knocked down, big bounce | 35 | 0 |
+| 39 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 250 | 20 |
+| 40 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 250 | 20 |
+| 42 |  | 0 | 6 | knocked away (dmg_blow) | 100 | 10 |
+| 43 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 30 | 0 |
+| 44 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 30 | 0 |
+| 45 |  | 0 | 4 | knocked down, big bounce | 100 | 20 |
+| 46 |  | 0 | 4 | knocked down, big bounce | 100 | 20 |
+| 47 |  | 1 | 4 | knocked down, big bounce | 35 | 0 |
+| 47 |  | 8 | 4 | knocked down, big bounce | 35 | 0 |
+| 47 |  | 9 | 4 | knocked down, big bounce | 35 | 0 |
+| 52 |  | 0 | 5 | spun away (dmg_blow_spin) | 200 | 50 |
+| 53 |  | 0 | 11 | shocked, then down (dmg_shock) | 400 | 5 |
+| 53 |  | 1 | 11 | shocked, then down (dmg_shock) | 20 | 0 |
+| 54 |  | 0 | 11 | shocked, then down (dmg_shock) | 21 | 5 |
+| 54 |  | 1 | 11 | shocked, then down (dmg_shock) | 20 | 0 |
+
+| Projectile row | Number | What it does | Damage |
+|---|---|---|---|
+| 10 | 12 | pierced, then down (dmg_penetration) | 250 |
+| 15 | 12 | pierced, then down (dmg_penetration) | 250 |
+| 20 | 5 | spun away (dmg_blow_spin) | 2200 |
+| 25 | 5 | spun away (dmg_blow_spin) | 35 |
+| 26 | 5 | spun away (dmg_blow_spin) | 10 |
+| 27 | 5 | spun away (dmg_blow_spin) | 10 |
+| 28 | 5 | spun away (dmg_blow_spin) | 10 |
+| 30 | 5 | spun away (dmg_blow_spin) | 35 |
+| 31 | 5 | spun away (dmg_blow_spin) | 35 |
+| 32 | 5 | spun away (dmg_blow_spin) | 10 |
+| 33 | 5 | spun away (dmg_blow_spin) | 10 |
+
 ## Skill table (the game's own list)
 
 Names and inputs as the pause menu's Skill table gives them. Which attack row each one uses is not linked yet.
