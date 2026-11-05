@@ -46,7 +46,7 @@ installer and the program contact no server: no update check, no crash report, n
 | `installer/tools/assemble_portable.py` | Packs the same payload as `jsp-<version>-portable.zip` with `run.cmd` and a short readme |
 | `installer/tools/fetch_toolchain.py`, `toolchain.json` | Downloads llvm-mingw, CMake, Ninja, their licence texts and the FFmpeg source (its libavcodec/libavutil headers only go into the payload, for the opening-movie decoder) on the machine that builds the installer, checks the pinned SHA-256 of each, unpacks them into a cache. Nothing downloaded is committed |
 | `installer/tools/llvm-mingw.cmake` | CMake toolchain file for the bundled compiler |
-| `installer/patches/` | Small patches the payload applies to its own copy of the port and the toolkit (this repository's files are not changed): 0001 to 0003 so that clang builds them, 0006 the optional "EX" in the title logo |
+| `installer/patches/` | Small patches the payload applies to its own copy of the port and the toolkit (this repository's files are not changed): 0001 to 0003 so that clang builds them, 0004 the optional startup shader loader, 0005 the Windows 10 fix for DXT textures whose size is not a multiple of 4, 0006 the optional "EX" in the title logo, 0007 the window icon and the plain title the launcher asks for |
 | `installer/licenses/LGPL-2.1.txt` | The one licence text kept in the tree (some MinGW-w64 headers are LGPL-2.1+); the others are fetched with pinned hashes |
 | `installer/tools/firstrun_selftest.py`, `portable_selftest.py`, `make_fixture.py` | Host checks of `firstrun.py` and the portable path, up to the compile; `make_fixture.py` writes a small fake disc folder (no game data) |
 

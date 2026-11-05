@@ -1,0 +1,38 @@
+Game window icon and a plain title, for an installer's launcher. Applied by installer/tools/assemble_payload.py to the payload's
+copy of the toolkit; the checked-out repository is not edited.
+WINDOW_ICON=<file.ico> gives the game window that icon in the title bar and the taskbar (the launcher points it at the
+installer's jsp-launcher.ico); unset keeps Windows' default. TITLE_STATS=0 shows the window title alone, without the FPS, draw
+count and size that are added once a second (the launcher sets it unless the settings window's "Show FPS in the window title"
+is on). Both unset: the window is as before.
+Tested on Windows 11: icon loaded (logged), title "J-Stars Victory VS+" with TITLE_STATS=0, the usual stats without it.
+diff --git a/ps3recomp/libs/video/rsx_d3d12_backend.c b/ps3recomp/libs/video/rsx_d3d12_backend.c
+--- a/ps3recomp/libs/video/rsx_d3d12_backend.c
++++ b/ps3recomp/libs/video/rsx_d3d12_backend.c
+@@ -1203,6 +1203,16 @@
+     wc.lpfnWndProc = d3d12_wndproc;
+     wc.hInstance = GetModuleHandle(NULL);
+     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
++    /* WINDOW_ICON=<file.ico>: the window's title-bar and taskbar icon (a
++     * title's launcher points it at its own art); unset keeps Windows' default. */
++    { const char* ico = getenv("WINDOW_ICON");
++      if (ico && *ico) {
++          wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXICON),
++                                       GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE);
++          wc.hIconSm = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
++                                         GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
++          printf("[D3D12] window icon %s: %s\n", wc.hIcon ? "loaded" : "NOT loaded", ico);
++      } }
+     wc.lpszClassName = "ps3recomp_d3d12";
+     RegisterClassExA(&wc);
+ 
+@@ -10143,6 +10153,10 @@
+                 snprintf(tb, sizeof(tb), "%s | FPS: %.2f (batches %.1f) | draws: %u | %ux%u",
+                          g_rsx_title_base, (double)(u32)(flips - s_tflip0) / secs,
+                          s_tframes / secs, s_dbg_last_draws, RS(s_d3d.width), RS(s_d3d.height));
++            /* TITLE_STATS=0: the title alone, without FPS, draws and size. */
++            { static int s_tstats = -1;
++              if (s_tstats < 0) { const char* e = getenv("TITLE_STATS"); s_tstats = (e && *e == '0') ? 0 : 1; }
++              if (!s_tstats) snprintf(tb, sizeof(tb), "%s", g_rsx_title_base); }
+             SetWindowTextA(s_d3d.hwnd, tb);
+             s_tframes = 0;
+             s_tflip0 = flips;
