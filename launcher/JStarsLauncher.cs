@@ -92,6 +92,8 @@ namespace JStarsLauncher
         // ---- controls ----
         ComboBox resBox, winBox, modeBox, aaBox;
         CheckBox fxFullBox;
+        CheckBox statsBox;
+        CheckBox fpsBox;
         static readonly string[] AaIds = { "off", "fxaa", "fxaa2", "smaa" };
         Panel kbPanel, kbmPanel, padPanel;
         TabControl tabs;
@@ -261,7 +263,7 @@ namespace JStarsLauncher
             using (Graphics g = CreateGraphics()) dpiScale = g.DpiX / 96F;
             Font = new Font("Segoe UI", 9F);
             Text = "J-Stars Victory VS+";
-            ClientSize = Z(640, 694);
+            ClientSize = Z(640, 718);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -279,20 +281,20 @@ namespace JStarsLauncher
             header.Controls.Add(title); header.Controls.Add(sub);
             Controls.Add(header);
 
-            tabs = new TabControl { Location = P(12, 76), Size = Z(616, 550) };
+            tabs = new TabControl { Location = P(12, 76), Size = Z(616, 574) };
             tabs.TabPages.Add(BuildDisplayTab());
             tabs.TabPages.Add(BuildControlsTab());
             Controls.Add(tabs);
 
             // Bottom bar
-            statusLabel = new Label { Location = P(14, 646), Size = Z(340, 36), Text = "Ready.", TextAlign = ContentAlignment.MiddleLeft };
+            statusLabel = new Label { Location = P(14, 670), Size = Z(340, 36), Text = "Ready.", TextAlign = ContentAlignment.MiddleLeft };
             startBtn = new Button {
-                Text = "Start Game", Location = P(366, 642), Size = Z(150, 40),
+                Text = "Start Game", Location = P(366, 666), Size = Z(150, 40),
                 BackColor = Accent, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 11F, FontStyle.Bold) };
             startBtn.FlatAppearance.BorderSize = 0;
             startBtn.Click += delegate { StartGame(); };
-            exitBtn = new Button { Text = "Exit", Location = P(526, 642), Size = Z(100, 40), Font = new Font("Segoe UI", 10F) };
+            exitBtn = new Button { Text = "Exit", Location = P(526, 666), Size = Z(100, 40), Font = new Font("Segoe UI", 10F) };
             exitBtn.Click += delegate { Close(); };
             Controls.Add(statusLabel); Controls.Add(startBtn); Controls.Add(exitBtn);
             AcceptButton = null;   // Enter must stay bindable on the Controls page
@@ -337,6 +339,16 @@ namespace JStarsLauncher
                 Text = "Only used in a window. Lists every 16:9 size your screens offer. A window\r\nbigger than the screen is shrunk to fit. You can also drag the window edges in the game.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 52;
+
+            // TITLE_STATS for the game: FPS, draw count and size after the window title (off in an install, on in the hand-built tree).
+            statsBox = new CheckBox { Text = "Show FPS in the window title", Location = P(16, y), AutoSize = true, Checked = !installed };
+            statsBox.CheckedChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(statsBox);
+            // FPS_COUNTER for the game: frames per second, small, in the bottom-left corner. Same row, so the window keeps its size.
+            fpsBox = new CheckBox { Text = "FPS counter (bottom left)", Location = P(300, y), AutoSize = true, Checked = false };
+            fpsBox.CheckedChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(fpsBox);
+            y += 32;
 
             boostOffBox = new CheckBox { Text = "Turn CPU boost off again when the game closes (keeps the PC cool)", Location = P(16, y), AutoSize = true, Checked = true };
             boostOffBox.CheckedChanged += delegate { SaveIfReady(); };
@@ -730,7 +742,7 @@ namespace JStarsLauncher
                     int eq = t.IndexOf('=');
                     if (t.Length == 0 || t.StartsWith("#") || eq <= 0) continue;
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
-                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" ||
+                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" ||
                         k == "INPUT_MODE" || k == "MOUSE_SENS" || k.StartsWith("PAD_KEY_") || k.StartsWith("KB_KEY_") ||
                         k.StartsWith("KBM_KEY_") || k.StartsWith("PAD_BTN_"))
                         cur[k] = v;
@@ -759,6 +771,8 @@ namespace JStarsLauncher
             int aa = cur.TryGetValue("AA_MODE", out s) ? Array.IndexOf(AaIds, s.ToLowerInvariant()) : 1;
             aaBox.SelectedIndex = aa < 0 ? 1 : aa;
             fxFullBox.Checked = !(cur.TryGetValue("FX_FULL", out s) && s == "0");
+            statsBox.Checked = cur.TryGetValue("TITLE_STATS", out s) ? s == "1" : !installed;
+            fpsBox.Checked = cur.TryGetValue("FPS_COUNTER", out s) && s == "1";
             // Keyboard page: KB_KEY_*, or PAD_KEY_* from before the input types existed.
             // Keyboard & Mouse page: KBM_KEY_*, else a copy of the keyboard page.
             string kbPrefix = HasPrefix(cur, "KB_KEY_") ? "KB_KEY_" : "PAD_KEY_";
@@ -804,6 +818,8 @@ namespace JStarsLauncher
             lines.Add("UI_SCALE=" + (hudBar.Value / 20.0).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
             lines.Add("AA_MODE=" + AaIds[aaBox.SelectedIndex]);
             lines.Add("FX_FULL=" + (fxFullBox.Checked ? "1" : "0"));
+            lines.Add("TITLE_STATS=" + (statsBox.Checked ? "1" : "0"));
+            lines.Add("FPS_COUNTER=" + (fpsBox.Checked ? "1" : "0"));
             lines.Add("INPUT_MODE=" + ModeIds[Mode]);
             lines.Add("# Keys the game uses: the active page's keys as Windows virtual-key codes (0x01-0x06 = mouse buttons).");
             foreach (PadAction a in CurrentKeys())
