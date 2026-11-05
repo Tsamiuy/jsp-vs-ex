@@ -1,6 +1,6 @@
 # J-Stars Victory VS+ game project (ps3recomp v0.18.0).
 # Starts from the ps3recomp v0.18.0 project template (templates/project/CMakeLists.txt, MIT).
-# From JSP-Project jstars/port/CMakeLists.txt (Tsamiuy, MIT), adapted to ps3recomp v0.18.0: the project's
+# From jsp-vs-ex jstars/port/CMakeLists.txt (Tsamiuy, MIT), adapted to ps3recomp v0.18.0: the project's
 # game files list (jstars_*.cpp, left out for now) and the dxguid link (only if the link needs it).
 # Built by the installer (installer/tools/firstrun.py) with PS3RECOMP_DIR = the patched toolkit, RECOMP_DIR = the PPU lift
 # and SPU_DIR = the lifted SPU jobs, all made on the player's PC from the player's own EBOOT; nothing of them is in git.

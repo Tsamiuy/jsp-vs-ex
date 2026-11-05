@@ -2,7 +2,7 @@
  * J-Stars Victory VS+ -- entry point (jsp.exe).
  *
  * Starts from the ps3recomp v0.18.0 project template (templates/project/main.cpp, MIT). Two blocks are from
- * JSP-Project jstars/port/main.cpp (Tsamiuy, MIT), adapted to ps3recomp v0.18.0:
+ * jsp-vs-ex jstars/port/main.cpp (Tsamiuy, MIT), adapted to ps3recomp v0.18.0:
  *   - cellGame_init_from_paramsfo (real title id from the disc's PARAM.SFO)
  *   - the cellfs_add_path_mapping calls for /dev_hdd0 and /dev_flash (PS3_HDD0_ROOT, PS3_DEV_FLASH)
  * ENHANCEMENT: the disc/hdd0/flash folders can also be given as arguments (see usage), for launchers that
@@ -508,7 +508,7 @@ int main(int argc, char** argv)
     derive_vfs_root(argv[1]);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
 
-    /* from JSP-Project jstars/port/main.cpp (Tsamiuy, MIT), adapted to ps3recomp v0.18.0:
+    /* from jsp-vs-ex jstars/port/main.cpp (Tsamiuy, MIT), adapted to ps3recomp v0.18.0:
      * the real title id from the disc's PARAM.SFO (the VFS root holds PS3_GAME). */
     {
         char sfo[1100];
@@ -516,7 +516,7 @@ int main(int argc, char** argv)
         cellGame_init_from_paramsfo(sfo);
     }
 
-    /* from JSP-Project jstars/port/main.cpp (Tsamiuy, MIT), adapted to ps3recomp v0.18.0:
+    /* from jsp-vs-ex jstars/port/main.cpp (Tsamiuy, MIT), adapted to ps3recomp v0.18.0:
      * libs/filesystem/cellFs.c (cellFsRename and friends) keeps its own mount table, defaulting /dev_hdd0 to
      * ./gamedata/dev_hdd0 -- not where ppu_fs (cellFsOpen) puts it. Point both at the same host directories. */
     {

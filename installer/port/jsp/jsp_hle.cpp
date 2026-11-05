@@ -2,7 +2,7 @@
  * jsp_hle.cpp -- single-call HLE overrides J-Stars needs on ps3recomp v0.18.0.
  *
  * After this repository's v0.15 port (jstars/port/stubs.cpp: l10n_ucs2_to_utf8, netctl_get_state,
- * sysutil_get_bgm_status2; JSP-Project, Tsamiuy, MIT). Each one is still missing or answers differently from
+ * sysutil_get_bgm_status2; jsp-vs-ex, Tsamiuy, MIT). Each one is still missing or answers differently from
  * hardware in v0.18.0 (0xA9A76FB8 and 0x6CFD856F unresolved, GetState NOT_INITIALIZED every frame
  * after the opening movie although the game called cellNetCtlInit).
  */
