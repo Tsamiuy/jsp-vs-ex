@@ -1,0 +1,52 @@
+Patch 1003: for JOBCRT Ver14 jobs, the job context holds the job descriptor's LS address (sound).
+
+CRI's decoder jobs (AtomDecoder, AsrVoice) link a "JOBCRT Ver14" crt. Its entry checks CellSpursJobContext2 +0x14 & 0x0FFFFFFF
+and stops with 0x3FFF before main when that is 0. spurs_job.c wrote 0 there for everything but Ver13 jobs, so no audio was
+decoded and the output was silent. jm2 leaves the LS address of the job descriptor in those bits; now they carry it.
+SPURS_CTX_PAD=0 restores the old 0. Ver13 jobs keep the jm_iface value.
+Diagnostic: AUDIO_SILENCE=1 counts all-zero mixed blocks and logs "[audio-silence] blocks= silent= window=" every 1000 blocks.
+Same fix as the v15 port's SPURS_CTX_PAD (toolkit/ps3recomp-local.patch, spurs_job.c; docs/notes/FINDINGS.md "SPURS_CTX_PAD").
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 02b751b..66005fb 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -618,6 +618,14 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+                 float a = s_mix_buffer[i]; if (a < 0) a = -a; if (a > pk) pk = a; }
+             if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
+                 fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
++        /* Patch 1003 (diagnostic): AUDIO_SILENCE=1 counts mixed blocks that are all zero (before the clip,
++         * so exactly what the backend receives) and prints total/silent every 1000 blocks (~5.3 s). */
++        { static int _as = -1; if (_as < 0) _as = getenv("AUDIO_SILENCE") ? 1 : 0;
++          if (_as) { static unsigned long _t, _z, _lt, _lz; int nz = 0;
++            for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
++            _t++; if (!nz) _z++;
++            if ((_t % 1000) == 0) { fprintf(stderr, "[audio-silence] blocks=%lu silent=%lu window=%lu/%lu\n", _t, _z, _z - _lz, _t - _lt);
++                _lt = _t; _lz = _z; } } }
+         /* AUDIO_WAV=<file>: append the final mix as raw f32le stereo 48 kHz
+          * (ffmpeg -f f32le -ar 48000 -ac 2 -i <file>). */
+         { static FILE* _wf = (FILE*)-1;
+diff --git a/runtime/spu/spurs_job.c b/runtime/spu/spurs_job.c
+index bb8f122..1c529d9 100644
+--- a/runtime/spu/spurs_job.c
++++ b/runtime/spu/spurs_job.c
+@@ -274,8 +274,18 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+         ls32(ls, 0x1CC, JOB_DMA_TAG);
+         memset(ls + 0x210, 0, 0x10);
+     }
++    /* Patch 1003 (SPURS_CTX_PAD, default on, SPURS_CTX_PAD=0 off): a "JOBCRT Ver14" crt (CRI's AtomDecoder and
++     * AsrVoice jobs) checks ctx+0x14 & 0x0FFFFFFF first and stops with 0x3FFF before main when it is 0. jm2 leaves the
++     * LS address of the job descriptor there. Ver13 keeps its own value (jm_iface above). Game jobs ignore the field.
++     * Adapted from the v15 port's SPURS_CTX_PAD (toolkit patch, spurs_job.c). */
++    uint32_t ctx_pad = jm_iface;
++    if (!jm_iface) {
++        static int pad = -1;
++        if (pad < 0) { const char* e = getenv("SPURS_CTX_PAD"); pad = (e && *e == '0') ? 0 : 1; }
++        if (pad) ctx_pad = desc_ls & 0x0FFFFFFFu;
++    }
+     ls32(ls, ctx_ls + JC_SIZE_JOB_DESC,
+-         ((dsz == 64 ? 0u : (dsz / 128u) & 0xFu) << 28) | jm_iface);
++         ((dsz == 64 ? 0u : (dsz / 128u) & 0xFu) << 28) | ctx_pad);
+     ls16(ls, ctx_ls + JC_NUM_IO_BUFFER,    (uint16_t)n_dma);
+     ls16(ls, ctx_ls + JC_NUM_CACHE_BUFFER, (uint16_t)n_cache);
+     ls32(ls, ctx_ls + JC_O_BUFFER, out_ls);

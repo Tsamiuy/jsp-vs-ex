@@ -1,0 +1,84 @@
+Patch 2024: 1024 texture slots in the VP path (fixes the HUD white and black boxes).
+
+VP_TEX_SLOTS was 192. A fight binds more distinct textures than that, so when no slot was free the bind returned -1 and the draw
+went out untextured: the white and black boxes on the gauges, the minimap arrows and the charge bar. The least-recently-used slot
+was also released and its committed D3D12 texture re-created over and over (CreateCommittedResource). 1024 slots hold the working
+set. VP_TEX_SLOTS=<n> (1..1024) lowers the active limit at run time (192 = the old behaviour). The [PERF] line (PERF=1) gets
+"texres N": committed texture and upload resources created in that window.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index e4aa418..46753ac 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -217,7 +217,21 @@ typedef struct {
+  * so every draw past the fourth got slot -1 from vp_upload_tex_slot ("out of
+  * slots") and drew UNTEXTURED. That reads as a correctly-lit but solid black
+  * object, which is indistinguishable from a missing texture upload. */
+-#define VP_TEX_SLOTS 192
++#define VP_TEX_SLOTS 1024
++/* Patch 2024: a fight cycles more than 192 distinct textures per few frames, so with 192 slots the least-recently-used texture was freed and re-created
++ * (CreateCommittedResource) constantly. 1024 slots hold the working set. The active limit can be lowered at run time for A/B runs: VP_TEX_SLOTS=<n>
++ * (1..1024; 192 = the previous behaviour). */
++static int s_vp_tex_lim = 0;
++static int vp_tex_lim(void)
++{
++    if (!s_vp_tex_lim) {
++        const char* e = getenv("VP_TEX_SLOTS"); int n = e ? atoi(e) : VP_TEX_SLOTS;
++        if (n < 1) n = 1; if (n > VP_TEX_SLOTS) n = VP_TEX_SLOTS;
++        s_vp_tex_lim = n;
++    }
++    return s_vp_tex_lim;
++}
++static int s_perf_texres = 0;   /* patch 2024: committed texture/upload resources created in this PERF window */
+ /* Guest texture uploads are staged in one persistently mapped upload buffer,
+  * a part per frame in flight, reset when that frame's command allocator is
+  * (the GPU has finished its copies by then). A committed upload buffer per
+@@ -3114,7 +3128,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+      * here was a GCC/Clang extension MSVC rejects.) */
+     #define TEX_CSUM(base, nbytes) tex_csum((base), (nbytes))
+     int slot = -1, freeslot = -1;
+-    for (int i = 0; i < VP_TEX_SLOTS; i++) {
++    for (int i = 0, _lim = vp_tex_lim(); i < _lim; i++) {
+         VPTexSlot* c = &s_d3d.vp_tex[i];
+         if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
+             && c->cube == cube) {
+@@ -3292,6 +3306,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+                 D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+                 &IID_ID3D12Resource, (void**)&t->res)))
+             return -1;
++        s_perf_texres++;
+         fresh = 1;
+     }
+     /* Stage the decoded image in the ring, or in the slot's own upload
+@@ -3336,6 +3351,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+                     D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                     &IID_ID3D12Resource, (void**)&t->up)))
+                 return -1;
++            s_perf_texres++;
+         }
+         up_res = t->up;
+     }
+@@ -5965,7 +5981,7 @@ static void render_frame(void)
+             double fr = s_perf_frame > 0 ? s_perf_frame : 1;
+             fprintf(stderr, "[PERF] %.2f fps | tex %.2fs (%.0f%%, %d calls) | vtx %.2fs"
+                             " (%.0f%%, %.0fk verts) | render_frame %.2fs (%.0f%%)"
+-                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | guest %.2fs (%.0f%%)%c",
++                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | texres %d | guest %.2fs (%.0f%%)%c",
+                     20.0 / fr,
+                     s_perf_tex, 100.0 * s_perf_tex / fr, s_perf_ntex,
+                     s_perf_vtx, 100.0 * s_perf_vtx / fr,
+@@ -5974,12 +5990,12 @@ static void render_frame(void)
+                     s_perf_pre, 100.0 * s_perf_pre / fr,
+                     s_perf_srv, 100.0 * s_perf_srv / fr,
+                     s_perf_pso, 100.0 * s_perf_pso / fr,
+-                    s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
++                    s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024, s_perf_texres,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+             s_perf_pso_calls = 0; s_perf_pso_miss = 0; s_perf_pso_hashbytes = 0;
+-            s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0;
++            s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0; s_perf_texres = 0;
+         }
+     }
+     { static int dt = -1;

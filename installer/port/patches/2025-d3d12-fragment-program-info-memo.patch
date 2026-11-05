@@ -1,0 +1,192 @@
+Patch 2025: memo for the per-draw fragment-program facts (size, code hash, sampled texture units).
+
+Per draw the D3D12 path walked the fragment program three times: rsx_fp_texture_units, rsx_fp_program_size and rsx_fp_code_hash.
+rsx_fp_info_memo() (rsx_fp_decompiler.c) answers all three from one entry per program: 4-way sets keyed on the hash of the first
+instruction slot (not on the address: the game rewrites programs into a ring), each with a copy of the program bytes and a
+per-slot skip mask. A slot is skipped in the comparison only when all three walks treat it as an inline-constant slot (the game
+re-patches those each frame), so a hit means identical instruction slots and identical results. Programs longer than 1 KB or
+without END are not memoised. Same idea as the v15 port's SHADER_HASH_MEMO, with a different key. SHADER_HASH_MEMO=0 runs the
+three walks as before. Drawing thread only (not thread-safe). [PERF] shows "fpmemo hits/misses".
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 46753ac..b4f0e56 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -231,6 +231,7 @@ static int vp_tex_lim(void)
+     }
+     return s_vp_tex_lim;
+ }
++extern unsigned long long g_rsx_fp_memo_hit, g_rsx_fp_memo_miss;
+ static int s_perf_texres = 0;   /* patch 2024: committed texture/upload resources created in this PERF window */
+ /* Guest texture uploads are staged in one persistently mapped upload buffer,
+  * a part per frame in flight, reset when that frame's command allocator is
+@@ -2357,14 +2358,14 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
+  * so the pipeline key can compare them: enabled (2 bits) | func<<2 | linear<<5 | unnormalized<<6. */
+ static int off_rt_find(u32 off);
+ static int off_ds_find(u32 off);
+-static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16])
++static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], int have_units, u32 units_in)
+ {
+     extern uint8_t* vm_base;
+     memset(sh, 0, 16);
+     static int en = -1;
+     if (en < 0) { const char* e = getenv("RSX_SHADOW_CMP"); en = e ? atoi(e) : 1; }
+     if (!en || !dr || !vm_base) return;
+-    u32 units = rsx_fp_texture_units(vm_base + off, 0x10000);
++    u32 units = have_units ? units_in : rsx_fp_texture_units(vm_base + off, 0x10000);   /* patch 2025: the memo may have it */
+     static u32 s_units_seen[64]; static int s_units_n;
+     for (u32 u = 0; u < 16 && u < VP_TEX_UNITS; u++) {
+         if (!(units & (1u << u))) continue;
+@@ -2850,7 +2851,10 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+     u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
+     if (off == 0xFFFFFFFFu) return NULL;
+-    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig);
++    /* Patch 2025: size, code hash and sampled units from one memoised lookup (SHADER_HASH_MEMO=0: three walks as before). */
++    u32 m_size = 0, m_hash = 0, m_units = 0;
++    const int memo = rsx_fp_info_memo(vm_base + off, &m_size, &m_hash, &m_units);
++    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig, memo, m_units);
+ 
+     /* Content hash: inline constants are patched in place per frame (wave's
+      * stamp), so identity is the BYTES, not the address. */
+@@ -2859,7 +2863,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+      * so hashing them made the pipeline key move every draw. */
+     u32 uhash;
+     {
+-        u32 usz = rsx_fp_program_size(vm_base + off, 0x10000);
++        u32 usz = memo ? m_size : rsx_fp_program_size(vm_base + off, 0x10000);
+         if (usz == 0) usz = 64;
+         s_perf_pso_hashbytes += (int)usz;
+         static int consts_inline = -1;
+@@ -2870,7 +2874,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             const u8* up = vm_base + off;
+             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
+         } else {
+-            uhash = rsx_fp_code_hash(vm_base + off, 0x10000);
++            uhash = memo ? m_hash : rsx_fp_code_hash(vm_base + off, 0x10000);
+         }
+     }
+ 
+@@ -5981,7 +5985,7 @@ static void render_frame(void)
+             double fr = s_perf_frame > 0 ? s_perf_frame : 1;
+             fprintf(stderr, "[PERF] %.2f fps | tex %.2fs (%.0f%%, %d calls) | vtx %.2fs"
+                             " (%.0f%%, %.0fk verts) | render_frame %.2fs (%.0f%%)"
+-                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | texres %d | guest %.2fs (%.0f%%)%c",
++                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | texres %d fpmemo %llu/%llu | guest %.2fs (%.0f%%)%c",
+                     20.0 / fr,
+                     s_perf_tex, 100.0 * s_perf_tex / fr, s_perf_ntex,
+                     s_perf_vtx, 100.0 * s_perf_vtx / fr,
+@@ -5991,6 +5995,7 @@ static void render_frame(void)
+                     s_perf_srv, 100.0 * s_perf_srv / fr,
+                     s_perf_pso, 100.0 * s_perf_pso / fr,
+                     s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024, s_perf_texres,
++                    g_rsx_fp_memo_hit, g_rsx_fp_memo_miss,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index cfb9685..8f3a817 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -1645,6 +1645,91 @@ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes)
+     return h;
+ }
+ 
++
++/* ------------------------------------------------------------------------- */
++/* Patch 2025: memo for the per-draw fragment-program facts (size, code hash, sampled texture units). Each of those is a walk of the program (three walks
++ * per draw). The result depends only on the instruction slots, not on the inline constant slots the game re-patches per frame, so a memo entry keeps a copy
++ * of the program bytes and a per-slot skip mask: a slot is skipped in the comparison only if all three walks treat it as a constant slot. A hit compares the
++ * remaining 16-byte slots (exact: identical instruction slots give identical walks). Programs over FP_MEMO_MAX bytes or without END are not memoised.
++ * Switch: SHADER_HASH_MEMO=0 turns it off (the three walks run as before). Idea credited to the owner's v0.15 SHADER_HASH_MEMO. */
++#define FP_MEMO_MAX   1024u
++#define FP_MEMO_SLOTS (FP_MEMO_MAX / 16u)
++#define FP_MEMO_SETS  1024u    /* 4-way: 4096 entries (about 4.6 MB) */
++#define FP_MEMO_WAYS  4u
++typedef struct {
++    u32 size, hash, units, nslots;
++    u8 skip[FP_MEMO_SLOTS]; u8 code[FP_MEMO_MAX];
++} FpMemo;
++static FpMemo s_fp_memo[FP_MEMO_SETS * FP_MEMO_WAYS];
++static u8 s_fp_memo_rr[FP_MEMO_SETS];
++unsigned long long g_rsx_fp_memo_hit, g_rsx_fp_memo_miss;
++
++static int fp_memo_enabled(void)
++{
++    static int en = -1;
++    if (en < 0) { const char* e = getenv("SHADER_HASH_MEMO"); en = (e && e[0] == '0') ? 0 : 1; }
++    return en;
++}
++
++/* Fills skip[] and returns the slot count, or 0 when the program is not memoisable. */
++static u32 fp_memo_layout(const u8* uc, u8* skip)
++{
++    u8 c[3][FP_MEMO_SLOTS]; u32 end[3] = {0, 0, 0};
++    for (int w = 0; w < 3; w++) {
++        u32 off = 0, slot = 0; memset(c[w], 0, FP_MEMO_SLOTS);
++        for (;;) {
++            if (slot >= FP_MEMO_SLOTS) return 0;       /* too long (or no END within the limit) */
++            const u32 w0 = rsx_fp_read_word(uc + off), w1 = rsx_fp_read_word(uc + off + 4);
++            const u32 w2 = rsx_fp_read_word(uc + off + 8), w3 = rsx_fp_read_word(uc + off + 12);
++            off += 16; slot++;
++            int k;
++            if (w == 0)      k = (((w1 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST ||
++                                  ((w2 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST ||
++                                  ((w3 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST);   /* size walk: branch too */
++            else if (w == 1) k = !(w2 & FP_BRANCH) && fp_instruction_has_constant(w1, w2, w3);              /* hash walk */
++            else             k = !(w2 & FP_BRANCH) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2); /* texture-unit walk */
++            if (k) { if (slot >= FP_MEMO_SLOTS) return 0; c[w][slot] = 1; off += 16; slot++; }
++            if (w0 & FP_END) break;
++        }
++        end[w] = slot;
++    }
++    u32 n = end[0] > end[1] ? end[0] : end[1]; if (end[2] > n) n = end[2];
++    for (u32 i = 0; i < n; i++)
++        skip[i] = (u8)(((i >= end[0]) || c[0][i]) && ((i >= end[1]) || c[1][i]) && ((i >= end[2]) || c[2][i]));
++    return n;
++}
++
++/* size/hash/units of the program at ucode (max_bytes 0x10000 as the backend passes). Returns 1 if the memo answered. */
++int rsx_fp_info_memo(const u8* ucode, u32* size, u32* hash, u32* units)
++{
++    if (!ucode || !fp_memo_enabled()) return 0;
++    /* Keyed on the program's first instruction slot (never a constant slot) and not on its address: the game rewrites programs into a ring, so the same
++     * program shows up at different addresses. The comparison below covers that slot too, so a shared key is only a hash collision. */
++    u32 kh = 2166136261u;
++    for (int i = 0; i < 16; i++) { kh ^= ucode[i]; kh *= 16777619u; }
++    const u32 set = (kh ^ (kh >> 15)) % FP_MEMO_SETS;
++    FpMemo* ways = &s_fp_memo[set * FP_MEMO_WAYS];
++    for (u32 w = 0; w < FP_MEMO_WAYS; w++) {
++        FpMemo* m = &ways[w];
++        if (!m->nslots) continue;
++        u32 i = 0;
++        for (; i < m->nslots; i++)
++            if (!m->skip[i] && memcmp(ucode + i * 16u, m->code + i * 16u, 16)) break;
++        if (i == m->nslots) { g_rsx_fp_memo_hit++; *size = m->size; *hash = m->hash; *units = m->units; return 1; }
++    }
++    g_rsx_fp_memo_miss++;
++    *size = rsx_fp_program_size(ucode, 0x10000);
++    *hash = rsx_fp_code_hash(ucode, 0x10000);
++    *units = rsx_fp_texture_units(ucode, 0x10000);
++    if (!*size) return 1;
++    u8 skip[FP_MEMO_SLOTS]; u32 n = fp_memo_layout(ucode, skip);
++    if (!n) return 1;
++    FpMemo* m = &ways[s_fp_memo_rr[set]++ % FP_MEMO_WAYS];
++    m->size = *size; m->hash = *hash; m->units = *units; m->nslots = n;
++    memcpy(m->skip, skip, n); memcpy(m->code, ucode, n * 16u);
++    return 1;
++}
++
+ /* Scale texel-space coordinates to the 0..1 range HLSL sampling expects.
+  *
+  * An RSX texture whose format carries RSX_TEX_FMT_UNNORM (0x40) is addressed in
+diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
+index e55bcc1..9039728 100644
+--- a/libs/video/rsx_fp_decompiler.h
++++ b/libs/video/rsx_fp_decompiler.h
+@@ -255,4 +255,5 @@ u32 rsx_fp_program_size(const u8* ucode, u32 max_bytes);
+ /* Kept from this tree (see the .c) -- used by rsx_d3d12_backend.c. */
+ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_out);
+ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes);
++int rsx_fp_info_memo(const u8* ucode, u32* size, u32* hash, u32* units);   /* patch 2025 */
+ #endif /* PS3RECOMP_RSX_FP_DECOMPILER_H */
