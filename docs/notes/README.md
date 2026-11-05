@@ -31,7 +31,7 @@ What changed, how it was tested and the evidence: table at the top of STATUS.md.
 | [SHADOWS_ENV.md](SHADOWS_ENV.md) | Environment shadow flicker (fixed by ZPASS_LOD0) |
 | [RESOLUTION.md](RESOLUTION.md) | 4K plan (done: RES_SCALE) |
 | [LAUNCHER.md](LAUNCHER.md) | `J-Stars Launcher.exe`: settings file, key bindings, tests |
-| [TRAINING_MODE.md](TRAINING_MODE.md) | Training mode design and build steps. Training settings menu in the pause menu (Unlimited Stamina, Free Camera). Time limit lock on Stage select |
+| [TRAINING_MODE.md](TRAINING_MODE.md) | Training mode design and build steps. Training settings menu in the pause menu (Unlimited Stamina, Free Camera, Hide HUD). Time limit lock on Stage select |
 | [FREEZE_FIX.md](FREEZE_FIX.md) | Fight freeze: cause (counter overflow) and fix |
 | [TEST_FIGHT.md](TEST_FIGHT.md) | `Test Fight.bat`: open the game straight into a Training match with chosen fighters and stage, about 72 s from launch. How to use it, timings, what it can't skip |
 | [COLOR_EXPOSURE.md](COLOR_EXPOSURE.md) | Brightness / glare study (parked until near the end) |

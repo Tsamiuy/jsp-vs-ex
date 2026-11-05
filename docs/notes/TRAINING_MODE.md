@@ -84,7 +84,7 @@ settings, and sampling during a fight. None of these addresses are known yet.
 
 - **Simple version (first try):**
   - every frame in a Training fight, for each fighter, if health is below 1, set it to 1;
-  - remember when health last went down; once 1.5 s pass with no drop, set health to max.
+  - remember when health last went down; once 1.5 s pass with no drop, set health to max. (Replaced on 11-03 by the combo-number rule, see "Refill timing" below.)
   - This only needs the health address (current and max).
 - **The catch:** the game probably decides "KO" in the same frame the damage lands, before our per-frame fix runs. A
   hit that takes health to 0 could still start the KO animation, end the round or add to the victory gauge.
@@ -98,6 +98,7 @@ settings, and sampling during a fight. None of these addresses are known yet.
 - **"Health shows 0 but they keep moving":** with the robust version, health can be allowed to reach exactly 0 on the
   bar while the KO branch is skipped, so it looks like 0. With the simple version it stops at 1, which is effectively
   invisible on the bar.
+- **Refill timing (11-03, the maintainer):** health refills 1 s after the combo number goes away, not 1.5 s after the last hit. The gauges over the characters (class `0x00879DA0`) hold the combo number: +0x3EC is 1 while it shows and +0x3F0 the hit count; both drop to 0 when it goes (pf3: 0.9 s after a 3-hit string, 0.77 s after one hit, 1.4 s after two). `training_icall` collects those gauges and `training_tick` waits for all of them to be 0, then 1 s. With no combo number seen after a hit, the old 1.5 s rule applies. Tested (cf1): both refills came 1000 ms after the number went.
 - **Works for both sides:** the player and the dummy both refill. The player can practise combos on the dummy forever,
   and the dummy never goes down.
 
@@ -152,6 +153,27 @@ Run names below (pj1, cam5, tm4 and the like) are local runs and are not in this
 - pi1 (first version): Free Battle shows the normal 5 rows. Not repeated on the sub-menu version; the code still only changes the tables in Training.
 - **Not tested:** Re-select character(s), or a real controller.
 
+### No knockdowns, opponent held close (11-03)
+
+Off by default since 11-05: normal Training Mode is back. `TRAINING_HOLD=1` and `TRAINING_NO_KNOCKDOWN=1` turn the experiment on. The code is still in the game file.
+
+For mapping every skill to its numbers (the maintainer's plan): in a Training fight, nobody gets knocked down and the opponent stands 2.5 in front of Player 1, held there, so every skill can be used on it without walking. Turn-based is left as it was. Numbers: Balance/Knockdowns.md.
+
+- **No knockdowns:** 1 s into the fight, `kd_flatten_all` looks through 0x41000000-0x42000000 for attack files (0x9C-byte slots, reaction +0x39) and projectile files (232-byte rows, reaction +0xAF): the entry count, three zero words, and at least 85% of the entries with damage looking right. Every entry whose reaction knocks down is set to 1, a flinch, rows without damage too (Gintoki's Justaway knocked down from one, nk1). The first hit from a file the scan missed flattens it too (Dio's and Dai's attack files fail the check on disk). The old bytes are put back when the fight scene ends. The too-many-hits build-up (+0x1A4 of each hit fighter) is held at 0. Since 11-05 the game's own knockdowns are kept unless `TRAINING_NO_KNOCKDOWN` is set (the code only checks that the variable exists, so `=0` also turns it on).
+- **Held close:** `pin_dummy` takes both places once per fight (`tb_fighters`) and puts the opponent on the line between the spawns, `k_train_apart` = 2.5 from Player 1, holding x and z (height free). Looking the places up every frame drifted with Player 1 (nk1). Since 11-05 `TRAINING_HOLD=1` is needed to turn it on.
+- **Tested (nk4, scripted, 0-star Koro-sensei):** Gintoki, Goku and Naruto, each with Square strings, Triangle twice, Circle twice, R1 + Circle and 40 Square presses without walking: 45, 39 and 58 hits, and no knockdown, blow, bounce or get-up on the dummy in any of them (nk1 before the fixes: Gintoki's Justaway knocked it down once, then the knock-away carried it). Each run held the opponent once, at 2.5.
+- **Not tested:** putting the bytes back after the fight (the scripted runs end inside the fight), Free Battle right after, a real controller, and fighters other than these three.
+
+### Hide HUD
+
+A setting in Training settings (the maintainer 11-04, for screenshots). While it is on, every fight HUD draw goes to a point off screen: bars, portraits, map, timer, name tags and markers. The fighters, stage and full-screen effects stay. While the pause menu is open the HUD shows again; it goes away when the menu closes. Seen in hud4 (11-04): the open menu read "Hide HUD: On" and the HUD came back while paused. The code has no pause-specific step for this.
+
+**How it works:** `ui_scale` in jstars_game.cpp, the same hook as UI_SCALE, returns a size of 0.0001 with the anchor at (8, 8) for each draw into the HUD target `0x0C6ABF40` during a fight while `g_set_hidehud` and `training_active()` are true. HUD parts that this hook doesn't see would stay (FINDINGS "UI size"). `HIDEHUD_TEST=1` (test only) starts with it on; empty or 0 counts as off.
+
+**Tested** (scripted, keyboard input, hud4): starts Off, the row reads "Hide HUD: Off/On", turning it on and closing the menu leaves a fight with no HUD for several seconds, turning it off brings the HUD back. hud2/hud3 started with it on because the test script left `HIDEHUD_TEST` set but empty; the code now treats that as off.
+
+**Not tested:** Victory Burst, supports and specials while it is on; 2 players; the maintainer's own play.
+
 ### Free Camera
 
 A setting in Training settings. While it is on, the pad moves the camera and the fighters see nothing pressed except Start, which opens the pause menu. Turning it off gives the camera back to the game.
@@ -187,6 +209,7 @@ In Training the time limit is always Unlimited and can't be changed. A padlock r
 - `stage_lock` writes 0 to both on every pad read while the screen is up, and hides Cross, Left and Right while the focus (+0x58) is on the box. The selector can still rest on the box, but nothing happens there.
 - The padlock is a small opaque picture from `stage_lock_stamp`, drawn by a new hook in the renderer, `g_rsx_stamp` in `rsx_d3d12_backend.c`. That toolkit change is in `toolkit/ps3recomp-local.patch`.
 - The boxes slide with their scene: box +0x28, then +4, then +0x1C is how far right of their place they are, 732 off the screen and 0 in place. The game is 2 frames ahead of the frame being drawn, so the padlock and the right arrow's patch use the value from 2 frames ago (`stage_slide_tick`).
+- **Fade (11-03, the maintainer):** the padlock now fades to white with the screen. The stage select screen's state at +0x48 is 9 while it is up, 0xD on Start, 0xE while the screen fades to white (500 ms, probe pf1; the port times its fade on the wall clock, not in frames, so it can drift from the game's own fade when the game runs slow) and 0xF once it is white, then 0. `stage_slide_tick` turns that into `g_lock_white` (50 ms lag for the 2 frames), and `stage_lock_stamp` mixes each pixel toward white. Tested with back-to-back screenshots (cf3, cf4): mid-fade the badge stays within about 13 of the bar beside it and the gold follows. cf3 showed the padlock popping back for about 100 ms on the white screen when the state went to 0 before the box was hidden; cf4, after the fix, has no pop.
 
 **Wrong lead:** `0x00968F10` follows the choice (1 at 300, 0 at Unlimited), but writing it and box +0x40 changed only the label. The fight's timer still counted down (run tm3 showed 288). Its purpose is unknown.
 
@@ -201,6 +224,12 @@ In Training the time limit is always Unlimited and can't be changed. A padlock r
 - **Not tested:** a real controller, or a Free Battle right after Training in the same session. Sliding was judged from screenshots, not video.
 
 ### Burst from the start: not done
+
+**Victory Gauge always active (the maintainer 11-03): not done.** Found but not enough:
+- The middle arc (HUD part `0x0087A1E0`) keeps a running total at +0x2C (+0x58 is it / 416.7 as a float), copied from `0x4902AC68` (the same address in four runs; found by searching memory on each change, vg1). It only goes up: 4600 after 11 boosted Gintoki strings (vg4, `BAL_TEST=2,0,200,300`), so it is the sum of gauge gains, not the marker.
+- Holding `0x4902AC68` at 5000 or setting it to 1950 and hitting past 2500 changed the number only: the marker stayed near the middle, no R3 prompt, and R3 did nothing (vg2, vg3).
+- In vg4 the marker moved slowly toward red over 11 strings but the prompt never came. The marker's own value is not in the arc object's first 0x400 bytes or around `0x4902AC68`. The arc's update (`func_00131DA4`) drives animations (`func_0032B288`), so the marker is probably an animation frame set from elsewhere.
+- Test-only switches left in: `PROBE_FADE`, `PROBE_VG`, `PROBE_VG2`, `VG_SET`, `VG_ONCE`.
 
 the maintainer's plan: a setting that lets R3 start Victory Burst from the start, and again when it runs out, with normal behaviour when off.
 
