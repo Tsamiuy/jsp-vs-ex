@@ -174,6 +174,34 @@ Played by the maintainer for 11 minutes. Log: the Test Fight log of that run (no
 - **Stamina Charge:** the limit rose from 1000 to 2000 here too.
 - **Rows not seen:** 22, 23, 24, 26 to 36. **Projectile rows not seen:** 1, 16, 20 to 26, 30, 31, 35, 36, 41, 45, 46, 51, 56.
 
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md). "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in this page's own damage list. Build-up is the "Gauge" value in the tables above; it drains by itself and applies to hits only, not to projectiles. Rows with an empty Move are not tied to an input yet.
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 2 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 10 |
+| 5 |  | 0 | 21 | launched, then down | 50 | 0 |
+| 5 |  | 1 | 4 | knocked down, big bounce | 200 | 150 |
+| 8 |  | 0 | 4 | knocked down, big bounce | 200 | 50 |
+| 9 |  | 4 | 21 | launched, then down | 30 | 30 |
+| 10 |  | 4 | 21 | launched, then down | 30 | 30 |
+| 11 |  | 4 | 21 | launched, then down | 30 | 30 |
+| 14 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 280 | 200 |
+| 19 |  | 2 | 9 | knocked down, big bounce | 50 | 10 |
+| 28 |  | 7 | 3 | lifted off the feet; lands and goes down unless hit again | 20 | 0 |
+| 31 |  | 1 | 6 | knocked away (dmg_blow) | 60 | 0 |
+| 32 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 250 | 0 |
+| 34 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 240 | 0 |
+| 36 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 160 | 0 |
+| 37 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 500 | 0 |
+| 39 |  | 2 | 3 | lifted off the feet; lands and goes down unless hit again | 500 | 0 |
+| 40 |  | 0 | 5 | spun away (dmg_blow_spin) | 100 | 0 |
+
+| Projectile row | Number | What it does | Damage |
+|---|---|---|---|
+| 45 | 6 | knocked away (dmg_blow) | 300 |
+
 ## Skill table (the game's own list)
 
 Names and inputs as the pause menu's Skill table gives them. Which attack row each one uses is not linked yet.

@@ -72,3 +72,21 @@ From `param_action`: +0x0C is the cost, on 48-byte rows in groups of 4. Action =
 ## Logged session (2026-10-30)
 
 Jotaro has data files but no roster slot: the game shows "なし" when he is forced in.
+
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md). "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in this page's own damage list. Build-up is the "Gauge" value in the tables above; it drains by itself and applies to hits only, not to projectiles. Rows with an empty Move are not tied to an input yet.
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 4 |  | 0 | 10 | knocked down, rolling bounce | 300 | 0 |
+| 6 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 240 | 0 |
+| 14 |  | 0 | 6 | knocked away (dmg_blow) | 360 | 0 |
+| 18 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 300 | 0 |
+| 22 |  | 1 | 4 | knocked down, big bounce | 150 | 0 |
+| 23 |  | 0 | 6 | knocked away (dmg_blow) | 300 | 0 |
+| 30 |  | 1 | 6 | knocked away (dmg_blow) | 150 | 0 |
+| 31 |  | 1 | 6 | knocked away (dmg_blow) | 180 | 0 |
+| 32 |  | 1 | 6 | knocked away (dmg_blow) | 200 | 0 |
+| 34 |  | 1 | 19 | knocked away (dmg_kizuna1_hit_blow) | 40 | 0 |
+| 36 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 200 | 0 |

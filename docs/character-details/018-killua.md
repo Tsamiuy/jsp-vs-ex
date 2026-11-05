@@ -133,6 +133,63 @@ The input is the last press before the hit, so a combo's later hits may show the
 
 Actions with a Stamina cost that landed a hit: 29: 50, 88: 300, 89: 300, 131: 50.
 
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md). "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in this page's own damage list. Build-up is the "Gauge" value in the tables above; it drains by itself and applies to hits only, not to projectiles. Rows with an empty Move are not tied to an input yet.
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 2 |  | 5 | 11 | shocked, then down (dmg_shock) | 40 | 2 |
+| 3 |  | 0 | 12 | pierced, then down (dmg_penetration) | 300 | 50 |
+| 4 |  | 0 | 10 | knocked down, rolling bounce | 300 | 0 |
+| 8 |  | 2 | 8 | knocked down, short bounce | 70 | 10 |
+| 14 |  | 0 | 4 | knocked down, big bounce | 200 | 100 |
+| 14 |  | 1 | 4 | knocked down, big bounce | 200 | 100 |
+| 15 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 300 | 150 |
+| 18 |  | 1 | 3 | lifted off the feet; lands and goes down unless hit again | 150 | 2 |
+| 18 |  | 2 | 12 | pierced, then down (dmg_penetration) | 50 | 2 |
+| 21 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 150 | 5 |
+| 25 |  | 0 | 6 | knocked away (dmg_blow) | 800 | 100 |
+| 27 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 1200 | 400 |
+| 30 |  | 0 | 6 | knocked away (dmg_blow) | 200 | 0 |
+| 30 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 10 |
+| 30 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 10 |
+| 31 |  | 1 | 4 | knocked down, big bounce | 100 | 10 |
+| 31 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 175 | 10 |
+| 31 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 175 | 10 |
+| 32 |  | 0 | 11 | shocked, then down (dmg_shock) | 50 | 10 |
+| 32 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 175 | 10 |
+| 35 |  | 0 | 6 | knocked away (dmg_blow) | 150 | 400 |
+| 36 |  | 0 | 12 | pierced, then down (dmg_penetration) | 200 | 0 |
+| 36 |  | 1 | 4 | knocked down, big bounce | 175 | 10 |
+| 36 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 175 | 10 |
+| 36 |  | 9 | 3 | lifted off the feet; lands and goes down unless hit again | 175 | 10 |
+| 37 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 250 | 250 |
+| 38 |  | 1 | 20 | big bounce (dmg_conspicuous_bound 2) | 200 | 0 |
+| 39 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 41 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 42 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 43 |  | 0 | 6 | knocked away (dmg_blow) | 250 | 70 |
+| 43 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+
+| Projectile row | Number | What it does | Damage |
+|---|---|---|---|
+| 0 | 11 | shocked, then down (dmg_shock) | 200 |
+| 1 | 11 | shocked, then down (dmg_shock) | 500 |
+| 5 | 11 | shocked, then down (dmg_shock) | 200 |
+| 6 | 11 | shocked, then down (dmg_shock) | 500 |
+| 10 | 11 | shocked, then down (dmg_shock) | 25 |
+| 11 | 11 | shocked, then down (dmg_shock) | 500 |
+| 15 | 11 | shocked, then down (dmg_shock) | 100 |
+| 20 | 11 | shocked, then down (dmg_shock) | 100 |
+| 25 | 11 | shocked, then down (dmg_shock) | 100 |
+| 30 | 11 | shocked, then down (dmg_shock) | 100 |
+| 35 | 11 | shocked, then down (dmg_shock) | 100 |
+| 40 | 11 | shocked, then down (dmg_shock) | 100 |
+| 45 | 11 | shocked, then down (dmg_shock) | 500 |
+| 50 | 11 | shocked, then down (dmg_shock) | 500 |
+| 55 | 11 | shocked, then down (dmg_shock) | 25 |
+
 ## Skill table (the game's own list)
 
 Names and inputs as the pause menu's Skill table gives them. Which attack row each one uses is not linked yet.
