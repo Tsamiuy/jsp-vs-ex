@@ -4,7 +4,7 @@ What is planned, in rough order. ✅ done · 🔧 in progress · 📋 planned. N
 not promised. Options that change gameplay are opt-in; display and input improvements may default on.
 What the port adds today: [FEATURES.md](FEATURES.md). Dated state and evidence: [notes/STATUS.md](notes/STATUS.md).
 The ✅ items describe the default build, the port in `jstars/port` on the ps3recomp v0.15 toolkit. A second port on the
-v0.18.0 toolkit is proposed as an opt-in installer choice (#2, open).
+v0.18.0 toolkit is on main in `installer/port` (#2, merged); it is an opt-in installer choice (`--tree v18`).
 
 ## 1. Playable on Windows from your own copy  🔧
 
@@ -63,7 +63,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 - Windows 11, x64, with Direct3D 12: the target today (Windows 10 partly: the menu fix is not yet confirmed there)
 - Linux through Proton or Wine: not supported yet. The default build has not been run under Proton since the
-  thread-local fix (installer patch 0003); the v0.18.0 port in #2 reaches fights under Proton in its tests
+  thread-local fix (installer patch 0003); the v0.18.0 port (`--tree v18`) reaches fights under Proton in its tests
 
 ## Not planned
 

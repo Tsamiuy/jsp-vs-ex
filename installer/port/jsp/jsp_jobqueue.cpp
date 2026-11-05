@@ -1,7 +1,7 @@
 /*
  * jsp_jobqueue.cpp -- cellSpursJq (job queue, Port2 flavour) for J-Stars.
  *
- * After this repository's v0.15 port (jstars/port/stubs.cpp, register_job_queue_overrides; JSP-Project, Tsamiuy,
+ * After this repository's v0.15 port (jstars/port/stubs.cpp, register_job_queue_overrides; jsp-vs-ex, Tsamiuy,
  * MIT), ported to ps3recomp v0.18.0. Notes: jstars-notes/FINDINGS.md section 3.
  *
  * CRI ADX2 and the game's engine submit SPU jobs through a SPURS job queue:
