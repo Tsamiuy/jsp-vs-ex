@@ -222,6 +222,7 @@ Everything marked tested comes from runs recorded in the notes named above. No g
 - Reading: `p_enemy_gauge_pl` is loaded at `0x116680`, in that class's non-virtual setup function at `0x11609C`.
 
 ## Battle setup and fighters (11-05)
+Short index only; which of these were read from the code and which were checked in a run is in FINDINGS "Battle setup table and 6 fighters".
 - Character select table 0x009540E4 (6 x 0x2C: 4 fighters + 2 Supports; menu only).
 - Battle world *(TOC-0x7A90): team unit lists +0x34, 6 unit records x 0x94 at +0x60 (+0x08 role 1/2/3).
 - Battle builder func_000ED344 (from func_000EDFDC); fighter func_0005AEE0, Support func_0005AB70; health object
