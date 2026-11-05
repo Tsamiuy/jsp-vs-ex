@@ -5,7 +5,9 @@ game and download nothing: setup asks for the folder of your own game disc, your
 copy, see RPCS3 and its documentation), copies the port's sources, a
 pinned compiler and a Python to the install folder, and then builds the port there (`installer/tools/firstrun.py`: lift,
 SPU jobs, compile). You need no Visual Studio: the compiler (llvm-mingw, with CMake and Ninja) is in the package. The
-installer and the program contact no server: no update check, no crash report, no telemetry.
+installer and the program contact no server: no update check, no crash report, no telemetry. The one exception is
+Online Battle (experimental, `v18` only), which is off unless you turn it on and give a psnr server, see
+[Online Battle](#online-battle-experimental).
 
 **The compile step has not been run on a real Windows PC.** See the table.
 
