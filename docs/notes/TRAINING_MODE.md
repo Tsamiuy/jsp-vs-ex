@@ -237,3 +237,33 @@ the maintainer's plan: a setting that lets R3 start Victory Burst from the start
 - **What R3 checks isn't found either.** Lead: the move graph's condition handlers (46 of them, listed by `tools/balance/handlers.py`, a local script that is not in this repository). The indirect-call hook can skip a handler and set its result, so if the right handler is found, it can be forced true.
 - **Useful recipe:** Luffy with Unlimited Stamina, tapping Circle in 14 rounds of 16 presses, moves the marker near full in about 2 minutes. Dumps of that were taken while the game ran (g0 middle, g1 near full) and are not in this repository. That run didn't reach the R3 prompt, so it needs a few more rounds.
 - **Hit record +0x6C:** with `BAL_TEST` at 5000 per hit the marker still barely moved, and the amount goes into a Stamina call on the hit fighter (`0x00082B3C`, slot +0x74). So "gauge gain" in the Balance notes may not be a direct gauge amount (reading).
+
+## The v18 tree (installer/port, 2026-11-05)
+
+Training is ported to the `v18` tree (`installer/port/jsp/jsp_training.cpp`), steps 1 to 3. There is no menu choice
+there yet: the environment variable `TRAINING=1` makes Free Battle run as Training. Without it nothing is hooked. With the
+installer, put `TRAINING=1` in the settings file: `jsp-launcher.exe` puts each of its lines in the environment
+(`installer/launcher/launcher.c`).
+
+- **How it hooks:** v0.18.0 calls every indirect call through its function table, so the file wraps the lifted functions
+  there (as the trace in `jsp_hle.cpp` does). No toolkit patch is needed. The screens are found by their vtable in r3,
+  not by heap addresses.
+- **Step 1:** nobody is KO'd (the damage call @0x00085B84 leaves 1 health), and health refills 45 frames (about 1.5 s,
+  ASSUMPTION: 30 frames per game second) after a fighter's last hit. The refill runs from the HUD's health read
+  @0x00085CEC.
+- **Step 2:** the CPU fighters of the other team become dummies: their pad is handed to a human driver (+0x18 and
+  +0x1FC, 3 to 1) and the pad getters @0x9D5AC to 0x9D750 answer "nothing pressed".
+  - Fighter numbers in a fight are 0 Player 1, 1 the opponent, 2 Player 1's partner, 3 the opponent's partner. The
+    v0.15 reading held only in 1 on 1.
+- **Step 3:** on character select, the CPU partner slots (1 and 3) are locked with the game's own padlock. On stage
+  select the time is Unlimited. Not ported yet: the padlock picture on the time box and the blocked presses there
+  (the box can be changed, but it is set back at once).
+- **Test-only switches:** `TRAINING_TEST_LOW=N` starts every fighter at N/100 health; `TRAINING_NODUMMY` keeps the
+  opponents as CPUs; `TRAINING_NOLOCK` leaves the partner slots free.
+- **Not done in v18:** the menu choice, the rewards check (no J-Points after Training), the Training settings menu,
+  the 0-star dummy, and a check with 4 fighters.
+
+Tested under Proton on Linux, US disc, with a scripted pad route (the same file and toolkit pin, built from this
+project's development tree, not from the installer): a Training fight with TIME at infinity, 16 hits all on the dummy
+and a refill after them; with `TRAINING_TEST_LOW=300` hits stop at 1 health and nobody is KO'd; without `TRAINING` a
+normal Free Battle with the timer counting down. Not run on Windows.
