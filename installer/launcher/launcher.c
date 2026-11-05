@@ -192,7 +192,7 @@ static void load_settings(const char *here, const char *cmd, char *exe, size_t e
 
 static void fail(const char *msg)
 {
-    MessageBoxA(NULL, msg, "J-Stars Victory VS EX: Fan Revival", MB_OK | MB_ICONWARNING);
+    MessageBoxA(NULL, msg, "J-Stars Victory VS-EX: Fan Revival", MB_OK | MB_ICONWARNING);
 }
 
 int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)

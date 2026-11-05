@@ -49,7 +49,7 @@ import time
 # toolchains, steps); the rest of the file (preflight framework, path rules, step fingerprints, logs) names no game.
 # ======================================================================================================================
 PROFILE = {
-    "product_name": "J-Stars Victory VS EX: Fan Revival",
+    "product_name": "J-Stars Victory VS-EX: Fan Revival",
     "short_name": "JSP Fan Revival",          # also the %APPDATA% folder and the install folder name (installer/jsp.iss AppDirName)
     "titles": {"BLUS31519": "US", "BLES02136": "EU"},   # one port for both regions
     "toolchains": ["vs-buildtools"],           # llvm-mingw is not wired up here
@@ -727,7 +727,7 @@ def interactive(a, root, ask=input, out=None):
     if not cp.has_section("install"):
         cp.add_section("install")
     saved = {k: unpack_path(ini_get(cp, k), root) for k in ("disc", "eboot")}
-    print("\nJ-Stars Victory VS EX: Fan Revival: first run (portable)", file=out)
+    print("\nJ-Stars Victory VS-EX: Fan Revival: first run (portable)", file=out)
     print("Nothing of the game is included or downloaded. This builds the port on your PC from your own copy of the game.\n"
           "Everything stays in this folder: " + str(root) + "\nType q at any question to stop; start again later and finished steps are kept.\n",
           file=out)

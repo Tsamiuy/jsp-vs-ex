@@ -1,4 +1,4 @@
-; J-Stars Victory VS EX: Fan Revival: installer (Inno Setup 6.7).
+; J-Stars Victory VS-EX: Fan Revival: installer (Inno Setup 6.7).
 ; Layout (PARAM.SFO reader, per-user install, portable task) adapted by hand from the maintainer's installer for another PS3
 ; port (same MIT licence), without its update page, RPCS3 import, ISO reading, version check, crash report or any online
 ; piece: this installer and the program it installs contact no server and send nothing anywhere.
@@ -24,7 +24,7 @@
 ; Opt-in music: an "Enable Music?" box, off by default, plays one of the tracks in installer\music\tracks.tsv at random.
 ; installer\tools\installer_music.py renders them to build\installer\music (never committed). Silent installs never play.
 #define MusicCount 6
-#define AppTitle "J-Stars Victory VS EX: Fan Revival"
+#define AppTitle "J-Stars Victory VS-EX: Fan Revival"
 #define AppDirName "JSP Fan Revival"
 #define LauncherExe "jsp-launcher.exe"
 #define AppVersion Trim(FileRead(FileOpen(AddBackslash(Payload) + "VERSION.txt")))
@@ -61,7 +61,7 @@ AllowNoIcons=yes
 CloseApplications=no
 
 [Messages]
-WelcomeLabel1=J-Stars Victory VS EX: Fan Revival
+WelcomeLabel1=J-Stars Victory VS-EX: Fan Revival
 WelcomeLabel2=An unofficial fan project. Nothing of the game is included or downloaded: setup builds the port on this PC from your own copy of the game.%n%nNext, tell setup where your disc folder and your decrypted EBOOT.elf are.
 FinishedHeadingLabel=Setup is done
 

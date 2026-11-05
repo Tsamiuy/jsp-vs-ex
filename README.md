@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS EX, Fan Revival. White ASCII art on black: a star with a 3D J inside on the left; on the right the title J-Stars Victory, the letters VS-EX and Fan Revival; below them: unofficial fan project, no game files included, you need your own copy."></p>
+<p align="center"><img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS-EX, Fan Revival. White ASCII art on black: a star with a 3D J inside on the left; on the right the title J-Stars Victory, the letters VS-EX and Fan Revival; below them: unofficial fan project, no game files included, you need your own copy."></p>
 
-# J-Stars Victory VS EX, Fan Revival (work in progress)
+# J-Stars Victory VS-EX, Fan Revival (work in progress)
 
 **J-Stars Victory VS+: unofficial PC port (static recompilation)**
 

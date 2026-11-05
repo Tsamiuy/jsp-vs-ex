@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Installer artwork for J-Stars Victory VS EX: Fan Revival, in the fan site's NFO look.
+"""Installer artwork for J-Stars Victory VS-EX: Fan Revival, in the fan site's NFO look.
 
 Image sizes per Inno DPI, own ICO writer, --check by bytes (layout adapted from the maintainer's installer for another PS3 port).
 Everything comes from tools/site/ascii_logo.py's cells
@@ -108,7 +108,7 @@ def wizard(dpi):
     d = ImageDraw.Draw(im)
     y = 24 * s
     y += star_block(d, 6 * s, y, (164 - 12) * s, stroke=0.25 * s) + 18 * s
-    text_lines(d, ["J-STARS", "VICTORY", "VS EX"], 10 * s, y, 0, 23 * s, 21 * s, PAPER)
+    text_lines(d, ["J-STARS", "VICTORY", "VS-EX"], 10 * s, y, 0, 23 * s, 21 * s, PAPER)
     text_lines(d, ["unofficial fan", "project. No game", "files included.", "Bring your own", "copy of the game."],
                10 * s, y + 84 * s, 0, 12.5 * s, 11 * s, ORANGE)
     return down(im, w, h)

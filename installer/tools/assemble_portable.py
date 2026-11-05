@@ -33,7 +33,7 @@ REQUIRED = ("firstrun.py", "support_bundle.py", "support-bundle.cmd", "tools/jsp
 FIRST_RUN_OUTPUT = ("build", "hdd0", "game", "logs", "paths.txt", "jsp-install.ini", "play_settings.txt", "run.cmd")
 
 RUN_CMD = """@echo off
-rem J-Stars Victory VS EX: Fan Revival, portable zip: first run.
+rem J-Stars Victory VS-EX: Fan Revival, portable zip: first run.
 rem Asks for your disc folder and your decrypted EBOOT.elf, checks them and builds the game here
 rem from your own copy with the bundled compiler (nothing to install). Saves, settings, logs and the
 rem build stay in this folder; the folder may be moved or renamed afterwards. Start it again to resume. Nothing is
@@ -54,7 +54,7 @@ if not defined JSP_NOPAUSE pause
 exit /b %RC%
 """
 
-README = """J-Stars Victory VS EX: Fan Revival, portable
+README = """J-Stars Victory VS-EX: Fan Revival, portable
 ============================================
 An unofficial fan project. Nothing of the game is included or downloaded: the port is built on your PC from your own copy.
 This program contacts no server: no update check, no crash report, no telemetry.
