@@ -257,6 +257,11 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     /* Off unless CPU_BOOST=1: a power plan change that other games would also feel, which players would not know about.
        boost_restore above still puts back a plan that an older version of this launcher left boosted. */
     if (GetEnvironmentVariableA("CPU_BOOST", boost, sizeof boost) && boost[0] == '1') boosted = boost_on(bfile);
+    /* The game window gets the installer's icon (installer patch 0007: WINDOW_ICON), and its title shows FPS and draw counts only
+       when TITLE_STATS=1 ("Show FPS in the window title" in the settings window). */
+    snprintf(path, sizeof path, "%s\\jsp-launcher.ico", here);
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) SetEnvironmentVariableA("WINDOW_ICON", path);
+    if (!GetEnvironmentVariableA("TITLE_STATS", boost, sizeof boost)) SetEnvironmentVariableA("TITLE_STATS", "0");
     if (!CreateProcessA(NULL, cl, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, run, &si, &pi)) {
         if (boosted) boost_restore(bfile);
         fail("Could not start the game program.");
