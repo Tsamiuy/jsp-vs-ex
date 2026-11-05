@@ -3,9 +3,10 @@
 People who have worked on this project. Add yourself in the pull request that makes your first change.
 Keep the list to names or handles you are happy to have public.
 
-## Maintainer
+## Maintainers
 
 - [Tsamiuy](https://github.com/Tsamiuy): owner of this repository and of the port.
+- [undecuple](https://github.com/undecuple): maintainer; what they have done is under Contributors below.
 
 ## Built on
 

@@ -2,7 +2,7 @@
 
 ## Reporting a problem
 
-Please report security problems privately to the maintainer, not in a public issue.
+Please report security problems privately to the maintainers, not in a public issue.
 Use GitHub's private vulnerability reporting for this repository (Security tab, "Report a vulnerability")
 if it is available. If it is not, open an issue that says only that you have a private security report,
 and ask for a contact. Do not put details in that issue.

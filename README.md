@@ -54,7 +54,7 @@ Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is us
 
 ## AI, licence, disclaimer
 
-Developed with AI agent assistance under the maintainer's direction.
+Developed with AI agent assistance under the maintainers' direction.
 
 The port's own code, tools and documentation: MIT, see [LICENSE](LICENSE). Third-party software and licences:
 [NOTICE.md](NOTICE.md). Security problems: [SECURITY.md](SECURITY.md).
