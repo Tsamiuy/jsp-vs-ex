@@ -70,6 +70,8 @@
 /tools/*
 !/tools/features.py
 !/tools/test_features.py
+!/tools/contributors.py
+!/tools/test_contributors.py
 !/tools/site/
 /tools/site/*
 !/tools/site/*.py
