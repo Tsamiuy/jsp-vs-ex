@@ -53,8 +53,8 @@ for the toolchain download, the 64-bit embeddable Python package from python.org
 downloaded llvm-mingw.
 
 ```
-git clone --recurse-submodules https://github.com/Tsamiuy/JSP-Project.git
-cd JSP-Project
+git clone --recurse-submodules https://github.com/Tsamiuy/jsp-vs-ex.git
+cd jsp-vs-ex
 mkdir build\installer\fonts
 rem put IBMPlexMono-Bold.ttf in build\installer\fonts
 rem unpack the embeddable Python into build\installer\toolchain-cache\python (python.exe directly inside)
