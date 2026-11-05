@@ -1,0 +1,418 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index adaa856..aa4204e 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -331,6 +331,7 @@ typedef struct {
+     u32 rtfmt;              /* DXGI format of the colour targets (PSO key) */
+     int exp32;              /* 32-bit-exports control bit (PSO key)       */
+     u64 gamma;              /* per-unit sRGB-decode lane masks, 4 bits/unit (PSO key) */
++    u64 expand;             /* TEX_EXPAND: hash of the units' sign-expansion masks (PSO key) */
+     u64 zkey;               /* DrZInfo key: units reading depth targets (PSO key) */
+     u32 ucode_hash;         /* FNV-1a of the FP ucode: apps re-patch inline
+                              * constants per frame (wave's stamp position/
+@@ -2361,6 +2362,39 @@ static u64 dr_gamma_key(const D3D12DrawRecord* dr)
+     return k;
+ }
+ 
++/* TEX_EXPAND=1: per-unit texture sign-expansion masks (SET_TEXTURE_ADDRESS
++ * bit 12, UNSIGNED_REMAP_BIASED) for the units a draw binds, built the way
++ * upstream ps3recomp 122690f's draw engine does. out[16] always receives the
++ * masks of every bound unit, so the [FPEXPAND] log can report them even when
++ * the feature is off. The returned PSO key is 0 unless TEX_EXPAND is on and
++ * the program either samples a biased unit or fetches with _bx2 (EXP_TEX,
++ * OPDEST bit 21); the decompiler then re-centres those fetches to -1..1. */
++static u64 dr_expand_key(const D3D12DrawRecord* dr, u8 out[16])
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("TEX_EXPAND"); on = e ? atoi(e) : 0; }
++    memset(out, 0, 16);
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    if (!dr->fp_addr || !vm_base) return 0;
++    for (int u = 0; u < RSX_TEX_UNITS && u < 16; u++)
++        if (dr->tex[u].set)
++            out[u] = rsx_texture_expand_mask(dr->tex[u].fmt, dr->tex[u].ctrl1,
++                                             dr->tex[u].filt, dr->tex[u].addr);
++    if (!on) return 0;
++    u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
++    if (foff == 0xFFFFFFFFu) return 0;
++    const u32 used = rsx_fp_texture_expand_units(vm_base + foff, FP_MAX_BYTES, out);
++    const u32 bx2  = rsx_fp_texture_bx2_units(vm_base + foff, FP_MAX_BYTES);
++    if (!used && !bx2) return 0;
++    u64 k = 1469598103934665603ull;
++    for (int u = 0; u < 16; u++) {
++        if (!(used & (1u << u))) out[u] = 0;      /* only the units it samples */
++        k = (k ^ out[u]) * 1099511628211ull;      /* FNV-1a over the masks */
++    }
++    return k | 1ull;                              /* non-zero: expand this draw */
++}
++
+ /* How a draw's fragment program reads depth targets (SHADOW_PASSES). Per unit
+  * bound to a DepthRT's zeta offset:
+  *  - DEPTH24_D8/DEPTH16 with an ADDRESS zfunc: hardware depth comparison. The
+@@ -2601,7 +2635,8 @@ static int zbitcast_rewrite(char* hlsl, size_t cap, const DrZInfo* zi)
+ 
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+-                                          u32 cube_mask, u64 gamma, const DrZInfo* zi)
++                                          u32 cube_mask, u64 gamma, u64 expand,
++                                          const u8* emask, const DrZInfo* zi)
+ {
+     /* nrt 0 = a depth-only pass (SHADOW_PASSES): no colour target at all. */
+     if (nrt < 0) nrt = 0; if (nrt > 4) nrt = 4;
+@@ -2657,6 +2692,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             s_d3d.vp_fp[i].blend == blend && s_d3d.vp_fp[i].nrt == nrt &&
+             s_d3d.vp_fp[i].rtfmt == (u32)rtfmt && s_d3d.vp_fp[i].exp32 == exp32 &&
+             s_d3d.vp_fp[i].gamma == gamma && s_d3d.vp_fp[i].zkey == zkey &&
++            s_d3d.vp_fp[i].expand == expand &&
+             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+             s_d3d.vp_fp[i].cull == cull &&
+             s_d3d.vp_fp[i].cube_mask == cube_mask)
+@@ -2671,6 +2707,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     const u32 fail_misc = (blend * 2654435761u) ^ ((u32)nrt << 28) ^ (cmask << 24) ^
+                           (cull << 16) ^ cube_mask ^ ((u32)vs_idx << 20) ^ ((u32)exp32 << 31) ^
+                           (u32)(gamma * 0x9E3779B97F4A7C15ull >> 32) ^
++                          (u32)(expand * 0xC2B2AE3D27D4EB4Full >> 32) ^
+                           (u32)(zkey >> 32) ^ (u32)zkey;
+     for (int i = 0; i < s_pso_fail_n; i++)
+         if (s_pso_fail[i].uhash == uhash &&
+@@ -2756,16 +2793,30 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+      * rewritten to that layout. FP_CONSTBUF=0 keeps the old literal path. */
+     int fp_buffered = !(getenv("FP_CONSTBUF") && getenv("FP_CONSTBUF")[0] == '0');
+     u32 fp_nconst = 0;
++    /* TEX_EXPAND: sign expansion goes through the combined entry point, which
++     * is byte-identical to the older ones when a mask is NULL. */
+     int n = fp_buffered
+-        ? (zi && zi->shadow_mask)
+-            ? rsx_fp_decompile_buffered_shadow_color_ex(vm_base + off, FP_MAX_BYTES, fp_ctrl, 0u,
+-                                                        zi->shadow, gamma ? gmask : NULL,
++        ? ((zi && zi->shadow_mask) || gamma || expand)
++            ? rsx_fp_decompile_buffered_shadow_color_expand_ex(vm_base + off, FP_MAX_BYTES, fp_ctrl, 0u,
++                                                        (zi && zi->shadow_mask) ? zi->shadow : NULL,
++                                                        gamma ? gmask : NULL, expand ? emask : NULL,
+                                                         hlsl, sizeof(hlsl), &fp_nconst)
+-        : (gamma ? rsx_fp_decompile_buffered_color_ex(vm_base + off, FP_MAX_BYTES, fp_ctrl, 0u,
+-                                                      gmask, hlsl, sizeof(hlsl), &fp_nconst)
+-                 : rsx_fp_decompile_buffered_ex(vm_base + off, FP_MAX_BYTES, fp_ctrl, 0u,
+-                                                hlsl, sizeof(hlsl), &fp_nconst))
++            : rsx_fp_decompile_buffered_ex(vm_base + off, FP_MAX_BYTES, fp_ctrl, 0u,
++                                           hlsl, sizeof(hlsl), &fp_nconst)
+         : rsx_fp_decompile(vm_base + off, FP_MAX_BYTES, fp_ctrl, hlsl, sizeof(hlsl));
++    /* [FPEXPAND]: once per program, which units it fetches with _bx2 and which
++     * bound units ask for the biased remap: the evidence for TEX_EXPAND
++     * (jstars-notes COLOR_EXPOSURE.md). Logged whether or not it is on. */
++    { static u32 seen[64]; static int ns = 0; int f = 0;
++      for (int i = 0; i < ns; i++) if (seen[i] == uhash) f = 1;
++      if (!f) { if (ns < 64) seen[ns++] = uhash;
++          const u32 bx2 = rsx_fp_texture_bx2_units(vm_base + off, FP_MAX_BYTES);
++          u32 biased = 0;
++          if (emask) for (int u = 0; u < 16; u++) if (emask[u]) biased |= 1u << u;
++          if (bx2 || biased)
++              fprintf(stderr, "[FPEXPAND] fp=0x%08X hash=0x%08X bx2_units=0x%04X biased_units=0x%04X%s%c",
++                      fp_addr, uhash, bx2, biased,
++                      expand ? " (expanding)" : " (TEX_EXPAND off)", 10); } }
+     if (n > 0 && fp_buffered) {
+         char* cb = strstr(hlsl, "cbuffer PSConstants : register(b1) {");
+         char* ce = cb ? strstr(cb, "};") : NULL;
+@@ -3183,6 +3234,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     s_d3d.vp_fp[s_d3d.vp_fp_n].rtfmt   = (u32)rtfmt;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].exp32   = exp32;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].gamma   = gamma;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].expand  = expand;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].zkey    = zkey;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].ucode_hash = uhash;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].cmask   = cmask;
+@@ -5449,12 +5501,13 @@ static void render_frame(void)
+         }
+         if (perf_on()) s_perf_srv += perf_now() - _sv0;
+         double _ps0 = perf_on() ? perf_now() : 0.0;
++        u8 _em[16]; const u64 _ek = dr_expand_key(dr, _em);
+         if (dr->fp_addr) vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+                                        dr_num_rts(dr),
+                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                        dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr),
+-                                       dr_gamma_key(dr), dr_z(dr));
++                                       dr_gamma_key(dr), _ek, _em, dr_z(dr));
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+ 
+@@ -5873,13 +5926,14 @@ static void render_frame(void)
+                   if (sf && (dr->cull & 3u) == 3u) continue; }
+                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
+                  * back to the hardcoded atlas/colour PS pair. */
++                u8 _em[16]; const u64 _ek = dr_expand_key(dr, _em);
+                 ID3D12PipelineState* dpso =
+                     dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+                                                 dr_num_rts(dr),
+                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr), dr_gamma_key(dr), dr_z(dr)) : NULL;
++                                                dr_cube_mask(dr), dr_gamma_key(dr), _ek, _em, dr_z(dr)) : NULL;
+                 /* A depth-only op has no colour target for the fallback PSO. */
+                 if (zdraw && !dpso) { zn_skip[cur_zt]++; continue; }
+                 if (zdraw) {
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 2ee499b..6efb0b9 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -603,15 +603,78 @@ static void fp_gamma_helper(Out* out)
+         "                  (mask & 8u) ? decoded.a : v.a);\n}\n");
+ }
+ 
++/* Texture sign expansion: units a TEX/TXP/TXB/TXL fetches from whose
++ * expand mask is set. The same walk as the gamma one. (Upstream ps3recomp
++ * 122690f, PR #331.) */
++u32 rsx_fp_texture_expand_units(const u8* ucode, u32 max_bytes,
++                                 const u8 expand_masks[16])
++{
++    if (!ucode || !expand_masks) return 0;
++    u32 units = 0;
++    for (u32 off = 0; off + 16 <= max_bytes;) {
++        const u32 w0 = rsx_fp_read_word(ucode + off);
++        const u32 w1 = rsx_fp_read_word(ucode + off + 4);
++        const u32 w2 = rsx_fp_read_word(ucode + off + 8);
++        const u32 w3 = rsx_fp_read_word(ucode + off + 12);
++        const u32 op = (w0 >> 24) & 63u, unit = (w0 >> FP_TEX_UNIT_SHIFT) & 15u;
++        if (!(w2 & FP_BRANCH) && expand_masks[unit] &&
++            (op == OP_TEX || op == OP_TXP || op == OP_TXB || op == OP_TXL))
++            units |= 1u << unit;
++        off += 16;
++        if (!(w2 & FP_BRANCH) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2)) off += 16;
++        if (w0 & FP_END) return units;
++    }
++    return 0;
++}
++
++/* Units a TEX/TXP/TXB/TXL reads with EXP_TEX (OPDEST bit 21, _bx2). */
++u32 rsx_fp_texture_bx2_units(const u8* ucode, u32 max_bytes)
++{
++    if (!ucode) return 0;
++    u32 units = 0;
++    for (u32 off = 0; off + 16 <= max_bytes;) {
++        const u32 w0 = rsx_fp_read_word(ucode + off);
++        const u32 w1 = rsx_fp_read_word(ucode + off + 4);
++        const u32 w2 = rsx_fp_read_word(ucode + off + 8);
++        const u32 w3 = rsx_fp_read_word(ucode + off + 12);
++        const u32 op = (w0 >> 24) & 63u, unit = (w0 >> FP_TEX_UNIT_SHIFT) & 15u;
++        if (!(w2 & FP_BRANCH) && (w0 & (1u << 21)) &&
++            (op == OP_TEX || op == OP_TXP || op == OP_TXB || op == OP_TXL))
++            units |= 1u << unit;
++        off += 16;
++        if (!(w2 & FP_BRANCH) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2)) off += 16;
++        if (w0 & FP_END) return units;
++    }
++    return 0;
++}
++
++static void fp_expand_helper(Out* out)
++{
++    out_puts(out,
++        "float4 _rsx_expand_input(float4 v, uint mask, bool bx2) {\n"
++        "    float4 e = bx2 ? v * 2.0 - 1.0\n"
++        "             : (mask & 16u) ? (floor(v * 65535.0 + 0.5) - 32768.0) / 32767.0\n"
++        "                            : (floor(v * 255.0 + 0.5) - 128.0) / 127.0;\n"
++        "    return float4((mask & 1u) ? e.r : v.r,\n"
++        "                  (mask & 2u) ? e.g : v.g,\n"
++        "                  (mask & 4u) ? e.b : v.b,\n"
++        "                  (mask & 8u) ? e.a : v.a);\n}\n");
++}
++
+ static int rsx_fp_decompile_internal(
+     const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
+     int buffered, const rsx_fp_shadow_desc* shadow, const u8 gamma_masks[16],
++    const u8* expand_masks,
+     char* out, u32 out_size, u32* out_constant_count)
+ {
+     if (!ucode || !out || out_size == 0) return -1;
+     s_fp_uses_tc89 = 0;
+     s_fp_uses_facing = 0;
+     const u32 gamma_units = rsx_fp_texture_gamma_units(ucode, max_bytes, gamma_masks);
++    const u32 expand_units = rsx_fp_texture_expand_units(ucode, max_bytes, expand_masks);
++    /* _bx2 (EXP_TEX) fetches expand whatever unit they read: the modifier is
++     * the instruction's, not the texture's. */
++    const u32 bx2_units = expand_masks ? rsx_fp_texture_bx2_units(ucode, max_bytes) : 0;
+ 
+     const u32 sampled_units = rsx_fp_texture_units(ucode, max_bytes);
+     if (shadow) for (u32 u = 0; u < 16; u++)
+@@ -994,6 +1057,34 @@ static int rsx_fp_decompile_internal(
+                                         sample, gamma_masks[tex_unit] & 15u);
+             if (length < 0 || (size_t)length >= sizeof rhs) return -1;
+         }
++        /* Texture sign expansion (RPCS3 _process_texel). A unit whose
++         * SET_TEXTURE_ADDRESS asks for UNSIGNED_REMAP_BIASED returns every
++         * fetch re-centred on the lanes the mask names, (round(x*255)-128)/127
++         * (16-bit channels: /32767), after gamma and not on gamma lanes. A
++         * fetch carrying EXP_TEX (OPDEST bit 21, the _bx2 modifier) returns
++         * x*2-1 on every lane, whatever the unit says, and bypasses gamma.
++         * A comparison fetch has nothing to expand. */
++        /* jstars-port: only the expand entry point (TEX_EXPAND=1) applies either
++         * form, so the feature stays opt-in; upstream applies _bx2 everywhere. */
++        if (expand_masks && ((w0 & (1u << 21)) || expand_masks[tex_unit]) &&
++            !(shadow && shadow[tex_unit].enabled) &&
++            (opcode == OP_TEX || opcode == OP_TXP || opcode == OP_TXB || opcode == OP_TXL)) {
++            const int bx2 = (w0 & (1u << 21)) != 0;
++            u32 mask = bx2 ? 15u : (expand_masks[tex_unit] & 0x1Fu);
++            if (!bx2 && gamma_masks) mask &= ~(gamma_masks[tex_unit] & 15u);
++            if (mask & 15u) {
++                char sample[sizeof rhs]; memcpy(sample, rhs, sizeof sample);
++                const int length = snprintf(rhs, sizeof rhs, "_rsx_expand_input(%s, %uu, %s)",
++                                            sample, mask, bx2 ? "true" : "false");
++                if (length < 0 || (size_t)length >= sizeof rhs) return -1;
++            }
++        } else if (expand_masks && ((w0 & (1u << 21)) || expand_masks[tex_unit]) &&
++                   (opcode == OP_TXD || opcode == OP_TEXBEM || opcode == OP_TXPBEM)) {
++            static u32 reported;
++            if (reported++ < 32)
++                fprintf(stderr, "[RSX fp] sign-expand fetch opcode %u unsupported on unit %u (read unexpanded)\n",
++                        opcode, tex_unit);
++        }
+ 
+         int has_dest = !(w0 & FP_OUT_NONE);
+         if (handled && (has_dest || set_cond)) {
+@@ -1195,6 +1286,7 @@ static int rsx_fp_decompile_internal(
+         if ((sampled_units & (1u << u)) && shadow[u].enabled)
+             fp_shadow_helper(&p, u, tex_cube_mask, &shadow[u]);
+     if (gamma_units) fp_gamma_helper(&p);
++    if (expand_units || bx2_units) fp_expand_helper(&p);
+     /* NV40 pack/unpack. A packed word travels on in a float's bits, so the
+      * packs bitcast and the unpacks bitcast back; the sRGB forms follow
+      * RPCS3's _builtin_pkg/_builtin_upg (linear_to_srgb, srgb_to_linear).
+@@ -1240,7 +1332,7 @@ int rsx_fp_decompile_ex(const u8* ucode, u32 max_bytes, u32 ctrl,
+                         u32 tex_cube_mask, char* out, u32 out_size)
+ {
+     return rsx_fp_decompile_internal(
+-        ucode, max_bytes, ctrl, tex_cube_mask, 0, NULL, NULL, out, out_size, NULL);
++        ucode, max_bytes, ctrl, tex_cube_mask, 0, NULL, NULL, NULL, out, out_size, NULL);
+ }
+ 
+ int rsx_fp_decompile_buffered_ex(
+@@ -1248,7 +1340,7 @@ int rsx_fp_decompile_buffered_ex(
+     char* out, u32 out_size, u32* out_constant_count)
+ {
+     return rsx_fp_decompile_internal(
+-        ucode, max_bytes, ctrl, tex_cube_mask, 1, NULL, NULL, out, out_size,
++        ucode, max_bytes, ctrl, tex_cube_mask, 1, NULL, NULL, NULL, out, out_size,
+         out_constant_count);
+ }
+ 
+@@ -1258,7 +1350,7 @@ int rsx_fp_decompile_buffered_shadow_ex(
+     char* out, u32 out_size, u32* out_constant_count)
+ {
+     return rsx_fp_decompile_internal(ucode, max_bytes, ctrl, tex_cube_mask,
+-        1, shadow, NULL, out, out_size, out_constant_count);
++        1, shadow, NULL, NULL, out, out_size, out_constant_count);
+ }
+ 
+ int rsx_fp_decompile_buffered_shadow_color_ex(
+@@ -1267,7 +1359,17 @@ int rsx_fp_decompile_buffered_shadow_color_ex(
+     char* out, u32 out_size, u32* out_constant_count)
+ {
+     return rsx_fp_decompile_internal(ucode, max_bytes, ctrl, tex_cube_mask,
+-        1, shadow, gamma_masks, out, out_size, out_constant_count);
++        1, shadow, gamma_masks, NULL, out, out_size, out_constant_count);
++}
++
++int rsx_fp_decompile_buffered_shadow_color_expand_ex(
++    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
++    const rsx_fp_shadow_desc shadow[16], const u8 gamma_masks[16],
++    const u8 expand_masks[16],
++    char* out, u32 out_size, u32* out_constant_count)
++{
++    return rsx_fp_decompile_internal(ucode, max_bytes, ctrl, tex_cube_mask,
++        1, shadow, gamma_masks, expand_masks, out, out_size, out_constant_count);
+ }
+ 
+ static float fp_half_to_float(u16 h)
+@@ -1658,5 +1760,5 @@ int rsx_fp_decompile_buffered_color_ex(
+     const u8 gamma_masks[16], char* out, u32 out_size, u32* out_constant_count)
+ {
+     return rsx_fp_decompile_internal(ucode, max_bytes, ctrl, tex_cube_mask,
+-        1, NULL, gamma_masks, out, out_size, out_constant_count);
++        1, NULL, gamma_masks, NULL, out, out_size, out_constant_count);
+ }
+diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
+index a8dec2e..5db705c 100644
+--- a/libs/video/rsx_fp_decompiler.h
++++ b/libs/video/rsx_fp_decompiler.h
+@@ -200,6 +200,22 @@ int rsx_fp_decompile_buffered_shadow_color_ex(
+     const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
+     const rsx_fp_shadow_desc shadow[16], const u8 gamma_masks[16],
+     char* out, u32 out_size, u32* out_constant_count);
++/* Texture sign expansion (SET_TEXTURE_ADDRESS UNSIGNED_REMAP_BIASED):
++ * expand_masks[u] is a post-remap RGBA lane mask of the lanes unit u
++ * re-centres, plus bit 4 for 16-bit channels (rsx_texture_expand_mask).
++ * Every TEX/TXP/TXB/TXL from such a unit returns (round(x*255)-128)/127 on
++ * those lanes, less gamma lanes. A fetch carrying EXP_TEX (OPDEST bit 21,
++ * the _bx2 modifier) returns x*2-1 on every lane on any unit and skips gamma
++ * (RPCS3 _process_texel). The units whose fetches expand are part of the
++ * pipeline's identity. Upstream ps3recomp 122690f (PR #331). */
++u32 rsx_fp_texture_expand_units(const u8* ucode, u32 max_bytes,
++                                 const u8 expand_masks[16]);
++u32 rsx_fp_texture_bx2_units(const u8* ucode, u32 max_bytes);
++int rsx_fp_decompile_buffered_shadow_color_expand_ex(
++    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
++    const rsx_fp_shadow_desc shadow[16], const u8 gamma_masks[16],
++    const u8 expand_masks[16],
++    char* out, u32 out_size, u32* out_constant_count);
+ 
+ /* Return the mnemonic for an NV40 fragment opcode (or "?" if unknown).
+  * Useful for disassembly/logging. */
+diff --git a/libs/video/rsx_texture_layout.c b/libs/video/rsx_texture_layout.c
+index 2b6904a..8853493 100644
+--- a/libs/video/rsx_texture_layout.c
++++ b/libs/video/rsx_texture_layout.c
+@@ -360,3 +360,32 @@ u8 rsx_texture_gamma_mask(u32 format, u32 control1, u32 filter, u32 address)
+     }
+     return gamma;
+ }
++
++/* Sign expansion lanes for SET_TEXTURE_ADDRESS UNSIGNED_REMAP_BIASED (bit 12).
++ * Upstream ps3recomp 122690f (PR #331), ported for TEX_EXPAND=1. */
++u8 rsx_texture_expand_mask(u32 format, u32 control1, u32 filter, u32 address)
++{
++    /* RPCS3 rsx::get_format_features, RSX_FORMAT_FEATURE_BIASED_NORMALIZATION:
++     * the 8-bit colour formats, the depth formats, X16, Y16_X16 and HILO8.
++     * Floats and the 32-bit depth-as-colour reads have nothing to expand. */
++    switch (format & 0x9Fu) {
++    case 0x81: case 0x82: case 0x83: case 0x84: case 0x85:
++    case 0x86: case 0x87: case 0x88: case 0x8B: case 0x8D: case 0x8E: case 0x8F:
++    case 0x90: case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x98:
++    case 0x97: case 0x9D: case 0x9E: break;
++    default: return 0;
++    }
++    if (!((address >> 12) & 1u)) return 0;          /* UNSIGNED_REMAP_NORMAL */
++    if (!(control1 & 0xFFFFu)) control1 = 0xAAE4u;
++    u8 remap[4]; rsx_texture_component_remap(control1, format, remap);
++    static const u8 rgba_lane[4] = {3, 0, 1, 2};
++    u8 mask = 0;
++    for (u32 i = 0; i < 4; ++i) {
++        const u32 source = (control1 >> (2u * i)) & 3u;
++        if (remap[i] < RSX_REMAP_ZERO && !((filter >> (28u + source)) & 1u))
++            mask |= (u8)(1u << rgba_lane[i]);
++    }
++    /* Bit 4: 16-bit channels (X16, Y16_X16) re-centre on 32768/32767. */
++    if (mask && ((format & 0x9Fu) == 0x94u || (format & 0x9Fu) == 0x95u)) mask |= 0x10u;
++    return mask;
++}
+diff --git a/libs/video/rsx_texture_layout.h b/libs/video/rsx_texture_layout.h
+index 437db9b..ef581cf 100644
+--- a/libs/video/rsx_texture_layout.h
++++ b/libs/video/rsx_texture_layout.h
+@@ -174,6 +174,15 @@ void rsx_texture_decode(void* dst, u32 dst_pitch,
+  * Float/depth/non-gamma formats return zero; source signed flags take
+  * precedence after the existing crossbar. No texture bytes are converted. */
+ u8 rsx_texture_gamma_mask(u32 format, u32 control1, u32 filter, u32 address);
++/* Per-final-RGBA-lane mask (bits 0..3) of the lanes every fetch re-centres
++ * to the signed range: every lane the crossbar fills from a source channel
++ * when SET_TEXTURE_ADDRESS asks for CELL_GCM_TEXTURE_UNSIGNED_REMAP_BIASED
++ * (bit 12), less lanes whose source SET_TEXTURE_FILTER flags signed (those
++ * take the sign-extension read instead). Bit 4 marks 16-bit channels (X16,
++ * Y16_X16). Only the formats that carry the feature return non-zero (RPCS3
++ * fragment_texture::format_features, RSX_FORMAT_FEATURE_BIASED_NORMALIZATION).
++ * No texture bytes are converted. Upstream ps3recomp 122690f (PR #331). */
++u8 rsx_texture_expand_mask(u32 format, u32 control1, u32 filter, u32 address);
+ 
+ /* --- component remap (NV4097 TEXTURE_CONTROL1 crossbar) ------------------
+  *

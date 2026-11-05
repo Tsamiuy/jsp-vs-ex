@@ -1,0 +1,47 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index b667c1a..e303885 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1506,6 +1506,42 @@ void cellGcm_fifo_kick_wait(unsigned ms)
+     static int on = -1;
+     if (on < 0) { const char* e = getenv("GCM_FIFO_KICK"); on = (e && *e == '0') ? 0 : 1; }
+     HANDLE ev = on ? (HANDLE)cellGcm_fifo_kick_event() : NULL;
++    /* GCM_PUT_POLL=<us> (opt-in): during the idle wait, look at the guest's
++     * `put` every <us> microseconds and return as soon as it moved past what
++     * the walker has consumed. The guest's flush is a plain store to the
++     * control register -- nothing can kick on it -- so the present thread
++     * otherwise notices a new frame only when this wait times out (up to
++     * `ms`, 4 ms). J-Stars flushes each frame right after its previous flip
++     * completes (func_006507DC: wait flip DONE, SetFlip + flush, wait
++     * vblank), and that flip only completes once the renderer has drained
++     * and presented the frame before, so this latency sits on every frame's
++     * critical path. A (put, get) pair that did not advance the walker last
++     * time is not reported again, so a parked walker does not spin the loop. */
++    static long putpoll = -1;
++    if (putpoll < 0) { const char* e = getenv("GCM_PUT_POLL"); putpoll = e ? atol(e) : 0;
++                       if (putpoll < 0) putpoll = 0; }
++    if (putpoll > 0 && ms > 0) {
++        static u32 last_put = 0xFFFFFFFFu, last_get = 0xFFFFFFFFu;
++        static LARGE_INTEGER f;
++        if (!f.QuadPart) QueryPerformanceFrequency(&f);
++        LARGE_INTEGER t0, t; QueryPerformanceCounter(&t0);
++        const LONGLONG deadline = t0.QuadPart + (LONGLONG)ms * f.QuadPart / 1000;
++        const LONGLONG step = (LONGLONG)putpoll * f.QuadPart / 1000000;
++        for (;;) {
++            if (ev && WaitForSingleObject(ev, 0) == WAIT_OBJECT_0) return;   /* kicked */
++            const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
++            const u32 get = s_fifo_getoff;
++            if (put != get && !(put == last_put && get == last_get)) {
++                last_put = put; last_get = get;
++                return;                                                     /* new work */
++            }
++            QueryPerformanceCounter(&t);
++            if (t.QuadPart >= deadline) return;
++            const LONGLONG until = t.QuadPart + step;
++            do { SwitchToThread(); QueryPerformanceCounter(&t); }
++            while (t.QuadPart < until && t.QuadPart < deadline);
++        }
++    }
+     if (ev) WaitForSingleObject(ev, ms);
+     else    Sleep(ms);
+ }

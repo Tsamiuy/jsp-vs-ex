@@ -1,0 +1,178 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 2b8afb3..82ff88a 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6352,6 +6352,7 @@ static void vf_src_init(rsx_fetch_src* s, const rsx_state* st, u32 first, int in
+     s->topo  = (u8)topo;
+     s->isize = 0;
+     s->ib    = NULL;
++    s->vlist = NULL;
+     if (indexed) {
+         const int local = ((st->index_array_dma & 0xF) == 0);
+         s->ib    = vm_base + cellGcmResolveLocated(local, st->index_array_offset);
+@@ -6364,7 +6365,7 @@ static void vf_src_init(rsx_fetch_src* s, const rsx_state* st, u32 first, int in
+ static void vf_one(const rsx_fetch_plan* plan, const rsx_state* st, u32 v, VPSlot* dst)
+ {
+     if (!plan) { read_vp_vertex(st, v, dst); return; }
+-    rsx_fetch_src s1 = { v, RSX_FETCH_LIST, 0, NULL };
++    rsx_fetch_src s1 = { v, RSX_FETCH_LIST, 0, NULL, NULL };
+     rsx_fetch_plan_range(plan, &s1, 0, 1, (float (*)[4])dst);
+ }
+ 
+@@ -6863,8 +6864,30 @@ static u32 upload_strip_vp_indexed_rsx(const rsx_state* state, u32 first, u32 co
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+     vp_attrs_dbg(state);
+     u32 vmin = 0xFFFFFFFFu, vmax = 0;
++    /* Batched (default): this loop only lists the guest vertex of each
++     * output, and one vf_fetch afterwards decodes the list in blocks --
++     * staged, streamed, a single fence, the worker pool for big batches, and
++     * repeats decoded once. Fetching each vertex as it was emitted (one plan
++     * range per vertex: a stage memset, a page-cache reset and an sfence
++     * each) made this the costliest path in the match, ~379 cycles/vertex
++     * against ~60 for the list paths. STRIPX_PERVERTEX=1 restores it. */
++    static int pervertex = -1;
++    if (pervertex < 0) pervertex = getenv("STRIPX_PERVERTEX") ? 1 : 0;
++    const int batched = !pervertex && !vf_legacy();
++    static u32* s_vl = NULL; static u32 s_vl_cap = 0;
++    if (batched) {
++        u64 need = (u64)count * 3u;
++        if (need > maxv) need = maxv;
++        if (need > s_vl_cap) {
++            u32 cap = s_vl_cap ? s_vl_cap : 4096u;
++            while (cap < need) cap *= 2u;
++            u32* nv = (u32*)realloc(s_vl, (size_t)cap * sizeof(u32));
++            if (nv) { s_vl = nv; s_vl_cap = cap; }
++        }
++    }
++    const int use_list = batched && s_vl && s_vl_cap >= ((u64)count * 3u < maxv ? (u64)count * 3u : maxv);
+     rsx_fetch_plan _plan, *plan = NULL;
+-    if (!vf_legacy()) { rsx_fetch_plan_init(state, vf_input_mask(state), &_plan); plan = &_plan; }
++    if (!use_list && !vf_legacy()) { rsx_fetch_plan_init(state, vf_input_mask(state), &_plan); plan = &_plan; }
+     u32 o = 0;
+     for (u32 i = 0; i < count; i++) {
+         u32 v;
+@@ -6877,12 +6900,22 @@ static u32 upload_strip_vp_indexed_rsx(const rsx_state* state, u32 first, u32 co
+         if (k >= 2) {
+             if (o + 3 > maxv) { s_drop_draws++; break; }
+             /* triangle k-2: odd ones are wound the other way */
+-            vf_one(plan, state, (k & 1) ? b : a, &out[o*16]); o++;
+-            vf_one(plan, state, (k & 1) ? a : b, &out[o*16]); o++;
+-            vf_one(plan, state, v, &out[o*16]); o++;
++            if (use_list) {
++                s_vl[o++] = (k & 1) ? b : a;
++                s_vl[o++] = (k & 1) ? a : b;
++                s_vl[o++] = v;
++            } else {
++                vf_one(plan, state, (k & 1) ? b : a, &out[o*16]); o++;
++                vf_one(plan, state, (k & 1) ? a : b, &out[o*16]); o++;
++                vf_one(plan, state, v, &out[o*16]); o++;
++            }
+         }
+         a = b; b = v; k++;
+     }
++    if (use_list && o) {
++        rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, s_vl };
++        vf_fetch(state, &src, o, out);
++    }
+     /* STRIPX_DUMP=<frame>: from that backend frame on, write the first 3000
+      * calls' index streams to stripx_dump.txt -- epoch, index offset, first,
+      * count, the carried piece state, restart flags and every index -- to
+diff --git a/libs/video/rsx_vertex_fetch.c b/libs/video/rsx_vertex_fetch.c
+index 7738dee..27f2a69 100644
+--- a/libs/video/rsx_vertex_fetch.c
++++ b/libs/video/rsx_vertex_fetch.c
+@@ -170,6 +170,9 @@ void rsx_fetch_plan_init(const rsx_state* st, u32 mask, rsx_fetch_plan* plan)
+     vbase_dbg(st);
+     plan->base_index = vboff ? 0u : st->vertex_data_base_index;
+     plan->local_base = cellGcmResolveLocated(1, 0);
++    { static int nodedup = -1;
++      if (nodedup < 0) nodedup = getenv("VFETCH_NODEDUP") ? 1 : 0;
++      plan->dedup = nodedup ? 0 : 1; }
+     memcpy(plan->konst, st->vertex_data4f, sizeof plan->konst);
+     for (int i = 0; i < 16; i++) {
+         if (!(plan->mask & (1u << i))) continue;
+@@ -201,6 +204,7 @@ void rsx_fetch_plan_init(const rsx_state* st, u32 mask, rsx_fetch_plan* plan)
+ u32 rsx_fetch_src_vertex(const rsx_fetch_src* src, u32 o)
+ {
+     u32 s;
++    if (src->topo == RSX_FETCH_VLIST) return src->vlist[o];
+     switch (src->topo) {
+     case RSX_FETCH_QUADS: {
+         static const u8 q6[6] = {0,1,2, 0,2,3};
+@@ -343,10 +347,32 @@ void rsx_fetch_plan_range(const rsx_fetch_plan* plan, const rsx_fetch_src* src,
+     memset(stage, 0, (size_t)nfirst * sizeof stage[0]);
+     const int aligned = (((uintptr_t)out) & 15u) == 0;
+ 
++    /* The last few distinct vertices decoded, by guest index (dedup). */
++    enum { RING = 4 };
++    u32 ring_vi[RING];
++    for (int i = 0; i < RING; i++) ring_vi[i] = 0xFFFFFFFFu;
++    u32 ring_next = 0;
++    _Alignas(16) float hold[RING][16][4];    /* copies that outlive the stage block */
++
+     for (u32 b0 = o0; b0 < o1; b0 += BLK) {
+         const u32 b1 = (o1 - b0 > BLK) ? b0 + BLK : o1;
+-        for (u32 o = b0; o < b1; o++)
+-            rsx_fetch_plan_vertex(plan, rsx_fetch_src_vertex(src, o), stage[o - b0], page, page_ea);
++        for (u32 o = b0; o < b1; o++) {
++            const u32 vi = rsx_fetch_src_vertex(src, o);
++            if (plan->dedup) {
++                int hit = -1;
++                for (int r = 0; r < RING; r++) if (ring_vi[r] == vi) { hit = r; break; }
++                if (hit >= 0) {
++                    memcpy(stage[o - b0], hold[hit], sizeof stage[0]);
++                    continue;
++                }
++            }
++            rsx_fetch_plan_vertex(plan, vi, stage[o - b0], page, page_ea);
++            if (plan->dedup) {
++                const u32 r = ring_next++ % RING;
++                ring_vi[r] = vi;
++                memcpy(hold[r], stage[o - b0], sizeof stage[0]);
++            }
++        }
+         rsx_fetch_store(out + (u64)b0 * 16u, &stage[0][0][0], (b1 - b0) * 16u, aligned);
+     }
+     rsx_fetch_store_fence();
+diff --git a/libs/video/rsx_vertex_fetch.h b/libs/video/rsx_vertex_fetch.h
+index 0bf0e89..09f7cb0 100644
+--- a/libs/video/rsx_vertex_fetch.h
++++ b/libs/video/rsx_vertex_fetch.h
+@@ -105,6 +105,7 @@ typedef struct rsx_fetch_plan {
+     u8    const_idx[16];              /* in mask, read from the register */
+     rsx_fetch_plan_attr fetch[16];    /* in mask, read from guest memory */
+     float konst[16][4];               /* vertex_data4f snapshot          */
++    u8    dedup;                      /* reuse a just-decoded vertex     */
+ } rsx_fetch_plan;
+ 
+ /* Build the plan for the current state. `mask` = attributes the vertex
+@@ -121,7 +122,8 @@ enum {
+     RSX_FETCH_QUADS,        /* quad q -> 0,1,2, 0,2,3                     */
+     RSX_FETCH_STRIP,        /* tri t -> t, t+1, t+2                       */
+     RSX_FETCH_STRIP_SWAP,   /* as STRIP, odd triangles swap the last two  */
+-    RSX_FETCH_FAN           /* tri t -> 0, t+1, t+2                       */
++    RSX_FETCH_FAN,          /* tri t -> 0, t+1, t+2                       */
++    RSX_FETCH_VLIST         /* vlist[o]: guest vertex indices, prebuilt   */
+ };
+ 
+ typedef struct rsx_fetch_src {
+@@ -129,11 +131,18 @@ typedef struct rsx_fetch_src {
+     u8        topo;    /* RSX_FETCH_*                                          */
+     u8        isize;   /* 0 = non-indexed (vi = first + src), 2 = u16, 4 = u32 */
+     const u8* ib;      /* resolved index array (big-endian), when indexed      */
++    const u32* vlist;  /* RSX_FETCH_VLIST: one guest vertex index per output   */
+ } rsx_fetch_src;
+ 
+ /* Fetch output vertices [o0, o1) into out, vertex o at out + o*16 (16
+  * float4 slots per vertex). Thread-safe: disjoint ranges of one draw can
+- * run concurrently. */
++ * run concurrently.
++ *
++ * Expanded strips and quads name the same guest vertex in up to three
++ * consecutive triangles. Decoding is a pure function of the guest bytes, so
++ * a vertex decoded a few outputs ago is copied instead of decoded again
++ * (the last 4 distinct indices are kept). VFETCH_NODEDUP=1 decodes every
++ * output. */
+ void rsx_fetch_plan_range(const rsx_fetch_plan* plan, const rsx_fetch_src* src,
+                           u32 o0, u32 o1, float (*out)[4]);
+ 

@@ -1,0 +1,67 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 985e1e1..ef87731 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -10470,6 +10470,22 @@ static void vp_code_dbg(const char* call, u32 primitive, u32 first, u32 count, i
+                     s_vpl[s_vpl_n].ea = (u32)(q - vm_base); s_vpl_n++;
+                 }
+             }
++            /* VP_CODE_GUARD=1: page-guard the first logged draw's first vertex,
++             * so every later write into that 4 KB page -- PPU stores, the lifted
++             * dcbz (inline memset) and vector stores, host memsets, SPU DMA --
++             * is logged with its writer and the flip count (ppu_guard_page).
++             * The beam's quads are written by the SPU two flips before the draw
++             * and are zero by the time it is decoded (jstars-notes VFX.md). */
++            if (v == 0 && i == 0) {
++                static int gd = -1, armed = 0;
++                if (gd < 0) gd = getenv("VP_CODE_GUARD") ? 1 : 0;
++                if (gd && !armed) {
++                    extern void ppu_guard_page(u32 guest_ea);
++                    armed = 1;
++                    fprintf(stderr, "[VPCODE] guarding the page of 0x%08X (draw #%d)%c", (u32)(q - vm_base), nprinted, 10);
++                    ppu_guard_page((u32)(q - vm_base));
++                }
++            }
+             fprintf(stderr, "[VPCODE]     v%u (index %u, element %u) ea=0x%08X bytes:", v, vi, ei, (u32)(q - vm_base));
+             for (u32 b = 0; b < 16 && b < (a->stride ? a->stride : 16u); b++) fprintf(stderr, " %02X", q[b]);
+             fprintf(stderr, "%c", 10);
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 2b6c95e..4bdd58d 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1126,6 +1126,8 @@ static volatile uint32_t  s_guard_ea   = 0;   /* guest ea being watched */
+ extern "C" void ppu_guest_callstack(const char* tag);
+ 
+ static uint32_t s_guard_pre = 0;
++extern "C" unsigned cellGcm_flip_request_count(void);   /* [GUARD] flip= */
++extern "C" unsigned long long ps3_ms_now(void);
+ static LONG WINAPI ppu_guard_veh(EXCEPTION_POINTERS* ep)
+ {
+     /* Re-entrancy guard. The handler logs with fprintf, and if the guarded page
+@@ -1145,11 +1147,22 @@ static LONG WINAPI ppu_guard_veh(EXCEPTION_POINTERS* ep)
+         if (tgt >= s_guard_page && tgt < s_guard_page + 0x1000) {
+             uint32_t guest = (uint32_t)(tgt - (uintptr_t)vm_base);
+             char* mbase = (char*)GetModuleHandleA(NULL);
++            /* PPU_GUARD_MAX=<n> (default 0 = unlimited): cap the WRITE lines.
++             * flip= and ms= put each write on the timeline of [VPCODE] and
++             * [dma-range]; tid tells an SPU DMA thread from the PPU. */
+             { extern uint32_t ppu_prof_resolve_host(void*);
+-              uint32_t gfn = ppu_prof_resolve_host((void*)ep->ContextRecord->Rip);
+-              fprintf(stderr, "[GUARD] WRITE guest=0x%08X from RIP rva=0x%llX guest-fn=0x%08X%s\n",
+-                      guest, (unsigned long long)((char*)ep->ContextRecord->Rip - mbase), gfn,
+-                      (guest == s_guard_ea) ? "  <<< watched addr!" : ""); }
++              static long gmax = -1, gn = 0;
++              if (gmax < 0) { const char* e = getenv("PPU_GUARD_MAX"); gmax = e ? atol(e) : 0; }
++              if (!gmax || ++gn <= gmax) {
++                  uint32_t gfn = ppu_prof_resolve_host((void*)ep->ContextRecord->Rip);
++                  uint32_t oldw = __builtin_bswap32(*(volatile uint32_t*)(vm_base + (guest & ~3u)));
++                  fprintf(stderr, "[GUARD] WRITE guest=0x%08X from RIP rva=0x%llX guest-fn=0x%08X"
++                                  " flip=%u ms=%llu tid=%lu old=0x%08X lr=0x%08X%s\n",
++                          guest, (unsigned long long)((char*)ep->ContextRecord->Rip - mbase), gfn,
++                          cellGcm_flip_request_count(), ps3_ms_now(), (unsigned long)GetCurrentThreadId(), oldw,
++                          g_active_ctx ? (uint32_t)g_active_ctx->lr : 0u,
++                          (guest == s_guard_ea) ? "  <<< watched addr!" : "");
++              } }
+             /* On the watched word specifically, dump the guest call stack: with a
+              * memset-style clear the writer is always the same memcpy body, and
+              * the only useful question is WHO called it. */

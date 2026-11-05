@@ -1,0 +1,142 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 9db6962..141a4f7 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -165,6 +165,9 @@ typedef struct {
+      * (wave's debug tiles) position quads with this, not with constants --
+      * forcing full-target viewports drew every tile window-sized. */
+     u32 vp_x, vp_y, vp_w, vp_h;
++    /* Guest viewport transform x/y (scale x, scale y, offset x, offset y) at
++     * draw time, for ZPASS_VPXY's per-cascade scissor. */
++    float vxy[4];
+     /* Ordered clear op (offscreen surfaces only; display clears stay the
+      * frame-start backbuffer clear). is_clear records also set is_vp so the
+      * legacy replay pass skips them. */
+@@ -246,6 +249,13 @@ static int zpass_dbg(void)
+     return on;
+ }
+ static int dr_is_zonly(const D3D12DrawRecord* dr) { return (dr->rt_off & ZT_TAG) != 0; }
++/* ZPASS_VPXY=1: depth-only (shadow caster) draws honour the guest's viewport
++ * scale/offset in x and y, not only the viewport rectangle. A shadow atlas
++ * places each cascade with the viewport transform; with the old identity x/y
++ * every cascade covered the whole map and the last one overwrote the others
++ * (jstars-notes SHADOWS_ENV.md). */
++static int zpass_vpxy(void) { static int on = -1; if (on < 0) on = getenv("ZPASS_VPXY") ? 1 : 0; return on; }
++static int dt_dims(u32 off, u32* w, u32* h);   /* defined with the DepthRT table */
+ /* Guest depth test/write/func packed for a depth-only op's PSO: bit 8 valid,
+  * bit 0 test, bit 1 write, bits 4..6 func as GL order (NEVER..ALWAYS). The
+  * register holds the GL enum (0x200..0x207); the reset value is the bare 1. */
+@@ -5809,6 +5819,32 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+      * fix ZPASS_CASTER_Z01=1 forces the GL [-1,1] -> [0,1] mapping (scale
+      * 0.5, offset 0.5) on casters, as cellGcmSetViewport's defaults do. */
+     if (dr && dr_is_zonly(dr)) {
++        /* ZPASS_DBG: each distinct x/y placement once (a cascade atlas shows
++         * several offsets on one target). */
++        if (zpass_dbg()) {
++            static float seenxy[16][2]; static int nxy = 0; int kn = 0;
++            for (int i = 0; i < nxy; i++)
++                if (seenxy[i][0] == vo_[0] && seenxy[i][1] == vo_[1]) kn = 1;
++            if (!kn && nxy < 16) { seenxy[nxy][0] = vo_[0]; seenxy[nxy][1] = vo_[1]; nxy++;
++                fprintf(stderr, "[ZPASS] caster xy map: target 0x%08X rect=%u,%u %ux%u scale=(%g,%g)"
++                                " offset=(%g,%g)%c", dr->rt_off & ~ZT_TAG, dr->vp_x, dr->vp_y,
++                        dr->vp_w, dr->vp_h, (double)vs_[0], (double)vs_[1],
++                        (double)vo_[0], (double)vo_[1], 10); }
++        }
++        if (zpass_vpxy() && vs_[0] != 0.0f && vs_[1] != 0.0f) {
++            u32 tw = 0, th = 0;
++            if (dt_dims(dr->rt_off & ~ZT_TAG, &tw, &th) && tw && th) {
++                /* D3D viewport = the whole map (see the record loop); window
++                 * x = ndc*sx + ox. y keeps today's orientation in either guest
++                 * convention: the scale's sign only picks which edge oy counts from. */
++                const float sy = vs_[1] < 0.0f ? -vs_[1] : vs_[1];
++                vpx[0] = 2.0f * vs_[0] / (float)tw;
++                vpx[4] = 2.0f * vo_[0] / (float)tw - 1.0f;
++                vpx[1] = 2.0f * sy / (float)th;
++                vpx[5] = (vs_[1] < 0.0f) ? 1.0f - 2.0f * vo_[1] / (float)th
++                                         : 2.0f * vo_[1] / (float)th - 1.0f;
++            }
++        }
+         if (zpass_dbg()) {
+             static float seen[16][2]; static int ns = 0; int known = 0;
+             for (int i = 0; i < ns; i++)
+@@ -5999,6 +6035,14 @@ static int dt_find(u32 off)
+     return -1;
+ }
+ 
++static int dt_dims(u32 off, u32* w, u32* h)
++{
++    const int i = dt_find(off);
++    if (i < 0) return 0;
++    *w = s_zrt[i].w; *h = s_zrt[i].h;
++    return 1;
++}
++
+ static D3D12_CPU_DESCRIPTOR_HANDLE dt_dsv(int i)
+ {
+     D3D12_CPU_DESCRIPTOR_HANDLE h;
+@@ -7914,7 +7958,7 @@ static void render_frame(void)
+                     float th = zdraw ? (float)s_zrt[cur_zt].h
+                              : (cur_rt >= 0) ? (float)s_d3d.off_rt[cur_rt].h : (float)s_d3d.height;
+                     D3D12_VIEWPORT dvp = {0, 0, tw, th, 0.0f, 1.0f};
+-                    if (dr->vp_w >= 2 && dr->vp_h >= 2 &&
++                    if (!(zdraw && zpass_vpxy()) && dr->vp_w >= 2 && dr->vp_h >= 2 &&
+                         (float)(dr->vp_x + dr->vp_w) <= tw + 0.5f &&
+                         (float)(dr->vp_y + dr->vp_h) <= th + 0.5f) {
+                         dvp.TopLeftX = (float)dr->vp_x;
+@@ -7925,6 +7969,23 @@ static void render_frame(void)
+                     D3D12_RECT dsc = {(LONG)dvp.TopLeftX, (LONG)dvp.TopLeftY,
+                                       (LONG)(dvp.TopLeftX + dvp.Width),
+                                       (LONG)(dvp.TopLeftY + dvp.Height)};
++                    /* ZPASS_VPXY: clip each caster to its own cascade, the
++                     * rectangle its viewport transform covers. */
++                    if (zdraw && zpass_vpxy() && dr->vxy[0] != 0.0f && dr->vxy[1] != 0.0f) {
++                        const float ax = dr->vxy[0] < 0 ? -dr->vxy[0] : dr->vxy[0];
++                        const float ay = dr->vxy[1] < 0 ? -dr->vxy[1] : dr->vxy[1];
++                        float x0 = dr->vxy[2] - ax, x1 = dr->vxy[2] + ax;
++                        float y0 = dr->vxy[3] - ay, y1 = dr->vxy[3] + ay;
++                        if (dr->vxy[1] > 0.0f) { const float t = th - y1; y1 = th - y0; y0 = t; }
++                        if (x0 < 0) x0 = 0;
++                        if (y0 < 0) y0 = 0;
++                        if (x1 > tw) x1 = tw;
++                        if (y1 > th) y1 = th;
++                        if (x1 > x0 && y1 > y0) {
++                            dsc.left = (LONG)x0; dsc.top = (LONG)y0;
++                            dsc.right = (LONG)x1; dsc.bottom = (LONG)y1;
++                        }
++                    }
+                     dvp_x = dvp.TopLeftX; dvp_y = dvp.TopLeftY;
+                     dvp_w = dvp.Width;    dvp_h = dvp.Height;
+                     if (!rec_dedup || !rd_vp_ok || memcmp(&dvp, &rd_vp, sizeof dvp) ||
+@@ -11078,6 +11139,10 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+                     dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+                     dr->vp_w = s_d3d.current_rsx_state->viewport_w;
+                     dr->vp_h = s_d3d.current_rsx_state->viewport_h;
++                    dr->vxy[0] = s_d3d.current_rsx_state->viewport_scale[0];
++                    dr->vxy[1] = s_d3d.current_rsx_state->viewport_scale[1];
++                    dr->vxy[2] = s_d3d.current_rsx_state->viewport_offset[0];
++                    dr->vxy[3] = s_d3d.current_rsx_state->viewport_offset[1];
+                 } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
+                 dr->cb_slot = s_d3d.draw_count;
+                 vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
+@@ -11220,6 +11285,10 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+                 dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+                 dr->vp_w = s_d3d.current_rsx_state->viewport_w;
+                 dr->vp_h = s_d3d.current_rsx_state->viewport_h;
++                dr->vxy[0] = s_d3d.current_rsx_state->viewport_scale[0];
++                dr->vxy[1] = s_d3d.current_rsx_state->viewport_scale[1];
++                dr->vxy[2] = s_d3d.current_rsx_state->viewport_offset[0];
++                dr->vxy[3] = s_d3d.current_rsx_state->viewport_offset[1];
+             } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
+             dr->cb_slot = s_d3d.draw_count;
+                 vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
+@@ -11479,6 +11548,10 @@ static void d3d12_draw_indexed_impl(void* ud, u32 primitive, u32 first, u32 coun
+             dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+             dr->vp_w = s_d3d.current_rsx_state->viewport_w;
+             dr->vp_h = s_d3d.current_rsx_state->viewport_h;
++            dr->vxy[0] = s_d3d.current_rsx_state->viewport_scale[0];
++            dr->vxy[1] = s_d3d.current_rsx_state->viewport_scale[1];
++            dr->vxy[2] = s_d3d.current_rsx_state->viewport_offset[0];
++            dr->vxy[3] = s_d3d.current_rsx_state->viewport_offset[1];
+         } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
+         dr->cb_slot = s_d3d.draw_count;
+                 vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);

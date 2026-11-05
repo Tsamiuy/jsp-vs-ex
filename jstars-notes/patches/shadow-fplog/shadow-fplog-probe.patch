@@ -1,0 +1,41 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index afe7aee..b5d155f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7962,6 +7962,14 @@ static void render_frame(void)
+             for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
+                 const D3D12DrawRecord* dr = &s_d3d.draws[d];
+                 if (!dr->is_vp) continue;
++                /* ZPASS_FPLOG probe: where the program's draws leave this loop.
++                 * One "enter" line per draw (first 40), then the PSO outcome below. */
++                { static int pr_on = -1; static u32 pr_fp = 0; static int pr_n = 0;
++                  if (pr_on < 0) { const char* e = getenv("ZPASS_FPLOG"); pr_on = e ? 1 : 0;
++                                   if (e) pr_fp = (u32)strtoul(e, NULL, 16); }
++                  if (pr_on && pr_n < 40 && (dr->fp_addr & ~0x3u) == (pr_fp & ~0x3u)) { pr_n++;
++                      fprintf(stderr, "[ZFPLOG] enter d=%u fp=0x%X is_clear=%d zonly=%d zclr=0x%X rt=0x%08X%c",
++                              (unsigned)d, dr->fp_addr, dr->is_clear, dr_is_zonly(dr), dr->zclr, dr->rt_off, 10); } }
+                 /* The reduced-viewport passes (this title's reflection, drawn
+                  * into a region of the same target) finish here -- snapshot
+                  * before the full-screen scene overwrites them. */
+@@ -8193,6 +8201,12 @@ static void render_frame(void)
+                 /* PSO_ASYNC: the pipeline is still being built. Skipping the
+                  * draw for a frame beats the hardcoded fallback shader (wrong
+                  * colours) and beats stalling the present thread. */
++                { static int po_on = -1; static u32 po_fp = 0; static int po_n = 0;
++                  if (po_on < 0) { const char* e = getenv("ZPASS_FPLOG"); po_on = e ? 1 : 0;
++                                   if (e) po_fp = (u32)strtoul(e, NULL, 16); }
++                  if (po_on && po_n < 40 && (dr->fp_addr & ~0x3u) == (po_fp & ~0x3u)) { po_n++;
++                      fprintf(stderr, "[ZFPLOG] pso d=%u fp=0x%X pso=%p pending=%d%c",
++                              (unsigned)d, dr->fp_addr, (void*)dpso, s_pso_pending_hit, 10); } }
+                 if (dr->fp_addr && !dpso && s_pso_pending_hit) { s_perf_pj_skipped++; continue; }
+                 if (zdraw) {
+                     zn_draw[cur_zt]++; zn_verts[cur_zt] += dr->vertex_count;
+@@ -8276,7 +8290,7 @@ static void render_frame(void)
+                     if (fl_on < 0) { const char* e = getenv("ZPASS_FPLOG"); fl_on = e ? 1 : 0;
+                         if (e) { char* c; fl_fp = (u32)strtoul(e, &c, 16); fl_n = (*c == ',') ? atol(c + 1) : 120; } }
+                     if (cur_czt >= 0) zn_cdraw[cur_czt]++;
+-                    if (fl_on && fl_n > 0 && dr->fp_addr == fl_fp) {
++                    if (fl_on && fl_n > 0 && (dr->fp_addr & ~0x3u) == (fl_fp & ~0x3u)) {
+                         extern unsigned int cellGcm_flip_request_count(void);
+                         char line[512]; int ln = 0;
+                         fl_n--;

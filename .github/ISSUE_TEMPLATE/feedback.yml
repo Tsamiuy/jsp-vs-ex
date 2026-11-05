@@ -1,0 +1,15 @@
+name: Feedback or question
+description: A question, a correction to the docs, or general feedback
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach game files, EBOOTs, ISOs, firmware, keys or screenshots of copyrighted game content. Logs only.
+  - type: textarea
+    id: text
+    attributes:
+      label: Your question or feedback
+      description: "If a statement in the README or docs looks wrong, quote it here."
+    validations:
+      required: true

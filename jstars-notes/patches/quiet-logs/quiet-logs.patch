@@ -1,0 +1,43 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b886d04..0963339 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -10934,10 +10934,14 @@ static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count
+     (void)ud;
+     prim_log("draw_arrays", primitive, count);
+     vp_code_dbg("draw_arrays", primitive, first, count, 0);
+-    /* Log the first 20 calls in detail, then every 1000th to show liveness
+-     * without flooding. */
++    /* Log the first 20 calls in detail. DRAW_LOG_EVERY=<n> adds every nth
++     * as a liveness trace; it used to be every 1000th by default, and on
++     * Hidden Leaf (~80 of these lines a second) that printf was ~4% of the
++     * drawing thread's samples (jstars-notes CPU_PROFILE §36). */
+     static u64 s_total = 0;
+-    if (s_total < 20 || (s_total % 1000) == 0) {
++    static int s_every = -1;
++    if (s_every < 0) { const char* e = getenv("DRAW_LOG_EVERY"); s_every = e ? atoi(e) : 0; }
++    if (s_total < 20 || (s_every > 0 && (s_total % (u64)s_every) == 0)) {
+         printf("[D3D12] draw_arrays #%llu prim=%u first=%u count=%u\n",
+                (unsigned long long)s_total, primitive, first, count);
+     }
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index e6c83aa..6fb3018 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -1066,8 +1066,14 @@ int64_t sys_event_port_send(ppu_context* ctx)
+       g_spu_pending_evt_valid = 0; }
+ 
+     if (event_queue_push(q, &evt) < 0) {
+-        fprintf(stderr, "[evt] port_send(port=%u): queue %d FULL -> EBUSY%c",
+-                port_id, qidx, 10);
++        /* The first 8, then one line per 1000 with the count: J-Stars sends
++         * on full kick queues (size 1) ~4,000 times a run, and the line was
++         * ~3% of its frame-loop thread (jstars-notes CPU_PROFILE §38). */
++        static unsigned long s_full = 0;   /* a log rate limit: a lost count is harmless */
++        const unsigned long nfull = ++s_full;
++        if (nfull <= 8 || (nfull % 1000) == 0)
++            fprintf(stderr, "[evt] port_send(port=%u): queue %d FULL -> EBUSY (%lu so far)%c",
++                    port_id, qidx, nfull, 10);
+         return (int64_t)(int32_t)CELL_EBUSY;
+     }
+ 

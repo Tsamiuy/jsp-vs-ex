@@ -1,0 +1,55 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index dbe4bf8..75c2490 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -119,6 +119,40 @@ u32 cellGcm_flip_request_count(void)
+ {
+     return s_flip_request_count;
+ }
++
++/* Present gate (the frame clock turns it on with VBLANK_THREAD=1): a flip the
++ * title queued in the FIFO completes only once the frame clock has PRESENTED
++ * it, not merely on the next 60 Hz tick. That is the hardware contract the
++ * title double-buffers on -- when flip N is done, the RSX has finished frame
++ * N, so frame N's buffers may be rewritten. Completing on the tick alone let
++ * J-Stars run ahead of the drawing thread once the tick stopped waiting for
++ * the drain: HUD drawn as black boxes, broken city geometry (jstars-notes
++ * CPU_PROFILE §40). The frame clock reports s_flip_request_count after each
++ * present (every queued flip decoded so far has been shown by then). Like
++ * GCM_FLIP_AT_WORD, flips owed for PRESENT_GATE_MS (default 100) are
++ * released, so a flip that is never drawn cannot stop the title for good. */
++static volatile u32 s_flip_presented = 0;
++static int s_flip_gate_present = 0;
++void cellGcm_flip_gate_present(int on) { s_flip_gate_present = on; }
++void cellGcm_flip_presented(u32 n)   /* only forward: a release may have moved it past n */
++{ if ((s32)(n - s_flip_presented) > 0) s_flip_presented = n; }
++static int gcm_flip_present_blocked(void)
++{
++    if (!s_flip_gate_present || (s32)(s_flip_ppu_requests - s_flip_presented) <= 0) return 0;
++    { extern unsigned long long ps3_ms_now(void);
++      static unsigned long long since = 0; static u32 owed_at = 0; static int lim = -1;
++      if (lim < 0) { const char* e = getenv("PRESENT_GATE_MS"); lim = e ? atoi(e) : 100; }
++      const unsigned long long now = ps3_ms_now();
++      if (owed_at != s_flip_ppu_requests) { owed_at = s_flip_ppu_requests; since = now; }
++      else if (now - since >= (unsigned long long)lim) {
++          static int n = 0;
++          if (n++ < 8) fprintf(stderr, "[cellGcmSys] present gate: %d flip(s) not presented for %d ms, releasing%c",
++                               (int)(s_flip_ppu_requests - s_flip_presented), lim, 10);
++          s_flip_presented = s_flip_ppu_requests;
++          return 0;
++      } }
++    return 1;
++}
+ static u32  s_debug_level = CELL_GCM_DEBUG_LEVEL0;
+ 
+ /* Display buffers */
+@@ -984,7 +1018,8 @@ void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); ftl_tick();
+  * the callback IS the flip interrupt -- no flip, no callback. */
+ void cellGcmTickFlip(void)
+ {
+-    if (s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && !gcm_flip_at_word_blocked())
++    if (s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && !gcm_flip_at_word_blocked() &&
++        !gcm_flip_present_blocked())
+         GCM_PENDING_SET(2);
+ }
+ 

@@ -1,0 +1,46 @@
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 00e8480..5d01b24 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -352,6 +352,20 @@ static void decode_src(u32 w, int abs_bit, Src* s)
+  * a pixel shader paired with a vertex shader that lacks TEXCOORD8/9 still
+  * links. FP_TC89=0 restores the zeros. */
+ static int s_fp_uses_tc89;
++/* Register indices are 6 bits (FP_OUT_REG_MASK / FP_SRC_REG_MASK), so a
++ * program can name r/h 48..63, but the HLSL declared r[48] / h[48]: such a
++ * program fails D3DCompile with X3504 "array index out of bounds" and its
++ * draws fall back to the debug-font pipeline (sample t0, discard where
++ * t0.r <= 0.5, output the vertex colour). J-Stars' Yoshiwara match hits it
++ * with 3 programs (fp 0x0FC27A81, 0x0FC268C1, 0x0FC10641). FP_REGS64=1
++ * declares 64 of each (opt-in: it changes every program's text, so every
++ * pipeline recompiles once). */
++static int fp_regs64_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FP_REGS64"); on = e ? atoi(e) : 0; }
++    return on;
++}
+ /* FACING (input 0xE, RSX "SSA"): +1 on front faces, -1 on back faces, as
+  * RPCS3 feeds it. It used to read as zero. J-Stars' two-sided leaf cards
+  * (3-4 vertex draws, e.g. fp 0x0FC03741 / 0x0FC040C1 in rsxcap_skin) multiply
+@@ -630,12 +644,15 @@ static int rsx_fp_decompile_internal(
+     Out o = { out, out_size, 0, 1 };
+     out[0] = '\0';
+     int uses_pack = 0;   /* a pack or unpack opcode was decoded: the preamble gets its helpers */
++    /* Fully initialise both register files: RSX programs routinely read a
++     * register lane before writing it (the hardware reads undefined), but
++     * HLSL rejects use-before-init (error X4000). Zero everything. */
++    out_puts(&o, fp_regs64_on()
++        ? "    float4 r[64]; float4 h[64];\n"
++          "    [unroll] for (int _i = 0; _i < 64; _i++) { r[_i] = (float4)0; h[_i] = (float4)0; }\n"
++        : "    float4 r[48]; float4 h[48];\n"
++          "    [unroll] for (int _i = 0; _i < 48; _i++) { r[_i] = (float4)0; h[_i] = (float4)0; }\n");
+     out_puts(&o,
+-        "    float4 r[48]; float4 h[48];\n"
+-        /* Fully initialise both register files: RSX programs routinely read a
+-         * register lane before writing it (the hardware reads undefined), but
+-         * HLSL rejects use-before-init (error X4000). Zero everything. */
+-        "    [unroll] for (int _i = 0; _i < 48; _i++) { r[_i] = (float4)0; h[_i] = (float4)0; }\n"
+         /* Condition-code registers for exec_if predication / set_cond. Reset
+          * to 0 (NV40 CC power-up state). Dead in non-predicated programs. */
+         "    float4 cc0 = (float4)0; float4 cc1 = (float4)0;\n");

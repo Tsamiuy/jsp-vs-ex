@@ -1,0 +1,28 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 25361ac..5ae9138 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -186,8 +186,12 @@ static u32 rsx_a2c_alpha(const rsx_state* st, u32 alpha_ctl)
+ {
+     static int on = -1;
+     if (on < 0) { const char* e = getenv("MENU_A2C"); on = e ? atoi(e) : 0; }
+-    if (!on || !st || (alpha_ctl & 0x10000u) || !(st->aa_control & 0x10u)) return alpha_ctl;
+-    return 0x10000u | (0x06u << 8) | 0x80u;   /* enable, GEQUAL, ref 128/255 */
++    /* Bit 24 records that the draw asked for alpha-to-coverage, whatever
++     * MENU_A2C does with it: vp_record_cb passes it on as fp_alpha.w, so the
++     * RSX_CAP shader headers show it (alpha=(enable, ref, func, a2c)). */
++    const u32 a2c = (st && (st->aa_control & 0x10u)) ? 0x1000000u : 0u;
++    if (!on || !st || (alpha_ctl & 0x10000u) || !(st->aa_control & 0x10u)) return alpha_ctl | a2c;
++    return 0x10000u | (0x06u << 8) | 0x80u | a2c;   /* enable, GEQUAL, ref 128/255 */
+ }
+ 
+ /* Depth-only passes (SHADOW_PASSES, on by default; SHADOW_PASSES=0 = old
+@@ -5045,7 +5049,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+             ts[16] = (float)((dr->alpha_ctl >> 16) & 1u);
+             ts[17] = (float)(dr->alpha_ctl & 0xFFu) / 255.0f;
+             ts[18] = (float)((dr->alpha_ctl >> 8) & 0x07u);
+-            ts[19] = 0.0f;
++            ts[19] = (float)((dr->alpha_ctl >> 24) & 1u);   /* a2c, logged only */
+         } else {
+             ts[16] = 0.0f; ts[17] = 0.0f; ts[18] = 7.0f; ts[19] = 0.0f;
+         }

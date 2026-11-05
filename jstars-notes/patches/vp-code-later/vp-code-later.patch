@@ -1,0 +1,91 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index dc0a6e2..4c82384 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6522,6 +6522,38 @@ static void lum_readback_finish(void)
+     }
+ }
+ 
++/* VP_CODE_LATER=<n> (with VP_CODE, logging only): re-read each logged draw's
++ * first vertex (24 bytes from attribute 0's address) n frames later, at the end
++ * of render_frame (0 = the end of the same frame), and print it as
++ * `[VPCODE-LATER] #id f=<logged>-><now> bytes: ...`. Tells "the producer
++ * writes the buffer after we fetched it" (non-zero later) from "nothing ever
++ * writes it there" (still zero). jstars-notes VFX.md (Kamehameha). */
++static struct { u32 id, ea; u64 frame; } s_vpl[256];
++static int s_vpl_n = 0;
++static int vp_code_later_n(void)
++{
++    static int n = -2;
++    if (n == -2) { const char* e = getenv("VP_CODE_LATER"); n = e ? atoi(e) : -1; }
++    return n;
++}
++static void vp_code_later(void)
++{
++    const int later = vp_code_later_n();
++    if (later < 0 || !s_vpl_n) return;
++    extern uint8_t* vm_base;
++    int keep = 0;
++    for (int i = 0; i < s_vpl_n; i++) {
++        if ((s64)(s_d3d.frame_count - s_vpl[i].frame) < (s64)later) { s_vpl[keep++] = s_vpl[i]; continue; }
++        const u8* q = vm_base + s_vpl[i].ea;
++        u32 nz = 0; for (int b = 0; b < 24; b++) if (q[b]) nz++;
++        fprintf(stderr, "[VPCODE-LATER] #%u f=%llu->%llu ea=0x%08X nonzero=%u/24 bytes:", s_vpl[i].id,
++                (unsigned long long)s_vpl[i].frame, (unsigned long long)s_d3d.frame_count, s_vpl[i].ea, nz);
++        for (int b = 0; b < 24; b++) fprintf(stderr, " %02X", q[b]);
++        fprintf(stderr, "%c", 10);
++    }
++    s_vpl_n = keep;
++}
++
+ static void render_frame(void)
+ {
+     vfa_sync();   /* the command list reads vp_vb: every queued fetch must be done */
+@@ -7731,6 +7763,7 @@ static void render_frame(void)
+     }
+ 
+     if (perf_on()) s_perf_rf += perf_now() - _rf0;
++    vp_code_later();
+     /* MEMPEEK=<hex addr>:<n>: n big-endian floats at a guest address each frame,
+      * with a min/max so a buffer of constants is distinguishable from real data. */
+     { const char* mp = getenv("MEMPEEK");
+@@ -10378,6 +10411,11 @@ static void vp_code_dbg(const char* call, u32 primitive, u32 first, u32 count, i
+             e = (*end == ',') ? end + 1 : NULL; }
+         const char* n = getenv("VP_CODE_N"); if (n) maxn = atoi(n); }
+     if (!nw || nprinted >= maxn) return;
++    /* VP_CODE_FROM=<frame_count>: start logging at that frame, so draws before
++     * the moment of interest do not use up VP_CODE_N. */
++    { static long long from = -2;
++      if (from == -2) { const char* e = getenv("VP_CODE_FROM"); from = e ? atoll(e) : 0; }
++      if ((long long)s_d3d.frame_count < from) return; }
+     const rsx_state* st = s_d3d.current_rsx_state;
+     extern uint8_t* vm_base;
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+@@ -10390,8 +10428,8 @@ static void vp_code_dbg(const char* call, u32 primitive, u32 first, u32 count, i
+     for (int i = 0; i < nw; i++) if (want[i] == code) hit = 1;
+     if (!hit) return;
+     nprinted++;
+-    fprintf(stderr, "[VPCODE] %s prim=%u first=%u count=%u fp=0x%X code=0x%08X tex0=0x%X divider_op=0x%08X"
+-                    " vp_start=%u base_off=0x%X base_idx=%u%c",
++    fprintf(stderr, "[VPCODE] #%d f=%llu %s prim=%u first=%u count=%u fp=0x%X code=0x%08X tex0=0x%X divider_op=0x%08X"
++                    " vp_start=%u base_off=0x%X base_idx=%u%c", nprinted, (unsigned long long)s_d3d.frame_count,
+             call, primitive, first, count, fp, code, s_d3d.cur_texs[0].raw, st->frequency_divider_op,
+             st->transform_program_start, st->vertex_data_base_offset, st->vertex_data_base_index, 10);
+     for (int i = 0; i < 16; i++) {
+@@ -10413,7 +10451,15 @@ static void vp_code_dbg(const char* call, u32 primitive, u32 first, u32 count, i
+             const u32 ao = st->vertex_data_base_offset + (a->offset & 0x7FFFFFFFu) + ei * a->stride;
+             const u8* q = vm_base + ((a->offset & 0x80000000u) ? cellGcmResolveLocated(0, ao)
+                                                                 : cellGcmResolveLocated(1, ao));
+-            fprintf(stderr, "[VPCODE]     v%u (index %u, element %u) bytes:", v, vi, ei);
++            if (v == 0 && vp_code_later_n() >= 0 && s_vpl_n < 256) {
++                int first_attr = 1;
++                for (int k = 0; k < i; k++) if (st->vertex_attribs[k].enabled) first_attr = 0;
++                if (first_attr) {
++                    s_vpl[s_vpl_n].id = (u32)nprinted; s_vpl[s_vpl_n].frame = s_d3d.frame_count;
++                    s_vpl[s_vpl_n].ea = (u32)(q - vm_base); s_vpl_n++;
++                }
++            }
++            fprintf(stderr, "[VPCODE]     v%u (index %u, element %u) ea=0x%08X bytes:", v, vi, ei, (u32)(q - vm_base));
+             for (u32 b = 0; b < 16 && b < (a->stride ? a->stride : 16u); b++) fprintf(stderr, " %02X", q[b]);
+             fprintf(stderr, "%c", 10);
+         }

@@ -1,0 +1,62 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index e7ffc9d..572f24d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2413,6 +2413,18 @@ static void dr_z_info(const D3D12DrawRecord* dr, DrZInfo* zi)
+     }
+     /* A depth-only op's PSO also carries the guest depth state. */
+     if (dr_is_zonly(dr)) zi->zonly_state = dr->zstate ? dr->zstate : 0x133u;  /* LEQUAL, test+write */
++    /* ZETA_TARGETS: a colour op whose depth is kept across switches must use
++     * the guest's own depth test and write mask. With the shared buffer every
++     * op got LESS_EQUAL + write against a buffer cleared at each switch, so
++     * 2D quads drawn "with depth off" were harmless. Against kept depth they
++     * wrote their quad's depth, and the next frame's scene failed the test
++     * there: the logo boxes, the stale subtitle and the blocky patches
++     * (FINDINGS §31). ZETA_FORCED_DEPTH=1 = the forced state (v1). */
++    else if (zeta_targets_on() && dr->rt_off && dr->zt_off && dt_find(dr->zt_off) >= 0) {
++        static int forced = -1;
++        if (forced < 0) forced = getenv("ZETA_FORCED_DEPTH") ? 1 : 0;
++        if (!forced) zi->zonly_state = dr->zstate ? dr->zstate : 0x133u;
++    }
+     if (!zi->shadow_mask && !zi->bitcast_mask && !zi->zonly_state) return;
+     u64 k = 1469598103934665603ULL;
+     const u8* p = (const u8*)zi + sizeof zi->key;   /* everything after key */
+@@ -6396,6 +6408,38 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+           if (e && sscanf(e, "%f,%f,%f", &_co[0], &_co[1], &_co[2]) == 3) _con = 1; }
+       if (_con) { cc[0] = _co[0]; cc[1] = _co[1]; cc[2] = _co[2]; } }
+ 
++    /* ZETA_TARGETS: EVERY depth/stencil clear of a zeta surface is recorded
++     * as a clear op on that zeta's DepthRT (the depth-only record form,
++     * rt_off = ZT_TAG | zeta), whatever the colour target is. v1 only
++     * caught clears made with an offscreen colour target bound; J-Stars clears
++     * its zetas with no colour target or with the display bound, so kept depth
++     * was never reset and each frame tested against the last one's (the
++     * stale regions in FINDINGS §31). ZETA_CLEARS_V1=1 = the v1 rule. */
++    { const rsx_state* zs = s_d3d.current_rsx_state;
++      static int v1 = -1;
++      if (v1 < 0) v1 = getenv("ZETA_CLEARS_V1") ? 1 : 0;
++      if (zeta_targets_on() && !v1 && zs && (flags & 3u) && zs->surface_zeta_offset &&
++          ((zs->surface_format >> 5) & 7u)) {
++          if (s_d3d.draw_count < MAX_DRAWS) {
++              D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count++];
++              memset(dr, 0, sizeof(*dr));
++              dr->is_vp = 1; dr->is_clear = 1; dr->tex_slot = -1;
++              dr->rt_off = ZT_TAG | zs->surface_zeta_offset;
++              u32 zw = zs->surface_clip_w, zh = zs->surface_clip_h;
++              if (zw < 16 || zw > 4096 || zh < 16 || zh > 4096) { zw = 0; zh = 0; }
++              dr->rt_w = zw; dr->rt_h = zh;
++              dr->rt_fmt = zs->surface_format;
++              dr->zstate = rsx_zstate_pack(zs);
++              dr->cc[0] = depth; dr->cc[1] = (float)stencil; dr->cc[2] = (float)(flags & 3u);
++              if (zpass_dbg()) {
++                  static int _n = 0; if (_n++ < 16)
++                      fprintf(stderr, "[ZPASS] zeta clear 0x%08X (colour target 0x%X) depth %.4f%c",
++                              zs->surface_zeta_offset, zs->color_target, (double)depth, 10);
++              }
++          }
++          if (!(flags & 0xF0u)) return;   /* depth/stencil only: done */
++          flags &= ~3u;                    /* the colour part goes on below */
++      } }
+     /* SHADOW_PASSES: a depth/stencil clear of a depth-only pass's zeta surface
+      * is an ordered op on its DepthRT (cc[0] depth, cc[1] stencil, cc[2] flags). */
+     { const rsx_state* zs = s_d3d.current_rsx_state;

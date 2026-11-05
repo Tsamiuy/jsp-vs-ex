@@ -1,0 +1,19 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3529,14 +3529,14 @@
+      * are set. FP_GAIN_LOG=1 lists each program once as it compiles. The
+      * inserted text is part of the HLSL, so the shader-cache key follows it. */
+     { static int gi = -1; static float gg = 1.0f, ge = 0.0f; static int gmin = 0, glog = 0;
+-      static u32 gkeys[32]; static int gnk = 0;
++      static u32 gkeys[128]; static int gnk = 0;   /* 128: a full character key list is ~75 */
+       if (gi < 0) { gi = 0; const char* e;
+           if ((e = getenv("FP_GAIN")) && e[0]) { gg = (float)atof(e); gi = 1; }
+           if ((e = getenv("FP_EXPOSURE")) && e[0]) { ge = (float)atof(e); gi = 1; }
+           if ((e = getenv("FP_GAIN_MININSTR")) && e[0]) gmin = atoi(e);
+           glog = getenv("FP_GAIN_LOG") ? 1 : 0;
+           if ((e = getenv("FP_GAIN_KEYS")) && e[0]) {
+-              while (*e && gnk < 32) { char* end = NULL; u32 v = (u32)strtoul(e, &end, 16);
++              while (*e && gnk < 128) { char* end = NULL; u32 v = (u32)strtoul(e, &end, 16);
+                   if (end == e) break; gkeys[gnk++] = v; e = end;
+                   while (*e == ',' || *e == ' ') e++; } }
+           if (gi && !gnk && gmin <= 0) gi = 0;

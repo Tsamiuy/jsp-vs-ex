@@ -1,0 +1,26 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -98,6 +98,7 @@
+ void     cellGcmTickFlip(void);
+ int      cellGcm_take_flip_pending(void);
+ void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
++void     cellGcm_fifo_kick_wait(unsigned ms); /* idle wait, woken by a kick */
+ unsigned cellGcm_flip_request_count(void);
+ }
+ 
+@@ -189,7 +190,14 @@
+     ULONGLONG next_tick = GetTickCount64();
+ 
+     for (;;) {
+-        Sleep(4);
++        /* Was Sleep(4), as in the template. cellGcmSys's FIFO kick event is
++         * created by its first waiter, so with no waiter a guest thread whose
++         * fence wait found the queue dry could not wake this loop, and paid
++         * up to the full 4 ms for every fence. The toolkit's boot harness
++         * (runtime/ppu/tests/boot_main.cpp) made the same change. Same 4 ms
++         * ceiling when nothing kicks; GCM_FIFO_KICK=0 restores the plain
++         * sleep. */
++        cellGcm_fifo_kick_wait(4);
+         ULONGLONG now = GetTickCount64();
+ 
+         int fired = 0;

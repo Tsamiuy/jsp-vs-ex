@@ -1,0 +1,207 @@
+
+/* DRAW_SAMPLE=1 (diagnostic, off by default): a stack sampler for the drawing
+ * thread. Every ~1 ms a sampler thread suspends it, walks its stack and
+ * resumes it, then counts the sample by: the module the thread was in (exe,
+ * ntdll, D3D12, NVIDIA, other), whether it ran since the previous sample (thread
+ * cycle time moved), and the first two exe frames on the stack -- so time in
+ * ntdll or the driver is charged to the exe code that called it. Every
+ * DRAW_SAMPLE_SEC seconds (default 10) the counts are appended to
+ * DRAW_SAMPLE_OUT (default draw_samples.txt) as exe RVAs; tools\ds_sym.py names
+ * them. The `threads` dumps (40 per run, top address only) could not say where
+ * the thread's ntdll/kernel quarter comes from.
+ * The walk runs while the thread is suspended, so it takes no locks: unwind
+ * tables are found from a module list made before (and refreshed between)
+ * windows, and RtlVirtualUnwind only reads memory. Costs the drawing thread
+ * a suspend/resume per sample (~1-2%). */
+#include <psapi.h>
+typedef struct { u64 base, end; const RUNTIME_FUNCTION* rf; u32 nrf; int cls; } DsMod;
+enum { DS_EXE, DS_NTDLL, DS_WAIT, DS_D3D12, DS_NV, DS_OTHER, DS_NCLS };
+static const char* const s_ds_cls_name[DS_NCLS] = { "exe", "ntdll", "ntwait", "d3d12", "nvidia", "other" };
+/* ntdll wait stubs: a sample whose top is in one is "ntwait" (blocked), not kernel work */
+static u64 s_ds_wait[8];
+static DsMod s_ds_mod[256];
+static int   s_ds_nmod = 0;
+typedef struct { u32 key_cls, e1, e2, n; } DsEnt;   /* key_cls: cls | ran << 4 */
+#define DS_HASH 16384u
+static DsEnt s_ds_tab[DS_HASH];
+static u32   s_ds_total = 0, s_ds_lost = 0;
+static u64   s_ds_stack_lo = 0, s_ds_stack_hi = 0;   /* the drawing thread's stack */
+
+static void ds_load_modules(void)
+{
+    HMODULE hm[256]; DWORD need = 0;
+    HANDLE p = GetCurrentProcess();
+    if (!K32EnumProcessModules(p, hm, sizeof hm, &need)) return;
+    int n = (int)(need / sizeof(HMODULE)); if (n > 256) n = 256;
+    const HMODULE exe = GetModuleHandleA(NULL), nt = GetModuleHandleA("ntdll.dll");
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        MODULEINFO mi;
+        if (!K32GetModuleInformation(p, hm[i], &mi, sizeof mi)) continue;
+        const IMAGE_DOS_HEADER* d = (const IMAGE_DOS_HEADER*)hm[i];
+        const IMAGE_NT_HEADERS64* nh = (const IMAGE_NT_HEADERS64*)((const u8*)hm[i] + d->e_lfanew);
+        const IMAGE_DATA_DIRECTORY* dd = &nh->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        char name[MAX_PATH] = { 0 };
+        K32GetModuleBaseNameA(p, hm[i], name, sizeof name);
+        DsMod* m = &s_ds_mod[k++];
+        m->base = (u64)hm[i]; m->end = m->base + mi.SizeOfImage;
+        m->rf   = dd->Size ? (const RUNTIME_FUNCTION*)((const u8*)hm[i] + dd->VirtualAddress) : NULL;
+        m->nrf  = dd->Size / (u32)sizeof(RUNTIME_FUNCTION);
+        m->cls  = hm[i] == exe ? DS_EXE : hm[i] == nt ? DS_NTDLL
+                : !_strnicmp(name, "d3d12", 5) ? DS_D3D12
+                : !_strnicmp(name, "nv", 2) ? DS_NV : DS_OTHER;
+    }
+    s_ds_nmod = k;
+    static const char* const wn[8] = { "NtWaitForSingleObject", "NtWaitForMultipleObjects",
+        "NtDelayExecution", "NtWaitForAlertByThreadId", "NtRemoveIoCompletion",
+        "NtSignalAndWaitForSingleObject", "NtWaitForWorkViaWorkerFactory", "NtYieldExecution" };
+    for (int i = 0; i < 8; i++) s_ds_wait[i] = nt ? (u64)GetProcAddress(nt, wn[i]) : 0;
+}
+
+static const DsMod* ds_mod_of(u64 pc)
+{
+    for (int i = 0; i < s_ds_nmod; i++)
+        if (pc >= s_ds_mod[i].base && pc < s_ds_mod[i].end) return &s_ds_mod[i];
+    return NULL;
+}
+
+static const RUNTIME_FUNCTION* ds_lookup(const DsMod* m, u64 pc)
+{
+    if (!m->rf) return NULL;
+    const u32 rva = (u32)(pc - m->base);
+    u32 lo = 0, hi = m->nrf;
+    while (lo < hi) {
+        const u32 mid = (lo + hi) / 2;
+        if (rva < m->rf[mid].BeginAddress) hi = mid;
+        else if (rva >= m->rf[mid].EndAddress) lo = mid + 1;
+        else return &m->rf[mid];
+    }
+    return NULL;
+}
+
+static void ds_count(u32 key_cls, u32 e1, u32 e2)
+{
+    u32 h = (key_cls * 0x9E3779B1u) ^ (e1 * 0x85EBCA77u) ^ (e2 * 0xC2B2AE3Du);
+    for (u32 i = 0; i < 64; i++) {
+        DsEnt* e = &s_ds_tab[(h + i) & (DS_HASH - 1)];
+        if (e->n && (e->key_cls != key_cls || e->e1 != e1 || e->e2 != e2)) continue;
+        e->key_cls = key_cls; e->e1 = e1; e->e2 = e2; e->n++;
+        return;
+    }
+    s_ds_lost++;
+}
+
+static int ds_cmp(const void* a, const void* b)
+{
+    const u32 x = ((const DsEnt*)a)->n, y = ((const DsEnt*)b)->n;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void ds_flush(FILE* f, int win, double secs)
+{
+    static DsEnt srt[DS_HASH];
+    u32 m = 0, by[DS_NCLS][2] = { { 0 } };
+    for (u32 i = 0; i < DS_HASH; i++)
+        if (s_ds_tab[i].n) {
+            srt[m++] = s_ds_tab[i];
+            by[s_ds_tab[i].key_cls & 15][s_ds_tab[i].key_cls >> 4] += s_ds_tab[i].n;
+        }
+    qsort(srt, m, sizeof srt[0], ds_cmp);
+    fprintf(f, "[DS] window %d: %u samples in %.1f s (%u lost)", win, s_ds_total, secs, s_ds_lost);
+    for (int c = 0; c < DS_NCLS; c++)
+        fprintf(f, " | %s ran %u idle %u", s_ds_cls_name[c], by[c][1], by[c][0]);
+    fputc(10, f);
+    for (u32 i = 0; i < m && i < 400; i++)
+        fprintf(f, "%u %s %s 0x%X 0x%X%c", srt[i].n, s_ds_cls_name[srt[i].key_cls & 15],
+                (srt[i].key_cls >> 4) ? "ran" : "idle", srt[i].e1, srt[i].e2, 10);
+    fflush(f);
+    memset(s_ds_tab, 0, sizeof s_ds_tab);
+    s_ds_total = s_ds_lost = 0;
+}
+
+static DWORD WINAPI ds_thread(LPVOID arg)
+{
+    HANDLE th = (HANDLE)arg;
+    const char* o = getenv("DRAW_SAMPLE_OUT");
+    FILE* f = fopen(o && *o ? o : "draw_samples.txt", "a");
+    if (!f) return 0;
+    double win_s = 10.0;
+    { const char* e = getenv("DRAW_SAMPLE_SEC"); if (e && atof(e) > 0) win_s = atof(e); }
+    HANDLE tm = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!tm) tm = CreateWaitableTimerW(NULL, FALSE, NULL);
+    u32 rng = GetCurrentThreadId() * 2654435761u;
+    ds_load_modules();
+    const DsMod* exe = NULL;
+    for (int i = 0; i < s_ds_nmod; i++) if (s_ds_mod[i].cls == DS_EXE) exe = &s_ds_mod[i];
+    ULONG64 last_cyc = 0; QueryThreadCycleTime(th, &last_cyc);
+    double t0 = perf_now(); int win = 0;
+    fprintf(f, "[DS] drawing-thread sampler start, %d modules, exe base 0x%llX%c",
+            s_ds_nmod, exe ? (unsigned long long)exe->base : 0ull, 10);
+    for (;;) {
+        /* 0.5-1.5 ms apart, at random: a fixed period would lock onto the
+         * game's own 1 ms timer waits and over- or under-count them. */
+        rng = rng * 1664525u + 1013904223u;
+        LARGE_INTEGER due; due.QuadPart = -(5000 + (LONGLONG)(rng >> 8) % 10000);
+        if (tm && SetWaitableTimer(tm, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(tm, INFINITE);
+        else Sleep(1);
+        if (SuspendThread(th) == (DWORD)-1) break;
+        CONTEXT c; memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        u32 cls = DS_OTHER, e1 = 0, e2 = 0;
+        if (GetThreadContext(th, &c)) {
+            const DsMod* m0 = ds_mod_of(c.Rip);
+            cls = m0 ? (u32)m0->cls : DS_OTHER;
+            if (cls == DS_NTDLL)
+                for (int i = 0; i < 8; i++)
+                    if (s_ds_wait[i] && c.Rip >= s_ds_wait[i] && c.Rip < s_ds_wait[i] + 32) cls = DS_WAIT;
+            for (int d = 0; d < 32 && c.Rip && !e2; d++) {
+                const DsMod* m = d ? ds_mod_of(c.Rip) : m0;
+                if (!m) break;                              /* unknown code: stop */
+                if (m->cls == DS_EXE) {
+                    if (!e1) e1 = (u32)(c.Rip - m->base); else e2 = (u32)(c.Rip - m->base);
+                }
+                if (c.Rsp < s_ds_stack_lo || c.Rsp + 8 > s_ds_stack_hi) break;
+                const RUNTIME_FUNCTION* rf = ds_lookup(m, c.Rip);
+                if (!rf) { c.Rip = *(const u64*)c.Rsp; c.Rsp += 8; }   /* leaf */
+                else {
+                    void* hd = NULL; DWORD64 ef = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, m->base, c.Rip, (PRUNTIME_FUNCTION)rf,
+                                     &c, &hd, &ef, NULL);
+                }
+                /* return addresses point after the call: -1 keeps them inside it */
+                if (c.Rip) c.Rip -= 1;
+            }
+        }
+        ResumeThread(th);
+        ULONG64 cyc = 0; QueryThreadCycleTime(th, &cyc);
+        const u32 ran = cyc != last_cyc; last_cyc = cyc;
+        ds_count(cls | (ran << 4), e1, e2);
+        s_ds_total++;
+        const double t = perf_now();
+        if (t - t0 >= win_s) { ds_flush(f, win++, t - t0); t0 = t; ds_load_modules(); }
+    }
+    fclose(f);
+    return 0;
+}
+
+static void ds_start_once(void)
+{
+    static int st = -1;
+    if (st >= 0) return;
+    const char* e = getenv("DRAW_SAMPLE");
+    st = (e && *e && *e != '0') ? 1 : 0;
+    if (!st) return;
+    {   /* this thread's whole stack reservation: the walk never reads outside it */
+        const NT_TIB* tib = (const NT_TIB*)NtCurrentTeb();
+        MEMORY_BASIC_INFORMATION mb;
+        s_ds_stack_hi = (u64)tib->StackBase;
+        if (VirtualQuery((const u8*)tib->StackBase - 1, &mb, sizeof mb))
+            s_ds_stack_lo = (u64)mb.AllocationBase;
+    }
+    HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                           FALSE, GetCurrentThreadId());
+    if (!th) { fprintf(stderr, "[DS] OpenThread failed%c", 10); return; }
+    HANDLE h = CreateThread(NULL, 0, ds_thread, th, 0, NULL);
+    if (h) { SetThreadPriority(h, THREAD_PRIORITY_HIGHEST); CloseHandle(h); }
+    fprintf(stderr, "[DS] sampling the drawing thread (tid %lu)%c", GetCurrentThreadId(), 10);
+}

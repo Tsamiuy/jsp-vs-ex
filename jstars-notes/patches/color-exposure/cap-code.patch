@@ -1,0 +1,23 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1917,12 +1917,18 @@
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->cc[0], r->cc[1], r->cc[2], r->cc[3]);
+             else {
++                /* code= is the program's code hash (rsx_fp_code_hash, the FP_GAIN_KEYS /
++                 * shader-cache identity), appended last so capops.py keeps parsing. */
++                u32 code = r->fp_addr;
++                { extern uint8_t* vm_base; extern u32 cellGcmResolveLocated(int local, u32 offset);
++                  u32 fo = cellGcmResolveLocated((r->fp_addr & 3u) == 1, r->fp_addr & ~3u);
++                  if (fo != 0xFFFFFFFFu && vm_base) code = rsx_fp_code_hash(vm_base + fo, FP_MAX_BYTES); }
+                 fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
+-                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
++                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X code=0x%08X\n",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+-                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
++                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw, code);
+                 for (int u = 0; u < 4; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,

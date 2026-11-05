@@ -1,0 +1,227 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 511cad3..8ff94eb 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -670,7 +670,11 @@ static struct {
+ } s_six = { -1, NULL, NULL, 0, 1, 1 };
+ static int strip_ix_on(void)
+ {
+-    if (s_six.on < 0) { const char* e = getenv("STRIP_INDEXED"); s_six.on = (e && *e && *e != '0') ? 1 : 0; }
++    /* 1 = dedup on the present thread (first version); 2 = the present
++     * thread only copies the indices, and the async workers build the cuts,
++     * dedup and fetch (see upload_strip_vp_native_ix2). */
++    if (s_six.on < 0) { const char* e = getenv("STRIP_INDEXED");
++                        s_six.on = (e && *e >= '1' && *e <= '2') ? (*e - '0') : 0; }
+     return s_six.on;
+ }
+ /* The rest of the present thread's time, which [PERF] lumps into "guest"
+@@ -8274,7 +8278,15 @@ static void vf_one(const rsx_fetch_plan* plan, const rsx_state* st, u32 v, VPSlo
+  * reads guest memory moves, and it stays before anything the guest can see.
+  * VTX_POS is not reported for queued fetches.
+  * ------------------------------------------------------------------------- */
+-typedef struct { rsx_fetch_plan plan; u32 list_off, n; VPSlot* out; } VfaJob;
++typedef struct {
++    rsx_fetch_plan plan; u32 list_off, n; VPSlot* out;
++    /* kind 1 (STRIP_INDEXED=2): the arena holds n guest indices, a restart
++     * already turned into 0xFFFFFFFF; the worker writes n strip indices to
++     * ixo (record-relative, loc_base + distinct vertex number) and fetches
++     * the distinct vertices to out. */
++    int kind; u32* ixo; u32 loc_base;
++} VfaJob;
++static void vfa_run(VfaJob* j);
+ #define VFA_JOBS 4096
+ static struct {
+     int     on;                   /* -1 = not decided yet */
+@@ -8296,9 +8308,7 @@ static DWORD WINAPI vfa_worker(LPVOID arg)
+             const LONG t = s_vfa.taken;
+             if (t >= s_vfa.posted) break;
+             if (InterlockedCompareExchange(&s_vfa.taken, t + 1, t) != t) continue;
+-            VfaJob* j = &s_vfa.jobs[t];
+-            rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, s_vfa.arena + j->list_off };
+-            rsx_fetch_plan_range(&j->plan, &src, 0, j->n, (float (*)[4])j->out);
++            vfa_run(&s_vfa.jobs[t]);
+             InterlockedIncrement(&s_vfa.done);
+             break;
+         }
+@@ -8347,9 +8357,7 @@ static void vfa_sync(void)
+                 /* Took job t from the workers' queue; consume its semaphore
+                  * count so a worker does not wake for it. */
+                 WaitForSingleObject(s_vfa.sem, 0);
+-                VfaJob* j = &s_vfa.jobs[t];
+-                rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, s_vfa.arena + j->list_off };
+-                rsx_fetch_plan_range(&j->plan, &src, 0, j->n, (float (*)[4])j->out);
++                vfa_run(&s_vfa.jobs[t]);
+                 InterlockedIncrement(&s_vfa.done);
+             }
+         }
+@@ -8361,6 +8369,60 @@ static void vfa_sync(void)
+     s_vfa.arena_used = 0;
+ }
+ 
++/* STRIP_INDEXED=2 job body, on a worker (or inline). Distinct guest vertices
++ * of THIS call are fetched once (a per-call map; the first version's map
++ * spanned the whole record, but it ran on the present thread). */
++static void vfa_run_strip_ix(const VfaJob* j, const u32* raw)
++{
++    static __declspec(thread) u32 *t_key, *t_val, *t_gen, *t_vl, t_cap, t_g;
++    const u32 n = j->n;
++    u32 msz = 64; while (msz < n * 2u) msz <<= 1;           /* load <= 50% */
++    if (msz > t_cap) {
++        free(t_key); free(t_val); free(t_gen); free(t_vl);
++        t_key = (u32*)malloc(msz * sizeof(u32)); t_val = (u32*)malloc(msz * sizeof(u32));
++        t_gen = (u32*)calloc(msz, sizeof(u32)); t_vl = (u32*)malloc(msz * sizeof(u32));
++        t_cap = (t_key && t_val && t_gen && t_vl) ? msz : 0; t_g = 0;
++    }
++    if (!t_cap) {                                           /* no memory: no dedup */
++        u32 nv = 0;
++        for (u32 i = 0; i < n; i++) j->ixo[i] = (raw[i] == 0xFFFFFFFFu) ? 0xFFFFFFFFu : j->loc_base + i;
++        (void)nv;
++        /* fetch every slot; cut slots fetch vertex 0 into an unused slot */
++        static __declspec(thread) u32* t_tmp; static __declspec(thread) u32 t_tmpcap;
++        if (n > t_tmpcap) { free(t_tmp); t_tmp = (u32*)malloc(n * sizeof(u32)); t_tmpcap = t_tmp ? n : 0; }
++        if (!t_tmp) return;
++        for (u32 i = 0; i < n; i++) t_tmp[i] = (raw[i] == 0xFFFFFFFFu) ? 0u : raw[i];
++        rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, t_tmp };
++        rsx_fetch_plan_range(&j->plan, &src, 0, n, (float (*)[4])j->out);
++        return;
++    }
++    if (++t_g == 0) { memset(t_gen, 0, t_cap * sizeof(u32)); t_g = 1; }
++    const u32 mask = t_cap - 1;
++    u32 nv = 0;
++    for (u32 i = 0; i < n; i++) {
++        const u32 v = raw[i];
++        if (v == 0xFFFFFFFFu) { j->ixo[i] = 0xFFFFFFFFu; continue; }
++        u32 s = (v * 2654435761u) & mask, loc;
++        for (;;) {
++            if (t_gen[s] != t_g) { t_gen[s] = t_g; t_key[s] = v; t_val[s] = loc = nv; t_vl[nv++] = v; break; }
++            if (t_key[s] == v) { loc = t_val[s]; break; }
++            s = (s + 1) & mask;
++        }
++        j->ixo[i] = j->loc_base + loc;
++    }
++    if (nv) {
++        rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, t_vl };
++        rsx_fetch_plan_range(&j->plan, &src, 0, nv, (float (*)[4])j->out);
++    }
++}
++
++static void vfa_run(VfaJob* j)
++{
++    if (j->kind == 1) { vfa_run_strip_ix(j, s_vfa.arena + j->list_off); return; }
++    rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, s_vfa.arena + j->list_off };
++    rsx_fetch_plan_range(&j->plan, &src, 0, j->n, (float (*)[4])j->out);
++}
++
+ /* Fetch list[0..n) into out: queued when VFETCH_ASYNC is on, else now. */
+ static void vfa_fetch_list(const rsx_state* state, const u32* list, u32 n, VPSlot* out)
+ {
+@@ -8379,7 +8441,7 @@ static void vfa_fetch_list(const rsx_state* state, const u32* list, u32 n, VPSlo
+     VfaJob* j = &s_vfa.jobs[s_vfa.posted];
+     rsx_fetch_plan_init(state, vf_input_mask(state), &j->plan);
+     memcpy(s_vfa.arena + s_vfa.arena_used, list, (size_t)n * sizeof(u32));
+-    j->list_off = s_vfa.arena_used; j->n = n; j->out = out;
++    j->list_off = s_vfa.arena_used; j->n = n; j->out = out; j->kind = 0;
+     s_vfa.arena_used += n;
+     MemoryBarrier();
+     InterlockedIncrement(&s_vfa.posted);
+@@ -9237,6 +9299,89 @@ static u32 upload_strip_vp_native_ix(const rsx_state* state, u32 first, u32 coun
+     return nv;
+ }
+ 
++/* STRIP_INDEXED=2: the present thread only reads the guest indices (a
++ * restart becomes 0xFFFFFFFF) and reserves `count` vertices and `count`
++ * indices; a worker writes the indices and fetches the distinct vertices.
++ * The first version did the dedup here, and the present thread is the
++ * bottleneck: vertices fell to a third but present-thread vtx rose ~40%
++ * (strips\*, FINDINGS §42). Reserved but unused vertex slots are never
++ * indexed. Same return contract as upload_strip_vp_native_ix. */
++static u32 upload_strip_vp_native_ix2(const rsx_state* state, u32 first, u32 count, u32 t0)
++{
++    extern uint8_t* vm_base;
++    s_six_added = 0; s_six_start = s_six.off;
++    s_req_verts += count; s_req_draws++;
++    if (!state || !vm_base || !s_d3d.vp_vb_mapped || !s_six.mapped || !count) return 0;
++    if (!state->vertex_attribs[0].enabled) return 0;
++    const u32 maxv = (MAX_VP_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    const u32 ixroom = SIX_CAP - s_six.off;
++    if (count > maxv || count > ixroom) {
++        s_drop_draws++;
++        count = maxv < ixroom ? maxv : ixroom;
++        if (!count) return 0;
++    }
++    const int idx16 = (((state->index_array_dma >> 4) & 0xF) == 1);
++    const int restart = state->restart_enable && !(idx16 && state->restart_index > 0xFFFFu);
++    const u32 ridx = state->restart_index;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    const u8* ib = vm_base + cellGcmResolveLocated((state->index_array_dma & 0xF) == 0,
++                                                   state->index_array_offset);
++    VfaJob jl, *j = &jl;
++    u32* raw;
++    static u32* s_raw = NULL; static u32 s_raw_cap = 0;
++    const int async = vfa_enabled() && count <= s_vfa.arena_cap;
++    if (async) {
++        if (s_vfa.posted >= VFA_JOBS || s_vfa.arena_used + count > s_vfa.arena_cap) vfa_sync();
++        j = &s_vfa.jobs[s_vfa.posted];
++        j->list_off = s_vfa.arena_used;
++        raw = s_vfa.arena + s_vfa.arena_used;
++    } else {
++        if (count > s_raw_cap) {
++            u32* nr = (u32*)realloc(s_raw, (size_t)count * sizeof(u32));
++            if (!nr) return 0;
++            s_raw = nr; s_raw_cap = count;
++        }
++        raw = s_raw;
++    }
++    for (u32 k = 0; k < count; k++) {
++        u32 v;
++        if (idx16) { const u8* q = ib + (u64)(first + k) * 2; v = ((u32)q[0] << 8) | q[1]; }
++        else { const u8* q = ib + (u64)(first + k) * 4;
++               v = ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3]; }
++        raw[k] = (restart && v == ridx) ? 0xFFFFFFFFu : v;
++    }
++    /* One BEGIN/END stream cannot change its vertex arrays between index
++     * batches, so a call continuing the record (t0 > 0, same BEGIN/END)
++     * reuses the plan: rsx_fetch_plan_init hashes the whole vertex program
++     * for its input mask, once per ~256-index call otherwise.
++     * STRIP_IX2_PLAN_REUSE=0 builds it every call. */
++    static rsx_fetch_plan s_plan; static int s_plan_ok = 0; static u32 s_plan_epoch = 0;
++    static int reuse = -1;
++    if (reuse < 0) { const char* e = getenv("STRIP_IX2_PLAN_REUSE"); reuse = (e && *e == '0') ? 0 : 1; }
++    if (reuse && t0 > 0 && s_plan_ok && s_plan_epoch == state->begin_epoch) {
++        j->plan = s_plan;
++    } else {
++        rsx_fetch_plan_init(state, vf_input_mask(state), &j->plan);
++        s_plan = j->plan; s_plan_ok = 1; s_plan_epoch = state->begin_epoch;
++    }
++    j->n = count; j->kind = 1; j->loc_base = t0;
++    j->ixo = s_six.mapped + (u64)s_d3d.vp_parity * SIX_CAP + s_six.off;
++    j->out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
++        + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    if (async) {
++        s_vfa.arena_used += count;
++        MemoryBarrier();
++        InterlockedIncrement(&s_vfa.posted);
++        ReleaseSemaphore(s_vfa.sem, 1, NULL);
++    } else {
++        vfa_run_strip_ix(j, raw);
++    }
++    s_six_added = count;
++    s_six.off += count;
++    s_d3d.vp_vb_offset += count * VP_VERT_STRIDE;
++    return count;
++}
++
+ static void vp_flush_if_full(u32 count, int cont)
+ {
+     static int off = -1;
+@@ -9596,7 +9741,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+                    pv->begin_epoch == (st ? st->begin_epoch : 0) &&
+                    pv->vb_byte_offset + pv->vertex_count * VP_VERT_STRIDE == rec &&
+                    pv->ix_start + pv->ix_count == s_six.off;
+-        emitted = VF_TIMED(upload_strip_vp_native_ix(st, first, count, cont ? pv->vertex_count : 0));
++        emitted = (s_six.on == 2)
++            ? VF_TIMED(upload_strip_vp_native_ix2(st, first, count, cont ? pv->vertex_count : 0))
++            : VF_TIMED(upload_strip_vp_native_ix(st, first, count, cont ? pv->vertex_count : 0));
+         if (cont) {
+             pv->vertex_count += emitted;
+             pv->ix_count += s_six_added;

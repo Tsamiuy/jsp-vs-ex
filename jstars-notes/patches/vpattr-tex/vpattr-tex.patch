@@ -1,0 +1,61 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6e93f46..0d9a770 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -8749,11 +8749,30 @@ static void vp_attrs_dbg(const rsx_state* state)
+       if (e == (const char*)1) { e = getenv("VP_ATTRS_FP");
+           want = e ? (u32)strtoul(e, NULL, 0) : 0; }
+       if (want && (!state || state->shader_program != want)) return; }
++    /* VP_ATTRS_TEX=<hex>[,<hex>...]: only draws whose texture unit 0 is one of
++     * these raw offsets (as RSX_CAP manifests print them, e.g. 04EEE600). J-Stars
++     * copies every fragment program into a ring, so VP_ATTRS_FP cannot follow
++     * one effect; its textures are stable. Matching draws skip the layout
++     * dedup (up to VP_ATTRS_N, default 12, are printed) and also show every
++     * attribute's first two vertices as raw bytes and each disabled
++     * attribute's constant register (jstars-notes VFX.md: the Kamehameha's
++     * COLOR0.a reaches the fragment program as 0). */
++    int tex_hit = 0;
++    { static int init = 0; static u32 tw[8]; static int nt = 0, maxn = 12, nprinted = 0;
++      if (!init) { init = 1; const char* e = getenv("VP_ATTRS_TEX");
++          while (e && *e && nt < 8) { char* end; tw[nt++] = (u32)strtoul(e, &end, 16);
++              e = (*end == ',') ? end + 1 : NULL; }
++          const char* n = getenv("VP_ATTRS_N"); if (n) maxn = atoi(n); }
++      if (nt) {
++          for (int i = 0; i < nt; i++) if (s_d3d.cur_texs[0].raw == tw[i]) tex_hit = 1;
++          if (!tex_hit || nprinted >= maxn) return;
++          nprinted++;
++      } }
+     /* Dedupe by the set of enabled attributes rather than printing the first
+      * few draws: one fragment program can be used by meshes with different
+      * vertex layouts, and a mesh missing an attribute takes the constant
+      * register instead -- which is exactly the case worth seeing. */
+-    { u32 mask = 0;
++    if (!tex_hit) { u32 mask = 0;
+       for (int i = 0; i < 16; i++) if (state->vertex_attribs[i].enabled) mask |= 1u << i;
+       static u32 seen[16]; static int ns = 0;
+       for (int i = 0; i < ns; i++) if (seen[i] == mask) return;
+@@ -8765,6 +8784,24 @@ static void vp_attrs_dbg(const rsx_state* state)
+         const rsx_vertex_attrib* a = &state->vertex_attribs[i];
+         if (a->enabled) fprintf(stderr, "[VPATTR] a%d off=0x%X stride=%u size=%u type=%u freq=%u fmt=0x%08X\n",
+                                 i, a->offset, a->stride, a->size, a->type, a->frequency, a->format);
++        if (!tex_hit) continue;
++        if (!a->enabled) {
++            const float* c = state->vertex_data4f[i];
++            if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f || i == 3)
++                fprintf(stderr, "[VPATTR]   a%d disabled, constant=(%g, %g, %g, %g)\n",
++                        i, c[0], c[1], c[2], c[3]);
++            continue;
++        }
++        if (!a->stride) continue;
++        { extern uint8_t* vm_base; extern u32 cellGcmResolveLocated(int, u32);
++          for (u32 v = 0; v < 2; v++) {
++              const u32 ao = state->vertex_data_base_offset + (a->offset & 0x7FFFFFFFu) + v * a->stride;
++              const u8* q = vm_base + ((a->offset & 0x80000000u) ? cellGcmResolveLocated(0, ao)
++                                                                  : cellGcmResolveLocated(1, ao));
++              fprintf(stderr, "[VPATTR]   a%d v%u bytes:", i, v);
++              for (u32 b = 0; b < 16 && b < a->stride; b++) fprintf(stderr, " %02X", q[b]);
++              fprintf(stderr, "%c", 10);
++          } }
+     }
+     /* VP_ATTRS_DUMP=<attr>:<n>: read n entries of that attribute straight out of
+      * guest memory. Answers "did the guest write these values, or did our fetch

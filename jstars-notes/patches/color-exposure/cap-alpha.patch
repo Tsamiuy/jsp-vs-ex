@@ -1,0 +1,87 @@
+From 18e2bf52bc230ee2ebe0a50a6d9917ba9c494a47 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 16:40:57 +0000
+Subject: [PATCH] cap-alpha: RSX_CAP_ALPHA=1 writes the alpha channel of every
+ capture dump as <name>_a.bmp
+
+---
+ libs/video/rsx_d3d12_backend.c | 56 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index d9ee372..460df6a 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1584,6 +1584,55 @@ static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
+     fclose(f);
+ }
+ 
++/* RSX_CAP_ALPHA=1: beside every capture BMP, write the alpha channel as a
++ * grey image (<name>_a.bmp). J-Stars' HDR encode divides the scene by its
++ * own alpha (scene.rgb / scene.a, fp 0x0FC9F901 / 0x0FD00281), so the alpha
++ * the material shaders leave in the scene RT is the HDR scale the tone-map
++ * sees; a surface whose alpha is 0.33 or less burns out at any exposure
++ * (jstars-notes COLOR_EXPOSURE.md round 4). The RGB dump cannot show it. */
++static void cap_write_bmp_alpha(const char* path, const void* mapped, u32 w, u32 h,
++                                u32 pitch, u32 dxgi)
++{
++    FILE* f = fopen(path, "wb");
++    if (!f) return;
++    u32 rowb = (w * 3 + 3) & ~3u, datasz = rowb * h;
++    u8 hdr[54] = {0};
++    hdr[0] = 'B'; hdr[1] = 'M';
++    *(u32*)(hdr+2) = 54 + datasz; *(u32*)(hdr+10) = 54; *(u32*)(hdr+14) = 40;
++    *(int*)(hdr+18) = (int)w; *(int*)(hdr+22) = (int)h;
++    *(u16*)(hdr+26) = 1; *(u16*)(hdr+28) = 24; *(u32*)(hdr+34) = datasz;
++    fwrite(hdr, 1, 54, f);
++    u8* line = (u8*)malloc(rowb);
++    if (line) for (int y = (int)h - 1; y >= 0; y--) {
++        const u8* srow = (const u8*)mapped + (u64)y * pitch;
++        memset(line, 0, rowb);
++        for (u32 x = 0; x < w; x++) {
++            float av;
++            if (dxgi == DXGI_FORMAT_R16G16B16A16_FLOAT) {
++                const u16 hv = ((const u16*)(srow + (u64)x * 8))[3];
++                u32 sg = (hv>>15)&1, e = (hv>>10)&0x1F, m = hv&0x3FF;
++                if (e == 0) av = (float)m / 16777216.0f;
++                else { u32 fb = (sg<<31)|((e-15+127)<<23)|(m<<13); memcpy(&av,&fb,4); }
++            } else if (dxgi == DXGI_FORMAT_R32G32B32A32_FLOAT) {
++                av = ((const float*)(srow + (u64)x * 16))[3];
++            } else {
++                av = (srow + (u64)x * 4)[3] / 255.0f;
++            }
++            if (av < 0) av = -av; if (av > 1) av = 1;
++            line[x*3+0] = line[x*3+1] = line[x*3+2] = (u8)(av * 255.0f);
++        }
++        fwrite(line, 1, rowb, f);
++    }
++    free(line);
++    fclose(f);
++}
++static int cap_alpha_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("RSX_CAP_ALPHA"); on = (e && e[0] != '0') ? 1 : 0; }
++    return on;
++}
++
+ /* Copy one GPU resource into a fresh readback buffer and write it as a BMP.
+  * Self-contained: waits, resets the frame command list, copies, executes,
+  * waits, maps. `prior` is the resource's current tracked state (restored after
+@@ -1658,6 +1707,13 @@ static void cap_readback_write(ID3D12Resource* res, u32 w, u32 h, u32 dxgi,
+     void* mp = NULL; D3D12_RANGE rr = {0, (SIZE_T)pitch * h};
+     if (SUCCEEDED(rb->lpVtbl->Map(rb, 0, &rr, &mp)) && mp) {
+         cap_write_bmp(path, mp, w, h, pitch, dxgi);
++        if (cap_alpha_on()) {
++            char ap[320]; size_t n = strlen(path);
++            if (n > 4 && n < sizeof(ap) - 8) {
++                memcpy(ap, path, n - 4); memcpy(ap + n - 4, "_a.bmp", 7);
++                cap_write_bmp_alpha(ap, mp, w, h, pitch, dxgi);
++            }
++        }
+         D3D12_RANGE wr = {0, 0};
+         rb->lpVtbl->Unmap(rb, 0, &wr);
+     }
+-- 
+2.43.0
+

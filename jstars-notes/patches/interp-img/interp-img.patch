@@ -1,0 +1,69 @@
+diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
+index 9a3bfc0..eee21e7 100644
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -365,6 +365,11 @@ static int spu_step(spu_context* ctx) {
+ 
+ uint32_t g_spu_interp_last_pc = 0;
+ uint64_t g_spu_interp_steps   = 0;
++/* Set while a whole job is interpreted on purpose (SPU_INTERP_IMG, spurs_job.c):
++ * the interpreter then does not hand back to lifted functions, so every
++ * instruction of the job runs here and lifted and interpreted runs can be told
++ * apart. */
++SPU_THREAD_LOCAL int g_spu_interp_only = 0;
+ 
+ /* Call-trace ring buffer for diagnosing SPU asserts (env SPU_CALLTRACE). */
+ #define SPU_TRACE_N 32
+@@ -426,7 +431,7 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
+          * un-lifted image (e.g. a title's raw SPU jobs) must never rejoin
+          * another image's functions that happen to share an LS address. */
+         /* ponytail: pc-only match; a recursive call through the same site would stop early -- compare r1 too if one shows up. */
+-        if (ctx->image_id >= 0 && ((stop_lsa && ctx->pc == stop_lsa) || spu_lifted_lookup(ctx, ctx->pc))) { g_spu_interp_steps = steps; g_spu_interp_last_pc = ctx->pc; return ctx->pc; }  /* rejoin fast path */
++        if (ctx->image_id >= 0 && ((stop_lsa && ctx->pc == stop_lsa) || (!g_spu_interp_only && spu_lifted_lookup(ctx, ctx->pc)))) { g_spu_interp_steps = steps; g_spu_interp_last_pc = ctx->pc; return ctx->pc; }  /* rejoin fast path */
+         g_spu_interp_last_pc = ctx->pc;
+         if (_g1>0) {
+             int inr = (ctx->pc >= 0x26E80u && ctx->pc < 0x26F14u);
+diff --git a/runtime/spu/spurs_job.c b/runtime/spu/spurs_job.c
+index 5e5b7e1..fd5fafc 100644
+--- a/runtime/spu/spurs_job.c
++++ b/runtime/spu/spurs_job.c
+@@ -46,6 +46,18 @@
+ extern uint8_t* vm_base;
+ extern int spu_run_with_halt(void (*)(spu_context*), spu_context*);
+ 
++/* SPU_INTERP_IMG=<id>: run that image's jobs on the interpreter from LS 0 to
++ * the planted return address, never entering its lifted functions. The beam
++ * job (image 17) PUTs all-zero quads when lifted (jstars-notes VFX.md); if the
++ * interpreted run PUTs real vertices, the lift is wrong. */
++extern SPU_THREAD_LOCAL int g_spu_interp_only;
++static void spurs_job_interp_entry(spu_context* ctx)
++{
++    g_spu_interp_only = 1;
++    spu_interp_run_until(ctx, 0, 0x3FF00u);          /* SPU_JOB_RETURN_LS */
++    g_spu_interp_only = 0;
++}
++
+ /* ---- guest reads (big-endian) ------------------------------------------ */
+ static uint32_t g32(uint32_t ea)
+ {
+@@ -358,7 +370,19 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+      * and trips its parameter guard, which HALTS -- ending the run. So the
+      * HALT-ASSERT heqi 0x1650 seen once per jm2 job is NORMAL COMPLETION
+      * noise, not a failure: the job's real work finished before the jump. */
+-    spu_run_with_halt(entry, &ctx);
++    { static int s_ii = -2;
++      if (s_ii == -2) { const char* e = getenv("SPU_INTERP_IMG"); s_ii = e ? atoi(e) : -1; }
++      if (s_ii >= 0 && image_id == s_ii) {
++          static int _n = 0;
++          if (_n++ < 4)
++              fprintf(stderr, "[spurs-job] img=%d job 0x%08X: interpreted (SPU_INTERP_IMG)
++",
++                      image_id, job_ea);
++          spu_run_with_halt(spurs_job_interp_entry, &ctx);
++          g_spu_interp_only = 0;                     /* a halt longjmps past the reset */
++      } else
++          spu_run_with_halt(entry, &ctx);
++    }
+ 
+     /* Capture the job's outbound mailbox. These are LS POINTERS TO STRINGS for
+      * the SPU printf service, NOT query results -- value 0x83C0 from the sound

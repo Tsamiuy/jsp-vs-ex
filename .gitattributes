@@ -1,0 +1,17 @@
+# Line endings are set per file type. There is no global text=auto: patches carry the line endings of the files
+# they change, so they stay byte for byte.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cs text eol=crlf
+*.sh text eol=lf
+*.patch -text
+/toolkit/third_party_smaa/* -text
+
+# Images and other binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.dds binary

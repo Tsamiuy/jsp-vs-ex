@@ -1,0 +1,125 @@
+From c34fa7d9f1a2bff44378830bae37ee1f17f6a4fc Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 15:34:36 +0100
+Subject: [PATCH] rsx: FIFO_FAST v2 -- walker handles 0x1EFC-led constant
+ blocks, vertex-program words fast too, TCONST_FIFO=<n> periodic histogram
+
+---
+ libs/video/cellGcmSys.c   | 28 +++++++++++++++++++++++-----
+ libs/video/rsx_commands.c | 27 +++++++++++++++++++++++++++
+ libs/video/rsx_commands.h |  1 +
+ 3 files changed, 51 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index d97d473..04ca454 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1984,11 +1984,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                   u32 mi = (method >> 2) & 2047;
+                   hist[mi]++; tot[mi] += count;
+                   static u64 seen = 0;
+-                  if (++seen == 200000ull && !dumped) { dumped = 1;
+-                      fprintf(stderr, "[TCFIFO] method histogram (blocks, dwords):%c", 10);
++                  /* TCONST_FIFO=1: one histogram at 200,000 blocks (reached in the
++                   * menu). TCONST_FIFO=<n> (n > 1): a histogram of every n blocks,
++                   * counts reset after each, so the later ones are the fight. */
++                  const u64 every = tf > 1 ? (u64)tf : 200000ull;
++                  if (++seen % every == 0 && (tf > 1 || !dumped)) { dumped = 1;
++                      fprintf(stderr, "[TCFIFO] method histogram (blocks, dwords), blocks %llu..%llu:%c",
++                              (unsigned long long)(seen - every + 1), (unsigned long long)seen, 10);
+                       for (u32 k = 0; k < 2048; k++) if (hist[k])
+                           fprintf(stderr, "[TCFIFO]   0x%04X  %8u blocks %10u dwords%c",
+                                   k << 2, hist[k], tot[k], 10);
++                      if (tf > 1) { memset(hist, 0, sizeof hist); memset(tot, 0, sizeof tot); }
+                   }
+               } }
+             /* NV406E semaphore: OFFSET(0x64) / ACQUIRE(0x68) / RELEASE(0x6C).
+@@ -2044,13 +2050,25 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                                !rsx_draw_engine_enabled();
+               if (ok && subch == 0) {
+                   int stop = 0;
++                  /* v2: the game sends constants as one block that starts with
++                   * SET_TRANSFORM_CONSTANT_LOAD (0x1EFC), so word 0 is the load
++                   * index (through rsx_process_method, as the loop below would)
++                   * and the words after it are the constants. Vertex-program
++                   * words (SET_TRANSFORM_PROGRAM, 0x0B80..0x0BFC) take the same
++                   * shortcut (rsx_vprog_fast). */
+                   for (; i_fast < count; i_fast++) {
+                       const u32 m = (type == 0) ? method + i_fast * 4 : method;
+-                      if (m < NV4097_SET_TRANSFORM_CONSTANT ||
+-                          m >= NV4097_SET_TRANSFORM_CONSTANT + NV4097_SET_TRANSFORM_CONSTANT_DWORDS * 4) break;
++                      const int tc = m >= NV4097_SET_TRANSFORM_CONSTANT &&
++                                     m < NV4097_SET_TRANSFORM_CONSTANT + NV4097_SET_TRANSFORM_CONSTANT_DWORDS * 4;
++                      const int vp = m >= NV4097_SET_TRANSFORM_PROGRAM && m < NV4097_SET_TRANSFORM_PROGRAM + 32 * 4;
++                      const int load0 = i_fast == 0 && m == NV4097_SET_TRANSFORM_CONSTANT_LOAD;
++                      if (!tc && !vp && !load0) break;
+                       const u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i_fast * 4);
+                       if (!dea) { stop = 1; break; }
+-                      rsx_tconst_fast(&s_state, m, vm_read32(dea));
++                      const u32 v = vm_read32(dea);
++                      if (tc)      rsx_tconst_fast(&s_state, m, v);
++                      else if (vp) rsx_vprog_fast(&s_state, m, v);
++                      else         rsx_process_method(&s_state, m, v);
+                   }
+                   if (stop) i_fast = count;   /* as the loop below: an unmapped word ends the block */
+               } }
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index ada021e..cc8374b 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -420,6 +420,32 @@ int rsx_tconst_fast(rsx_state* state, u32 method, u32 data)
+     return 1;
+ }
+ 
++/* FIFO_FAST v2: SET_TRANSFORM_PROGRAM words (0x0B80..0x0BFC, vertex-program
++ * microcode) are the most frequent FIFO data in Builder's histogram
++ * (jstars-notes CPU_PROFILE §28) and were handled after ~60 tests in
++ * rsx_process_method. This is that handler, taken first; nothing above it
++ * claims 0x0B80..0x0BFC (no other NV4097 method lives in 0x0B00..0x0BFF).
++ * Returns 1 when it handled the word. */
++int rsx_vprog_fast(rsx_state* state, u32 method, u32 data)
++{
++    if (method < NV4097_SET_TRANSFORM_PROGRAM || method >= NV4097_SET_TRANSFORM_PROGRAM + 32 * 4 ||
++        !rsx_tconst_fast_on())
++        return 0;
++    u32 w = state->vp_ucode_write;
++    if (w + 4 <= sizeof(state->vp_ucode)) {
++        /* data is host-endian already; store as little-endian bytes. */
++        state->vp_ucode[w+0] = (u8)(data);
++        state->vp_ucode[w+1] = (u8)(data >> 8);
++        state->vp_ucode[w+2] = (u8)(data >> 16);
++        state->vp_ucode[w+3] = (u8)(data >> 24);
++        state->vp_ucode_write = w + 4;
++        if (w + 4 > state->vp_ucode_bytes) state->vp_ucode_bytes = w + 4;
++        state->vp_dirty = 1;
++        state->vp_gen = rsx_vp_gen_next();
++    }
++    return 1;
++}
++
+ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+ {
+     /* Guest-visible progress: NV406E SET_REFERENCE (0x50) and semaphore
+@@ -438,6 +464,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+       if(_rt){ static int _m=0; if(_m++<_rt) fprintf(stderr,"[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
+     /* FIFO_FAST: SET_TRANSFORM_CONSTANT first (rsx_tconst_fast, above). */
+     if (rsx_tconst_fast(state, method, data)) return 0;
++    if (rsx_vprog_fast(state, method, data)) return 0;
+     /* Back-end write label / semaphore (cellGcmSetWriteBackEndLabel): the RSX
+      * writes a value to a report/label the CPU polls for CPU<->RSX sync (double
+      * buffering). Real hardware DOES this; without it the game's frame-fence
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 72f1b18..edf6577 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -425,6 +425,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data);
+  * it handled the word); rsx_tconst_fast_on() says whether the fast path is on. */
+ int rsx_tconst_fast_on(void);
+ int rsx_tconst_fast(rsx_state* state, u32 method, u32 data);
++int rsx_vprog_fast(rsx_state* state, u32 method, u32 data);   /* SET_TRANSFORM_PROGRAM words */
+ 
+ /* Called (when set) before any method that makes RSX progress visible to the
+  * guest -- label/semaphore writes, SET_REFERENCE, reports -- and by the FIFO
+-- 
+2.56.0.windows.2
+

@@ -1,0 +1,74 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index afe7aee..66c6282 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6418,6 +6418,11 @@ static D3D12_CPU_DESCRIPTOR_HANDLE off_rt_rtv(int slot)
+ 
+ /* Write a texture SRV (or a null SRV when res == NULL) at an absolute SRV
+  * heap slot. Used to fill per-draw t0-t3 descriptor windows. */
++/* Set by the per-draw SRV fill for the texture it is about to write: 1 = the
++ * view exposes mip 0 only (ZPASS_LOD0 / TEX_LODCLAMP), so any LOD the shader
++ * computes lands on the full-resolution level. Reset after each write. */
++static int s_srv_mip0;
++
+ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+                          UINT mapping, int cube)
+ {
+@@ -6426,7 +6431,8 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+     sv.Shader4ComponentMapping = mapping;
+     /* TEX_MIPS: all levels the resource has (RTs and depth have one). */
+-    sv.Texture2D.MipLevels = tex_mips_on() ? (UINT)-1 : 1u;
++    sv.Texture2D.MipLevels = (tex_mips_on() && !s_srv_mip0) ? (UINT)-1 : 1u;
++    s_srv_mip0 = 0;
+     if (cube) {   /* must match the TextureCube declaration in the HLSL */
+         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+         sv.TextureCube.MipLevels = 1;
+@@ -7692,6 +7698,47 @@ static void render_frame(void)
+                         { static int am = -1;
+                           if (am < 0) { const char* e = getenv("TEX_A1_UNITS"); am = e ? (int)strtoul(e, NULL, 16) : 0; }
+                           if (am & (1 << _u)) _map = (_map & ~(7u << 9)) | (5u << 9) | 0x1000; }
++                        /* ZPASS_LOD0=1: depth-only (shadow caster) draws see mip 0
++                         * only. Alpha-tested casters (J-Stars' leaves, fp 0x9CA80C1)
++                         * otherwise drop whole clusters when a wider camera refits
++                         * the shadow map and a smaller, box-filtered mip falls below
++                         * the alpha-test reference (jstars-notes SHADOWS_ENV.md).
++                         * TEX_LODCLAMP=1: any draw whose guest TEXTURE_CONTROL0 caps
++                         * the LOD below 1 (max LOD field < 1.0) sees mip 0 only, the
++                         * guest's own clamp our static samplers can't apply.
++                         * ZPASS_DBG logs each caster texture's min/max LOD once. */
++                        /* ZPASS_LOD0=2: alternate on/off every ZPASS_LOD0_SEC seconds
++                         * (default 3) within one run, logging each switch with the
++                         * flip, so one fight compares both. */
++                        { static int l0 = -1, lc = -1, l0prev = -1; static unsigned long long l0per = 3000;
++                          if (l0 < 0) { const char* e = getenv("ZPASS_LOD0"); l0 = e ? atoi(e) : 0;
++                                        if (e && !l0) l0 = 1;
++                                        lc = getenv("TEX_LODCLAMP") ? 1 : 0;
++                                        e = getenv("ZPASS_LOD0_SEC"); if (e && atof(e) > 0) l0per = (unsigned long long)(atof(e) * 1000.0); }
++                          int l0now = l0 == 1;
++                          if (l0 == 2) {
++                              extern unsigned long long ps3_ms_now(void);
++                              extern unsigned int cellGcm_flip_request_count(void);
++                              l0now = (int)((ps3_ms_now() / l0per) & 1u);
++                              if (l0now != l0prev) { l0prev = l0now;
++                                  fprintf(stderr, "[ZPASS] LOD0 %s at flip %u%c", l0now ? "ON" : "off",
++                                          cellGcm_flip_request_count(), 10); }
++                          }
++                          const u32 c0 = dr->tex[_u].ctl0;
++                          const float minl = (float)((c0 >> 19) & 0xFFFu) / 256.0f;
++                          const float maxl = (float)((c0 >> 7) & 0xFFFu) / 256.0f;
++                          if ((l0now && dr_is_zonly(dr)) || (lc && (c0 & 0x80000000u) && maxl < 1.0f))
++                              s_srv_mip0 = 1;
++                          if (zpass_dbg() && dr_is_zonly(dr)) {
++                              static u32 seen[16]; static int ns = 0; int kn = 0;
++                              const u32 k = dr->fp_addr ^ ((u32)_u << 28) ^ c0;
++                              for (int i = 0; i < ns; i++) if (seen[i] == k) kn = 1;
++                              if (!kn && ns < 16) { seen[ns++] = k;
++                                  fprintf(stderr, "[ZPASS] caster fp=0x%X unit %d tex 0x%08X %ux%u mips=%u ctl0=0x%08X"
++                                                  " lod=[%.2f,%.2f]%s%c", dr->fp_addr, _u, dr->tex[_u].off,
++                                          dr->tex[_u].w, dr->tex[_u].h, (unsigned)dr->tex[_u].mips, c0,
++                                          (double)minl, (double)maxl, s_srv_mip0 ? " -> mip 0 only" : "", 10); }
++                          } }
+                         srv_write_ex(wslot, s_d3d.vp_tex[ts].res, sf, _map, _cube);
+                         continue;
+                     }

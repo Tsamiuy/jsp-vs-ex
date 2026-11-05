@@ -1,0 +1,47 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 75c2490..3058272 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -130,7 +130,15 @@ u32 cellGcm_flip_request_count(void)
+  * CPU_PROFILE §40). The frame clock reports s_flip_request_count after each
+  * present (every queued flip decoded so far has been shown by then). Like
+  * GCM_FLIP_AT_WORD, flips owed for PRESENT_GATE_MS (default 100) are
+- * released, so a flip that is never drawn cannot stop the title for good. */
++ * released, so a flip that is never drawn cannot stop the title for good.
++ *
++ * PRESENT_GATE_LAG (default 1): how many of the title's newest flips may still
++ * be unpresented when one completes. 0 -- the newest must be shown -- stalled
++ * J-Stars on the release valve for every flip (~8 f/s, §41b): its flip
++ * marker only reaches the walker with a later flush, which it makes after the
++ * flip completes. With 1, flip N completes once N-1 is shown: the title may
++ * then reuse frame N-1's buffers, and frame N's stay untouched until N is
++ * shown -- double buffering, as on hardware. */
+ static volatile u32 s_flip_presented = 0;
+ static int s_flip_gate_present = 0;
+ void cellGcm_flip_gate_present(int on) { s_flip_gate_present = on; }
+@@ -138,7 +146,9 @@ void cellGcm_flip_presented(u32 n)   /* only forward: a release may have moved i
+ { if ((s32)(n - s_flip_presented) > 0) s_flip_presented = n; }
+ static int gcm_flip_present_blocked(void)
+ {
+-    if (!s_flip_gate_present || (s32)(s_flip_ppu_requests - s_flip_presented) <= 0) return 0;
++    static int lag = -1;
++    if (lag < 0) { const char* e = getenv("PRESENT_GATE_LAG"); lag = e ? atoi(e) : 1; if (lag < 0) lag = 0; }
++    if (!s_flip_gate_present || (s32)(s_flip_ppu_requests - s_flip_presented) <= lag) return 0;
+     { extern unsigned long long ps3_ms_now(void);
+       static unsigned long long since = 0; static u32 owed_at = 0; static int lim = -1;
+       if (lim < 0) { const char* e = getenv("PRESENT_GATE_MS"); lim = e ? atoi(e) : 100; }
+@@ -146,9 +156,11 @@ static int gcm_flip_present_blocked(void)
+       if (owed_at != s_flip_ppu_requests) { owed_at = s_flip_ppu_requests; since = now; }
+       else if (now - since >= (unsigned long long)lim) {
+           static int n = 0;
+-          if (n++ < 8) fprintf(stderr, "[cellGcmSys] present gate: %d flip(s) not presented for %d ms, releasing%c",
+-                               (int)(s_flip_ppu_requests - s_flip_presented), lim, 10);
+-          s_flip_presented = s_flip_ppu_requests;
++          /* requested / decoded by the walker / presented: which one lags */
++          if (n++ < 40) fprintf(stderr, "[cellGcmSys] present gate: flips requested %u decoded %u presented %u,"
++                                " owed %d ms, releasing%c", s_flip_ppu_requests, s_flip_request_count,
++                                s_flip_presented, lim, 10);
++          s_flip_presented = s_flip_ppu_requests - (u32)lag;
+           return 0;
+       } }
+     return 1;

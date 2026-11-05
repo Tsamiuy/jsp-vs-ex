@@ -1,0 +1,39 @@
+--- a/jstars/port/CMakeLists.txt	2026-10-25 12:50:42.691828100 +0100
++++ b/jstars/port/CMakeLists.txt	2026-10-25 12:51:14.660857300 +0100
+@@ -74,6 +74,36 @@
+ # imported one arrives without SDL2, pthreads, the Metal frameworks or the
+ # Winsock/XInput imports -- the link then fails on every platform for a
+ # different reason. add_subdirectory hands all of that over with the target.
++# Floating point and CPU features, for every target below (the SDK's too, so
++# these come before add_subdirectory). C and C++ only: the resource compiler
++# (app.rc) must not see them.
++#
++#   - No spontaneous fused multiply-add, for real. The SDK and the lifted files
++#     ask for -ffp-contract=off, but clang-cl ignores that spelling ("unknown
++#     argument ignored"); only /clang:-ffp-contract=off reaches the compiler.
++#     Without FMA in the build there was nothing to fuse into, so it never
++#     mattered. With FMA it would: clang fuses a*b+c by default, and a lifted
++#     PPC fmuls+fadds pair must stay two roundings.
++#   - JSTARS_AVX2 (default ON): build for AVX2+FMA CPUs (Intel Haswell 2013+,
++#     AMD Excavator/Zen). The SPU float helpers have an AVX2 path (spu_helpers.h,
++#     checked bit-exact against their reference) that the build never enabled,
++#     and fmaf (PPU vmaddfp, SPU fma) becomes one instruction instead of a
++#     library call. Offline (jstars-notes tools\bench_avx.c): spu_fm 2.5x and
++#     spu_fma ~1.3x faster per op, results identical. -DJSTARS_AVX2=OFF builds
++#     for any x86-64 as before.
++option(JSTARS_AVX2 "Build for AVX2+FMA CPUs (faster SPU/VMX float maths)" ON)
++if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/clang:-ffp-contract=off>)
++    if(JSTARS_AVX2)
++        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/arch:AVX2>)
++    endif()
++elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
++    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
++    if(JSTARS_AVX2)
++        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mavx2> $<$<COMPILE_LANGUAGE:C,CXX>:-mfma>)
++    endif()
++endif()
++
+ add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
+                  EXCLUDE_FROM_ALL)
+ 

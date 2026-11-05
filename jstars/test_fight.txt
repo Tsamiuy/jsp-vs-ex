@@ -1,0 +1,3 @@
+3 32 0
+Line 1: fighter, opponent, support, and optionally a stage number. Used by "Test Fight.bat" when it's started with no numbers.
+Character numbers are in docs\balance\README.md.

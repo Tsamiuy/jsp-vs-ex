@@ -1,0 +1,26 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -9446,6 +9446,11 @@
+ 
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    /* lum-rt-drawlog (jstars-notes COLOR_EXPOSURE.md Round 10): LUM_RT=0E590000 logs every draw the FIFO hands
++     * the backend for that colour target, before the guards below can drop it. noct = rsx_no_color_target(). */
++    { static int _lr = -1; if (_lr < 0) { const char* e = getenv("LUM_RT"); _lr = e ? (int)strtoul(e, NULL, 16) : 0; }
++      if (_lr && current_rt_off(NULL, NULL, NULL) == (u32)_lr) { static int _n = 0; if (_n < 200 || (_n % 1000) == 0)
++          fprintf(stderr, "[LUMRT] draw_arrays #%d prim=%u first=%u count=%u noct=%d ready=%d vb=%d\n", _n, primitive, first, count, rsx_no_color_target(), (int)s_d3d.pipeline_ready, (int)s_d3d.vb_mapped); _n++; } }
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+@@ -9728,6 +9733,11 @@
+ 
+ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    /* lum-rt-drawlog (jstars-notes COLOR_EXPOSURE.md Round 10): LUM_RT=0E590000 logs every draw the FIFO hands
++     * the backend for that colour target, before the guards below can drop it. noct = rsx_no_color_target(). */
++    { static int _lr = -1; if (_lr < 0) { const char* e = getenv("LUM_RT"); _lr = e ? (int)strtoul(e, NULL, 16) : 0; }
++      if (_lr && current_rt_off(NULL, NULL, NULL) == (u32)_lr) { static int _n = 0; if (_n < 200 || (_n % 1000) == 0)
++          fprintf(stderr, "[LUMRT] draw_indexed #%d prim=%u first=%u count=%u noct=%d ready=%d vb=%d\n", _n, primitive, first, count, rsx_no_color_target(), (int)s_d3d.pipeline_ready, (int)s_d3d.vb_mapped); _n++; } }
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */

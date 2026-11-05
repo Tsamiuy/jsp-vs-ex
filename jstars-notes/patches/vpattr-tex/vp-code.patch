@@ -1,0 +1,123 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6e93f46..dc0a6e2 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -10356,6 +10356,102 @@ static void sf_log(int indexed, u32 prim, u32 first, u32 count, int how, u32 emi
+  * strips (skill projectiles, beams, trails) never appear (jstars-notes
+  * VFX.md). Logged per draw: fp, colour target, texture 0, count and
+  * whether a vertex program is loaded. */
++/* VP_CODE=<hex>[,<hex>...] (logging only): for draws whose fragment program
++ * has one of these code hashes (the `code=` of RSX_CAP manifests and shader
++ * headers, rsx_fp_code_hash), log the vertex layout and data and write the
++ * vertex program. Fragment-program addresses (a ring) and the effect's
++ * texture addresses change between runs; the code hash does not. Written for
++ * the Kamehameha (jstars-notes VFX.md: its draws scale by COLOR0.a, which
++ * arrives as 0): VP_CODE=9A64BF1C,AD204EA4.
++ * Per matching draw (first VP_CODE_N, default 12): `[VPCODE]` with call,
++ * prim, first, count, fp, code, tex0, divider op, VP start slot; each
++ * enabled attribute's layout and the raw bytes of the draw's first two
++ * vertices (index-resolved for indexed draws, base offset/index applied);
++ * each disabled attribute's constant register (always a3 = COLOR0).
++ * Per distinct vertex program: vp_code_<code>_<n>.hlsl = the decompiled
++ * program plus every non-zero vertex constant at that draw. */
++static void vp_code_dbg(const char* call, u32 primitive, u32 first, u32 count, int indexed)
++{
++    static int init = 0; static u32 want[8]; static int nw = 0, maxn = 12, nprinted = 0;
++    if (!init) { init = 1; const char* e = getenv("VP_CODE");
++        while (e && *e && nw < 8) { char* end; want[nw++] = (u32)strtoul(e, &end, 16);
++            e = (*end == ',') ? end + 1 : NULL; }
++        const char* n = getenv("VP_CODE_N"); if (n) maxn = atoi(n); }
++    if (!nw || nprinted >= maxn) return;
++    const rsx_state* st = s_d3d.current_rsx_state;
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    if (!st || !vm_base || !st->shader_program) return;
++    const u32 fp = st->shader_program;
++    const u32 fo = cellGcmResolveLocated((fp & 0x3u) == 1, fp & ~0x3u);
++    if (fo == 0xFFFFFFFFu) return;
++    const u32 code = rsx_fp_code_hash(vm_base + fo, FP_MAX_BYTES);
++    int hit = 0;
++    for (int i = 0; i < nw; i++) if (want[i] == code) hit = 1;
++    if (!hit) return;
++    nprinted++;
++    fprintf(stderr, "[VPCODE] %s prim=%u first=%u count=%u fp=0x%X code=0x%08X tex0=0x%X divider_op=0x%08X"
++                    " vp_start=%u base_off=0x%X base_idx=%u%c",
++            call, primitive, first, count, fp, code, s_d3d.cur_texs[0].raw, st->frequency_divider_op,
++            st->transform_program_start, st->vertex_data_base_offset, st->vertex_data_base_index, 10);
++    for (int i = 0; i < 16; i++) {
++        const rsx_vertex_attrib* a = &st->vertex_attribs[i];
++        if (!a->enabled) {
++            const float* c = st->vertex_data4f[i];
++            if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f || i == 3)
++                fprintf(stderr, "[VPCODE]   a%d disabled, constant=(%g, %g, %g, %g)%c",
++                        i, (double)c[0], (double)c[1], (double)c[2], (double)c[3], 10);
++            continue;
++        }
++        fprintf(stderr, "[VPCODE]   a%d off=0x%X stride=%u size=%u type=%u freq=%u%c",
++                i, a->offset, a->stride, a->size, a->type, a->frequency, 10);
++        for (u32 v = 0; v < 2 && v < count; v++) {
++            u32 vi = indexed ? read_guest_index(st, first + v) : first + v;
++            u32 ei = (vi + st->vertex_data_base_index) & 0x000FFFFFu;
++            if (a->frequency > 1)
++                ei = (st->frequency_divider_op & (1u << i)) ? (vi % a->frequency) : (vi / a->frequency);
++            const u32 ao = st->vertex_data_base_offset + (a->offset & 0x7FFFFFFFu) + ei * a->stride;
++            const u8* q = vm_base + ((a->offset & 0x80000000u) ? cellGcmResolveLocated(0, ao)
++                                                                : cellGcmResolveLocated(1, ao));
++            fprintf(stderr, "[VPCODE]     v%u (index %u, element %u) bytes:", v, vi, ei);
++            for (u32 b = 0; b < 16 && b < (a->stride ? a->stride : 16u); b++) fprintf(stderr, " %02X", q[b]);
++            fprintf(stderr, "%c", 10);
++        }
++    }
++    /* The vertex program, once per distinct program (same start-slot rules as vp_get_vs). */
++    {
++        extern int rsx_vp_decompile(const uint8_t*, u32, char*, u32);
++        if (st->vp_ucode_bytes < 16) return;
++        u32 vstart = st->transform_program_start * 16u;
++        if (vstart >= st->vp_ucode_bytes) vstart = 0;
++        const u8* vuc = st->vp_ucode + vstart;
++        u32 vlen = st->vp_ucode_bytes - vstart;
++        { u32 ninstr = rsx_vp_program_size_instrs(vuc, vlen); if (ninstr) vlen = ninstr * 16u; }
++        const u32 vh = vp_hash_ucode(vuc, vlen);
++        static u32 seen[16]; static int ns = 0;
++        for (int i = 0; i < ns; i++) if (seen[i] == vh) return;
++        if (ns >= 16) return;
++        seen[ns++] = vh;
++        static char hlsl[262144];
++        rsx_vp_set_branch_base(vstart / 16u);
++        int ni = rsx_vp_decompile(vuc, vlen, hlsl, sizeof hlsl);
++        char pn[96];
++        snprintf(pn, sizeof pn, "vp_code_%08X_%d.hlsl", code, ns);
++        FILE* f = fopen(pn, "w");
++        if (!f) return;
++        fprintf(f, "/* fp code=0x%08X fp=0x%X vp hash=0x%08X start=%u instrs=%d tex0=0x%X\n",
++                code, fp, vh, vstart / 16u, ni, s_d3d.cur_texs[0].raw);
++        for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
++            const float* c = st->vertex_constants[r];
++            if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f)
++                fprintf(f, "   c[%d] = (%g, %g, %g, %g)\n", r, (double)c[0], (double)c[1], (double)c[2], (double)c[3]);
++        }
++        fprintf(f, "*/\n%s\n", ni > 0 ? hlsl : "/* decompile failed */");
++        fclose(f);
++        fprintf(stderr, "[VPCODE] wrote %s (%d instrs)%c", pn, ni, 10);
++    }
++}
++
+ static void prim_log(const char* call, u32 primitive, u32 count)
+ {
+     static int on = -1;
+@@ -10395,6 +10491,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+               printf("[backend] arrays callbacks=%lld (prim=%u count=%u)\n", n, primitive, count), fflush(stdout); } }
+     (void)ud;
+     prim_log("draw_arrays", primitive, count);
++    vp_code_dbg("draw_arrays", primitive, first, count, 0);
+     /* Log the first 20 calls in detail, then every 1000th to show liveness
+      * without flooding. */
+     static u64 s_total = 0;
+@@ -10696,6 +10793,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+               printf("[backend] indexed callbacks=%lld (prim=%u count=%u)\n", n, primitive, count), fflush(stdout); } }
+     (void)ud;
+     prim_log("draw_indexed", primitive, count);
++    vp_code_dbg("draw_indexed", primitive, first, count, 1);
+     static int log_count = 0;
+     if (log_count < 8) {
+         printf("[D3D12] draw_indexed(prim=%u, first=%u, count=%u)\n",

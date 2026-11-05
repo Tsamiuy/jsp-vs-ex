@@ -1,0 +1,20 @@
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index e74da3c..f2b227f 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -636,6 +636,15 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+           } }
+         /* GET: main memory -> local store */
+         memcpy(ls_ptr, ea_ptr, size);
++        /* SPU_FORCE_REC_FLAG=<img> (test only): set bit 0x02 of byte +0x121 in each
++        * 0x130-byte record that image GETs. The particle job (image 17) renders a
++        * record through its real path (colour, size, rotation) only when that bit
++        * is set, and through a zero-size path otherwise; every beam record arrives
++        * with it clear (jstars-notes VFX.md). Shows whether that flag is all that
++        * keeps the skill effects from drawing. */
++        { static int s_frf = -2;
++          if (s_frf == -2) { const char* e = getenv("SPU_FORCE_REC_FLAG"); s_frf = e ? atoi(e) : -1; }
++          if (s_frf >= 0 && spu->image_id == s_frf && size == 0x130) ls_ptr[0x121] |= 0x02; }
+         /* SPU_STACKEA_WATCH (b): scan the just-loaded payload for a 0xD00Cxxxx
+          * dword = the completion-word EA arriving in a job buffer. */
+         { static int s_se = -1; if (s_se < 0) s_se = getenv("SPU_STACKEA_WATCH") ? 1 : 0;

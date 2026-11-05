@@ -1,0 +1,74 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index acab5fc..beb0946 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7019,8 +7019,36 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+         ib = vm_base + cellGcmResolveLocated((state->index_array_dma & 0xF) == 0,
+                                              state->index_array_offset);
+     }
++    /* Batched (default): the loop below only lists the guest vertex behind
++     * each output -- a join's repeated vertex gets its source's index -- and
++     * one vf_fetch afterwards decodes the list (staged blocks, one fence, the
++     * worker pool, a repeat copied from the vertex just decoded). Per vertex,
++     * the old loop ran a one-vertex plan range, and every join copied 256-byte
++     * vertices back out of the write-combined upload heap: reads from that
++     * memory are uncached, and match strips are mostly 3-index pieces, i.e. a
++     * join every few vertices. That was ~4,000 cycles per vertex (FINDINGS
++     * §28). The one output the list cannot name -- a join's first repeat at
++     * o == 0, which copies the previous call's last vertex -- is still copied
++     * from the heap, after the fetch. STRIP_NATIVE_PERVERTEX=1 restores the
++     * old loop. */
++    static int pervertex = -1;
++    if (pervertex < 0) pervertex = getenv("STRIP_NATIVE_PERVERTEX") ? 1 : 0;
++    static u32* s_nl = NULL; static u32 s_nl_cap = 0;
++    int use_list = 0;
++    if (!pervertex && !vf_legacy()) {
++        u64 need = (u64)count * 4u;
++        if (need > maxv) need = maxv;
++        if (need > s_nl_cap) {
++            u32 cap = s_nl_cap ? s_nl_cap : 4096u;
++            while (cap < need) cap *= 2u;
++            u32* nv = (u32*)realloc(s_nl, (size_t)cap * sizeof(u32));
++            if (nv) { s_nl = nv; s_nl_cap = cap; }
++        }
++        use_list = s_nl && s_nl_cap >= need;
++    }
++    int prev0 = 0;   /* output 0 repeats the previous call's last vertex */
+     rsx_fetch_plan _plan, *plan = NULL;
+-    if (!vf_legacy()) { rsx_fetch_plan_init(state, vf_input_mask(state), &_plan); plan = &_plan; }
++    if (!use_list && !vf_legacy()) { rsx_fetch_plan_init(state, vf_input_mask(state), &_plan); plan = &_plan; }
+     u32 o = 0;
+     for (u32 k = 0; k < count; k++) {
+         u32 v;
+@@ -7033,6 +7061,16 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+         if (s_strip_pending && t0 + o > 0) {
+             /* join: repeat the previous vertex, then this one (twice if the
+              * piece would otherwise start at an odd position). Decoded once. */
++            if (use_list) {
++                if (o == 0) { prev0 = 1; s_nl[o] = v; }   /* placeholder, fixed below */
++                else        s_nl[o] = s_nl[o - 1];
++                o++;
++                s_nl[o] = v; o++;
++                if ((t0 + o) & 1) { s_nl[o] = s_nl[o - 1]; o++; }
++                s_nl[o] = s_nl[o - 1]; o++;
++                s_strip_pending = 0;
++                continue;
++            }
+             memcpy(&out[o*16], &out[((int)o - 1)*16], VP_VERT_STRIDE); o++;
+             vf_one(plan, state, v, &out[o*16]); o++;
+             if ((t0 + o) & 1) { memcpy(&out[o*16], &out[(o - 1)*16], VP_VERT_STRIDE); o++; }
+@@ -7041,7 +7079,13 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+             continue;
+         }
+         s_strip_pending = 0;
+-        vf_one(plan, state, v, &out[o*16]); o++;
++        if (use_list) { s_nl[o] = v; o++; }
++        else { vf_one(plan, state, v, &out[o*16]); o++; }
++    }
++    if (use_list && o) {
++        rsx_fetch_src src = { 0, RSX_FETCH_VLIST, 0, NULL, s_nl };
++        vf_fetch(state, &src, o, out);
++        if (prev0) memcpy(&out[0], &out[-16], VP_VERT_STRIDE);
+     }
+     /* STRIP_DUMP=<frame>: from that backend frame on, describe a few new strip
+      * records -- index format, restart state, first indices, first decoded

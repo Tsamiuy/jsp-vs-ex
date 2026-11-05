@@ -1,0 +1,49 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4314,6 +4314,31 @@
+     if (on < 0) { const char* e = getenv("MENU_TEX_PITCH"); on = e ? atoi(e) : 0; }
+     return on;
+ }
++/* Loading-tips fix (jstars-notes FINDINGS 69, patches\loading-tips): should the
++ * frame copy stand in for this display-sized, non-RT texture? Only when the
++ * texture is one the RSX could have written (not DXT: the GPU never writes
++ * compressed data) AND the guest bytes behind it are empty, i.e. the title
++ * samples a surface we rendered but never wrote back (the water reflection).
++ * CPU content at the display size keeps its own bytes: the boot logos
++ * (uncompressed) and the match loading screen's DXT1 tips snapshot at
++ * 0x0082C900, both of which the size-only rule drew as the previous frame.
++ * 256 samples spread over the whole image, so a picture with an empty top
++ * band still counts as written. SCREEN_AS_TEX_FORCE=1: the old size-only rule. */
++static int screen_as_tex_wants(const D3D12DrawRecord* dr, int u)
++{
++    static int force = -1;
++    if (force < 0) { const char* e = getenv("SCREEN_AS_TEX_FORCE"); force = e ? atoi(e) : 0; }
++    if (force) return 1;
++    const u32 bf = dr->tex[u].fmt & 0x9F;
++    if (bf >= 0x86 && bf <= 0x88) return 0;          /* compressed: never a frame */
++    extern uint8_t* vm_base;
++    if (!vm_base || !dr->tex[u].off) return 1;
++    const u32 sz = dr->tex[u].w * dr->tex[u].h * 4u;
++    const u32 step = sz > 0x10000u ? sz / 256u : 256u;
++    for (u32 i = 0; i < sz; i += step)
++        if (vm_base[dr->tex[u].off + i]) return 0;    /* written by the CPU: use it */
++    return 1;
++}
+ 
+ /* MENU_FMT16=1 (opt-in): A1R5G5B5 (0x82), A4R4G4B4 (0x83), R5G6B5 (0x84),
+  * R5G5B5A1 (0x97), D1R5G5B5 (0x9D) and D8R8G8B8 (0x9E). rsx_texture_layout
+@@ -6650,9 +6675,13 @@
+              * 1280x720 title into an RT and samples it in a final gamma pass, and
+              * swapping that for the (still black) backbuffer copy blanked the
+              * screen. A tracked RT is always the better source. */
++            /* Loading-tips fix: only for a texture the RSX could have written
++             * whose guest bytes are empty (screen_as_tex_wants). The boot logos
++             * and the loading screen's DXT1 tips snapshot are display-sized CPU
++             * content and drew the previous frame before this (FINDINGS 69). */
+             if (dr->tex[_u].set && s_screen_copy &&
+                 dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height &&
+-                off_rt_find(dr->tex[_u].raw) < 0) {
++                off_rt_find(dr->tex[_u].raw) < 0 && screen_as_tex_wants(dr, _u)) {
+                 static int en = -1;
+                 if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }
+                 if (en) {

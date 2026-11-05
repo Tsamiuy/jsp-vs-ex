@@ -1,0 +1,38 @@
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 07c4f6c..55a50f7 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -1339,6 +1339,33 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+                 if ((cmd & 0xF0) == 0x20 && size) {
+                     uint32_t nz = 0; for (uint32_t k = 0; k < size; k++) if (spu->ls[(lsa + k) & SPU_LS_MASK]) nz++;
+                     fprintf(stderr, "        put nonzero=%u/%u%c", nz, size, 10);
++                    /* SPU_DMATRACE_LSDUMP=<n>: on the first n all-zero PUTs of
++                     * the traced image, write its whole local store and its
++                     * registers to spu<img>_ls_<k>.bin / spu<img>_regs_<k>.txt
++                     * (working directory). The output buffer is empty although
++                     * the job's input records are not (jstars-notes VFX.md,
++                     * image 17): the LS shows where the job's computed vertices
++                     * went, or which per-particle field made it skip them. */
++                    { static int ld = -1, nd = 0;
++                      if (ld < 0) { const char* e = getenv("SPU_DMATRACE_LSDUMP"); ld = e ? atoi(e) : 0; }
++                      if (!nz && nd < ld) {
++                          char fn[64]; nd++;
++                          snprintf(fn, sizeof fn, "spu%d_ls_%d.bin", spu->image_id, nd);
++                          FILE* f = fopen(fn, "wb");
++                          if (f) { fwrite(spu->ls, 1, SPU_LS_MASK + 1u, f); fclose(f); }
++                          snprintf(fn, sizeof fn, "spu%d_regs_%d.txt", spu->image_id, nd);
++                          f = fopen(fn, "w");
++                          if (f) {
++                              fprintf(f, "img=%d pc=0x%05X lsa=0x%05X ea=0x%llX size=0x%X flip=%u\n", spu->image_id,
++                                      (uint32_t)spu->pc & SPU_LS_MASK, lsa, (unsigned long long)ea, size,
++                                      cellGcm_flip_request_count());
++                              for (int r = 0; r < 128; r++)
++                                  fprintf(f, "r%-3d %08X %08X %08X %08X\n", r, spu->gpr[r]._u32[0],
++                                          spu->gpr[r]._u32[1], spu->gpr[r]._u32[2], spu->gpr[r]._u32[3]);
++                              fclose(f);
++                          }
++                          fprintf(stderr, "        LS dump %d written (spu%d_ls_%d.bin)%c", nd, spu->image_id, nd, 10);
++                      } }
+                 }
+                 /* GETs larger than the 64-byte dump: the non-zero count. */
+                 if (mfc_is_get(cmd) && size > 64 && vm_base && mfc_ea_range_committed(ea, size)) {

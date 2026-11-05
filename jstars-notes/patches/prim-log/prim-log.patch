@@ -1,0 +1,59 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index d674572..def815d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -10347,6 +10347,38 @@ static void sf_log(int indexed, u32 prim, u32 first, u32 count, int how, u32 emi
+             st ? st->restart_enable : 0u, st ? st->restart_index : 0u, st ? st->index_array_dma : 0u);
+ }
+ 
++/* PRIM_LOG=1 (logging only): every draw whose primitive is not one the VP
++ * path handles -- POINTS (1), LINES (2), LINE_LOOP (3), LINE_STRIP (4),
++ * QUAD_STRIP (9), POLYGON (10) -- once per (call, prim, fp, target), plus a
++ * running count every 600 such draws. draw_arrays sends these to the
++ * fixed-function passthrough (no vertex program, so no transform) and
++ * draw_indexed skips them, so effects built from point sprites, lines or quad
++ * strips (skill projectiles, beams, trails) never appear (jstars-notes
++ * VFX.md). Logged per draw: fp, colour target, texture 0, count and
++ * whether a vertex program is loaded. */
++static void prim_log(const char* call, u32 primitive, u32 count)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("PRIM_LOG") ? 1 : 0;
++    if (!on || primitive == RSX_PRIMITIVE_TRIANGLES || primitive == RSX_PRIMITIVE_TRIANGLE_STRIP ||
++        primitive == RSX_PRIMITIVE_TRIANGLE_FAN || primitive == RSX_PRIMITIVE_QUADS) return;
++    const rsx_state* st = s_d3d.current_rsx_state;
++    const u32 fp = st ? st->shader_program : 0, rt = current_rt_off(NULL, NULL, NULL);
++    static u32 seen[64][4]; static int ns = 0; static unsigned long total = 0;
++    total++;
++    int known = 0;
++    for (int i = 0; i < ns; i++)
++        if (seen[i][0] == (u32)(call[5] == 'i') && seen[i][1] == primitive && seen[i][2] == fp && seen[i][3] == rt) known = 1;
++    if (!known && ns < 64) {
++        seen[ns][0] = (u32)(call[5] == 'i'); seen[ns][1] = primitive; seen[ns][2] = fp; seen[ns][3] = rt; ns++;
++        fprintf(stderr, "[PRIM] %s prim=%u count=%u fp=0x%X rt=0x%X tex0=0x%X vp_bytes=%u noct=%d%c",
++                call, primitive, count, fp, rt, s_d3d.cur_texs[0].raw,
++                st ? st->vp_ucode_bytes : 0u, rsx_no_color_target(), 10);
++    }
++    if ((total % 600) == 0)
++        fprintf(stderr, "[PRIM] %lu non-triangle draws so far (%d distinct)%c", total, ns, 10);
++}
++
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* lum-rt-drawlog (jstars-notes COLOR_EXPOSURE.md Round 10): LUM_RT=0E590000 logs every draw the FIFO hands
+@@ -10362,6 +10394,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+           if (((++n) % 20000) == 0)
+               printf("[backend] arrays callbacks=%lld (prim=%u count=%u)\n", n, primitive, count), fflush(stdout); } }
+     (void)ud;
++    prim_log("draw_arrays", primitive, count);
+     /* Log the first 20 calls in detail, then every 1000th to show liveness
+      * without flooding. */
+     static u64 s_total = 0;
+@@ -10662,6 +10695,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+           if (((++n) % 20000) == 0)
+               printf("[backend] indexed callbacks=%lld (prim=%u count=%u)\n", n, primitive, count), fflush(stdout); } }
+     (void)ud;
++    prim_log("draw_indexed", primitive, count);
+     static int log_count = 0;
+     if (log_count < 8) {
+         printf("[D3D12] draw_indexed(prim=%u, first=%u, count=%u)\n",

@@ -1,0 +1,53 @@
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index bdd2ce3..9d9d789 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -802,6 +802,15 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         return 0;
+     }
+ 
++    if (method == 0x1FECu) {   /* NV4097_SET_SHADER_PACKER: sRGB colour write */
++        /* Logged on every change (first 8) so a run shows whether the title
++         * ever asks for sRGB-encoded writes, which the D3D12 backend ignores
++         * (rsx_fp_srgb_output_enabled is only used by the live draw engine). */
++        static int n = 0;
++        if (n < 8 && data != state->shader_packer) { n++;
++            fprintf(stderr, "[RSXPK] shader_packer=0x%X\n", data); }
++        state->shader_packer = data;
++    }
+     if (method == NV4097_SET_SHADER_CONTROL) {
+         { static int _sc=0; if (_sc++ < 12 && getenv("RTT_DUMP"))
+             fprintf(stderr, "[RSXSC] shader_control=0x%X\n", data); }
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 4b1ef36..ac5c271 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -356,6 +356,9 @@ typedef struct rsx_state {
+     float viewport_scale[4];
+     u32 shader_program;       /* fragment program address (offset | location in bits [0:1]) */
+     u32 shader_control;       /* SET_SHADER_CONTROL (0x40 = 32-bit colour exports) */
++    u32 shader_packer;        /* SET_SHADER_PACKER (0x1FEC): sRGB colour write flag.
++                               * Recorded for the [RSXPK] log; the D3D12 backend
++                               * does not apply it yet (jstars-notes COLOR_EXPOSURE.md) */
+     u32 fragment_program_addr;
+     u32 vertex_attrib_output_mask;
+     u32 vertex_attrib_input_mask;      /* 0x1FF0 */
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index aa4204e..d17721f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -8852,10 +8852,12 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+             if (!f && ns < 64) { seen[ns++]=k;
+                 /* gamma = ADDRESS bits 20-23: per-component sRGB decode
+                  * (jstars-notes PALE_TEXTURES.md cause 1). */
+-                fprintf(stderr, "[TEXFMT] unit=%u fmt=0x%02X %ux%u mips=%u cube=%d off=0x%X gamma=0x%X filter=0x%08X%c",
++                /* addr = the whole TEXTURE_ADDRESS word: bit 12 is the biased
++                 * unsigned remap (TEX_EXPAND), bits 20-23 the gamma above. */
++                fprintf(stderr, "[TEXFMT] unit=%u fmt=0x%02X %ux%u mips=%u cube=%d off=0x%X gamma=0x%X filter=0x%08X addr=0x%08X%c",
+                         unit, (tex->format >> 8) & 0xFFu, width, height,
+                         (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset,
+-                        (tex->address >> 20) & 0xFu, tex->filter, 10); } }
++                        (tex->address >> 20) & 0xFu, tex->filter, tex->address, 10); } }
+         s_d3d.cur_texs[unit].set = 1;
+     }
+     if (base_fmt == 0x81 /* B8 */) {

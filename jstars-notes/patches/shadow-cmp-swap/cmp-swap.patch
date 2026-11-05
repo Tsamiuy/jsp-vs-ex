@@ -1,0 +1,21 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6a6d267..38317e2 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3078,6 +3078,16 @@ static void zcmp_desc(const D3D12DrawRecord* dr, int u, u32 fmt, rsx_fp_shadow_d
+ {
+     rsx_fp_shadow_desc_from_texture(sd, fmt, 2u, (u32)dr->tex[u].cube, dr->tex[u].mips,
+                                     dr->tex[u].filt, dr->tex[u].addr, dr->tex[u].ctl0);
++    /* ZPASS_CMP_SWAP=1: RSX compares the stored texel against the reference
++     * ("texel OP reference"), the reverse of GL's "reference OP texel" that
++     * the decompiler's helper implements (RPCS3 reverses the direction for
++     * texture compares too). Mirror the function so the helper computes the
++     * RSX result. Evidence: Yoshiwara's floor cascade t7 (zfunc GREATER)
++     * stores ~1 (empty map) with reference < stored, and the game reads 1 as
++     * lit -- GL order said "in shadow" (FINDINGS §44). */
++    { static int sw = -1; if (sw < 0) sw = getenv("ZPASS_CMP_SWAP") ? 1 : 0;
++      static const u8 mirror[8] = {0, 4, 2, 6, 1, 5, 3, 7};
++      if (sw && sd->enabled) sd->func = mirror[sd->func & 7u]; }
+     if (sd->enabled != 2) return;
+     const u32 base = fmt & 0x9Fu, minf = (dr->tex[u].filt >> 16) & 7u;
+     if (base == 0x91 || base == 0x93 || dr->tex[u].cube || sd->func == 0 || sd->func > 6) {

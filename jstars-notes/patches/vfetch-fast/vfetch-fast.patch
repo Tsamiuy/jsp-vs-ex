@@ -1,0 +1,733 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 8e826bb..3067e67 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -20,6 +20,7 @@
+ #include "rsx_d3d12_backend.h"
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
++#include "rsx_vp_decompiler.h"
+ #include "rsx_texture_layout.h"
+ #include <stdio.h>
+ #include <string.h>
+@@ -490,6 +491,17 @@ static double s_perf_tex = 0.0, s_perf_frame = 0.0, s_perf_vtx = 0.0, s_perf_rf
+ static double s_perf_gpu = 0.0, s_perf_pre = 0.0, s_perf_srv = 0.0, s_perf_pso = 0.0;
+ static int s_perf_pso_calls = 0, s_perf_pso_miss = 0, s_perf_pso_hashbytes = 0;
+ static u64    s_perf_nverts = 0;
++/* CPU cycles the recording thread spent in the timed vertex fetch. Against
++ * the wall time (s_perf_vtx) it tells real work from a starved thread: the
++ * old fetch costs ~0.05 us/vertex in isolation on this machine, yet the
++ * match measured ~1.6 us/vertex. */
++static u64    s_perf_vtx_cyc = 0;
++static u64 vf_cycles(void)
++{
++    ULONG64 c = 0;
++    QueryThreadCycleTime(GetCurrentThread(), &c);
++    return (u64)c;
++}
+ static u64    s_perf_texbytes = 0;
+ static int    s_perf_ntex = 0;
+ static double perf_now(void)
+@@ -4981,12 +4993,14 @@ static void render_frame(void)
+         if (++s_n % 20 == 0) {
+             double fr = s_perf_frame > 0 ? s_perf_frame : 1;
+             fprintf(stderr, "[PERF] %.2f fps | tex %.2fs (%.0f%%, %d calls) | vtx %.2fs"
+-                            " (%.0f%%, %.0fk verts) | render_frame %.2fs (%.0f%%)"
++                            " (%.0f%%, %.0fk verts, %.0f Mcyc = %.0f cyc/vert) | render_frame %.2fs (%.0f%%)"
+                             " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | guest %.2fs (%.0f%%)%c",
+                     20.0 / fr,
+                     s_perf_tex, 100.0 * s_perf_tex / fr, s_perf_ntex,
+                     s_perf_vtx, 100.0 * s_perf_vtx / fr,
+                     (double)s_perf_nverts / 1000.0,
++                    (double)s_perf_vtx_cyc / 1e6,
++                    s_perf_nverts ? (double)s_perf_vtx_cyc / (double)s_perf_nverts : 0.0,
+                     s_perf_rf, 100.0 * s_perf_rf / fr,
+                     s_perf_pre, 100.0 * s_perf_pre / fr,
+                     s_perf_srv, 100.0 * s_perf_srv / fr,
+@@ -4996,7 +5010,7 @@ static void render_frame(void)
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+             s_perf_pso_calls = 0; s_perf_pso_miss = 0; s_perf_pso_hashbytes = 0;
+-            s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0;
++            s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0; s_perf_vtx_cyc = 0;
+         }
+     }
+     { static int dt = -1;
+@@ -5836,6 +5850,199 @@ static void vp_attrs_dbg(const rsx_state* state)
+                   ai, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], nfin, nnan, 10); } } }
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Fast VP vertex fetch: per-draw plan, VP-read attributes only, worker pool.
++ *
++ * read_vp_vertex decodes all 16 attributes of every vertex through
++ * rsx_fetch_attrib, which re-derives the whole fetch per component. In a
++ * J-Stars match that was 85-96% of the frame (~1.6 us/vertex, FINDINGS §19).
++ * This path:
++ *   - builds an rsx_fetch_plan once per draw (resolve, divider, type);
++ *   - fetches only the attributes the guest VP reads (rsx_vp_analyze_inputs;
++ *     any doubt -> all 16). The input layout is unchanged -- the other slots
++ *     are simply not written, and the shader never reads them;
++ *   - splits big draws across worker threads (disjoint output ranges).
++ * Switches:
++ *   VFETCH_LEGACY=1    the old read_vp_vertex loops
++ *   VFETCH_ALL=1       plan path, but fetch all 16 attributes
++ *   VFETCH_THREADS=<n> worker threads besides the caller (0 = none)
++ *   VFETCH_MIN=<n>     smallest draw (output vertices) that is split
++ * -------------------------------------------------------------------------*/
++static int vf_legacy(void)
++{
++    static int v = -1;
++    if (v < 0) v = getenv("VFETCH_LEGACY") ? 1 : 0;
++    return v;
++}
++
++/* Attributes the active VP reads. Keyed like vp_get_vs (start slot through
++ * END), cached so the analysis runs once per program, not per draw. */
++static u32 vf_input_mask(const rsx_state* st)
++{
++    static int all = -1;
++    if (all < 0) all = getenv("VFETCH_ALL") ? 1 : 0;
++    if (all || !st || st->vp_ucode_bytes < 16) return 0xFFFFu;
++    u32 vstart = 0;
++    { static int off = -1; if (off < 0) off = getenv("VP_START_OFF") ? 1 : 0;
++      if (!off) vstart = st->transform_program_start * 16u; }
++    if (vstart >= st->vp_ucode_bytes) vstart = 0;
++    const u8* vuc = st->vp_ucode + vstart;
++    u32 vlen = st->vp_ucode_bytes - vstart;
++    { u32 ninstr = rsx_vp_program_size_instrs(vuc, vlen);
++      if (ninstr) vlen = ninstr * 16u; }
++    /* Word-wise FNV: this runs per draw, the byte-wise vp_hash_ucode per
++     * compile. vlen is a multiple of 16. */
++    u32 h = 2166136261u;
++    for (u32 i = 0; i + 4 <= vlen; i += 4) { u32 w; memcpy(&w, vuc + i, 4); h ^= w; h *= 16777619u; }
++    h = (h ^ (vstart / 16u)) * 16777619u;
++    static struct { u32 hash, vstart, vlen, mask; } cache[256];
++    const u32 slot = (h ^ (h >> 8) ^ (h >> 16)) & 255u;
++    if (cache[slot].mask && cache[slot].hash == h &&
++        cache[slot].vstart == vstart && cache[slot].vlen == vlen)
++        return cache[slot].mask;
++    rsx_vp_input_analysis an;
++    u32 mask = 0xFFFFu;
++    if (rsx_vp_analyze_inputs(vuc, vlen, &an) >= 0 && an.exact)
++        mask = an.input_mask & 0xFFFFu;
++    /* Attribute 0 always: the uploads key on it and the debug paths
++     * (VTX_POS, RSX_DBG_VTX, IDX_DBG) read it back. */
++    mask |= 1u;
++    cache[slot].hash = h; cache[slot].vstart = vstart; cache[slot].vlen = vlen;
++    cache[slot].mask = mask;
++    { static int dbg = -1; if (dbg < 0) dbg = getenv("VFETCH_DBG") ? 1 : 0;
++      if (dbg) fprintf(stderr, "[VFETCH] vp start=%u instrs=%u mask=0x%04X%s%c",
++                       vstart / 16u, vlen / 16u, mask, mask == 0xFFFFu ? " (all)" : "", 10); }
++    return mask;
++}
++
++/* Worker pool. The caller takes chunks too, so VFETCH_THREADS=0 is the
++ * plain single-threaded loop. Draws are recorded on one thread, so one job
++ * at a time. */
++#define VF_MAX_WORKERS 15
++#define VF_CHUNK       512u
++static struct {
++    int    n;                      /* workers, excluding the caller */
++    u32    min_split;
++    HANDLE th[VF_MAX_WORKERS];
++    HANDLE go[VF_MAX_WORKERS];     /* auto-reset, one per worker    */
++    HANDLE done;                   /* auto-reset                    */
++    volatile LONG next;            /* next chunk to take            */
++    volatile LONG busy;            /* workers still on this job     */
++    const rsx_fetch_plan* plan;
++    const rsx_fetch_src*  src;
++    float (*out)[4];
++    u32 total;
++} s_vf;
++
++static void vf_take_chunks(void)
++{
++    for (;;) {
++        const u32 c = (u32)InterlockedIncrement(&s_vf.next) - 1u;
++        const u64 o0 = (u64)c * VF_CHUNK;
++        if (o0 >= s_vf.total) return;
++        u32 o1 = (u32)o0 + VF_CHUNK; if (o1 > s_vf.total) o1 = s_vf.total;
++        rsx_fetch_plan_range(s_vf.plan, s_vf.src, (u32)o0, o1, s_vf.out);
++    }
++}
++
++static DWORD WINAPI vf_worker(LPVOID arg)
++{
++    const int me = (int)(intptr_t)arg;
++    for (;;) {
++        WaitForSingleObject(s_vf.go[me], INFINITE);
++        vf_take_chunks();
++        if (InterlockedDecrement(&s_vf.busy) == 0) SetEvent(s_vf.done);
++    }
++    return 0;
++}
++
++static void vf_pool_init(void)
++{
++    static int inited = 0;
++    if (inited) return;
++    inited = 1;
++    SYSTEM_INFO si; GetSystemInfo(&si);
++    /* Default 3 workers (fewer on small machines). Measured into a real
++     * upload heap (laptop GPU, 400k vertices, 4 attributes): 1 thread
++     * 7.3 ms, 1+1 5.3 ms, 3+1 4.6 ms, 7+1 4.9 ms -- the copy into the
++     * heap saturates, and the PPU/SPU threads need the other cores. */
++    int n = (int)si.dwNumberOfProcessors / 4;
++    if (n > 3) n = 3;
++    { const char* e = getenv("VFETCH_THREADS"); if (e) n = atoi(e); }
++    if (n < 0) n = 0;
++    if (n > VF_MAX_WORKERS) n = VF_MAX_WORKERS;
++    s_vf.min_split = 2048u;
++    { const char* e = getenv("VFETCH_MIN"); if (e) s_vf.min_split = (u32)strtoul(e, NULL, 0); }
++    s_vf.done = CreateEventA(NULL, FALSE, FALSE, NULL);
++    for (int i = 0; i < n && s_vf.done; i++) {
++        s_vf.go[i] = CreateEventA(NULL, FALSE, FALSE, NULL);
++        if (!s_vf.go[i]) break;
++        s_vf.th[i] = CreateThread(NULL, 0, vf_worker, (LPVOID)(intptr_t)i, 0, NULL);
++        if (!s_vf.th[i]) { CloseHandle(s_vf.go[i]); s_vf.go[i] = NULL; break; }
++        s_vf.n = i + 1;
++    }
++    fprintf(stderr, "[VFETCH] %d worker thread(s), split draws >= %u vertices%c",
++            s_vf.n, s_vf.min_split, 10);
++}
++
++/* Fetch `total` output vertices of the current draw into out. */
++static void vf_fetch(const rsx_state* state, const rsx_fetch_src* src,
++                     u32 total, VPSlot* out)
++{
++    if (!total) return;
++    rsx_fetch_plan plan;
++    rsx_fetch_plan_init(state, vf_input_mask(state), &plan);
++    float (*o4)[4] = (float (*)[4])out;
++    vf_pool_init();
++    int nw = 0;
++    if (s_vf.n > 0 && total >= s_vf.min_split) {
++        const u32 chunks = (total + VF_CHUNK - 1u) / VF_CHUNK;
++        nw = (int)chunks - 1;               /* the caller takes one */
++        if (nw > s_vf.n) nw = s_vf.n;
++    }
++    if (nw <= 0) {
++        rsx_fetch_plan_range(&plan, src, 0, total, o4);
++    } else {
++        s_vf.plan = &plan; s_vf.src = src; s_vf.out = o4; s_vf.total = total;
++        s_vf.next = 0;
++        s_vf.busy = nw;
++        MemoryBarrier();
++        for (int i = 0; i < nw; i++) SetEvent(s_vf.go[i]);
++        vf_take_chunks();
++        WaitForSingleObject(s_vf.done, INFINITE);
++    }
++    /* VTX_POS: the first fetched position of each draw (read_vp_vertex
++     * reported every vertex until the cap; one per draw is more useful). */
++    { const rsx_vertex_attrib* a = &state->vertex_attribs[0];
++      u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
++      rsx_vtx_pos_dbg(state, out[0].v, n); }
++}
++
++/* The index array, resolved once per draw (read_guest_index resolves it per
++ * index). */
++static void vf_src_init(rsx_fetch_src* s, const rsx_state* st, u32 first, int indexed, int topo)
++{
++    extern uint8_t* vm_base;
++    s->first = first;
++    s->topo  = (u8)topo;
++    s->isize = 0;
++    s->ib    = NULL;
++    if (indexed) {
++        const int local = ((st->index_array_dma & 0xF) == 0);
++        s->ib    = vm_base + cellGcmResolveLocated(local, st->index_array_offset);
++        s->isize = (((st->index_array_dma >> 4) & 0xF) == 1) ? 2 : 4;
++    }
++}
++
++/* One vertex through the plan (the native strip path walks restarts itself),
++ * or through read_vp_vertex when there is no plan. */
++static void vf_one(const rsx_fetch_plan* plan, const rsx_state* st, u32 v, VPSlot* dst)
++{
++    if (!plan) { read_vp_vertex(st, v, dst); return; }
++    rsx_fetch_src s1 = { v, RSX_FETCH_LIST, 0, NULL };
++    rsx_fetch_plan_range(plan, &s1, 0, 1, (float (*)[4])dst);
++}
++
+ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+ {
+     extern uint8_t* vm_base;
+@@ -5847,6 +6054,12 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+     if (quads * 6 > maxv) quads = maxv / 6;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    if (!vf_legacy()) {   /* VTX_DUMP below is legacy-only */
++        rsx_fetch_src src; vf_src_init(&src, state, first, 0, RSX_FETCH_QUADS);
++        vf_fetch(state, &src, quads * 6, out);
++        s_d3d.vp_vb_offset += quads * 6 * VP_VERT_STRIDE;
++        return quads * 6;
++    }
+     u32 o = 0;
+     for (u32 q = 0; q < quads; q++) {
+         VPSlot c[4][16];
+@@ -5884,10 +6097,13 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+         count = maxv - (maxv % 3); }
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    { double _tv = perf_on() ? perf_now() : 0.0;
+-      for (u32 k = 0; k < count; k++)
++    { double _tv = perf_on() ? perf_now() : 0.0; u64 _cy = perf_on() ? vf_cycles() : 0;
++      if (!vf_legacy()) { rsx_fetch_src src; vf_src_init(&src, state, first, 0, RSX_FETCH_LIST);
++                          vf_fetch(state, &src, count, out); }
++      else for (u32 k = 0; k < count; k++)
+           read_vp_vertex(state, first + k, &out[k*16]);
+-      if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
++      if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_vtx_cyc += vf_cycles() - _cy;
++                       s_perf_nverts += count; } }
+     /* IDXDBG=<hex shader_program>: vertex range for that program's draws. */
+     { static const char* ie = (const char*)1; static u32 iw = 0;
+       if (ie == (const char*)1) { ie = getenv("IDXDBG");
+@@ -5947,6 +6163,13 @@ static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan
+     if (tris * 3 > maxv) tris = maxv / 3;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    if (!vf_legacy()) {
++        rsx_fetch_src src;
++        vf_src_init(&src, state, first, 0, fan ? RSX_FETCH_FAN : RSX_FETCH_STRIP_SWAP);
++        vf_fetch(state, &src, tris * 3, out);
++        s_d3d.vp_vb_offset += tris * 3 * VP_VERT_STRIDE;
++        return tris * 3;
++    }
+     u32 o = 0;
+     for (u32 t = 0; t < tris; t++) {
+         u32 i0 = fan ? 0 : t;
+@@ -5990,6 +6213,12 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
+     if (quads * 6 > maxv) quads = maxv / 6;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    if (!vf_legacy()) {   /* VTX_DUMP below is legacy-only */
++        rsx_fetch_src src; vf_src_init(&src, state, first, 1, RSX_FETCH_QUADS);
++        vf_fetch(state, &src, quads * 6, out);
++        s_d3d.vp_vb_offset += quads * 6 * VP_VERT_STRIDE;
++        return quads * 6;
++    }
+     u32 o = 0;
+     for (u32 q = 0; q < quads; q++) {
+         VPSlot c[4][16];
+@@ -6035,10 +6264,13 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+         count = maxv - (maxv % 3); }
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    { double _tv = perf_on() ? perf_now() : 0.0;
+-      for (u32 k = 0; k < count; k++)
++    { double _tv = perf_on() ? perf_now() : 0.0; u64 _cy = perf_on() ? vf_cycles() : 0;
++      if (!vf_legacy()) { rsx_fetch_src src; vf_src_init(&src, state, first, 1, RSX_FETCH_LIST);
++                          vf_fetch(state, &src, count, out); }
++      else for (u32 k = 0; k < count; k++)
+           read_vp_vertex(state, read_guest_index(state, first + k), &out[k*16]);
+-      if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
++      if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_vtx_cyc += vf_cycles() - _cy;
++                       s_perf_nverts += count; } }
+     /* IDXDBG=<hex shader_program>: index range for that program's draws. An
+      * index past the vertex array reads unmapped guest memory as zero, which
+      * shows up as a spike triangle with a zero texcoord, not as a missing draw. */
+@@ -6248,6 +6480,13 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
+     if (tris * 3 > maxv) tris = maxv / 3;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    if (!vf_legacy()) {
++        rsx_fetch_src src;
++        vf_src_init(&src, state, first, 1, fan ? RSX_FETCH_FAN : RSX_FETCH_STRIP);
++        vf_fetch(state, &src, tris * 3, out);
++        s_d3d.vp_vb_offset += tris * 3 * VP_VERT_STRIDE;
++        return tris * 3;
++    }
+     u32 o = 0;
+     for (u32 t = 0; t < tris; t++) {
+         u32 i0 = fan ? 0 : t;
+@@ -6298,7 +6537,9 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+         ib = vm_base + cellGcmResolveLocated((state->index_array_dma & 0xF) == 0,
+                                              state->index_array_offset);
+     }
+-    double _tv = perf_on() ? perf_now() : 0.0;
++    double _tv = perf_on() ? perf_now() : 0.0; u64 _cy = perf_on() ? vf_cycles() : 0;
++    rsx_fetch_plan _plan, *plan = NULL;
++    if (!vf_legacy()) { rsx_fetch_plan_init(state, vf_input_mask(state), &_plan); plan = &_plan; }
+     u32 o = 0;
+     for (u32 k = 0; k < count; k++) {
+         u32 v;
+@@ -6312,16 +6553,16 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+             /* join: repeat the previous vertex, then this one (twice if the
+              * piece would otherwise start at an odd position). Decoded once. */
+             memcpy(&out[o*16], &out[((int)o - 1)*16], VP_VERT_STRIDE); o++;
+-            read_vp_vertex(state, v, &out[o*16]); o++;
++            vf_one(plan, state, v, &out[o*16]); o++;
+             if ((t0 + o) & 1) { memcpy(&out[o*16], &out[(o - 1)*16], VP_VERT_STRIDE); o++; }
+             memcpy(&out[o*16], &out[(o - 1)*16], VP_VERT_STRIDE); o++;
+             s_strip_pending = 0;
+             continue;
+         }
+         s_strip_pending = 0;
+-        read_vp_vertex(state, v, &out[o*16]); o++;
++        vf_one(plan, state, v, &out[o*16]); o++;
+     }
+-    if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += o; }
++    if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_vtx_cyc += vf_cycles() - _cy; s_perf_nverts += o; }
+     /* STRIP_DUMP=<frame>: from that backend frame on, describe a few new strip
+      * records -- index format, restart state, first indices, first decoded
+      * positions -- to compare with what the expansion path reads. */
+diff --git a/libs/video/rsx_vertex_fetch.c b/libs/video/rsx_vertex_fetch.c
+index 2b5de59..7738dee 100644
+--- a/libs/video/rsx_vertex_fetch.c
++++ b/libs/video/rsx_vertex_fetch.c
+@@ -6,6 +6,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <stdint.h>
+ 
+ float rsx_rd_bef(const u8* p)
+ {
+@@ -25,6 +26,37 @@ float rsx_rd_half_be(const u8* p)
+     float o; memcpy(&o, &f, 4); return o;
+ }
+ 
++/* RSX_VBASE_OFF=1: ignore SET_VERTEX_DATA_BASE_OFFSET/INDEX. */
++static int vbase_off(void)
++{
++    static int v = -1;
++    if (v < 0) v = getenv("RSX_VBASE_OFF") ? 1 : 0;
++    return v;
++}
++
++/* VP_NOFREQ=1: instancing kill-switch (ignore the frequency divider). */
++static int vp_nofreq(void)
++{
++    static int v = -1;
++    if (v < 0) v = getenv("VP_NOFREQ") ? 1 : 0;
++    return v;
++}
++
++/* VBASE_DBG=1: print each new (base offset, base index) pair once. */
++static void vbase_dbg(const rsx_state* st)
++{
++    static int dbg = -1; if (dbg < 0) dbg = getenv("VBASE_DBG") ? 1 : 0;
++    if (!dbg) return;
++    static u32 seen[16][2]; static int ns = 0; int f = 0;
++    for (int i = 0; i < ns; i++)
++        if (seen[i][0] == st->vertex_data_base_offset && seen[i][1] == st->vertex_data_base_index) f = 1;
++    if (!f && ns < 16) { seen[ns][0] = st->vertex_data_base_offset; seen[ns][1] = st->vertex_data_base_index; ns++;
++        fprintf(stderr, "[VBASE] base_offset=0x%X base_index=%u (attr0 off=0x%X type=%u size=%u stride=%u)\n",
++                st->vertex_data_base_offset, st->vertex_data_base_index,
++                st->vertex_attribs[0].offset, st->vertex_attribs[0].type,
++                st->vertex_attribs[0].size, st->vertex_attribs[0].stride); }
++}
++
+ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
+ {
+     /* A disabled attribute array feeds the CONSTANT vertex attribute register
+@@ -52,22 +84,11 @@ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
+     /* Per-vertex element = (vertex + SET_VERTEX_DATA_BASE_INDEX) & 0xFFFFF, the
+      * same rule as rsx_vertex_element_index() in the dispatch engine; the base
+      * index was ignored here. */
+-    static int vboff = -1;
+-    if (vboff < 0) vboff = getenv("RSX_VBASE_OFF") ? 1 : 0;
+-    { static int dbg = -1; if (dbg < 0) dbg = getenv("VBASE_DBG") ? 1 : 0;
+-      if (dbg && idx == 0) { static u32 seen[16][2]; static int ns = 0; int f = 0;
+-        for (int i = 0; i < ns; i++)
+-            if (seen[i][0] == st->vertex_data_base_offset && seen[i][1] == st->vertex_data_base_index) f = 1;
+-        if (!f && ns < 16) { seen[ns][0] = st->vertex_data_base_offset; seen[ns][1] = st->vertex_data_base_index; ns++;
+-            fprintf(stderr, "[VBASE] base_offset=0x%X base_index=%u (attr0 off=0x%X type=%u size=%u stride=%u)\n",
+-                    st->vertex_data_base_offset, st->vertex_data_base_index,
+-                    st->vertex_attribs[0].offset, st->vertex_attribs[0].type,
+-                    st->vertex_attribs[0].size, st->vertex_attribs[0].stride); } } }
++    const int vboff = vbase_off();
++    if (idx == 0) vbase_dbg(st);
+     u32 ei = (vi + (vboff ? 0u : st->vertex_data_base_index)) & 0x000FFFFFu;
+     if (a->frequency > 1) {
+-        static int nofreq = -1;                 /* VP_NOFREQ: instancing kill-switch */
+-        if (nofreq < 0) nofreq = getenv("VP_NOFREQ") ? 1 : 0;
+-        if (!nofreq)
++        if (!vp_nofreq())                       /* VP_NOFREQ: instancing kill-switch */
+             ei = (st->frequency_divider_op & (1u << idx))
+                      ? (vi % a->frequency)      /* MODULO: repeat mesh */
+                      : (vi / a->frequency);     /* DIVIDE: per-instance */
+@@ -135,3 +156,198 @@ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
+         break;
+     }
+ }
++
++/* ---------------------------------------------------------------------------
++ * Per-draw fetch plan (see rsx_vertex_fetch.h)
++ * -------------------------------------------------------------------------*/
++
++void rsx_fetch_plan_init(const rsx_state* st, u32 mask, rsx_fetch_plan* plan)
++{
++    memset(plan, 0, sizeof *plan);
++    plan->mask = mask & 0xFFFFu;
++    const int vboff = vbase_off();
++    const int nofreq = vp_nofreq();
++    vbase_dbg(st);
++    plan->base_index = vboff ? 0u : st->vertex_data_base_index;
++    plan->local_base = cellGcmResolveLocated(1, 0);
++    memcpy(plan->konst, st->vertex_data4f, sizeof plan->konst);
++    for (int i = 0; i < 16; i++) {
++        if (!(plan->mask & (1u << i))) continue;
++        const rsx_vertex_attrib* a = &st->vertex_attribs[i];
++        if (!a->enabled || a->stride == 0 || !vm_base) {
++            plan->const_idx[plan->nconst++] = (u8)i;
++            continue;
++        }
++        rsx_fetch_plan_attr* f = &plan->fetch[plan->nfetch++];
++        f->idx    = (u8)i;
++        f->aoff   = (vboff ? 0u : st->vertex_data_base_offset) + (a->offset & 0x7FFFFFFFu);
++        f->stride = a->stride;
++        f->freq   = (a->frequency > 1 && !nofreq) ? a->frequency : 0u;
++        f->modulo = (st->frequency_divider_op & (1u << i)) ? 1 : 0;
++        f->main   = (a->offset & 0x80000000u) ? 1 : 0;
++        f->type   = (u8)a->type;
++        u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
++        f->n      = (u8)n;
++        if (f->type < 1 || f->type > 7) {   /* same report as rsx_fetch_attrib */
++            static int t = -1; if (t < 0) t = getenv("VTX_TYPEDBG") ? 1 : 0;
++            if (t) { static u32 seen = 0;
++                if (!(seen & (1u << (a->type & 31)))) { seen |= 1u << (a->type & 31);
++                    fprintf(stderr, "[VTXTYPE] UNHANDLED type=%u attr=%d size=%u stride=%u\n",
++                            a->type, i, a->size, a->stride); } }
++        }
++    }
++}
++
++u32 rsx_fetch_src_vertex(const rsx_fetch_src* src, u32 o)
++{
++    u32 s;
++    switch (src->topo) {
++    case RSX_FETCH_QUADS: {
++        static const u8 q6[6] = {0,1,2, 0,2,3};
++        s = (o / 6u) * 4u + q6[o % 6u];
++        break; }
++    case RSX_FETCH_STRIP:
++    case RSX_FETCH_STRIP_SWAP:
++    case RSX_FETCH_FAN: {
++        const u32 t = o / 3u, j = o % 3u;
++        if (j == 0)      s = (src->topo == RSX_FETCH_FAN) ? 0u : t;
++        else if (src->topo == RSX_FETCH_STRIP_SWAP && (t & 1u))
++                         s = (j == 1) ? t + 2u : t + 1u;
++        else             s = t + j;
++        break; }
++    default:
++        s = o;
++        break;
++    }
++    const u32 k = src->first + s;
++    if (src->isize == 2) {
++        const u8* q = src->ib + (u64)k * 2;
++        return ((u32)q[0] << 8) | q[1];
++    }
++    if (src->isize == 4) {
++        const u8* q = src->ib + (u64)k * 4;
++        return ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3];
++    }
++    return k;
++}
++
++static inline u32 rd_be16(const u8* p) { return ((u32)p[0] << 8) | p[1]; }
++
++/* Copy n float4 slots out: non-temporal 16-byte stores when the target is
++ * aligned (they stream into write-combined memory without reading it or
++ * polluting the cache), plain memcpy otherwise. */
++#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
++#include <emmintrin.h>
++static void rsx_fetch_store(float (*dst)[4], const float* src, u32 n, int aligned)
++{
++    if (!aligned) { memcpy(dst, src, (size_t)n * 16u); return; }
++    float* d = &dst[0][0];
++    for (u32 i = 0; i < n; i++) _mm_stream_ps(d + i * 4, _mm_load_ps(src + i * 4));
++}
++static void rsx_fetch_store_fence(void) { _mm_sfence(); }
++#else
++static void rsx_fetch_store(float (*dst)[4], const float* src, u32 n, int aligned)
++{
++    (void)aligned; memcpy(dst, src, (size_t)n * 16u);
++}
++static void rsx_fetch_store_fence(void) {}
++#endif
++
++/* Decode one vertex into v (16 float4 slots, cached memory). */
++static void rsx_fetch_plan_vertex(const rsx_fetch_plan* plan, u32 vi, float (*v)[4],
++                                  u32 page[16], u32 page_ea[16])
++{
++    for (u32 c = 0; c < plan->nconst; c++) {
++        const u32 i = plan->const_idx[c];
++        memcpy(v[i], plan->konst[i], 16);
++    }
++    for (u32 c = 0; c < plan->nfetch; c++) {
++        const rsx_fetch_plan_attr* f = &plan->fetch[c];
++        const float* k4 = plan->konst[f->idx];
++
++        u32 ei = (vi + plan->base_index) & 0x000FFFFFu;
++        if (f->freq) ei = f->modulo ? (vi % f->freq) : (vi / f->freq);
++        const u32 off = f->aoff + ei * f->stride;
++
++        u32 ea;
++        if (f->main) {
++            const u32 pg = off >> 20;
++            if (pg != page[c]) { page[c] = pg; page_ea[c] = cellGcmResolveLocated(0, pg << 20); }
++            ea = page_ea[c] + (off & 0xFFFFFu);
++        } else {
++            ea = plan->local_base + off;
++        }
++        const u8* p = vm_base + ea;
++        const u32 n = f->n;
++
++        /* Components the array does not supply keep the register value. */
++        float* t = v[f->idx];
++        t[0] = k4[0]; t[1] = k4[1]; t[2] = k4[2]; t[3] = k4[3];
++        switch (f->type) {
++        case 2: /* F: float32 BE */
++            for (u32 k = 0; k < n; k++) t[k] = rsx_rd_bef(p + k * 4);
++            break;
++        case 3: /* SF: half BE */
++            for (u32 k = 0; k < n; k++) t[k] = rsx_rd_half_be(p + k * 2);
++            break;
++        case 4: /* UB: u8 normalized */
++            for (u32 k = 0; k < n; k++) t[k] = p[k] / 255.0f;
++            break;
++        case 1: /* S1: s16 normalized */
++            for (u32 k = 0; k < n; k++) t[k] = (float)(s16)rd_be16(p + k * 2) / 32767.0f;
++            break;
++        case 5: /* S32K: s16 integer */
++            for (u32 k = 0; k < n; k++) t[k] = (float)(s16)rd_be16(p + k * 2);
++            break;
++        case 7: /* UB256: u8 unnormalized */
++            for (u32 k = 0; k < n; k++) t[k] = (float)p[k];
++            break;
++        case 6: { /* CMP: signed 11/11/10, w = 1 */
++            const u32 w = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
++            s32 x = (s32)(w & 0x7FFu);          if (x & 0x400) x -= 0x800;
++            s32 y = (s32)((w >> 11) & 0x7FFu);  if (y & 0x400) y -= 0x800;
++            s32 z = (s32)((w >> 22) & 0x3FFu);  if (z & 0x200) z -= 0x400;
++            t[0] = (float)x / 1023.0f;
++            t[1] = (float)y / 1023.0f;
++            t[2] = (float)z / 511.0f;
++            t[3] = 1.0f;
++            break; }
++        default:
++            for (u32 k = 0; k < n; k++) t[k] = rsx_rd_bef(p + k * 4);
++            break;
++        }
++    }
++}
++
++void rsx_fetch_plan_range(const rsx_fetch_plan* plan, const rsx_fetch_src* src,
++                          u32 o0, u32 o1, float (*out)[4])
++{
++    if (o1 <= o0) return;
++    /* MAIN arrays resolve through the IO table one 1MB page at a time; the
++     * result is linear inside a page (cellGcmResolveIO and its
++     * cellGcmResolveOffset fallback both are), so each page is resolved once
++     * per range rather than once per component read. Per call, so ranges on
++     * different threads never share it. */
++    u32 page[16], page_ea[16];
++    for (int i = 0; i < 16; i++) { page[i] = 0xFFFFFFFFu; page_ea[i] = 0; }
++
++    /* Vertices are built in a cached staging block, then copied out whole:
++     * 256 contiguous bytes each. `out` is normally a D3D12 upload heap, i.e.
++     * write-combined memory, where the old path's scattered per-component
++     * stores (the constant default first, then each component again) each
++     * cost a bus transaction, and a skipped slot would break the line.
++     * Slots outside the mask are written as zero. */
++    enum { BLK = 32 };
++    _Alignas(16) float stage[BLK][16][4];
++    const u32 nfirst = (o1 - o0 < BLK) ? o1 - o0 : BLK;
++    memset(stage, 0, (size_t)nfirst * sizeof stage[0]);
++    const int aligned = (((uintptr_t)out) & 15u) == 0;
++
++    for (u32 b0 = o0; b0 < o1; b0 += BLK) {
++        const u32 b1 = (o1 - b0 > BLK) ? b0 + BLK : o1;
++        for (u32 o = b0; o < b1; o++)
++            rsx_fetch_plan_vertex(plan, rsx_fetch_src_vertex(src, o), stage[o - b0], page, page_ea);
++        rsx_fetch_store(out + (u64)b0 * 16u, &stage[0][0][0], (b1 - b0) * 16u, aligned);
++    }
++    rsx_fetch_store_fence();
++}
+diff --git a/libs/video/rsx_vertex_fetch.h b/libs/video/rsx_vertex_fetch.h
+index a52a2e1..0bf0e89 100644
+--- a/libs/video/rsx_vertex_fetch.h
++++ b/libs/video/rsx_vertex_fetch.h
+@@ -68,6 +68,79 @@ float rsx_rd_half_be(const u8* p);  /* 2-byte IEEE half -> float  */
+  */
+ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4]);
+ 
++/* ---------------------------------------------------------------------------
++ * Per-draw fetch plan.
++ *
++ * rsx_fetch_attrib re-derives everything per vertex and per attribute: the
++ * env switches, the frequency rule, the context-DMA resolve through
++ * cellGcmSys. A J-Stars match frame pushes ~400k vertices through it, all 16
++ * attributes each, and that was 85-96% of the frame (FINDINGS §19).
++ *
++ * The plan does that work once per draw and keeps only the attributes the
++ * vertex program reads. Conversion rules are rsx_fetch_attrib's, unchanged:
++ * the same constant-register default, base offset/index, divider, LOCAL vs
++ * MAIN resolve and type decode.
++ *
++ * Attributes outside `mask` are written as zero: the caller's vertex
++ * layout keeps their slot, and the shader never reads it. Every vertex is
++ * stored whole (256 contiguous bytes), because the destination is usually
++ * write-combined upload-heap memory.
++ * -------------------------------------------------------------------------*/
++typedef struct rsx_fetch_plan_attr {
++    u32 aoff;      /* (array offset & 0x7FFFFFFF) + SET_VERTEX_DATA_BASE_OFFSET */
++    u32 stride;
++    u32 freq;      /* > 1: divider applies                                    */
++    u8  idx;       /* attribute register                                      */
++    u8  type;
++    u8  n;         /* components supplied, 1..4                               */
++    u8  main;      /* 1 = MAIN (IO table), 0 = LOCAL (VRAM)                   */
++    u8  modulo;    /* divider op: 1 = vi % freq, 0 = vi / freq                */
++} rsx_fetch_plan_attr;
++
++typedef struct rsx_fetch_plan {
++    u32   mask;        /* attributes written per vertex                   */
++    u32   base_index;  /* SET_VERTEX_DATA_BASE_INDEX (0 under RSX_VBASE_OFF) */
++    u32   local_base;  /* cellGcmResolveLocated(1, 0)                     */
++    u8    nconst, nfetch;
++    u8    const_idx[16];              /* in mask, read from the register */
++    rsx_fetch_plan_attr fetch[16];    /* in mask, read from guest memory */
++    float konst[16][4];               /* vertex_data4f snapshot          */
++} rsx_fetch_plan;
++
++/* Build the plan for the current state. `mask` = attributes the vertex
++ * program reads (0xFFFF = all, the old behaviour). Not thread-safe (it runs
++ * the one-time env/debug checks); the plan itself is read-only afterwards
++ * and may be shared by any number of threads. */
++void rsx_fetch_plan_init(const rsx_state* st, u32 mask, rsx_fetch_plan* plan);
++
++/* How output vertex positions map to the draw's source positions. The VP
++ * paths expand quads/strips/fans to triangle lists, so output o is not
++ * source o. */
++enum {
++    RSX_FETCH_LIST = 0,     /* o                                          */
++    RSX_FETCH_QUADS,        /* quad q -> 0,1,2, 0,2,3                     */
++    RSX_FETCH_STRIP,        /* tri t -> t, t+1, t+2                       */
++    RSX_FETCH_STRIP_SWAP,   /* as STRIP, odd triangles swap the last two  */
++    RSX_FETCH_FAN           /* tri t -> 0, t+1, t+2                       */
++};
++
++typedef struct rsx_fetch_src {
++    u32       first;   /* first index / vertex of the draw                     */
++    u8        topo;    /* RSX_FETCH_*                                          */
++    u8        isize;   /* 0 = non-indexed (vi = first + src), 2 = u16, 4 = u32 */
++    const u8* ib;      /* resolved index array (big-endian), when indexed      */
++} rsx_fetch_src;
++
++/* Fetch output vertices [o0, o1) into out, vertex o at out + o*16 (16
++ * float4 slots per vertex). Thread-safe: disjoint ranges of one draw can
++ * run concurrently. */
++void rsx_fetch_plan_range(const rsx_fetch_plan* plan, const rsx_fetch_src* src,
++                          u32 o0, u32 o1, float (*out)[4]);
++
++/* Guest vertex index of output position o (applies topo and the index
++ * array). Exposed for the debug paths and tests. */
++u32 rsx_fetch_src_vertex(const rsx_fetch_src* src, u32 o);
++
+ #ifdef __cplusplus
+ }
+ #endif

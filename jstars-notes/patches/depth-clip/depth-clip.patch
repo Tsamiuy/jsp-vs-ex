@@ -1,0 +1,41 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3fdb8a4..bfe0e7c 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1809,6 +1809,20 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+            (unsigned long long)s_d3d.frame_count, dir, ndraws);
+ }
+ 
++/* Near/far depth clipping. A zero-initialised D3D12_RASTERIZER_DESC has
++ * DepthClipEnable = FALSE, so every VP pipeline clamped depth instead of
++ * clipping it: geometry between the camera and the near plane (a ground or
++ * water plane running under a low camera) was drawn at depth 0, in front of
++ * everything, cut off by a hard line where it crosses the near plane. RSX
++ * clips at near/far by default (SET_ZMIN_MAX_CONTROL, not decoded here), so
++ * clip. DEPTH_CLAMP=1 restores the old clamping. */
++static BOOL vp_depth_clip(void)
++{
++    static int clamp = -1;
++    if (clamp < 0) clamp = getenv("DEPTH_CLAMP") ? 1 : 0;
++    return clamp ? FALSE : TRUE;
++}
++
+ /* Decompile the captured RSX vertex program to HLSL and build the VP PSO
+  * (decompiled VS + atlas alpha-test PS). One-shot per program. */
+ static void compile_vp(void)
+@@ -1885,6 +1899,7 @@ static void compile_vp(void)
+     pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb); pd.PS.BytecodeLength = pb->lpVtbl->GetBufferSize(pb);
+     pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
+     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.DepthClipEnable = vp_depth_clip();
+     pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+     pd.SampleMask = UINT_MAX;
+@@ -2874,6 +2889,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
+     pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
+     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.DepthClipEnable = vp_depth_clip();
+     /* Guest face culling. CULL_OFF=1 forces double-sided, the old
+      * unconditional behaviour -- geometry that vanishes under culling is a
+      * winding/front-face problem, not a missing draw. */

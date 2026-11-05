@@ -1,0 +1,49 @@
+name: Performance report
+description: Low frame rate, stutter or audio crackle in a specific place
+title: "[Performance] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fights run at about 29 frames per second on the maps tested so far (the game's own speed is 30). Reports that help most: a stage, character or effect that is much slower than the rest, or a change between builds. Never attach game files.
+  - type: textarea
+    id: where
+    attributes:
+      label: What you see
+      description: "What is on screen, how slow it gets, and whether it is stutter or steady slowness."
+    validations:
+      required: true
+  - type: input
+    id: place
+    attributes:
+      label: Mode, stage and characters
+      description: "The mode (for example Free Battle), the stage, the fighters on both teams, and how long after the start."
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game version and region
+      description: "For example US BLUS31519, with or without the game update."
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Port build
+      description: "Release number, or the commit (`git rev-parse --short HEAD`) of the build you ran, and the resolution setting (RES_SCALE)."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: "Windows version, CPU, RAM, GPU and driver version. On Linux: the Proton or Wine version too."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "If you installed with the installer: Start menu > Make a support bundle (JSP Fan Revival), then drag the zip from your Desktop here (open it first and look). Otherwise paste the lines around the slow part. Remove your user name and folder paths. Never attach game files, EBOOTs, saves or keys."

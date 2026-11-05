@@ -1,0 +1,120 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 7bc566d..5f2c4ac 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -29,6 +29,7 @@ static u32 s_gcm_context_ea = 0;
+ #include <windows.h>
+ #else
+ #include <time.h>
++#include "rsx_env.h"   /* getenv() -> cached when RSX_ENV_CACHE=1 */
+ #endif
+ 
+ /* ---------------------------------------------------------------------------
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 53d4ef8..e7225f1 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -19,6 +19,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
+ #include <string.h>
++#include "rsx_env.h"   /* getenv() -> cached when RSX_ENV_CACHE=1 */
+ #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
+ 
+ /* ---------------------------------------------------------------------------
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 78915b8..3eae001 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -25,6 +25,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
++#include "rsx_env.h"   /* getenv() -> cached when RSX_ENV_CACHE=1 */
+ #include <math.h>
+ 
+ #ifndef WIN32_LEAN_AND_MEAN
+diff --git a/libs/video/rsx_env.h b/libs/video/rsx_env.h
+new file mode 100644
+index 0000000..59edf95
+--- /dev/null
++++ b/libs/video/rsx_env.h
+@@ -0,0 +1,78 @@
++/*
++ * ps3recomp - cached getenv for the RSX hot paths
++ *
++ * The video code reads ~200 debug switches with getenv(). About a third are
++ * not cached at their call site, and several of those sit in per-draw and
++ * per-FIFO-pass code (vp_record_cb, vp_get_fp_pso, d3d12_draw_indexed, the
++ * FIFO walker). The CRT getenv takes a lock and scans the whole environment:
++ * ~1.2 us per call measured on the J-Stars machine, so a few dozen per draw
++ * at ~600 draws a batch is milliseconds per frame on the present thread,
++ * which the sampler shows is the only busy thread in a match.
++ *
++ * Including this header after <stdlib.h> routes getenv() in that file
++ * through a small cache keyed by the variable NAME (its characters, not the
++ * pointer). The first answer for each name is kept, which is what the
++ * cached call sites already do; the video code never sets variables.
++ * Opt-in for now: RSX_ENV_CACHE=1 turns the cache on; without it every
++ * call goes to the CRT as before.
++ *
++ * Windows (MSVC / clang-cl intrinsics) only; elsewhere getenv is untouched.
++ * No <windows.h>: the files that include this must not gain its macros.
++ */
++#ifndef PS3RECOMP_RSX_ENV_H
++#define PS3RECOMP_RSX_ENV_H
++
++#include <stdlib.h>
++#include <string.h>
++
++#if defined(_WIN32) && defined(_MSC_VER)
++#include <intrin.h>
++
++typedef struct {
++    const char* volatile name_copy;   /* published last: non-NULL = slot valid */
++    const char* value;
++    unsigned hash;
++} rsx_env_slot;
++
++static const char* rsx_env_get(const char* name)
++{
++    enum { N = 512 };
++    static rsx_env_slot tab[N];
++    static volatile long wlock;       /* writers only; readers take no lock */
++    static int live = -1;
++    if (live < 0) { const char* e = getenv("RSX_ENV_CACHE"); live = (e && *e && *e != '0') ? 0 : 1; }
++    if (live || !name) return getenv(name);
++    unsigned h = 2166136261u;
++    for (const char* p = name; *p; p++) { h ^= (unsigned char)*p; h *= 16777619u; }
++    const unsigned i0 = h & (N - 1);
++    /* Lookup. x86 keeps loads in order, and a writer stores name_copy with a
++     * full barrier after value/hash, so a visible name means a valid slot. */
++    for (unsigned n = 0, i = i0; n < N; n++, i = (i + 1) & (N - 1)) {
++        const char* nc = tab[i].name_copy;
++        if (!nc) break;
++        if (tab[i].hash == h && strcmp(nc, name) == 0) return tab[i].value;
++    }
++    const char* v = getenv(name);
++    while (_InterlockedExchange(&wlock, 1)) _mm_pause();
++    for (unsigned n = 0, i = i0; n < N; n++, i = (i + 1) & (N - 1)) {
++        const char* nc = tab[i].name_copy;
++        if (nc && tab[i].hash == h && strcmp(nc, name) == 0) break;   /* raced: already in */
++        if (!nc) {
++            size_t len = strlen(name) + 1;
++            char* c = (char*)malloc(len);
++            if (c) {
++                memcpy(c, name, len);
++                tab[i].value = v; tab[i].hash = h;
++                _InterlockedExchangePointer((void* volatile*)&tab[i].name_copy, c);
++            }
++            break;
++        }
++    }
++    _InterlockedExchange(&wlock, 0);
++    return v;
++}
++/* Function-like only, so declarations of getenv itself are not affected. */
++#define getenv(name) rsx_env_get(name)
++#endif
++
++#endif /* PS3RECOMP_RSX_ENV_H */

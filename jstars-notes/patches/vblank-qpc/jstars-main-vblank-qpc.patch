@@ -1,0 +1,64 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -189,7 +189,52 @@
+     unsigned  last_flip = 0;
+     ULONGLONG next_tick = GetTickCount64();
+ 
++    /* VBLANK_QPC=1 (opt-in): run the 60 Hz vblank/flip tick off
++     * QueryPerformanceCounter at exactly 1000/60 ms, and never idle past the
++     * next tick.
++     *
++     * GetTickCount64 only advances in 15-16 ms steps, even with
++     * timeBeginPeriod(1) (measured on this machine: 15,16,15,16,...). With
++     * `next_tick += 16` a tick therefore fires late by up to a whole step, or
++     * two fire in one burst, and the flip completions the guest paces its
++     * frames on (flip mode VSYNC) land on an irregular 15.6/31.2 ms grid.
++     * A frame ready in 30 ms then often waits for a third vblank:
++     * perf/strip-carry-2026-10-20 [PERF4] shows half the frames at 37-54 ms.
++     * The kick wait below is also capped at the time left to the next tick,
++     * so a tick is never late by the 4 ms idle wait either. */
++    static int vqpc = -1;
++    if (vqpc < 0) { const char* e = getenv("VBLANK_QPC"); vqpc = (e && *e && *e != '0') ? 1 : 0; }
++    LARGE_INTEGER qf, qn; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&qn);
++    const double q_period = 1000.0 / 60.0;
++    double q_next = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
++    if (vqpc) fprintf(stderr, "[rsx] VBLANK_QPC: vblank tick from QPC, %.4f ms\n", q_period);
++
+     for (;;) {
++        if (vqpc) {
++            QueryPerformanceCounter(&qn);
++            const double qms = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
++            double left = q_next - qms;
++            unsigned w = left <= 0.0 ? 0u : (unsigned)(left + 0.999);
++            if (w > 4) w = 4;
++            if (w) cellGcm_fifo_kick_wait(w);
++            QueryPerformanceCounter(&qn);
++            const double qnow = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
++            int qfired = 0;
++            while (qnow >= q_next && qfired < 240) {
++                cellGcmTickVBlank();
++                cellGcmTickFlip();
++                if (rsx_ok && cellGcm_take_flip_pending()) {
++                    present_guest_frame();
++                    last_flip = cellGcm_flip_request_count();
++                }
++                if (rsx_ok) cellGcm_rsx_process_fifo();
++                q_next += q_period;
++                qfired++;
++            }
++            if (qfired >= 240) q_next = qnow + q_period;   /* fell too far behind -- resync */
++            goto outer_cadence;
++        }
++        {
+         /* Was Sleep(4), as in the template. cellGcmSys's FIFO kick event is
+          * created by its first waiter, so with no waiter a guest thread whose
+          * fence wait found the queue dry could not wake this loop, and paid
+@@ -221,6 +266,8 @@
+             fired++;
+         }
+         if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
++        }
++outer_cadence:
+ 
+         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
+          * fence every render pass on a label the drain writes, and one wave of

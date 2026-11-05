@@ -1,0 +1,679 @@
+From 0f6370bbac3690d5b226d4ca129b88b4341ca08d Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 16:18:06 +0200
+Subject: [PATCH] video: vertex pulling for indexed strips (VPULL=1, opt-in)
+
+---
+ libs/video/rsx_d3d12_backend.c | 253 ++++++++++++++++++++++++++++++++-
+ libs/video/rsx_vp_decompiler.c |  19 +++
+ libs/video/rsx_vp_decompiler.h |   4 +
+ libs/video/rsx_vpull.h         | 179 +++++++++++++++++++++++
+ 4 files changed, 449 insertions(+), 6 deletions(-)
+ create mode 100644 libs/video/rsx_vpull.h
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 11313b4..9b7bc13 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -21,6 +21,7 @@
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_vp_decompiler.h"
++#include "rsx_vpull.h"
+ #include "rsx_texture_layout.h"
+ #include <stdio.h>
+ #include <string.h>
+@@ -174,6 +175,10 @@ typedef struct {
+      * Valid only while ix_gen == s_six.gen, so a slot reused by any other
+      * path (none of which sets these) can never be taken for one. */
+     u32 ix_start, ix_count, ix_gen;
++    /* VPULL: the record's vertices are its byte region at vpull_base in the
++     * ring, decoded by the vertex shader. Valid only while vpull_gen ==
++     * s_six.gen (same rule as ix_gen). */
++    u32 vpull_base, vpull_gen, vpull_sig;
+ } D3D12DrawRecord;
+ 
+ /* MENU_A2C=1 (opt-in): alpha-to-coverage as an alpha test. RSX foliage cards
+@@ -699,6 +704,34 @@ static int strip_ix_on(void)
+     if (s_six.on < 0) { const char* e = getenv("STRIP_INDEXED"); s_six.on = (e && *e && *e != '0') ? 1 : 0; }
+     return s_six.on;
+ }
++
++/* VPULL=1 (opt-in): indexed strips decoded by the vertex shader (rsx_vpull.h).
++ * Per FIFO index batch the guest vertex bytes the batch spans are copied into
++ * a byte ring and its indices, rebased to that copy, go into the STRIP_INDEXED
++ * index buffer (restart -> strip cut). No 256-byte slots, no decode workers.
++ * A record whose attributes are not one plain interleaved stream (divider,
++ * mixed strides or memory, unknown type, a very sparse first batch) takes the
++ * CPU path as before. With PERF on, a [VPULL] line follows each [PERF4]. */
++#define VPULL_RING_BYTES (64u << 20)    /* per parity half */
++#define VPULL_RING_SLACK 4096u          /* Load2 past a record's last byte */
++#define VPULL_MARGIN     (8u << 20)     /* flush the batch below this much room */
++static struct {
++    int on;                    /* -1 = undecided */
++    ID3D12Resource* ring; u8* ring_mapped;
++    ID3D12Resource* tab;  u8* tab_mapped;   /* rsx_vpull_tab per record slot, x2 parity */
++    ID3D12Resource* lut;
++    u32 off;                   /* ring bytes used in the current batch */
++    u32 rec_base, rec_k;       /* the open record: region start, vertices reserved */
++    rsx_fetch_plan plan;       /* vpull_prepare's result for the current call */
++    rsx_vpull_layout lay;
++    rsx_vpull_tab tab_cur;
++    u32 n_rec, n_batch, n_cpu, n_sparse, n_drop; u64 bytes, idx;
++} s_vpull = { .on = -1 };
++static int vpull_on(void)
++{
++    if (s_vpull.on < 0) { const char* e = getenv("VPULL"); s_vpull.on = (e && *e && *e != '0') ? 1 : 0; }
++    return s_vpull.on;
++}
+ /* The rest of the present thread's time, which [PERF] lumps into "guest"
+  * (= window - render_frame):
+  *   s_perf_present  swap-chain Present (vsync), after render_frame's timer;
+@@ -1373,7 +1406,19 @@ static int init_d3d12(u32 width, u32 height)
+         srv_range.BaseShaderRegister = 0;
+         srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+ 
+-        D3D12_ROOT_PARAMETER rp[3] = {0};
++        D3D12_ROOT_PARAMETER rp[6] = {0};
++        /* VPULL: t8 = the record's vertex bytes, t9 = decode tables, b2 = the
++         * record's attribute table (rsx_vpull.h). Only with VPULL on, so the
++         * default root signature stays as it was. */
++        rp[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++        rp[3].Descriptor.ShaderRegister = 8;
++        rp[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
++        rp[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++        rp[4].Descriptor.ShaderRegister = 9;
++        rp[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
++        rp[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
++        rp[5].Descriptor.ShaderRegister = 2;
++        rp[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+         rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 = vp_c bank */
+         rp[0].Descriptor.ShaderRegister = 0;
+         rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+@@ -1424,7 +1469,7 @@ static int init_d3d12(u32 width, u32 height)
+         }
+ 
+         D3D12_ROOT_SIGNATURE_DESC rd = {0};
+-        rd.NumParameters = 3; rd.pParameters = rp;
++        rd.NumParameters = vpull_on() ? 6 : 3; rd.pParameters = rp;
+ rd.NumStaticSamplers = RSX_TEX_UNITS; rd.pStaticSamplers = samp;
+         rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+ 
+@@ -1464,7 +1509,36 @@ rd.NumStaticSamplers = RSX_TEX_UNITS; rd.pStaticSamplers = samp;
+         else
+             fprintf(stderr, "[VPVB] ALLOCATION FAILED -- no VP geometry will render%c", 10);
+ 
+-        if (strip_ix_on()) {
++        if (vpull_on()) {   /* VPULL: byte ring, per-record tables, decode tables */
++            u64 keep = bd.Width;
++            int ok = 1;
++            bd.Width = ((u64)VPULL_RING_BYTES + VPULL_RING_SLACK) * 2;
++            ok = ok && SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++                    D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                    &IID_ID3D12Resource, (void**)&s_vpull.ring)) &&
++                 SUCCEEDED(s_vpull.ring->lpVtbl->Map(s_vpull.ring, 0, &nr, (void**)&s_vpull.ring_mapped));
++            bd.Width = (u64)MAX_DRAWS * RSX_VPULL_TAB_BYTES * 2;
++            ok = ok && SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++                    D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                    &IID_ID3D12Resource, (void**)&s_vpull.tab)) &&
++                 SUCCEEDED(s_vpull.tab->lpVtbl->Map(s_vpull.tab, 0, &nr, (void**)&s_vpull.tab_mapped));
++            bd.Width = (u64)RSX_VPULL_LUT_COUNT * sizeof(float);
++            void* lm = NULL;
++            ok = ok && SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++                    D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                    &IID_ID3D12Resource, (void**)&s_vpull.lut)) &&
++                 SUCCEEDED(s_vpull.lut->lpVtbl->Map(s_vpull.lut, 0, &nr, &lm));
++            if (ok) {
++                rsx_vpull_fill_lut((float*)lm);
++                fprintf(stderr, "[VPULL] vertex pulling on: %u MB byte ring x2 parity%c",
++                        VPULL_RING_BYTES >> 20, 10);
++            } else {
++                fprintf(stderr, "[VPULL] buffer allocation failed -- VPULL off%c", 10);
++                s_vpull.ring_mapped = NULL; s_vpull.tab_mapped = NULL; s_vpull.on = 0;
++            }
++            bd.Width = keep;
++        }
++        if (strip_ix_on() || vpull_on()) {   /* VPULL draws through this index buffer too */
+             u64 keep = bd.Width;
+             bd.Width = (u64)SIX_CAP * sizeof(u32) * 2;   /* x2 parity, like vp_vb */
+             if (SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
+@@ -2183,7 +2257,7 @@ static void compile_vp(void)
+     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+     pd.SampleMask = UINT_MAX;
+     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+-    if (strip_ix_on()) pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
++    if (strip_ix_on() || vpull_on()) pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+     pd.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+     /* Depth test ON (LESS_EQUAL, matching the guest's rsxtiny_DepthTestFunc 515 /
+@@ -2773,6 +2847,7 @@ static void pso_async_prepass_end(void)
+     }
+ }
+ 
++static int s_vs_pull_req = 0;   /* VPULL: vp_get_vs_pull wants the pulling variant */
+ static int vp_get_vs(const rsx_state* st)
+ {
+     extern int rsx_vp_decompile(const uint8_t*, u32, char*, u32);
+@@ -2811,6 +2886,8 @@ static int vp_get_vs(const rsx_state* st)
+         if (!hash) hash = 1u;
+         memo_st = st; memo_gen = st->vp_gen; memo_hash = hash; memo_vlen = vlen;
+     }
++    /* VPULL: the pulling variant of a program is a cache entry of its own. */
++    if (s_vs_pull_req) { hash = (hash ^ 0x50554C4Cu) * 16777619u; if (!hash) hash = 1u; }
+     for (int i = 0; i < s_d3d.vp_vs_n; i++)
+         if (s_d3d.vp_vs[i].hash == hash) { s_vs_last_batch[i] = s_vs_batch; return i; }
+ 
+@@ -2818,7 +2895,9 @@ static int vp_get_vs(const rsx_state* st)
+     /* The decompiler resolves BRA/CAL targets against this; it stayed 0, so a
+      * program with branches loaded at a non-zero slot jumped to wrong code. */
+     rsx_vp_set_branch_base(getenv("VP_NO_BRANCH_BASE") ? 0u : vstart / 16u);
++    rsx_vp_set_pull(s_vs_pull_req);
+     int ni = rsx_vp_decompile(vuc, vlen, hlsl, sizeof hlsl);
++    rsx_vp_set_pull(0);
+     if (ni <= 0) return -1;
+     if (getenv("VP_DUMP")) { static int _d=0; if (_d++ < 4) {
+         FILE* f = fopen("vp2_dump.hlsl", _d==1 ? "w" : "a");
+@@ -4064,7 +4143,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+     pd.SampleMask = UINT_MAX;
+     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+-    if (strip_ix_on()) pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
++    if (strip_ix_on() || vpull_on()) pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+     pd.NumRenderTargets = (UINT)nrt;
+     for (int _r = 0; _r < nrt; _r++) {
+         pd.RTVFormats[_r] = rtfmt;
+@@ -7035,6 +7114,20 @@ static void render_frame(void)
+                 ibv.Format = DXGI_FORMAT_R32_UINT;
+                 s_d3d.cmd_list->lpVtbl->IASetIndexBuffer(s_d3d.cmd_list, &ibv);
+             }
++            /* VPULL: the decode tables once; the ring and table slot per record
++             * at the draw (set here too so no root parameter is ever unset). */
++            const u64 vpull_ring_va = s_vpull.ring_mapped
++                ? s_vpull.ring->lpVtbl->GetGPUVirtualAddress(s_vpull.ring)
++                  + (u64)s_d3d.vp_parity * (VPULL_RING_BYTES + VPULL_RING_SLACK) : 0;
++            const u64 vpull_tab_va = s_vpull.tab_mapped
++                ? s_vpull.tab->lpVtbl->GetGPUVirtualAddress(s_vpull.tab)
++                  + (u64)s_d3d.vp_parity * MAX_DRAWS * RSX_VPULL_TAB_BYTES : 0;
++            if (s_vpull.ring_mapped && s_vpull.tab_mapped) {
++                s_d3d.cmd_list->lpVtbl->SetGraphicsRootShaderResourceView(s_d3d.cmd_list, 3, vpull_ring_va);
++                s_d3d.cmd_list->lpVtbl->SetGraphicsRootShaderResourceView(s_d3d.cmd_list, 4,
++                    s_vpull.lut->lpVtbl->GetGPUVirtualAddress(s_vpull.lut));
++                s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 5, vpull_tab_va);
++            }
+             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
+             int cur_rt = -1;                       /* target A: -1 = backbuffer */
+@@ -7395,6 +7488,17 @@ static void render_frame(void)
+                         cap_snap_rt(cur_rt, d, 0);
+                 }
+                 if (s_six.ib && dr->ix_gen == s_six.gen && dr->ix_count &&
++                    dr->topology == RSX_TOPOLOGY_TRIANGLE_STRIP &&
++                    dr->vpull_gen == s_six.gen && vpull_ring_va) {
++                    /* VPULL: indices are vertex numbers in the record's own region. */
++                    s_d3d.cmd_list->lpVtbl->SetGraphicsRootShaderResourceView(s_d3d.cmd_list, 3,
++                        vpull_ring_va + dr->vpull_base);
++                    s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 5,
++                        vpull_tab_va + (u64)dr->cb_slot * RSX_VPULL_TAB_BYTES);
++                    s_d3d.cmd_list->lpVtbl->DrawIndexedInstanced(s_d3d.cmd_list,
++                        dr->ix_count, 1, dr->ix_start, 0, 0);
++                }
++                else if (s_six.ib && dr->ix_gen == s_six.gen && dr->ix_count &&
+                     dr->topology == RSX_TOPOLOGY_TRIANGLE_STRIP)
+                     s_d3d.cmd_list->lpVtbl->DrawIndexedInstanced(s_d3d.cmd_list,
+                         dr->ix_count, 1, dr->ix_start, (INT)(dr->vb_byte_offset / 256), 0);
+@@ -7611,6 +7715,15 @@ static void render_frame(void)
+             fprintf(stderr, "[PERF4] batch intervals: <20ms %u | 20-37 %u | 37-54 %u | 54-70 %u | 70-87 %u | >87 %u%c",
+                     s_ivl[0], s_ivl[1], s_ivl[2], s_ivl[3], s_ivl[4], s_ivl[5], 10);
+             memset(s_ivl, 0, sizeof s_ivl);
++            if (s_vpull.ring_mapped) {   /* VPULL, per [PERF] window */
++                fprintf(stderr, "[VPULL] records %u batches %u | indices %llu | copied %.1f MB"
++                                " | CPU path: layout %u sparse %u | dropped %u%c",
++                        s_vpull.n_rec, s_vpull.n_batch, (unsigned long long)s_vpull.idx,
++                        (double)s_vpull.bytes / 1048576.0, s_vpull.n_cpu, s_vpull.n_sparse,
++                        s_vpull.n_drop, 10);
++                s_vpull.n_rec = s_vpull.n_batch = s_vpull.n_cpu = s_vpull.n_sparse = s_vpull.n_drop = 0;
++                s_vpull.bytes = s_vpull.idx = 0;
++            }
+             s_perf_present = 0.0; s_perf_rf_mid = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+@@ -7638,6 +7751,7 @@ static void render_frame(void)
+     s_d3d.vp_vb_offset = 0;
+     s_d3d.draw_count = 0;
+     s_six.off = 0; s_six.gen++;           /* STRIP_INDEXED records end with the batch */
++    s_vpull.off = 0;                      /* so do VPULL's */
+     s_vs_batch++;          /* recorded draws consumed: their VS slots may go */
+     s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
+ 
+@@ -8252,6 +8366,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+     s_d3d.vb_offset    = 0;
+     s_d3d.vp_vb_offset = 0;
+     s_six.off = 0; s_six.gen++;
++    s_vpull.off = 0;
+     s_vs_batch++;
+ }
+ 
+@@ -9723,6 +9838,107 @@ static u32 upload_strip_vp_native_ix(const rsx_state* state, u32 first, u32 coun
+     return nv;
+ }
+ 
++/* VPULL: can the current state's strips be pulled? Builds the fetch plan and
++ * the record layout into s_vpull for upload_strip_vpull. */
++static int vpull_prepare(const rsx_state* st)
++{
++    extern uint8_t* vm_base;
++    if (!st || !vm_base || !s_vpull.ring_mapped || !s_six.mapped) return 0;
++    if (!st->vertex_attribs[0].enabled) return 0;
++    rsx_fetch_plan_init(st, vf_input_mask(st), &s_vpull.plan);
++    if (rsx_vpull_layout_from_plan(&s_vpull.plan, &s_vpull.lay, &s_vpull.tab_cur)) return 1;
++    s_vpull.n_cpu++;
++    return 0;
++}
++
++static int vp_get_vs_pull(const rsx_state* st)
++{
++    s_vs_pull_req = 1;
++    const int i = vp_get_vs(st);
++    s_vs_pull_req = 0;
++    return i;
++}
++
++/* VPULL upload: one call = one FIFO index batch of a strip record. Copies the
++ * guest bytes of vertices vmin..vmax (plus the tail of the last one) to the
++ * record's region at rec_k * stride, and writes the batch's indices as
++ * rec_k + (vertex - vmin), a restart as the cut. `cont` = the batch continues
++ * the open record. Returns the indices written (s_six_added / s_six_start as
++ * for STRIP_INDEXED); 0xFFFFFFFF = a new record too sparse to pull, take the
++ * CPU path. */
++static u32 upload_strip_vpull(const rsx_state* state, u32 first, u32 count, int cont)
++{
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    s_six_added = 0; s_six_start = s_six.off;
++    const rsx_vpull_layout* lay = &s_vpull.lay;
++    const u32 S = lay->stride, bix = s_vpull.plan.base_index;
++    /* Same index and restart rules as upload_strip_vp_native. */
++    const int idx16 = (((state->index_array_dma >> 4) & 0xF) == 1);
++    const int restart = state->restart_enable && !(idx16 && state->restart_index > 0xFFFFu);
++    const u32 ridx = state->restart_index;
++    const u8* ib = vm_base + cellGcmResolveLocated((state->index_array_dma & 0xF) == 0,
++                                                   state->index_array_offset);
++    u32 vmin = 0xFFFFFFFFu, vmax = 0;
++    for (u32 k = 0; k < count; k++) {
++        u32 v;
++        if (idx16) { const u8* q = ib + (u64)(first + k) * 2; v = ((u32)q[0] << 8) | q[1]; }
++        else { const u8* q = ib + (u64)(first + k) * 4;
++               v = ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3]; }
++        if (restart && v == ridx) continue;
++        v = (v + bix) & 0x000FFFFFu;
++        if (v < vmin) vmin = v;
++        if (v > vmax) vmax = v;
++    }
++    const u32 span = (vmin <= vmax) ? vmax - vmin + 1u : 0u;
++    /* A new record whose first batch spans far more vertices than it uses
++     * would copy mostly unused bytes: leave it to the CPU path. A continuing
++     * batch is pulled whatever it spans, or the strip would break. */
++    if (!cont && span > 4096u && span > 8u * count) { s_vpull.n_sparse++; return 0xFFFFFFFFu; }
++    if (!cont) { s_vpull.rec_base = (s_vpull.off + 15u) & ~15u; s_vpull.rec_k = 0; }
++    const u64 at = (u64)s_vpull.rec_base + (u64)s_vpull.rec_k * S;
++    const u64 len = span ? (u64)(span - 1u) * S + lay->extent : 0;
++    if (at + len > VPULL_RING_BYTES || count > SIX_CAP - s_six.off) { s_vpull.n_drop++; s_drop_draws++; return 0; }
++    u8* ring = s_vpull.ring_mapped + (u64)s_d3d.vp_parity * (VPULL_RING_BYTES + VPULL_RING_SLACK);
++    if (span) rsx_vpull_copy(ring + at, lay->base + vmin * S, (u32)len, lay->main, s_vpull.plan.local_base);
++    u32* ixo = s_six.mapped + (u64)s_d3d.vp_parity * SIX_CAP + s_six.off;
++    const u32 k0 = s_vpull.rec_k - vmin;   /* index = rec_k + (v - vmin), mod 2^32 */
++    for (u32 k = 0; k < count; k++) {
++        u32 v;
++        if (idx16) { const u8* q = ib + (u64)(first + k) * 2; v = ((u32)q[0] << 8) | q[1]; }
++        else { const u8* q = ib + (u64)(first + k) * 4;
++               v = ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3]; }
++        ixo[k] = (restart && v == ridx) ? 0xFFFFFFFFu : k0 + ((v + bix) & 0x000FFFFFu);
++    }
++    if (span) s_vpull.rec_k += span + lay->pad;
++    s_vpull.off = (u32)((u64)s_vpull.rec_base + (u64)s_vpull.rec_k * S);
++    if (!cont && s_d3d.draw_count < MAX_DRAWS)   /* the record this batch opens takes slot draw_count */
++        memcpy(s_vpull.tab_mapped + ((u64)s_d3d.vp_parity * MAX_DRAWS + s_d3d.draw_count) * RSX_VPULL_TAB_BYTES,
++               &s_vpull.tab_cur, RSX_VPULL_TAB_BYTES);
++    s_six.off += count;
++    s_six_added = count;
++    s_vpull.n_batch++; s_vpull.n_rec += cont ? 0u : 1u; s_vpull.bytes += len; s_vpull.idx += count;
++    s_req_verts += count; s_req_draws++;
++    return count;
++}
++
++/* VPULL: does this batch continue the open pulled record? Same BEGIN/END
++ * stream and program, its indices and ring bytes end where this call starts,
++ * same attribute layout. Sets s_vpull_cont for the caller. */
++static int s_vpull_cont = 0;
++static int vpull_continues(const rsx_state* st)
++{
++    const D3D12DrawRecord* pv = s_d3d.draw_count > 0 ? &s_d3d.draws[s_d3d.draw_count - 1] : NULL;
++    s_vpull_cont = pv && s_d3d.merge_prev_draw &&
++                   pv->is_vp && pv->topology == RSX_TOPOLOGY_TRIANGLE_STRIP &&
++                   pv->vpull_gen == s_six.gen && pv->ix_gen == s_six.gen && pv->ix_count &&
++                   pv->fp_addr == (st ? st->shader_program : 0) &&
++                   pv->begin_epoch == (st ? st->begin_epoch : 0) &&
++                   pv->ix_start + pv->ix_count == s_six.off &&
++                   pv->vpull_base == s_vpull.rec_base && pv->vpull_sig == s_vpull.lay.sig;
++    return s_vpull_cont;
++}
++
+ static void vp_flush_if_full(u32 count, int cont)
+ {
+     static int off = -1;
+@@ -9733,6 +9949,7 @@ static void vp_flush_if_full(u32 count, int cont)
+     u64 room = ((u64)MAX_VP_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     int full = room < need || s_d3d.draw_count >= MAX_DRAWS - 1;
+     if (s_six.mapped && SIX_CAP - s_six.off < count + 1) full = 1;   /* STRIP_INDEXED */
++    if (s_vpull.ring_mapped && VPULL_RING_BYTES - s_vpull.off < VPULL_MARGIN) full = 1;   /* VPULL */
+     if (!full && (cont || (room >= VP_FLUSH_MARGIN && s_d3d.draw_count < MAX_DRAWS - 64)))
+         return;
+     { static int _n = 0; if (_n++ < 8)
+@@ -10238,6 +10455,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+      * list. Other primitives are skipped rather than drawn wrong. */
+     u32 emitted = 0;
+     int six_new = 0;   /* STRIP_INDEXED: the record created below is indexed */
++    int vpull_new = 0; /* VPULL: ... and pulled */
+     int sfc = (primitive == RSX_PRIMITIVE_TRIANGLE_FAN) ? sf_continues(1, primitive, first, count) : 0;   /* fan-join */
+     vp_flush_if_full(count, (s_d3d.merge_prev_draw &&
+                             (s_d3d.merge_first_end == first ||
+@@ -10253,6 +10471,20 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+      * costs 3x the vertices. STRIP_EXPAND=1 selects the expansion. */
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && getenv("STRIP_EXPAND"))
+         emitted = VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 0));
++    else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && vpull_on() && !vf_legacy() &&
++             vpull_prepare(s_d3d.current_rsx_state) &&
++             (emitted = VF_TIMED(upload_strip_vpull(s_d3d.current_rsx_state, first, count,
++                  vpull_continues(s_d3d.current_rsx_state)))) != 0xFFFFFFFFu) {
++        /* VPULL: continue the open record (vpull_continues), else open one. */
++        if (s_vpull_cont) {
++            D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
++            pv->vertex_count += emitted;
++            pv->ix_count += s_six_added;
++            s_d3d.merge_first_end = first + count;
++            return;
++        }
++        six_new = 1; vpull_new = 1;
++    }
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && strip_ix_on() && s_six.mapped && !vf_legacy()) {
+         /* STRIP_INDEXED: continue the previous record when it is the same
+          * BEGIN/END stream and both its vertices and its indices end exactly
+@@ -10338,6 +10570,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+                              ? RSX_TOPOLOGY_TRIANGLE_STRIP : RSX_TOPOLOGY_TRIANGLES;
+         dr->ix_gen = 0;
+         if (six_new) { dr->ix_gen = s_six.gen; dr->ix_start = s_six_start; dr->ix_count = s_six_added; }
++        dr->vpull_gen = vpull_new ? s_six.gen : 0u;
++        dr->vpull_base = s_vpull.rec_base;
++        dr->vpull_sig = s_vpull.lay.sig;
+         dr->textured       = s_d3d.tex_bound;
+         dr->is_vp          = 1;
+         dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
+@@ -10375,7 +10610,13 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+             dr->tex_rt[_u]  = -1;
+         }
+         dr->tex_slot = -1;
+-        dr->vs_idx = vp_get_vs(s_d3d.current_rsx_state);
++        dr->vs_idx = vpull_new ? vp_get_vs_pull(s_d3d.current_rsx_state)
++                               : vp_get_vs(s_d3d.current_rsx_state);
++        if (vpull_new && dr->vs_idx < 0) {   /* no pulling VS: the record can't be drawn */
++            s_vpull.n_drop++;
++            s_d3d.merge_prev_draw = 0;
++            return;
++        }
+         dr->is_clear = 0;
+         dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
+         dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
+index a35be4f..c2b10e0 100644
+--- a/libs/video/rsx_vp_decompiler.c
++++ b/libs/video/rsx_vp_decompiler.c
+@@ -29,6 +29,7 @@
+  *       o15 = TEX8. Unwritten outputs default to (0,0,0,1).
+  */
+ #include "rsx_vp_decompiler.h"
++#include "rsx_vpull.h"   /* RSX_VPULL_HLSL */
+ #include <stdio.h>
+ #include <string.h>
+ 
+@@ -136,6 +137,8 @@ static void emit_store(Out* b, const char* dst_fmt, u32 idx, const char* m)
+ 
+ static u32 s_vp_branch_base = 0;   /* VP slot the program being decompiled starts at */
+ void rsx_vp_set_branch_base(u32 start_slot) { s_vp_branch_base = start_slot; }
++static int s_vp_pull = 0;          /* VPULL: attributes come from vpull_attr */
++void rsx_vp_set_pull(int on) { s_vp_pull = on ? 1 : 0; }
+ 
+ /* BRA BRI CAL CLI RET BRB CLB (scalar opcodes). */
+ static int vp_is_flow(u32 sca_op)
+@@ -622,6 +625,21 @@ static int rsx_vp_decompile_impl(
+         emit(&o, decl);
+     }
+ 
++    if (s_vp_pull) {
++        /* VPULL: no vertex inputs; each attribute is decoded from the
++         * game's bytes by vpull_attr. The compiler drops the unread ones. */
++        emit(&o, RSX_VPULL_HLSL);
++        emit(&o, "VSOutput main(uint vpull_vid:SV_VertexID) {\n"
++                 "    float4 v[16];\n");
++        for (u32 attr = 0; attr < 16; attr++) {
++            char assignment[64];
++            if (compact_inputs && !(input_mask & (1u << attr)))
++                snprintf(assignment, sizeof(assignment), "    v[%u]=float4(0,0,0,1);\n", attr);
++            else
++                snprintf(assignment, sizeof(assignment), "    v[%u]=vpull_attr(%uu, vpull_vid);\n", attr, attr);
++            emit(&o, assignment);
++        }
++    } else {
+     emit(&o, "VSOutput main(VSInput input) {\n");
+     if (!compact_inputs) {
+         emit(&o,
+@@ -642,6 +660,7 @@ static int rsx_vp_decompile_impl(
+             emit(&o, assignment);
+         }
+     }
++    }
+     emit(&o,
+         "    float4 r[32]; float4 o[16];\n"
+         "    [unroll] for (int _i=0;_i<32;_i++) r[_i]=(float4)0;\n"
+diff --git a/libs/video/rsx_vp_decompiler.h b/libs/video/rsx_vp_decompiler.h
+index ecc53fc..8a66c22 100644
+--- a/libs/video/rsx_vp_decompiler.h
++++ b/libs/video/rsx_vp_decompiler.h
+@@ -57,6 +57,10 @@ int rsx_vp_decompile(const u8* ucode, u32 max_bytes, char* out, u32 out_size);
+  * to the ucode pointer handed in. Defaults to 0. */
+ void rsx_vp_set_branch_base(u32 start_slot);
+ 
++/* VPULL: nonzero makes the next programs decompiled read their attributes
++ * through vpull_attr (rsx_vpull.h, SV_VertexID) instead of ATTRn inputs. */
++void rsx_vp_set_pull(int on);
++
+ /* Bit N in vtex_mask declares NV40 2D vertex-texture unit N at t(16+N),
+  * sampler sN, and turns TXL for that unit into SampleLevel(..., LOD 0).
+  * Unmasked units retain the defined-zero fallback. */
+diff --git a/libs/video/rsx_vpull.h b/libs/video/rsx_vpull.h
+new file mode 100644
+index 0000000..8afb8fd
+--- /dev/null
++++ b/libs/video/rsx_vpull.h
+@@ -0,0 +1,179 @@
++/*
++ * ps3recomp - RSX vertex pulling (VPULL): the vertex shader decodes the
++ * game's own vertex bytes instead of the CPU decoding every vertex into a
++ * 256-byte float4 slot (rsx_vertex_fetch.c).
++ *
++ * One interleaved vertex stream per draw record: every fetched attribute of
++ * the record has the same stride S and no frequency divider. Per index batch
++ * the CPU copies the guest bytes the batch spans into a byte ring and writes
++ * the batch's indices rebased to that copy (vertex k of the record sits at
++ * k * S in the record's region). The shader gets:
++ *   t8  ByteAddressBuffer   the record's region (root SRV, 4-byte aligned)
++ *   t9  ByteAddressBuffer   the decode tables below (exact values)
++ *   b2  VPullTab            per attribute: byte offset in the vertex, stride,
++ *                           type (0 = constant register), components; and
++ *                           the constant register values (vertex_data4f)
++ *
++ * The decode must give the same float bits as rsx_fetch_plan_vertex. GPU
++ * division is not correctly rounded, so the normalised types read their value
++ * from tables the CPU fills with the same expressions (rsx_vpull_fill_lut);
++ * the rest is integer work plus int->float conversions that are exact.
++ */
++#ifndef PS3RECOMP_RSX_VPULL_H
++#define PS3RECOMP_RSX_VPULL_H
++
++#include "rsx_vertex_fetch.h"
++#include <string.h>
++
++/* Decode table layout, in floats (the HLSL below hard-codes 256, 65792 and
++ * 67840). */
++#define RSX_VPULL_LUT_UB    0u                       /* p / 255.0f, p = 0..255        */
++#define RSX_VPULL_LUT_S1    256u                     /* (s16)u / 32767.0f, u = 0..65535 */
++#define RSX_VPULL_LUT_CMPXY (256u + 65536u)          /* 11-bit pattern -> x / 1023.0f */
++#define RSX_VPULL_LUT_CMPZ  (256u + 65536u + 2048u)  /* 10-bit pattern -> z / 511.0f  */
++#define RSX_VPULL_LUT_COUNT (256u + 65536u + 2048u + 1024u)
++
++/* Per-record table (constant buffer b2), 512 bytes. */
++typedef struct rsx_vpull_tab {
++    u32   attr[16][4];   /* x = byte offset of vertex 0, y = stride, z = type (0 = constant), w = n */
++    float konst[16][4];  /* vertex_data4f snapshot (components the array does not supply)      */
++} rsx_vpull_tab;
++#define RSX_VPULL_TAB_BYTES 512u
++
++/* What one batch has to copy, from rsx_vpull_layout. */
++typedef struct rsx_vpull_layout {
++    u32 base;      /* lowest attribute offset (aoff) of the stream           */
++    u32 stride;    /* S                                                       */
++    u32 extent;    /* bytes of one vertex from `base`: max(aoff - base + size) */
++    u32 pad;       /* vertices to reserve beyond the last one (extent > S)    */
++    u8  main;      /* 1 = MAIN (IO table), 0 = LOCAL                          */
++    u32 sig;       /* layout signature, for record continuation              */
++} rsx_vpull_layout;
++
++static inline void rsx_vpull_fill_lut(float* lut)
++{
++    for (u32 p = 0; p < 256u; p++) lut[RSX_VPULL_LUT_UB + p] = p / 255.0f;
++    for (u32 u = 0; u < 65536u; u++) lut[RSX_VPULL_LUT_S1 + u] = (float)(s16)(u16)u / 32767.0f;
++    for (u32 b = 0; b < 2048u; b++) { s32 x = (s32)b; if (x & 0x400) x -= 0x800;
++                                      lut[RSX_VPULL_LUT_CMPXY + b] = (float)x / 1023.0f; }
++    for (u32 b = 0; b < 1024u; b++) { s32 z = (s32)b; if (z & 0x200) z -= 0x400;
++                                      lut[RSX_VPULL_LUT_CMPZ + b] = (float)z / 511.0f; }
++}
++
++static inline u32 rsx_vpull_type_size(u32 type, u32 n)
++{
++    switch (type) {
++    case 2: return 4u * n;           /* F    */
++    case 3: case 1: case 5: return 2u * n;   /* SF, S1, S32K */
++    case 4: case 7: return n;        /* UB, UB256 */
++    case 6: return 4u;               /* CMP  */
++    default: return 0u;
++    }
++}
++
++/* Can this plan be pulled, and how? 1 = yes (lay and tab filled). Not
++ * pulled: no fetched attribute, a frequency divider, different strides or
++ * memory locations, or a type the CPU decodes as its float32 default. */
++static inline int rsx_vpull_layout_from_plan(const rsx_fetch_plan* plan, rsx_vpull_layout* lay,
++                                      rsx_vpull_tab* tab)
++{
++    if (!plan->nfetch) return 0;
++    const rsx_fetch_plan_attr* f0 = &plan->fetch[0];
++    u32 base = f0->aoff, end = 0;
++    for (u32 c = 0; c < plan->nfetch; c++) {
++        const rsx_fetch_plan_attr* f = &plan->fetch[c];
++        if (f->freq || f->stride != f0->stride || f->main != f0->main) return 0;
++        if (f->type < 1 || f->type > 7) return 0;
++        if (f->aoff < base) base = f->aoff;
++    }
++    const u32 S = f0->stride;
++    if (S == 0) return 0;
++    memset(tab, 0, sizeof *tab);
++    memcpy(tab->konst, plan->konst, sizeof tab->konst);
++    u32 sig = 2166136261u;
++    for (u32 c = 0; c < plan->nfetch; c++) {
++        const rsx_fetch_plan_attr* f = &plan->fetch[c];
++        const u32 rel = f->aoff - base;
++        if (rel > 4096u) return 0;                     /* attributes far apart: not one stream */
++        const u32 e = rel + rsx_vpull_type_size(f->type, f->n);
++        if (e > end) end = e;
++        tab->attr[f->idx][0] = rel;
++        tab->attr[f->idx][1] = S;
++        tab->attr[f->idx][2] = f->type;
++        tab->attr[f->idx][3] = f->n;
++        sig = (sig ^ (f->idx | (f->type << 8) | ((u32)f->n << 16))) * 16777619u;
++        sig = (sig ^ rel) * 16777619u;
++    }
++    sig = (sig ^ S ^ ((u32)f0->main << 31)) * 16777619u;
++    sig = (sig ^ base) * 16777619u;
++    sig = (sig ^ plan->base_index) * 16777619u;
++    for (u32 i = 0; i < 16; i++)                       /* constants change the record too */
++        for (u32 k = 0; k < 4; k++) { u32 w; memcpy(&w, &plan->konst[i][k], 4); sig = (sig ^ w) * 16777619u; }
++    lay->base = base; lay->stride = S; lay->extent = end; lay->main = f0->main;
++    lay->pad = (end > S) ? (end - 1u) / S : 0u;        /* whole vertices the tail reaches into */
++    lay->sig = sig ? sig : 1u;
++    return 1;
++}
++
++/* Copy `len` guest bytes at array offset `off` (LOCAL or MAIN) to dst, one IO
++ * page at a time for MAIN, as rsx_fetch_plan_vertex resolves them. */
++static inline void rsx_vpull_copy(u8* dst, u32 off, u32 len, int main_mem, u32 local_base)
++{
++    if (!main_mem) { memcpy(dst, vm_base + (u32)(local_base + off), len); return; }
++    while (len) {
++        const u32 pg = off >> 20;
++        u32 n = 0x100000u - (off & 0xFFFFFu);
++        if (n > len) n = len;
++        memcpy(dst, vm_base + (u32)(cellGcmResolveLocated(0, pg << 20) + (off & 0xFFFFFu)), n);
++        dst += n; off += n; len -= n;
++    }
++}
++
++/* HLSL: the decoder the vertex program prologue calls (vpull_attr). */
++#define RSX_VPULL_HLSL \
++"ByteAddressBuffer vpull_bytes : register(t8);\n" \
++"ByteAddressBuffer vpull_lut : register(t9);\n" \
++"cbuffer VPullTab : register(b2) { uint4 vpull_a[16]; float4 vpull_k[16]; };\n" \
++"uint vpull_ld(uint a) {\n" \
++"    uint s = (a & 3u) * 8u; uint2 w = vpull_bytes.Load2(a & ~3u);\n" \
++"    return s ? ((w.x >> s) | (w.y << (32u - s))) : w.x;\n" \
++"}\n" \
++"uint vpull_be32(uint a) { uint x = vpull_ld(a);\n" \
++"    return (x << 24) | ((x << 8) & 0xFF0000u) | ((x >> 8) & 0xFF00u) | (x >> 24); }\n" \
++"uint vpull_be16(uint a) { uint x = vpull_ld(a); return ((x & 0xFFu) << 8) | ((x >> 8) & 0xFFu); }\n" \
++"uint vpull_u8(uint a) { return vpull_ld(a) & 0xFFu; }\n" \
++"float vpull_tabf(uint i) { return asfloat(vpull_lut.Load(i * 4u)); }\n" \
++"float vpull_half(uint h) {\n" \
++"    uint s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu, f;\n" \
++"    if (e == 0u) f = s << 31;\n" \
++"    else if (e == 31u) f = (s << 31) | 0x7F800000u | (m << 13);\n" \
++"    else f = (s << 31) | ((e - 15u + 127u) << 23) | (m << 13);\n" \
++"    return asfloat(f);\n" \
++"}\n" \
++"float4 vpull_attr(uint i, uint vid) {\n" \
++"    uint4 d = vpull_a[i]; float4 t = vpull_k[i];\n" \
++"    [branch] if (d.z == 0u) return t;\n" \
++"    uint a = d.x + vid * d.y;\n" \
++"    [branch] if (d.z == 6u) {\n" \
++"        uint w = vpull_be32(a);\n" \
++"        return float4(vpull_tabf(65792u + (w & 0x7FFu)), vpull_tabf(65792u + ((w >> 11) & 0x7FFu)),\n" \
++"                      vpull_tabf(67840u + ((w >> 22) & 0x3FFu)), 1.0);\n" \
++"    }\n" \
++"    uint es = (d.z == 2u) ? 4u : ((d.z == 4u || d.z == 7u) ? 1u : 2u);\n" \
++"    [unroll] for (uint k = 0u; k < 4u; k++) {\n" \
++"        if (k < d.w) {\n" \
++"            uint x = vpull_ld(a + k * es);\n" \
++"            uint r = (es == 4u) ? ((x << 24) | ((x << 8) & 0xFF0000u) | ((x >> 8) & 0xFF00u) | (x >> 24))\n" \
++"                   : ((es == 2u) ? (((x & 0xFFu) << 8) | ((x >> 8) & 0xFFu)) : (x & 0xFFu));\n" \
++"            float v = asfloat(r);\n" \
++"            if (d.z == 3u) v = vpull_half(r);\n" \
++"            else if (d.z == 5u) v = (float)((int)(r << 16) >> 16);\n" \
++"            else if (d.z == 7u) v = (float)r;\n" \
++"            [branch] if (d.z == 1u || d.z == 4u) v = vpull_tabf((d.z == 1u ? 256u : 0u) + r);\n" \
++"            t[k] = v;\n" \
++"        }\n" \
++"    }\n" \
++"    return t;\n" \
++"}\n"
++
++#endif /* PS3RECOMP_RSX_VPULL_H */
+-- 
+2.56.0.windows.2
+

@@ -1,0 +1,102 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index d38b1bc..ab031e4 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7636,6 +7636,20 @@ static void render_frame(void)
+             float dvp_x = 0, dvp_y = 0, dvp_w = 0, dvp_h = 0;  /* per-draw, for DRAWARGS */
+             int cur_m[3] = {-1, -1, -1};           /* MRT B/C/D: -1 = unbound   */
+             double _rec0 = perf_on() ? perf_now() : 0.0;
++            /* REC_DEDUP (default on, =0 = every call as before): skip the
++             * per-draw PSO, viewport/scissor and topology calls when they
++             * repeat the previous draw's, and read the two constant buffers'
++             * GPU addresses once. The driver and runtime calls of this loop
++             * were ~8% of the drawing thread's samples (DRAW_SAMPLE: NVIDIA
++             * 6.2%, D3D12 2.2%; jstars-notes CPU_PROFILE §42). Nothing else in
++             * the loop sets the PSO or topology; the two target switches that
++             * set a viewport invalidate rd_vp_ok. */
++            static int rec_dedup = -1;
++            if (rec_dedup < 0) { const char* e = getenv("REC_DEDUP"); rec_dedup = !(e && *e == '0'); }
++            ID3D12PipelineState* rd_pso = vpso;   /* set just above */
++            D3D12_VIEWPORT rd_vp; D3D12_RECT rd_sc; int rd_vp_ok = 0, rd_topo = -1;
++            const u64 rd_cb_va = s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb);
++            const u64 rd_fpcb_va = s_d3d.vp_fpcb ? s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb) : 0;
+             int seen_small_vp = 0, captured = 0;
+             s_cap_frame_now = cap_due() && s_cap_passes > 0;
+             for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
+@@ -7675,6 +7689,7 @@ static void render_frame(void)
+                         D3D12_RECT zsc = {0, 0, (LONG)s_zrt[zt].w, (LONG)s_zrt[zt].h};
+                         s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &zvp);
+                         s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &zsc);
++                        rd_vp_ok = 0;   /* REC_DEDUP */
+                         if (s_zrt[zt].fresh) {
+                             s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, zh,
+                                 D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
+@@ -7743,6 +7758,7 @@ static void render_frame(void)
+                     s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, nrt, rh, FALSE, &dzh);
+                     s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
+                     s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
++                    rd_vp_ok = 0;   /* REC_DEDUP */
+                     /* The shared buffer is still reset per switch; a zeta-keyed
+                      * DepthRT keeps its contents until the game clears it. */
+                     if (czt < 0)
+@@ -7885,8 +7901,11 @@ static void render_frame(void)
+                                     dr->vp_x, dr->vp_y, dr->vp_w, dr->vp_h, dr->vertex_count, 10); }
+                     }
+                 }
+-                s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+-                                                         dpso ? dpso : vpso);
++                { ID3D12PipelineState* np = dpso ? dpso : vpso;
++                  if (!rec_dedup || np != rd_pso) {
++                      s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, np);
++                      rd_pso = np;
++                  } }
+                 /* Per-draw viewport: the guest rect when sane, else the
+                  * full target. Scissor tracks the same rect. */
+                 {
+@@ -7908,8 +7927,12 @@ static void render_frame(void)
+                                       (LONG)(dvp.TopLeftY + dvp.Height)};
+                     dvp_x = dvp.TopLeftX; dvp_y = dvp.TopLeftY;
+                     dvp_w = dvp.Width;    dvp_h = dvp.Height;
+-                    s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &dvp);
+-                    s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &dsc);
++                    if (!rec_dedup || !rd_vp_ok || memcmp(&dvp, &rd_vp, sizeof dvp) ||
++                        memcmp(&dsc, &rd_sc, sizeof dsc)) {
++                        s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &dvp);
++                        s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &dsc);
++                        rd_vp = dvp; rd_sc = dsc; rd_vp_ok = 1;
++                    }
+                 }
+                 /* Per-draw textures: bind this draw's t0-t3 SRV window.
+                  * Any sampled offscreen RT transitions to PSR first (never
+@@ -7927,11 +7950,11 @@ static void render_frame(void)
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+                 /* Per-draw constants: this draw's vp_cb + FP texscale slots. */
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
+-                    s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb)
++                    (rec_dedup ? rd_cb_va : s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb))
+                     + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_CB_STRIDE);
+                 if (s_d3d.vp_fpcb)
+                     s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
+-                        s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
++                        (rec_dedup ? rd_fpcb_va : s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb))
+                         + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+                 /* DRAWARGS=<N>: the arguments actually handed to the GPU, plus
+                  * the target they are aimed at. A zero vertex count, or a start
+@@ -7971,10 +7994,13 @@ static void render_frame(void)
+                 /* Strip records (upload_strip_vp_native) are drawn as strips;
+                  * everything else on this path is a triangle list. Both share
+                  * the TRIANGLE topology type the PSOs are built with. */
+-                s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list,
+-                    dr->topology == RSX_TOPOLOGY_TRIANGLE_STRIP
+-                        ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP
+-                        : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++                { const int tp = dr->topology == RSX_TOPOLOGY_TRIANGLE_STRIP;
++                  if (!rec_dedup || tp != rd_topo) {
++                      s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list,
++                          tp ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP
++                             : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++                      rd_topo = tp;
++                  } }
+                 /* RSX_CAP_PASSES: the target before (unless the previous
+                  * snapshot already shows it) and after each full-screen pass. */
+                 int cap_snap = s_cap_frame_now && cur_rt >= 0 && dr->vertex_count <= 6;

@@ -1,0 +1,232 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 04ca454..d308994 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -136,10 +136,186 @@ static volatile int s_flip_pending = 0;
+  * derive it from the observed per-frame volume if a title outgrows it. */
+ #define GCM_FLIP_WRAP_BYTES 0x40000u
+ 
++#ifdef _WIN32
++/* FRAME_TL=1 (diagnostic, off by default): one line per 60 flips on where each
++ * frame's time goes between the game's main thread and the drawing thread
++ * (jstars-notes CPU_PROFILE §37). J-Stars' frame loop (func_006507DC) is: wait
++ * flip DONE -> reset, flip request + flush -> wait a vblank -> build the next
++ * frame -> poll the flip status again. Per flip request k:
++ *   vbl     request -> first vblank tick after it;
++ *   build   that tick -> the main thread's first flip-status poll (its next
++ *           frame is built), split into the thread's own CPU time and the rest
++ *           (blocked: SPU jobs, labels, sleeps);
++ *   flipw   first poll -> the poll that sees DONE;
++ *   walker  request -> the drawing thread decoding this flip's marker, and
++ *   present request -> that flip being taken for present (both include any
++ *           earlier frames still queued).
++ * A request interval over 37 ms is a missed 30 fps slot; the line counts how
++ * many of those had build > 16.7 ms and how many had walker > 33 ms. */
++#define FTL_RING 64u
++static int    s_ftl_on = -1;
++static double s_ftl_req[FTL_RING];          /* by request number */
++static volatile LONG s_ftl_nreq = 0, s_ftl_nwalk = 0, s_ftl_npres = 0;
++static volatile double s_ftl_tick = 0.0;    /* first vblank tick after the last request */
++static double s_ftl_poll = 0.0, s_ftl_done = 0.0;
++static u64    s_ftl_cyc_tick = 0, s_ftl_cyc_poll = 0;
++static HANDLE s_ftl_main = NULL;
++static DWORD  s_ftl_main_tid = 0;
++static double s_ftl_cyc_per_ms = 0.0;
++static double s_ftl_walk_lag[FTL_RING], s_ftl_pres_lag[FTL_RING];
++typedef struct { double n, interval, vbl, build, build_cpu, flipw, walk, pres;
++                 double max_interval, max_build, max_walk;
++                 unsigned long_iv, long_build, long_walk, long_both, build_over, walk_over, walk_missing; } FtlAcc;
++static FtlAcc s_ftl_acc;
++
++static int ftl_on(void)
++{
++    if (s_ftl_on < 0) {
++        const char* e = getenv("FRAME_TL");
++        s_ftl_on = (e && *e && *e != '0') ? 1 : 0;
++        if (s_ftl_on) {   /* thread cycle counts tick at the reference TSC rate */
++            LARGE_INTEGER f, a, b; ULONG64 c0 = 0, c1 = 0;
++            QueryPerformanceFrequency(&f);
++            QueryThreadCycleTime(GetCurrentThread(), &c0); QueryPerformanceCounter(&a);
++            do { QueryPerformanceCounter(&b); } while (b.QuadPart - a.QuadPart < f.QuadPart / 50);
++            QueryThreadCycleTime(GetCurrentThread(), &c1);
++            s_ftl_cyc_per_ms = (double)(c1 - c0) / ((double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart);
++        }
++    }
++    return s_ftl_on;
++}
++static double ftl_now(void)
++{
++    static LARGE_INTEGER f; LARGE_INTEGER c;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
++}
++static u64 ftl_main_cycles(void)
++{
++    ULONG64 c = 0;
++    if (s_ftl_main) QueryThreadCycleTime(s_ftl_main, &c);
++    return (u64)c;
++}
++
++/* Per request slot: the game-side times, filled when the next request closes
++ * the frame. A frame is counted FTL_LAG requests later, by when its flip
++ * marker has been decoded and presented even with the game running ahead. */
++#define FTL_LAG 6
++typedef struct { double iv, vbl, build, bcpu, flipw; } FtlGame;
++static FtlGame s_ftl_game[FTL_RING];
++
++static void ftl_count(LONG j)
++{
++    const FtlGame* g = &s_ftl_game[(u32)j % FTL_RING];
++    const double walk = s_ftl_walk_lag[(u32)j % FTL_RING];
++    const double pres = s_ftl_pres_lag[(u32)j % FTL_RING];
++    FtlAcc* a = &s_ftl_acc;
++    a->n++; a->interval += g->iv; a->vbl += g->vbl; a->build += g->build; a->build_cpu += g->bcpu;
++    a->flipw += g->flipw; a->walk += walk; a->pres += pres;
++    if (walk <= 0.0) a->walk_missing++;
++    if (g->iv > a->max_interval) a->max_interval = g->iv;
++    if (g->build > a->max_build) a->max_build = g->build;
++    if (walk > a->max_walk) a->max_walk = walk;
++    if (g->build > 16.7) a->build_over++;
++    if (walk > 33.3) a->walk_over++;
++    if (g->iv > 37.0) {
++        a->long_iv++;
++        if (g->build > 16.7 && walk > 33.3) a->long_both++;
++        else if (g->build > 16.7) a->long_build++;
++        else if (walk > 33.3) a->long_walk++;
++    }
++    if (a->n >= 60) {
++        const double n = a->n;
++        fprintf(stderr, "[FTL] %.0f flips | interval %.1f ms (max %.1f), %u over 37 ms: build>16.7 %u,"
++                        " walker>33 %u, both %u, neither %u | vbl %.1f | build %.1f (cpu %.1f, max %.1f,"
++                        " %u over 16.7) | flip wait %.1f | walker %.1f (max %.1f, %u over 33, %u not seen)"
++                        " | present %.1f%c",
++                n, a->interval / n, a->max_interval, a->long_iv, a->long_build, a->long_walk, a->long_both,
++                a->long_iv - a->long_build - a->long_walk - a->long_both,
++                a->vbl / n, a->build / n, a->build_cpu / n, a->max_build, a->build_over,
++                a->flipw / n, a->walk / n, a->max_walk, a->walk_over, a->walk_missing, a->pres / n, 10);
++        memset(a, 0, sizeof *a);
++    }
++}
++
++/* The game requested flip number s_ftl_nreq: close the previous frame's game side. */
++static void ftl_request(void)
++{
++    if (!ftl_on()) return;
++    const double now = ftl_now();
++    const LONG k = s_ftl_nreq;
++    if (k > 0) {
++        FtlGame* g = &s_ftl_game[(u32)(k - 1) % FTL_RING];
++        const double req = s_ftl_req[(u32)(k - 1) % FTL_RING];
++        const double poll = s_ftl_poll > 0.0 ? s_ftl_poll : now;
++        const double tick = s_ftl_tick > req ? s_ftl_tick : 0.0;
++        g->iv    = now - req;
++        g->vbl   = tick > 0.0 && tick < poll ? tick - req : poll - req;
++        g->build = poll - req - g->vbl;
++        g->bcpu  = (tick > 0.0 && tick < poll && s_ftl_cyc_poll > s_ftl_cyc_tick && s_ftl_cyc_per_ms > 0.0)
++                 ? (double)(s_ftl_cyc_poll - s_ftl_cyc_tick) / s_ftl_cyc_per_ms : 0.0;
++        g->flipw = s_ftl_done > poll ? s_ftl_done - poll : 0.0;
++        if (k - 1 >= FTL_LAG) ftl_count(k - 1 - FTL_LAG);
++    }
++    s_ftl_req[(u32)k % FTL_RING] = now;
++    s_ftl_walk_lag[(u32)k % FTL_RING] = 0.0;
++    s_ftl_pres_lag[(u32)k % FTL_RING] = 0.0;
++    s_ftl_tick = 0.0; s_ftl_poll = 0.0; s_ftl_done = 0.0;
++    MemoryBarrier();
++    InterlockedIncrement(&s_ftl_nreq);
++}
++
++/* A vblank tick (ticker thread): the first one after a request ends the vblank wait. */
++static void ftl_tick(void)
++{
++    if (s_ftl_on <= 0 || s_ftl_nreq == 0 || s_ftl_tick > 0.0) return;
++    s_ftl_cyc_tick = ftl_main_cycles();
++    s_ftl_tick = ftl_now();
++}
++
++/* The main thread polled the flip status; done = it saw DONE. */
++static void ftl_poll(int done)
++{
++    if (!ftl_on() || s_ftl_nreq == 0) return;
++    if (!s_ftl_main_tid) {   /* the first poller is the frame loop's thread */
++        s_ftl_main_tid = GetCurrentThreadId();
++        s_ftl_main = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, s_ftl_main_tid);
++    }
++    if (GetCurrentThreadId() != s_ftl_main_tid) return;
++    const double now = ftl_now();
++    if (s_ftl_poll == 0.0) { s_ftl_poll = now; s_ftl_cyc_poll = ftl_main_cycles(); }
++    if (done && s_ftl_done == 0.0) s_ftl_done = now;
++}
++
++/* The walker decoded a flip marker / the present thread took a flip. */
++static void ftl_walk(void)
++{
++    if (s_ftl_on <= 0) return;
++    LONG w = s_ftl_nwalk;
++    if (s_ftl_nreq - w > 8) w = s_ftl_nreq - 1;   /* markers lost to a resync: catch up */
++    if (w < s_ftl_nreq) { s_ftl_walk_lag[(u32)w % FTL_RING] = ftl_now() - s_ftl_req[(u32)w % FTL_RING]; s_ftl_nwalk = w + 1; }
++}
++static void ftl_present(void)
++{
++    if (s_ftl_on <= 0) return;
++    LONG p = s_ftl_npres;
++    if (s_ftl_nreq - p > 8) p = s_ftl_nreq - 1;
++    if (p < s_ftl_nreq) { s_ftl_pres_lag[(u32)p % FTL_RING] = ftl_now() - s_ftl_req[(u32)p % FTL_RING]; s_ftl_npres = p + 1; }
++}
++#else
++static void ftl_request(void) {}
++static void ftl_tick(void) {}
++static void ftl_poll(int done) { (void)done; }
++static void ftl_walk(void) {}
++static void ftl_present(void) {}
++#endif
++
+ int cellGcm_take_flip_pending(void)
+ {
+     int v = s_flip_pending;
+     s_flip_pending = 0;
++    if (v) ftl_present();   /* FRAME_TL */
+     return v;
+ }
+ 
+@@ -685,6 +861,7 @@ u32 cellGcmGetFlipStatus(void)
+       if (getenv("FLIP_DBG") && n++ < 24)
+           fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
+                   s_flip_status, 10); }
++    ftl_poll(s_flip_status == CELL_GCM_FLIP_STATUS_DONE);   /* FRAME_TL */
+     return s_flip_status;
+ }
+ 
+@@ -785,7 +962,7 @@ void ppu_gcm_pump(void)
+ 
+ /* Back-compat: the old direct entry points now just mark a tick pending (so any
+  * caller other than the ticker still works) -- delivery stays on the main thread. */
+-void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
++void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); ftl_tick(); }
+ /* Only deliver a flip completion when a flip is actually outstanding.
+  *
+  * Ticking unconditionally at 60 Hz fires the guest's flip handler even when
+@@ -1283,6 +1460,7 @@ int cellGcm_take_flip_pending_synced(void)
+     u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
+     if (get != put) return 0;   /* frame not fully drained yet */
+     s_flip_pending = 0;
++    ftl_present();   /* FRAME_TL */
+     return 1;
+ }
+ 
+@@ -1873,6 +2051,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+             }
++            ftl_walk();   /* FRAME_TL */
+             /* ...unless the FIFO is badly backlogged. One flip per drain is
+              * right while `get` is keeping up with `put`; when it is megabytes
+              * behind it is a deadlock, because the title's ring can only be
+@@ -2547,6 +2726,7 @@ u32 cellGcm_display_buffer_count(void)
+ 
+ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+ {
++    ftl_request();   /* FRAME_TL */
+     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
+      * which answers "did it ever flip?" and not "is it still flipping, and how
+      * fast?" -- the question that matters when a title stops appearing on

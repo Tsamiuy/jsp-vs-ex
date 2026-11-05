@@ -1,0 +1,250 @@
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 9672284..1433839 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -516,6 +516,10 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->depth_dirty = 1;
+         return 0;
+     }
++    if (method == NV4097_SET_ANTI_ALIASING_CONTROL) {
++        state->aa_control = data;
++        return 0;
++    }
+     if (method == NV4097_SET_DEPTH_MASK) {
+         state->depth_mask = data ? 1 : 0;
+         state->depth_dirty = 1;
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 0dcb565..ce7fa16 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -182,6 +182,7 @@ extern "C" {
+ 
+ /* Depth / stencil */
+ #define NV4097_SET_DEPTH_TEST_ENABLE            0x00000A74
++#define NV4097_SET_ANTI_ALIASING_CONTROL        0x00001D7C
+ #define NV4097_SET_POLY_OFFSET_FILL_ENABLE      0x00000A68
+ #define NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR  0x00000A78
+ #define NV4097_SET_POLYGON_OFFSET_BIAS          0x00000A7C
+@@ -279,6 +280,9 @@ typedef struct rsx_state {
+     int depth_test_enable;
+     u32 depth_func;
+     int depth_mask;
++    /* SET_ANTI_ALIASING_CONTROL: bit 0 MSAA enable, bit 4 alpha-to-coverage,
++     * bit 8 alpha-to-one, bits 16..31 sample mask. */
++    u32 aa_control;
+     /* glPolygonOffset for filled primitives: enable, factor (scale), units
+      * (bias). Shadow casters use it against self-shadowing acne. */
+     int poly_offset_fill;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3dcee1e..f1da4ef 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -123,6 +123,7 @@ typedef struct {
+                          * with a 3-component direction, not a 2D uv -- treating
+                          * one as 2D is what makes an environment-mapped chrome
+                          * surface come out with black patches and banding. */
++        u32 pitch;      /* TEXTURE_CONTROL3 [19:0]: linear row pitch */
+         u32 ctl0;       /* TEXTURE_CONTROL0: enable + alpha-kill, which gate
+                          * the depth comparison (rsx_fp_shadow_desc) */
+         int set;
+@@ -165,6 +166,21 @@ typedef struct {
+     float cc[4];
+ } D3D12DrawRecord;
+ 
++/* MENU_A2C=1 (opt-in): alpha-to-coverage as an alpha test. RSX foliage cards
++ * (J-Stars' Naruto forest) cut their leaves out with alpha-to-coverage
++ * (SET_ANTI_ALIASING_CONTROL bit 4), not the alpha test. This backend renders
++ * one sample and never read that register, so the cards drew whole and their
++ * transparent texels (DXT1 punch-through: black, alpha 0) showed as black
++ * rims. With one sample, coverage is "alpha >= 0.5"; that is what this adds
++ * when the game's own alpha test is off. */
++static u32 rsx_a2c_alpha(const rsx_state* st, u32 alpha_ctl)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("MENU_A2C"); on = e ? atoi(e) : 0; }
++    if (!on || !st || (alpha_ctl & 0x10000u) || !(st->aa_control & 0x10u)) return alpha_ctl;
++    return 0x10000u | (0x06u << 8) | 0x80u;   /* enable, GEQUAL, ref 128/255 */
++}
++
+ /* Depth-only passes (SHADOW_PASSES, on by default; SHADOW_PASSES=0 = old
+  * behaviour). SET_SURFACE_COLOR_TARGET = NONE with a zeta surface is a
+  * depth-only pass: J-Stars renders its two shadow cascades that way (2048x1024
+@@ -427,7 +443,7 @@ typedef struct {
+     int                   vp_fp_n;
+     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
+     /* VP path: latest texture bound per unit (t0-t3). */
+-    struct { u32 off, raw, w, h, fmt, ctrl1, mips, addr, filt, ctl0; int cube; int set; } cur_texs[RSX_TEX_UNITS];
++    struct { u32 off, raw, w, h, fmt, ctrl1, mips, addr, filt, ctl0, pitch; int cube; int set; } cur_texs[RSX_TEX_UNITS];
+ 
+     /* Render-to-texture: offscreen RT pool + their RTV heap. */
+     OffRT                 off_rt[MAX_OFF_RTS];
+@@ -3253,6 +3269,33 @@ static u32    s_tex_gen = 1;       /* bumped where vp_tex[].used is reset */
+ 
+ static int tex_verify_frame(void);
+ extern unsigned cellGcm_flip_request_count(void);
++/* MENU_TEX_PITCH=1 (opt-in): honour the linear row pitch (CONTROL3). The
++ * D3D12 path laid every texture out with rows of exactly width x bpp (or one
++ * block row for DXT), so a linear image with a wider pitch -- J-Stars' NPOT
++ * DXT UI art, e.g. the menu logo -- was read with every row shifted: the
++ * scrambled red blocks. The pitch reaches _impl through this static, set by
++ * the caller around the call (the memoised wrapper's signature is shared). */
++static u32 s_tex_upload_pitch;
++static int menu_tex_pitch_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("MENU_TEX_PITCH"); on = e ? atoi(e) : 0; }
++    return on;
++}
++
++/* MENU_FMT16=1 (opt-in): A1R5G5B5 (0x82), A4R4G4B4 (0x83), R5G6B5 (0x84),
++ * R5G5B5A1 (0x97), D1R5G5B5 (0x9D) and D8R8G8B8 (0x9E). rsx_texture_layout
++ * already decodes them to RGBA8, but the D3D12 bind ignored them (the unit
++ * kept its previous texture) and the upload gave them a null view (black,
++ * alpha 0): candidates for the empty title bar and the noise beside the CPU
++ * stars on character select. TEXFMT_SKIP=1 logs every format the bind ignores. */
++static int menu_fmt16(u32 b)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("MENU_FMT16"); on = e ? atoi(e) : 0; }
++    return on && (b == 0x82 || b == 0x83 || b == 0x84 || b == 0x97 || b == 0x9D || b == 0x9E);
++}
++
+ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
+ {
+     s_txo = TXO_FAIL;
+@@ -3278,7 +3321,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+      * layout.c owns them so the Metal backend can read a guest texture without
+      * re-deriving any of it. Only the DXGI mapping below is ours. */
+     rsx_tex_layout tl;
+-    rsx_texture_layout(fmt, w, h, &tl);
++    rsx_texture_layout_pitched(fmt, w, h, menu_tex_pitch_on() ? s_tex_upload_pitch : 0u, &tl);
+     u32 basef = fmt & 0x9F;              /* still needed for the SRV remap */
+     int argb = (tl.fmt == RSX_TEXFMT_R8G8B8A8);
+     int dxt  = tl.compressed;
+@@ -5357,12 +5400,14 @@ static void render_frame(void)
+                 u32 _bf = dr->tex[_u].fmt & 0x9F;
+                 if (dr->tex[_u].off &&
+                     (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
+-                     (_bf >= 0x86 && _bf <= 0x88))) {
++                     (_bf >= 0x86 && _bf <= 0x88) || menu_fmt16(_bf))) {
+                     double _tt = perf_on() ? perf_now() : 0.0;
+                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
++                    s_tex_upload_pitch = dr->tex[_u].pitch;
+                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,
+                                                 dr->tex[_u].h, dr->tex[_u].fmt,
+                                                 _cube, dr->tex[_u].mips);
++                    s_tex_upload_pitch = 0;
+                     if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
+                         s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
+                     /* Both forms of the offset are in hand here; the filters
+@@ -5371,7 +5416,7 @@ static void render_frame(void)
+                         s_duck_raw = dr->tex[_u].raw;
+                     if (ts >= 0) {
+                         DXGI_FORMAT sf =
+-                            (_bf == 0x85) ? DXGI_FORMAT_R8G8B8A8_UNORM :
++                            (_bf == 0x85 || menu_fmt16(_bf)) ? DXGI_FORMAT_R8G8B8A8_UNORM :
+                             (_bf == 0x8B) ? DXGI_FORMAT_R8G8_UNORM :
+                             (_bf == 0x86) ? DXGI_FORMAT_BC1_UNORM :
+                             (_bf == 0x87) ? DXGI_FORMAT_BC2_UNORM :
+@@ -8239,6 +8284,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                     dr->alpha_ctl = ((s_d3d.current_rsx_state->alpha_test_enable ? 1u : 0u) << 16)
+                                   | ((s_d3d.current_rsx_state->alpha_func & 0xFFu) << 8)
+                                   | (s_d3d.current_rsx_state->alpha_ref & 0xFFu);
++                    dr->alpha_ctl = rsx_a2c_alpha(s_d3d.current_rsx_state, dr->alpha_ctl);
+                 for (int _u = 0; _u < RSX_TEX_UNITS; _u++) {
+                     dr->tex[_u].off = s_d3d.cur_texs[_u].off;
+                     dr->tex[_u].raw = s_d3d.cur_texs[_u].raw;
+@@ -8251,6 +8297,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                     dr->tex[_u].addr  = s_d3d.cur_texs[_u].addr;
+                     dr->tex[_u].filt  = s_d3d.cur_texs[_u].filt;
+                     dr->tex[_u].ctl0  = s_d3d.cur_texs[_u].ctl0;
++                    dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
+                     dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+                     dr->tex_rt[_u]  = -1;
+                 }
+@@ -8371,6 +8418,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 dr->alpha_ctl = ((s_d3d.current_rsx_state->alpha_test_enable ? 1u : 0u) << 16)
+                               | ((s_d3d.current_rsx_state->alpha_func & 0xFFu) << 8)
+                               | (s_d3d.current_rsx_state->alpha_ref & 0xFFu);
++                dr->alpha_ctl = rsx_a2c_alpha(s_d3d.current_rsx_state, dr->alpha_ctl);
+             for (int _u = 0; _u < RSX_TEX_UNITS; _u++) {
+                 dr->tex[_u].off = s_d3d.cur_texs[_u].off;
+                 dr->tex[_u].raw = s_d3d.cur_texs[_u].raw;
+@@ -8383,6 +8431,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                     dr->tex[_u].addr  = s_d3d.cur_texs[_u].addr;
+                     dr->tex[_u].filt  = s_d3d.cur_texs[_u].filt;
+                     dr->tex[_u].ctl0  = s_d3d.cur_texs[_u].ctl0;
++                    dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
+                 dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+                 dr->tex_rt[_u]  = -1;
+             }
+@@ -8554,6 +8603,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+             dr->alpha_ctl = ((s_d3d.current_rsx_state->alpha_test_enable ? 1u : 0u) << 16)
+                           | ((s_d3d.current_rsx_state->alpha_func & 0xFFu) << 8)
+                           | (s_d3d.current_rsx_state->alpha_ref & 0xFFu);
++            dr->alpha_ctl = rsx_a2c_alpha(s_d3d.current_rsx_state, dr->alpha_ctl);
+         for (int _u = 0; _u < RSX_TEX_UNITS; _u++) {
+             dr->tex[_u].off = s_d3d.cur_texs[_u].off;
+             dr->tex[_u].raw = s_d3d.cur_texs[_u].raw;
+@@ -8566,6 +8616,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+                     dr->tex[_u].addr  = s_d3d.cur_texs[_u].addr;
+                     dr->tex[_u].filt  = s_d3d.cur_texs[_u].filt;
+                     dr->tex[_u].ctl0  = s_d3d.cur_texs[_u].ctl0;
++                    dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
+             dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+             dr->tex_rt[_u]  = -1;
+         }
+@@ -8669,8 +8720,20 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+     /* VP path: record the latest bound texture (any supported format) so draws
+      * can carry it per-draw. Location bits (format[1:0]): 1 = LOCAL, 2 = MAIN. */
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
++    { static int sk = -1; if (sk < 0) sk = getenv("TEXFMT_SKIP") ? 1 : 0;
++      if (sk && unit < RSX_TEX_UNITS && width && height) {
++          const u32 b = base_fmt;
++          const int known = b == 0x81 || b == 0x85 || b == 0x8B || (b >= 0x86 && b <= 0x88) ||
++                            b == 0x9A || (b >= 0x90 && b <= 0x93) || menu_fmt16(b);
++          static u32 seen[32]; static int ns = 0; int f = 0;
++          for (int i = 0; i < ns; i++) if (seen[i] == ((format << 16) | (width & 0xFFFFu))) f = 1;
++          if (!known && !f && ns < 32) { seen[ns++] = (format << 16) | (width & 0xFFFFu);
++              fprintf(stderr, "[TEXFMT-SKIP] unit=%u fmt=0x%02X %ux%u off=0x%X ignored at bind%c",
++                      unit, format, width, height, offset, 10); }
++      } }
+     if (unit < RSX_TEX_UNITS &&
+         (base_fmt == 0x81 /* B8 */ || base_fmt == 0x85 /* A8R8G8B8 */ ||
++         menu_fmt16(base_fmt) /* MENU_FMT16: packed 16-bit colour, D8R8G8B8 */ ||
+          base_fmt == 0x8B /* G8B8: LBP's font atlas */ ||
+          (base_fmt >= 0x86 && base_fmt <= 0x88) /* DXT1/23/45 */ ||
+          base_fmt == 0x9A /* W16Z16Y16X16 half-float: RTT intermediates */ ||
+@@ -8726,6 +8789,7 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+         s_d3d.cur_texs[unit].addr  = tex->address;
+         s_d3d.cur_texs[unit].filt  = tex->filter;
+         s_d3d.cur_texs[unit].ctl0  = tex->control0;
++        s_d3d.cur_texs[unit].pitch = tex->control3 & 0xFFFFFu;
+         s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
+         s_d3d.cur_texs[unit].mips  = (tex->format >> 16) & 0xFFFFu;
+         if (getenv("TEXFMTDBG")) { static u32 seen[64]; static int ns=0;
+diff --git a/libs/video/rsx_texture_layout.c b/libs/video/rsx_texture_layout.c
+index cc65943..18bb6cc 100644
+--- a/libs/video/rsx_texture_layout.c
++++ b/libs/video/rsx_texture_layout.c
+@@ -93,6 +93,11 @@ void rsx_texture_layout_pitched(u32 rsx_fmt, u32 w, u32 h, u32 pitch,
+         out->rows      = (h + 3u) / 4u;
+         out->dst_bytes_per_texel = 0;
+         out->dst_row_bytes       = out->row_bytes;
++        /* A linear (LN) compressed image can have a row pitch wider than its
++         * block row, like any linear image: rows of blocks then sit `pitch`
++         * apart in memory, and only dst_row_bytes of each are image. */
++        if (pitch > out->row_bytes && (rsx_fmt & 0x20u))
++            out->row_bytes = pitch;
+     } else {
+         /* Swizzled unless the LN bit is set. The hardware requires power-of-two
+          * dimensions to swizzle, so a NPOT image is linear regardless. */
+@@ -270,7 +275,7 @@ void rsx_texture_decode(void* dst, u32 dst_pitch,
+          * rather than converted -- only the row stride changes. */
+         for (u32 y = 0; y < tl->rows; y++)
+             memcpy(d + (size_t)y * dst_pitch,
+-                   src + (size_t)y * tl->row_bytes, tl->row_bytes);
++                   src + (size_t)y * tl->row_bytes, tl->dst_row_bytes);
+         return;
+     }
+ 

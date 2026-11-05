@@ -1,0 +1,51 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 0963339..d38b1bc 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -676,9 +676,11 @@ static u64    s_perf_texbytes = 0;
+ static int    s_perf_ntex = 0;
+ static double perf_now(void)
+ {
+-    LARGE_INTEGER f, c;
+-    QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+-    return (double)c.QuadPart / (double)f.QuadPart;
++    static double inv = 0.0;   /* the frequency is fixed at boot */
++    LARGE_INTEGER c;
++    if (inv == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); inv = 1.0 / (double)f.QuadPart; }
++    QueryPerformanceCounter(&c);
++    return (double)c.QuadPart * inv;
+ }
+ static int perf_on(void)
+ {
+@@ -1000,17 +1002,29 @@ extern void cellGcm_perf_drain_take(double* secs, unsigned* calls, unsigned* wor
+  * Wrapped at the call sites in d3d12_draw_arrays/_indexed so every path is
+  * covered; the match's strip expansion was not (vtx read 0k verts). */
+ static double s_vt_t0; static u64 s_vt_c0;
++/* PERF_CYCLES=1: also count the thread's cycles per call (the [PERF] cyc/vert
++ * figure). QueryThreadCycleTime is a system call; at two per draw it was
++ * ~10% of the drawing thread's samples on Hidden Leaf, and the two timer
++ * calls together ~20% (DRAW_SAMPLE, jstars-notes CPU_PROFILE §36) -- so
++ * every PERF=1 run measured a slower renderer than the game runs with. */
++static int perf_cycles(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("PERF_CYCLES"); v = (e && *e && *e != '0') ? 1 : 0; }
++    return v;
++}
+ static u32 vf_timed_end(u32 emitted)
+ {
+     if (perf_on()) {
+         s_perf_vtx += perf_now() - s_vt_t0;
+-        s_perf_vtx_cyc += vf_cycles() - s_vt_c0;
++        if (perf_cycles()) s_perf_vtx_cyc += vf_cycles() - s_vt_c0;
+         s_perf_nverts += emitted;
+     }
+     return emitted;
+ }
+ #define VF_TIMED(call) \
+-    ((void)(perf_on() ? (s_vt_t0 = perf_now(), s_vt_c0 = vf_cycles(), 0) : 0), vf_timed_end(call))
++    ((void)(perf_on() ? (s_vt_t0 = perf_now(), s_vt_c0 = perf_cycles() ? vf_cycles() : 0, 0) : 0), \
++     vf_timed_end(call))
+ /* DBG_LOCK: running clip-space centroid of the tracked mesh (RSX_DBG_VTX's
+  * texture), so the debug camera can follow it. The ducks are driven by the
+  * physics sim and drift every frame, so a fixed DBG_CENTER loses them as soon

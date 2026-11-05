@@ -1,0 +1,226 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 4b5f52e..7bc566d 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1540,11 +1540,35 @@ void cellGcm_ref_on_poll(void)
+         SetEvent(s_gcm_kick_ev);       /* dry: ask the present thread to walk */
+ }
+ 
++/* PERF=1: drain time and counts, read (and reset) by the D3D12 backend's
++ * [PERF2] line. "with work" = the walker advanced `get`. Many calls, little
++ * work per call and a large [PERF2] "rest" means the present loop is pacing
++ * the guest: every fence the guest waits on costs it one loop iteration. */
++static double   s_perf_drain_s;
++static unsigned s_perf_drain_n, s_perf_drain_w;
++void cellGcm_perf_drain_take(double* secs, unsigned* calls, unsigned* worked)
++{
++    *secs = s_perf_drain_s; *calls = s_perf_drain_n; *worked = s_perf_drain_w;
++    s_perf_drain_s = 0.0; s_perf_drain_n = 0; s_perf_drain_w = 0;
++}
++
+ void cellGcm_rsx_process_fifo(void)
+ {
++    static int perf = -1;
++    if (perf < 0) { const char* e = getenv("PERF"); perf = (e && atoi(e)) ? 1 : 0; }
++    LARGE_INTEGER t0 = {0}, t1, f;
++    if (perf) QueryPerformanceCounter(&t0);
+     AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    const u32 get0 = s_fifo_getoff;
+     gcm_rsx_process_fifo_unlocked();
++    const int worked = (s_fifo_getoff != get0);
+     ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++    if (perf) {
++        QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);
++        s_perf_drain_s += (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart;
++        s_perf_drain_n++;
++        if (worked) s_perf_drain_w++;
++    }
+ }
+ 
+ static void gcm_rsx_process_fifo_unlocked(void)
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 145fd7b..186dd56 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -516,6 +516,32 @@ static int perf_on(void)
+     if (v < 0) { const char* e = getenv("PERF"); v = e ? atoi(e) : 0; }
+     return v;
+ }
++/* The rest of the present thread's time, which [PERF] lumps into "guest"
++ * (= window - render_frame):
++ *   s_perf_present  swap-chain Present (vsync), after render_frame's timer;
++ *   s_perf_rf_mid   render_frame runs from the mid-frame flush. They happen
++ *                   INSIDE a FIFO drain, so they are in both render_frame and
++ *                   drain; [PERF2] subtracts them once;
++ *   drain           cellGcm_rsx_process_fifo: FIFO decode, state, draw
++ *                   recording and the vertex uploads (cellGcmSys.c). */
++static double s_perf_present = 0.0, s_perf_rf_mid = 0.0;
++extern void cellGcm_perf_drain_take(double* secs, unsigned* calls, unsigned* worked);
++
++/* Time one VP upload call: wall, recording-thread cycles, emitted vertices.
++ * Wrapped at the call sites in d3d12_draw_arrays/_indexed so every path is
++ * covered; the match's strip expansion was not (vtx read 0k verts). */
++static double s_vt_t0; static u64 s_vt_c0;
++static u32 vf_timed_end(u32 emitted)
++{
++    if (perf_on()) {
++        s_perf_vtx += perf_now() - s_vt_t0;
++        s_perf_vtx_cyc += vf_cycles() - s_vt_c0;
++        s_perf_nverts += emitted;
++    }
++    return emitted;
++}
++#define VF_TIMED(call) \
++    ((void)(perf_on() ? (s_vt_t0 = perf_now(), s_vt_c0 = vf_cycles(), 0) : 0), vf_timed_end(call))
+ /* DBG_LOCK: running clip-space centroid of the tracked mesh (RSX_DBG_VTX's
+  * texture), so the debug camera can follow it. The ducks are driven by the
+  * physics sim and drift every frame, so a fixed DBG_CENTER loses them as soon
+@@ -5138,6 +5164,20 @@ static void render_frame(void)
+                     s_perf_pso, 100.0 * s_perf_pso / fr,
+                     s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
++            /* Where "guest" goes. rest = window - render_frame - present -
++             * (drain - mid-frame renders): the present loop's sleeps, the
++             * vblank/flip handlers, and waiting for the guest to submit. */
++            { double dr = 0.0; unsigned dn = 0, dw = 0;
++              cellGcm_perf_drain_take(&dr, &dn, &dw);
++              const double drain_own = dr - s_perf_rf_mid;
++              const double rest = fr - s_perf_rf - s_perf_present - drain_own;
++              fprintf(stderr, "[PERF2] drain %.2fs (%.0f%%, %u calls, %u with work)"
++                              " of which vtx %.2fs, mid-frame render %.2fs"
++                              " | present %.2fs (%.0f%%) | rest %.2fs (%.0f%%)%c",
++                      dr, 100.0 * dr / fr, dn, dw, s_perf_vtx, s_perf_rf_mid,
++                      s_perf_present, 100.0 * s_perf_present / fr,
++                      rest, 100.0 * rest / fr, 10); }
++            s_perf_present = 0.0; s_perf_rf_mid = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+             s_perf_pso_calls = 0; s_perf_pso_miss = 0; s_perf_pso_hashbytes = 0;
+@@ -5451,8 +5491,11 @@ skip_dump_consider: ;
+     s_cap_nsnap = 0;
+ 
+     /* Present */
+-    if (s_present_this_frame)
+-        s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0); /* vsync */   /* skipped for an offscreen-only batch */
++    if (s_present_this_frame) {
++        double _pt = perf_on() ? perf_now() : 0.0;
++        s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0); /* vsync */
++        if (perf_on()) s_perf_present += perf_now() - _pt;
++    }   /* skipped for an offscreen-only batch */
+ 
+     move_to_next_frame();
+ 
+@@ -6218,13 +6261,12 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+         count = maxv - (maxv % 3); }
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    { double _tv = perf_on() ? perf_now() : 0.0; u64 _cy = perf_on() ? vf_cycles() : 0;
++    {
+       if (!vf_legacy()) { rsx_fetch_src src; vf_src_init(&src, state, first, 0, RSX_FETCH_LIST);
+                           vf_fetch(state, &src, count, out); }
+       else for (u32 k = 0; k < count; k++)
+           read_vp_vertex(state, first + k, &out[k*16]);
+-      if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_vtx_cyc += vf_cycles() - _cy;
+-                       s_perf_nverts += count; } }
++    }
+     /* IDXDBG=<hex shader_program>: vertex range for that program's draws. */
+     { static const char* ie = (const char*)1; static u32 iw = 0;
+       if (ie == (const char*)1) { ie = getenv("IDXDBG");
+@@ -6385,13 +6427,12 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+         count = maxv - (maxv % 3); }
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    { double _tv = perf_on() ? perf_now() : 0.0; u64 _cy = perf_on() ? vf_cycles() : 0;
++    {
+       if (!vf_legacy()) { rsx_fetch_src src; vf_src_init(&src, state, first, 1, RSX_FETCH_LIST);
+                           vf_fetch(state, &src, count, out); }
+       else for (u32 k = 0; k < count; k++)
+           read_vp_vertex(state, read_guest_index(state, first + k), &out[k*16]);
+-      if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_vtx_cyc += vf_cycles() - _cy;
+-                       s_perf_nverts += count; } }
++    }
+     /* IDXDBG=<hex shader_program>: index range for that program's draws. An
+      * index past the vertex array reads unmapped guest memory as zero, which
+      * shows up as a spike triangle with a zero texcoord, not as a missing draw. */
+@@ -6658,7 +6699,6 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+         ib = vm_base + cellGcmResolveLocated((state->index_array_dma & 0xF) == 0,
+                                              state->index_array_offset);
+     }
+-    double _tv = perf_on() ? perf_now() : 0.0; u64 _cy = perf_on() ? vf_cycles() : 0;
+     rsx_fetch_plan _plan, *plan = NULL;
+     if (!vf_legacy()) { rsx_fetch_plan_init(state, vf_input_mask(state), &_plan); plan = &_plan; }
+     u32 o = 0;
+@@ -6683,7 +6723,6 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+         s_strip_pending = 0;
+         vf_one(plan, state, v, &out[o*16]); o++;
+     }
+-    if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_vtx_cyc += vf_cycles() - _cy; s_perf_nverts += o; }
+     /* STRIP_DUMP=<frame>: from that backend frame on, describe a few new strip
+      * records -- index format, restart state, first indices, first decoded
+      * positions -- to compare with what the expansion path reads. */
+@@ -6735,7 +6774,9 @@ static void vp_flush_if_full(u32 count, int cont)
+                s_d3d.draw_count, (unsigned long long)room); }
+     int was = s_present_this_frame;
+     s_present_this_frame = 0;
+-    render_frame();
++    { double _mt = perf_on() ? perf_now() : 0.0;
++      render_frame();
++      if (perf_on()) s_perf_rf_mid += perf_now() - _mt; }
+     s_present_this_frame = was;
+     s_d3d.merge_prev_draw = 0;
+ }
+@@ -6777,7 +6818,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+         if (s_d3d.vp_vb_mapped && s_d3d.vp_root_sig) {
+             vp_flush_if_full(count, 0);
+             u32 rec = s_d3d.vp_vb_offset;
+-            u32 emitted = upload_quads_vp(s_d3d.current_rsx_state, first, count);
++            u32 emitted = VF_TIMED(upload_quads_vp(s_d3d.current_rsx_state, first, count));
+             if (emitted && s_d3d.draw_count < MAX_DRAWS) {
+                 D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
+                 dr->vb_byte_offset = rec;
+@@ -6875,8 +6916,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+         vp_flush_if_full(count, s_d3d.merge_prev_draw && s_d3d.merge_first_end == first);
+         u32 rec = s_d3d.vp_vb_offset;
+         u32 emitted = (primitive == RSX_PRIMITIVE_TRIANGLES)
+-            ? upload_tris_vp(s_d3d.current_rsx_state, first, count)
+-            : upload_strip_vp(s_d3d.current_rsx_state, first, count, primitive == RSX_PRIMITIVE_TRIANGLE_FAN);
++            ? VF_TIMED(upload_tris_vp(s_d3d.current_rsx_state, first, count))
++            : VF_TIMED(upload_strip_vp(s_d3d.current_rsx_state, first, count, primitive == RSX_PRIMITIVE_TRIANGLE_FAN));
+         /* RSX splits one primitive stream across several DRAW_ARRAYS entries
+          * inside a single BEGIN/END (each carries at most 256 vertices), and the
+          * hardware concatenates them before assembling primitives. Recording a
+@@ -7021,14 +7062,14 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+                             (s_d3d.merge_first_end == first ||
+                              primitive == RSX_PRIMITIVE_TRIANGLE_STRIP));
+     u32 rec = s_d3d.vp_vb_offset;
+-    if (primitive == RSX_PRIMITIVE_QUADS)             emitted = upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count);
+-    else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count);
++    if (primitive == RSX_PRIMITIVE_QUADS)             emitted = VF_TIMED(upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count));
++    else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = VF_TIMED(upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count));
+     /* Native strips (upload_strip_vp_native) are opt-in with STRIP_NATIVE=1
+      * until they render: in J-Stars' match their draws are submitted with the
+      * right PSO, RT and vertex range yet rasterize nothing (jstars-notes
+      * FINDINGS §19). Default: the old expansion to a triangle list. */
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && !getenv("STRIP_NATIVE"))
+-        emitted = upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 0);
++        emitted = VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 0));
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP) {
+         /* Native strip; a batch continuing the previous one's stream appends
+          * to its record (see upload_strip_vp_native). */
+@@ -7041,14 +7082,14 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+                    pv->fp_addr == (st ? st->shader_program : 0) &&
+                    pv->begin_epoch == (st ? st->begin_epoch : 0) &&
+                    pv->vb_byte_offset + pv->vertex_count * VP_VERT_STRIDE == rec;
+-        emitted = upload_strip_vp_native(st, first, count, 1, cont ? pv->vertex_count : 0);
++        emitted = VF_TIMED(upload_strip_vp_native(st, first, count, 1, cont ? pv->vertex_count : 0));
+         if (cont) {
+             pv->vertex_count += emitted;
+             s_d3d.merge_first_end = first + count;
+             return;
+         }
+     }
+-    else if (primitive == RSX_PRIMITIVE_TRIANGLE_FAN)   emitted = upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 1);
++    else if (primitive == RSX_PRIMITIVE_TRIANGLE_FAN)   emitted = VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 1));
+     else {
+         static int _skip = 0;
+         if (_skip++ < 3)

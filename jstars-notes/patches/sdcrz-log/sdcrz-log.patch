@@ -1,0 +1,35 @@
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 8c40580..0a303ba 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -195,6 +195,30 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+          * cannot detect that a peer's reservation was lost. Issuer exclusion
+          * follows the existing plain-MFC-write model; issuer reservation
+          * behavior for storage controls is not separately modeled here. */
++        /* SPU_SDCRZ_RANGE=<lo>-<hi> (hex EAs), SPU_SDCRZ_AFTER=<s>,
++         * SPU_SDCRZ_N=<n> (default 400): log the zero-fills that land in a
++         * range. They bypass SPU_DMA_RANGE (this branch returns before it),
++         * so a buffer an SPU job zeroes looked as if nothing wrote it. Same
++         * ms=/flip= fields as [dma-range] (jstars-notes VFX.md: the beam's
++         * vertices are written, then zero by the time the FIFO draws them). */
++        { static uint32_t z_lo = 1, z_hi; static unsigned long long z_first = 0, z_after = 0;
++          static int z_max = 400, z_n = 0;
++          extern unsigned long long ps3_ms_now(void);
++          extern unsigned int cellGcm_flip_request_count(void);
++          if (z_lo == 1) { const char* e = getenv("SPU_SDCRZ_RANGE"); z_lo = 0;
++              if (e) { char* d; z_lo = (uint32_t)strtoul(e, &d, 16); if (*d == '-') z_hi = (uint32_t)strtoul(d + 1, 0, 16); }
++              const char* a = getenv("SPU_SDCRZ_AFTER"); if (a) z_after = (unsigned long long)(atof(a) * 1000.0);
++              const char* n = getenv("SPU_SDCRZ_N"); if (n) z_max = atoi(n); }
++          if (z_hi) {
++              const unsigned long long now = ps3_ms_now();
++              if (!z_first) z_first = now;
++              if ((uint32_t)ea < z_hi && (uint32_t)ea + size > z_lo && now - z_first >= z_after && z_n < z_max) {
++                  z_n++;
++                  fprintf(stderr, "[sdcrz] t=%.3fs ms=%llu flip=%u pc=0x%05X ea=0x%08X size=%u\n",
++                          (double)(now - z_first) / 1000.0, now, cellGcm_flip_request_count(),
++                          (uint32_t)spu->pc & SPU_LS_MASK, (uint32_t)ea, size);
++              }
++          } }
+         spu_lockline_lock();
+         memset(vm_base + (uint32_t)ea, 0, size);
+         for (uint32_t offset = 0; offset < size; offset += 128u)

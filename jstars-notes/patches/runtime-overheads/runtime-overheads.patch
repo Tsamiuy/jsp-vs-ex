@@ -1,0 +1,229 @@
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 2d19532..2b6c95e 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1521,11 +1521,31 @@ static PPU_THREAD_LOCAL int      g_dispatch_depth = 0;
+ extern "C" int* ps3_ppu_dispatch_depth_slot(void) { return &g_dispatch_depth; }
+ extern "C" int* ps3_ppu_vcall_sp_slot(void) { return &g_vcall_sp; }
+ 
++/* PS3_COH_INLINE (default on; =0 calls spu_coh_is_reserved as before): the
++ * reservation test for every guest store, inlined. It was an out-of-line call
++ * per store, 27% of the J-Stars main thread's code time (jstars-notes
++ * CPU_PROFILE.md §10). Same globals, same bit test as spu_coherency.c. */
++extern "C" unsigned char g_spu_coh_bitmap[];
++extern "C" int g_spu_coh_armed;
++static int coh_inline_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("PS3_COH_INLINE"); v = (e && *e == '0') ? 0 : 1; }
++    return v;
++}
++static inline int spu_coh_is_reserved_fast(uint32_t addr)
++{
++    if (__builtin_expect(!coh_inline_on(), 0)) return spu_coh_is_reserved(addr);
++    if (!g_spu_coh_armed) return 0;
++    const uint32_t line = addr >> 7;                 /* SPU_COH_LINE_SHIFT */
++    return (g_spu_coh_bitmap[line >> 3] >> (line & 7)) & 1u;
++}
++
+ /* Every guest store commits through this: on a line no SPU has reserved (all of
+  * them, until SPU code runs) it is the plain memcpy it replaced. */
+ #define VM_WRITE_COH(a, src, n)                                               \
+     do {                                                                      \
+-        if (spu_coh_is_reserved((uint32_t)(a))) {                             \
++        if (spu_coh_is_reserved_fast((uint32_t)(a))) {                        \
+             spu_lockline_lock();                                              \
+             memcpy(vm_base + (uint32_t)(a), (src), (n));                      \
+             spu_coh_notify_write((uint32_t)(a));                              \
+@@ -1970,7 +1990,23 @@ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* r
+ {
+     barrier_watch_hit(ea, val, width, ra);
+ }
+-void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
++
++/* PS3_FAST_DEBUG_HOOKS (default on; =0 runs the hook on every store as
++ * before): barrier_watch_hit is a set of debug watches (PPU_WVAL*, PPU_WWATCH*,
++ * the runtime's barrier sync watch). Run on every out-of-line guest store, its
++ * checks were 37% of one J-Stars PPU thread's code time (CPU_PROFILE.md §10).
++ * Call it only when one of them is armed: the env watches are decided once,
++ * the sync watch is a runtime global and is still checked per store. */
++static inline void store_watch(uint32_t a, uint32_t v, int width, void* ra)
++{
++    static int env = -1;
++    if (__builtin_expect(env < 0, 0)) {
++        const char* f = getenv("PS3_FAST_DEBUG_HOOKS");
++        env = ((f && *f == '0') || getenv("PPU_WVAL") || getenv("PPU_WWATCH")) ? 1 : 0;
++    }
++    if (env || g_barrier_sync_watch) barrier_watch_hit(a, v, width, ra);
++}
++void vm_write8 (uint64_t a, uint8_t  v) { store_watch((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
+ #ifdef _WIN32
+     /* PT detector: does this byte-write turn its word into the hunted truncated value? */
+     { if(g_pt_val==-2){const char*e=getenv("PT"); g_pt_val=e?(int64_t)strtoul(e,0,16):-1;}
+@@ -1980,9 +2016,9 @@ void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, _
+         else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
+ #endif
+     VM_WRITE_COH(a, &v, 1); }
+-void vm_write16(uint64_t a, uint16_t v) { barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
++void vm_write16(uint64_t a, uint16_t v) { store_watch((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
+     v = __builtin_bswap16(v); VM_WRITE_COH(a, &v, 2); }
+-void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, __builtin_return_address(0)); if (vm_oob((uint32_t)a,4) || vm_null_store((uint32_t)a, v, 4, __builtin_return_address(0))) return;
++void vm_write32(uint64_t a, uint32_t v) { store_watch((uint32_t)a, v, 4, __builtin_return_address(0)); if (vm_oob((uint32_t)a,4) || vm_null_store((uint32_t)a, v, 4, __builtin_return_address(0))) return;
+ #ifdef _WIN32
+     /* PT restore: a full-word store of a valid pointer (high byte set) to a
+      * previously-truncated slot clears the record (that truncation was transient). */
+@@ -2000,8 +2036,8 @@ void vm_write64(uint64_t a, uint64_t v) {
+      * every 64-bit struct field is written with std, so a watch on one would
+      * report nothing and read as "nobody writes this". Two halves so an
+      * 8-byte store still shows up when only its low or high word is watched. */
+-    barrier_watch_hit((uint32_t)a,     (uint32_t)(v >> 32), 4, __builtin_return_address(0));
+-    barrier_watch_hit((uint32_t)a + 4, (uint32_t)v,         4, __builtin_return_address(0));
++    store_watch((uint32_t)a,     (uint32_t)(v >> 32), 4, __builtin_return_address(0));
++    store_watch((uint32_t)a + 4, (uint32_t)v,         4, __builtin_return_address(0));
+     if (vm_oob((uint32_t)a,8) || vm_null_store((uint32_t)a, (uint32_t)(v >> 32), 8, __builtin_return_address(0))) return;
+     v = __builtin_bswap64(v); VM_WRITE_COH(a, &v, 8); }
+ }
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index 923d8bd..8b5d70f 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -72,14 +72,19 @@ void spu_lockline_unlock(void) { atomic_flag_clear_explicit(&g_lockline, memory_
+ #define SPU_COH_LINES       (1u << (32 - SPU_COH_LINE_SHIFT))   /* 2^25 lines */
+ #define SPU_COH_BITMAP_SZ   (SPU_COH_LINES / 8)                 /* 4 MiB */
+ 
+-static unsigned char s_coh_bitmap[SPU_COH_BITMAP_SZ];
++/* Exported (g_ names) so the PPU store path in ppu_loader.cpp can test a line
++ * inline instead of calling spu_coh_is_reserved per guest store
++ * (PS3_COH_INLINE). Same data, same test. */
++unsigned char g_spu_coh_bitmap[SPU_COH_BITMAP_SZ];
++#define s_coh_bitmap g_spu_coh_bitmap
+ 
+ /* Zero until the first GETLLAR anywhere. Keeps the PPU fast path off the
+  * bitmap entirely for a title that runs no SPU code, and keeps every existing
+  * test that stores through vm_write* paying one compare against a hot global.
+  * Written once, under the lock; read unlocked, where a stale zero costs at most
+  * one missed event on the very first reservation of the run. */
+-static int s_coh_armed;
++int g_spu_coh_armed;
++#define s_coh_armed g_spu_coh_armed
+ 
+ /* Every live virtual context may retain a reservation between scheduling
+  * quanta; physical SPU count is not a bound on this set. All access is under
+diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
+index 931d3b3..8f14e7c 100644
+--- a/runtime/spu/spu_drain.c
++++ b/runtime/spu/spu_drain.c
+@@ -344,11 +344,28 @@ void spu_depth_guard(spu_context* ctx)
+     /* Ring of recent drain sites. When the depth trips, the useful question is
+      * not "where are we" but "what cycle got us here" -- one pc names a point,
+      * a ring names the loop. */
++    /* PS3_FAST_DEBUG_HOOKS (default on): one ring per thread. A single static
++     * ring written by every SPU thread on every drain kept one cache line
++     * bouncing between cores -- 55% of one J-Stars SPU thread's code time
++     * (jstars-notes CPU_PROFILE.md §10). The report then shows the tripping
++     * thread's own recent sites. =0: the shared ring as before. */
+     enum { RING = 24 };
+-    static uint32_t s_ring[RING];
+-    static uint32_t s_n;
+-    s_ring[s_n % RING] = ((uint32_t)ctx->pc & SPU_LS_MASK);
+-    s_n++;
++    static uint32_t s_ring_shared[RING];
++    static uint32_t s_n_shared;
++#ifdef _WIN32
++    static __declspec(thread) uint32_t t_ring[RING];
++    static __declspec(thread) uint32_t t_n;
++#else
++    static _Thread_local uint32_t t_ring[RING];
++    static _Thread_local uint32_t t_n;
++#endif
++    static int s_fast = -1;
++    if (s_fast < 0) { const char* e = getenv("PS3_FAST_DEBUG_HOOKS"); s_fast = (e && *e == '0') ? 0 : 1; }
++    uint32_t* s_ring = s_fast ? t_ring : s_ring_shared;
++    uint32_t* np = s_fast ? &t_n : &s_n_shared;
++    s_ring[*np % RING] = ((uint32_t)ctx->pc & SPU_LS_MASK);
++    (*np)++;
++    const uint32_t s_n = *np;
+ 
+     if (ctx->host_depth < s_max) return;
+     static int s_reported = 0;
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 1cdfe48..386f55b 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -38,6 +38,49 @@ uint64_t spu_workload_fingerprint(const void* data, size_t n)
+     return h;
+ }
+ 
++/* SPU_FP_CACHE (default on; SPU_FP_CACHE=0 = hash every time): the dispatch
++ * paths fingerprint the WHOLE job image byte by byte on every dispatch to find
++ * its lifted code. J-Stars dispatches ~2,200 SPURS jobs a second, mostly the
++ * same few images at the same addresses, and the byte-wise FNV was 20-36% of
++ * the SPU job threads' code time (jstars-notes CPU_PROFILE.md §10). Each
++ * thread keeps the bytes it last hashed per (address, size); when the image
++ * still matches them (memcmp, vectorised) the stored fingerprint is returned.
++ * Same bytes give the same FNV, so the answer is always what a full hash would
++ * give; any byte that differs takes the full hash again. Images over 256 KB are
++ * always hashed. */
++#ifdef _WIN32
++#define SPU_FP_TLS __declspec(thread)
++#else
++#define SPU_FP_TLS _Thread_local
++#endif
++static uint64_t spu_workload_fingerprint_cached(const void* data, size_t n)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SPU_FP_CACHE"); on = (e && *e == '0') ? 0 : 1; }
++    if (!on || n > (256u << 10)) return spu_workload_fingerprint(data, n);
++    enum { NE = 16 };
++    static SPU_FP_TLS const void* t_ptr[NE];
++    static SPU_FP_TLS size_t      t_len[NE];
++    static SPU_FP_TLS uint64_t    t_fp[NE];
++    static SPU_FP_TLS uint8_t*    t_copy[NE];
++    static SPU_FP_TLS size_t      t_cap[NE];
++    static SPU_FP_TLS unsigned    t_next;
++    int slot = -1;
++    for (int i = 0; i < NE; i++)
++        if (t_ptr[i] == data && t_len[i] == n) { slot = i; break; }
++    if (slot >= 0 && memcmp(t_copy[slot], data, n) == 0) return t_fp[slot];
++    const uint64_t fp = spu_workload_fingerprint(data, n);
++    if (slot < 0) slot = (int)(t_next++ % NE);
++    if (t_cap[slot] < n) {
++        uint8_t* c = (uint8_t*)realloc(t_copy[slot], n);
++        if (!c) { t_ptr[slot] = NULL; t_len[slot] = 0; return fp; }
++        t_copy[slot] = c; t_cap[slot] = n;
++    }
++    memcpy(t_copy[slot], data, n);
++    t_ptr[slot] = data; t_len[slot] = n; t_fp[slot] = fp;
++    return fp;
++}
++
+ /* ---- registry ---------------------------------------------------------- */
+ 
+ #ifndef SPU_WORKLOAD_MAX
+@@ -199,7 +242,7 @@ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
+ {
+     if (!image || image_size == 0) return 0;
+ 
+-    uint64_t fp = spu_workload_fingerprint(image, image_size);
++    uint64_t fp = spu_workload_fingerprint_cached(image, image_size);
+     spu_lifted_entry_fn fn = NULL;
+     int image_id = 0;
+     for (unsigned i = 0; i < s_registry_count; i++)
+@@ -811,7 +854,7 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+ {
+     if (!image || image_size == 0) return 0;
+ 
+-    uint64_t fp = spu_workload_fingerprint(image, image_size);
++    uint64_t fp = spu_workload_fingerprint_cached(image, image_size);
+     spu_lifted_entry_fn fn = NULL;
+     int image_id = 0;
+     for (unsigned i = 0; i < s_registry_count; i++)
+@@ -1174,7 +1217,7 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+ {
+     if (!image || image_size == 0) return 0;
+ 
+-    uint64_t fp = spu_workload_fingerprint(image, image_size);
++    uint64_t fp = spu_workload_fingerprint_cached(image, image_size);
+     spu_lifted_entry_fn fn = NULL;
+     int image_id = 0;
+     for (unsigned i = 0; i < s_registry_count; i++)

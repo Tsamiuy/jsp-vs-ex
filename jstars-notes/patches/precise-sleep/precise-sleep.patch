@@ -1,0 +1,97 @@
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index 78b3e38..82c52f2 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -103,6 +103,82 @@ static void write_be64(uint32_t addr, uint64_t val)
+     *p = val;
+ }
+ 
++#ifdef _WIN32
++/* PS3_PRECISE_SLEEP (default on; PS3_PRECISE_SLEEP=0 = the old spin): a guest
++ * sleep shorter than 1 ms is a real sleep on a high-resolution waitable timer
++ * instead of a SwitchToThread spin until the deadline.
++ *
++ * Titles poll with short sleeps everywhere. J-Stars' main thread waits for
++ * its previous flip with usleep(200) and its CRI file server idles on
++ * usleep(20) ~10,000 times a second; spun, each of those pollers shows a full
++ * core busy while doing nothing (jstars-notes CPU_PROFILE.md §6-7: ~870% of
++ * a core for a 16-core laptop, three threads at ~95%). A high-resolution
++ * timer (Windows 10 1803+) wakes within a fraction of a millisecond of the
++ * deadline, so the guest still sleeps at least what it asked for, just with
++ * a little more slack than the spin gave.
++ * Measured on the J-Stars machine (jstars-notes patches\precise-sleep): a
++ * 20/100/200 us request then takes p50 ~0.52 ms, p99 ~1-1.3 ms, p99.9 3-7 ms
++ * at ~1-3% of a core, against exact 20/100/200 us at ~100% when spun.
++ * PS3_PRECISE_SLEEP_MAX_US=<n>: use the timer only for requests up to n us
++ * (default 999 = every sub-ms sleep), so pacing loops with longer polls can
++ * keep the exact spin while idle pollers sleep.
++ * PS3_PRECISE_SLEEP_SPIN_US=<n>: spin only the last n us (default 0) for a
++ * title that turns out to need tighter wake-ups. One timer per thread. */
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++static int precise_sleep_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("PS3_PRECISE_SLEEP"); v = (e && *e == '0') ? 0 : 1; }
++    return v;
++}
++static unsigned precise_sleep_max_us(void)
++{
++    static long v = -1;
++    if (v < 0) { const char* e = getenv("PS3_PRECISE_SLEEP_MAX_US"); v = e ? atol(e) : 999;
++                 if (v < 0) v = 0; }
++    return (unsigned)v;
++}
++static unsigned precise_sleep_spin_us(void)
++{
++    static long v = -1;
++    if (v < 0) { const char* e = getenv("PS3_PRECISE_SLEEP_SPIN_US"); v = e ? atol(e) : 0;
++                 if (v < 0) v = 0; }
++    return (unsigned)v;
++}
++/* Returns 1 when it slept, 0 when no high-resolution timer is available
++ * (older Windows): the caller then spins as before. */
++static int precise_sleep_us(uint64_t usec)
++{
++    static __declspec(thread) HANDLE t_timer;
++    static __declspec(thread) int t_state;       /* 0 untried, 1 ok, -1 unavailable */
++    if (t_state == 0) {
++        t_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                                         TIMER_ALL_ACCESS);
++        t_state = t_timer ? 1 : -1;
++    }
++    if (t_state < 0) return 0;
++    const unsigned tail = precise_sleep_spin_us();
++    LARGE_INTEGER qpc_start, qpc_now;
++    ensure_qpc_init();
++    QueryPerformanceCounter(&qpc_start);
++    if (usec > tail) {
++        LARGE_INTEGER due;
++        due.QuadPart = -((LONGLONG)(usec - tail) * 10);   /* 100 ns units, relative */
++        if (!SetWaitableTimerEx(t_timer, &due, 0, NULL, NULL, NULL, 0)) return 0;
++        WaitForSingleObject(t_timer, INFINITE);
++    }
++    if (tail) {
++        const int64_t qpc_deadline = qpc_start.QuadPart +
++            (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
++        do { SwitchToThread(); QueryPerformanceCounter(&qpc_now); }
++        while (qpc_now.QuadPart < qpc_deadline);
++    }
++    return 1;
++}
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * sys_timer_usleep
+  *
+@@ -229,6 +305,9 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         } else {
+             Sleep((DWORD)(usec / 1000));
+         }
++    } else if (usec > 0 && precise_sleep_on() && usec <= precise_sleep_max_us() &&
++               precise_sleep_us(usec)) {
++        /* slept on the high-resolution timer (PS3_PRECISE_SLEEP, above) */
+     } else if (usec > 0) {
+         /* Sub-millisecond sleep. Sleep()/waitable timers round up to the
+          * ~0.5-1 ms scheduler quantum, far too coarse for a guest that relies

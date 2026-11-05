@@ -1,0 +1,40 @@
+diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
+index eee21e7..c26e978 100644
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -464,7 +464,34 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
+             #undef LB
+             fflush(stderr); _tr--; g_spu_interp_steps=steps; return 0x2000u;
+         }
+-        if (spu_step(ctx)) {
++        /* SPU_ITRACE_IMG=<id> SPU_ITRACE_LO/_HI=<hex pc range> SPU_ITRACE_FLIP=<n>
++         * SPU_ITRACE_N=<lines, default 6000>: log every interpreted instruction
++         * in [lo,hi) of that image from flip n on, with the value its target
++         * register holds afterwards. Run with SPU_INTERP_IMG=<id>. Gives the
++         * full data flow of image 17's quad builder for one particle, to name
++         * the input that leaves the beam quads zero-size (jstars-notes VFX.md). */
++        static int it_img = -2; static uint32_t it_lo, it_hi, it_flip; static long it_n;
++        if (it_img == -2) { const char* e = getenv("SPU_ITRACE_IMG"); it_img = e ? atoi(e) : -1;
++            e = getenv("SPU_ITRACE_LO"); it_lo = e ? (uint32_t)strtoul(e, 0, 16) : 0;
++            e = getenv("SPU_ITRACE_HI"); it_hi = e ? (uint32_t)strtoul(e, 0, 16) : 0x40000u;
++            e = getenv("SPU_ITRACE_FLIP"); it_flip = e ? (uint32_t)strtoul(e, 0, 0) : 0;
++            e = getenv("SPU_ITRACE_N"); it_n = e ? atol(e) : 6000; }
++        uint32_t it_pc = ctx->pc, it_w = 0; int it_on = 0;
++        if (it_img >= 0 && ctx->image_id == it_img && it_n > 0 && it_pc >= it_lo && it_pc < it_hi) {
++            extern unsigned int cellGcm_flip_request_count(void);
++            if (cellGcm_flip_request_count() >= it_flip) {
++                const uint8_t* q = ctx->ls + (it_pc & 0x3FFFCu);
++                it_w = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8) | q[3];
++                it_on = 1; it_n--; } }
++        int it_stop = spu_step(ctx);
++        if (it_on) {
++            /* RRR-form ops (top nibble 8-F: selb, shufb, fma, fnms, ...) keep rt in
++             * bits 4-10; every other form keeps it in the low 7 bits. */
++            uint32_t rt = (it_w >> 28) >= 8u ? (it_w >> 21) & 0x7Fu : it_w & 0x7Fu;
++            fprintf(stderr, "[itrace] %05X %08X r%-3u %08X %08X %08X %08X%c", it_pc, it_w, rt,
++                    ctx->gpr[rt]._u32[0], ctx->gpr[rt]._u32[1], ctx->gpr[rt]._u32[2], ctx->gpr[rt]._u32[3], 10);
++        }
++        if (it_stop) {
+             /* stop 0x110 = SYS_SPU_THREAD_STOP_RECEIVE_EVENT. The worker writes
+              * the SPU queue number to its out-mailbox, stops, and lv2 replies
+              * with {CELL_OK, data1, data2, data3} in the in-mailbox -- which is

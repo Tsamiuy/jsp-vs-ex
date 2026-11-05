@@ -1,0 +1,14 @@
+Build with the bundled llvm-mingw. Applied by installer/tools/assemble_payload.py to the payload's copy of the toolkit
+(ps3recomp/runtime/ppu/ppu_loader.cpp); the checked-out repository is not edited.
+ppu_resv_break is defined further down as "static inline"; the earlier declaration says extern "C", which clang rejects as a
+linkage conflict (MSVC and GCC accept it). Same declaration, same linkage as the definition.
+--- a/ps3recomp/runtime/ppu/ppu_loader.cpp
++++ b/ps3recomp/runtime/ppu/ppu_loader.cpp
+@@ -771,7 +771,7 @@
+  * polling reader all see the same thing, so the guest behaves as it would if
+  * whatever should have cleared the counter had done so. */
+-extern "C" void ppu_resv_break(uint64_t ea);
++static inline void ppu_resv_break(uint64_t ea);
+ static DWORD WINAPI poke_thread(LPVOID p)
+ {
+     const uint32_t ea  = (uint32_t)(uintptr_t)p;

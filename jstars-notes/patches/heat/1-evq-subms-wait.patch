@@ -1,0 +1,102 @@
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index 4240edf..8947545 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -1,4 +1,4 @@
+-/*
++/*
+  * ps3recomp - Event queue and event flag syscalls (implementation)
+  */
+ 
+@@ -283,9 +283,68 @@ void sys_event_queue_cancel_by_id(uint32_t queue_id)
+             queue_id);
+ }
+ 
++#ifdef _WIN32
++/* EVQ_SUBMS_WAIT (default on, EVQ_SUBMS_WAIT=0 off): a receive with a timeout
++ * under 1 ms used to return ETIMEDOUT at once when the queue was empty. That
++ * keeps a one-off per-frame poll free, but a thread that LOOPS on such a
++ * receive -- J-Stars has two, parked in its wrapper func_0060AE04 -- then runs
++ * flat out instead of sleeping between tries: 38% and 21% of a core, a third
++ * of it kernel time, on Hidden Leaf (jstars-notes CPU_PROFILE §26).
++ * So: the first empty poll of a queue by a thread still returns at once; when
++ * the same thread polls the same queue empty again within 2 ms, it is in a
++ * loop, and it now really waits up to its timeout -- on a high-resolution
++ * timer, and on a per-queue event that a push sets, so an event that arrives
++ * meanwhile ends the wait early. */
++static HANDLE s_evq_push_ev[SYS_EVENT_QUEUE_MAX];   /* auto-reset, created on first use */
++static int evq_subms_wait_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("EVQ_SUBMS_WAIT"); v = (e && *e == '0') ? 0 : 1; }
++    return v;
++}
++static void evq_push_wake(uint32_t queue_id)
++{
++    if (queue_id && queue_id <= SYS_EVENT_QUEUE_MAX && s_evq_push_ev[queue_id - 1])
++        SetEvent(s_evq_push_ev[queue_id - 1]);
++}
++/* Wait up to timeout_us for a push to queue_id (or the timer). */
++static void evq_subms_wait(uint32_t queue_id, uint64_t timeout_us)
++{
++    static __declspec(thread) HANDLE t_timer;
++    static __declspec(thread) int t_state;          /* 0 untried, 1 ok, -1 none */
++    if (t_state == 0) {
++        t_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
++        t_state = t_timer ? 1 : -1;
++    }
++    HANDLE* ev = &s_evq_push_ev[queue_id - 1];
++    if (!*ev) {
++        HANDLE h = CreateEventA(NULL, FALSE, FALSE, NULL);
++        if (h && InterlockedCompareExchangePointer((PVOID*)ev, h, NULL) != NULL) CloseHandle(h);
++    }
++    LARGE_INTEGER due; due.QuadPart = -((LONGLONG)timeout_us * 10);
++    if (t_state > 0 && *ev && SetWaitableTimerEx(t_timer, &due, 0, NULL, NULL, NULL, 0)) {
++        HANDLE hs[2] = { *ev, t_timer };
++        WaitForMultipleObjects(2, hs, FALSE, 2);
++    } else if (*ev) {
++        WaitForSingleObject(*ev, 1);
++    }
++}
++/* Is this the same thread polling the same empty queue again within 2 ms? */
++static int evq_is_poll_loop(uint32_t queue_id)
++{
++    static __declspec(thread) uint32_t t_q;
++    static __declspec(thread) int64_t t_last;
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    static LARGE_INTEGER f; if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    const int loop = (t_q == queue_id) && (now.QuadPart - t_last) < f.QuadPart / 500;
++    t_q = queue_id; t_last = now.QuadPart;
++    return loop;
++}
++#endif
++
+ /* Diagnostic gates polled on every receive (~140k/s in GH3): read once. */
+ static int s_ps3_waitbt = -1, s_ydkj_sputask = -1, s_ydkj_spurs_ready = -1, s_ydkj_fakecomplete = -1, s_ydkj_hle_draw = -1;
+-
++
+ int64_t sys_event_queue_receive(ppu_context* ctx)
+ {
+     uint32_t queue_id    = LV2_ARG_U32(ctx, 0);
+@@ -487,6 +546,13 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+          * (each frame ate ~30ms in two polls). Honor the intent: check once and
+          * return ETIMEDOUT immediately if empty -- same result the game already
+          * handles, just without the bogus 15ms stall. */
++        if ((q->count == 0 || !q->active) && q->active && evq_subms_wait_on() &&
++            evq_is_poll_loop(queue_id)) {
++            /* EVQ_SUBMS_WAIT: a polling loop waits its timeout (see above). */
++            LeaveCriticalSection(&q->lock);
++            evq_subms_wait(queue_id, timeout_us);
++            EnterCriticalSection(&q->lock);
++        }
+         if (q->count == 0 || !q->active) {
+             LeaveCriticalSection(&q->lock);
+             return (int64_t)(int32_t)CELL_ETIMEDOUT;
+@@ -740,6 +806,7 @@ static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
+ #ifdef _WIN32
+     WakeConditionVariable(&q->not_empty);
+     LeaveCriticalSection(&q->lock);
++    evq_push_wake((uint32_t)(q - g_sys_event_queues) + 1u);   /* EVQ_SUBMS_WAIT */
+ #else
+     pthread_cond_signal(&q->not_empty);
+     pthread_mutex_unlock(&q->lock);

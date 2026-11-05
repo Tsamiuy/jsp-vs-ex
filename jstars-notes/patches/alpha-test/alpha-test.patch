@@ -1,0 +1,41 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index a392f80..479a63c 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3566,6 +3566,36 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             printf("[FP] fp=0x%08X: depth bitcast rewrite did not fit\n", fp_addr);
+         PSO_NOTE_FAIL(); return NULL;
+     }
++    /* Guest alpha test, applied per draw from b1's fp_alpha (x = enable,
++     * y = ref, z = func & 7: NEVER LESS EQUAL LEQUAL GREATER NOTEQUAL GEQUAL
++     * ALWAYS), which vp_record_cb fills from dr->alpha_ctl. The decompiler
++     * this backend first used read the same slot as rsx_alphatest
++     * (0c2bb62); the one adopted later declares fp_alpha but never tests
++     * it, so every alpha-tested draw -- and MENU_A2C, which turns alpha-to-
++     * coverage into an alpha test -- drew its whole card: J-Stars' foliage
++     * came out as black or green boxes (jstars-notes STAGE_TEXTURES.md §8).
++     * Tests colour target 0's alpha, before the NaN guard, as RSX does.
++     * ALPHA_TEST=0 leaves it out. */
++    { static int at = -1;
++      if (at < 0) { const char* e = getenv("ALPHA_TEST"); at = !(e && e[0] == '0'); }
++      const char* ov = "_o";
++      char* ep = at ? strstr(hlsl, "    return (_o == _o)") : NULL;
++      if (at && !ep) { ep = strstr(hlsl, "    _out.t0 = "); ov = "_o0"; }
++      if (ep && strstr(hlsl, "float4 fp_alpha;")) {
++          char ins[512];
++          const int il = snprintf(ins, sizeof ins,
++              "    if (fp_alpha.x != 0.0) {\n"
++              "        const float _a = %s.a, _r = fp_alpha.y; const int _f = (int)fp_alpha.z;\n"
++              "        const bool _p = _f == 1 ? _a < _r : _f == 2 ? _a == _r : _f == 3 ? _a <= _r :\n"
++              "                        _f == 4 ? _a > _r : _f == 5 ? _a != _r : _f == 6 ? _a >= _r :\n"
++              "                        _f == 7;\n"
++              "        if (!_p) discard;\n"
++              "    }\n", ov);
++          if (il > 0 && strlen(hlsl) + (size_t)il + 1 < sizeof hlsl) {
++              memmove(ep + il, ep, strlen(ep) + 1);
++              memcpy(ep, ins, (size_t)il);
++          }
++      } }
+     if (zi && zi->shadow_mask && zpass_show()) {
+         const char* only = getenv("ZPASS_SHOW_FP");
+         if (!only || (u32)strtoul(only, NULL, 16) == fp_addr) {

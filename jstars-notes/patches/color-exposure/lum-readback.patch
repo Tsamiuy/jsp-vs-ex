@@ -1,0 +1,226 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 8e28cd7..63a61f3 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -155,6 +155,7 @@ typedef struct {
+                          * shading G-buffers write 3-4 targets in one pass. */
+     u32 rt_w, rt_h;     /* surface clip dims at record time (offscreen RT size) */
+     u32 rt_fmt;         /* RSX surface colour format (SET_SURFACE_FORMAT [4:0]) */
++    u32 rt_pitch;       /* SET_SURFACE_PITCH_A at record time (LUM_READBACK) */
+     /* Guest viewport rect at draw time (target pixels). Sub-viewport layouts
+      * (wave's debug tiles) position quads with this, not with constants --
+      * forcing full-target viewports drew every tile window-sized. */
+@@ -254,6 +255,10 @@ typedef struct {
+     u32                   dxgi;        /* DXGI_FORMAT of the resource */
+     D3D12_RESOURCE_STATES st;          /* tracked resource state */
+     int                   used;        /* referenced this frame */
++    u32                   pitch;       /* guest SET_SURFACE_PITCH_A when last drawn (LUM_READBACK) */
++    ID3D12Resource*       rb;          /* LUM_READBACK: readback buffer, lazily created */
++    u32                   rb_pitch;    /* its row pitch (256-aligned) */
++    int                   rb_pending;  /* a copy into rb is in the submitted command list */
+ } OffRT;
+ /* Offscreen render targets live at once. J-Stars' matches use 17 in one frame
+  * (scene, shadow-free post chain, bloom levels, HUD composite); at 16 the HUD
+@@ -4514,6 +4519,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
+          * rare (a surface changing size), so the stall costs nothing. */
+         wait_for_gpu();
+         r->res->lpVtbl->Release(r->res); r->res = NULL;   /* dims/format changed */
++        if (r->rb) { r->rb->lpVtbl->Release(r->rb); r->rb = NULL; r->rb_pending = 0; }
+         if (r->up) { r->up->lpVtbl->Release(r->up); r->up = NULL; }
+     } else {
+         for (int i = 0; i < MAX_OFF_RTS; i++)
+@@ -4524,6 +4530,9 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
+             if (slot < 0) return -1;
+             wait_for_gpu();   /* same hazard as above: the frame may still use it */
+             s_d3d.off_rt[slot].res->lpVtbl->Release(s_d3d.off_rt[slot].res);
++            if (s_d3d.off_rt[slot].rb) {
++                s_d3d.off_rt[slot].rb->lpVtbl->Release(s_d3d.off_rt[slot].rb);
++                s_d3d.off_rt[slot].rb = NULL; s_d3d.off_rt[slot].rb_pending = 0; }
+             s_d3d.off_rt[slot].res = NULL;
+             if (s_d3d.off_rt[slot].up) {
+                 s_d3d.off_rt[slot].up->lpVtbl->Release(s_d3d.off_rt[slot].up);
+@@ -4973,6 +4982,122 @@ static u32 s_flip_skips = 0;   /* public presents ignored because clears present
+ static void vrace_check(void);
+ static void vfa_sync(void);           /* VFETCH_ASYNC: finish queued fetches */
+ static double s_perf_vfa_wait = 0.0;  /* time render/sync points waited on them */
++/* LUM_READBACK=1: write small offscreen colour targets back to guest memory.
++ * J-Stars reduces its HDR scene to a 20x11 average-luminance target
++ * (0x039FFA40, A8R8G8B8, capture rsxcap_flush1 ops 321-324) and the PPU
++ * reads that back to set the tone-map's exposure (fp 0x0FC9FC01, constant
++ * c1.w = key / max(avg, 1e-4)). The backend never wrote a render target back
++ * to guest memory, so the game read zeros and the exposure sat at
++ * 0.72 / 1e-4 = 7200 in every capture: blown-out, over-saturated colours
++ * (jstars-notes COLOR_EXPOSURE.md). Targets up to LUM_READBACK_MAXPX pixels
++ * (default 4096) are copied into a readback buffer at the end of the frame's
++ * command list and written into guest memory the next time the GPU is
++ * drained -- one frame late, which auto-exposure tolerates -- as big-endian
++ * A8R8G8B8 rows at the surface's pitch. Only R8G8B8A8 targets; linear layout
++ * assumed (no tiled regions for such a small surface). */
++static int lum_readback_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("LUM_READBACK"); on = e ? atoi(e) : 0; }
++    return on;
++}
++static u32 lum_readback_maxpx(void)
++{
++    static u32 px = 0;
++    if (!px) { const char* e = getenv("LUM_READBACK_MAXPX"); px = e ? (u32)atoi(e) : 4096u;
++               if (!px) px = 4096u; }
++    return px;
++}
++/* Record the copies; runs with the frame's command list open, after every
++ * draw of the frame has been recorded. */
++static void lum_readback_issue(void)
++{
++    if (!lum_readback_on()) return;
++    for (int i = 0; i < MAX_OFF_RTS; i++) {
++        OffRT* r = &s_d3d.off_rt[i];
++        if (!r->res || !r->used || !r->w || !r->h) continue;
++        if ((u64)r->w * r->h > lum_readback_maxpx()) continue;
++        if (r->dxgi != (u32)DXGI_FORMAT_R8G8B8A8_UNORM) continue;
++        const u32 pitch = (r->w * 4u + 255u) & ~255u;
++        if (r->rb && r->rb_pitch != pitch) {   /* resized under the same offset */
++            r->rb->lpVtbl->Release(r->rb); r->rb = NULL; r->rb_pending = 0;
++        }
++        if (!r->rb) {
++            D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_READBACK;
++            D3D12_RESOURCE_DESC rd = {0};
++            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++            rd.Width = (u64)pitch * r->h; rd.Height = 1; rd.DepthOrArraySize = 1;
++            rd.MipLevels = 1; rd.SampleDesc.Count = 1;
++            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++            if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
++                    s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
++                    D3D12_RESOURCE_STATE_COPY_DEST, NULL,
++                    &IID_ID3D12Resource, (void**)&r->rb)) || !r->rb) { r->rb = NULL; continue; }
++            r->rb_pitch = pitch;
++        }
++        D3D12_RESOURCE_BARRIER b = {0};
++        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        b.Transition.pResource = r->res;
++        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++        if (r->st != D3D12_RESOURCE_STATE_COPY_SOURCE) {
++            b.Transition.StateBefore = r->st;
++            b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
++            s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++        }
++        D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
++        dst.pResource = r->rb; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++        dst.PlacedFootprint.Footprint.Format = (DXGI_FORMAT)r->dxgi;
++        dst.PlacedFootprint.Footprint.Width = r->w; dst.PlacedFootprint.Footprint.Height = r->h;
++        dst.PlacedFootprint.Footprint.Depth = 1; dst.PlacedFootprint.Footprint.RowPitch = pitch;
++        src.pResource = r->res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++        src.SubresourceIndex = 0;
++        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
++        if (r->st != D3D12_RESOURCE_STATE_COPY_SOURCE) {
++            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++            b.Transition.StateAfter  = r->st;
++            s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++        }
++        r->rb_pending = 1;
++    }
++}
++/* Deliver the copies to guest memory; runs right after the GPU has been
++ * drained, so the previous frame's command list (and its copies) is done. */
++static void lum_readback_finish(void)
++{
++    if (!lum_readback_on()) return;
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    for (int i = 0; i < MAX_OFF_RTS; i++) {
++        OffRT* r = &s_d3d.off_rt[i];
++        if (!r->rb || !r->rb_pending) continue;
++        r->rb_pending = 0;
++        if (!vm_base) continue;
++        u32 goff = cellGcmResolveLocated(1, r->off);
++        if (goff == 0xFFFFFFFFu) goff = cellGcmResolveLocated(0, r->off);
++        if (goff == 0xFFFFFFFFu) continue;
++        const u32 gpitch = r->pitch ? r->pitch : r->w * 4u;
++        void* mapped = NULL;
++        D3D12_RANGE rr = {0, (SIZE_T)r->rb_pitch * r->h};
++        if (FAILED(r->rb->lpVtbl->Map(r->rb, 0, &rr, &mapped)) || !mapped) continue;
++        for (u32 y = 0; y < r->h; y++) {
++            const u8* s = (const u8*)mapped + (size_t)y * r->rb_pitch;
++            u8* d = vm_base + goff + (size_t)y * gpitch;
++            for (u32 x = 0; x < r->w; x++) {   /* R8G8B8A8 -> big-endian A8R8G8B8 */
++                d[x * 4 + 0] = s[x * 4 + 3]; d[x * 4 + 1] = s[x * 4 + 0];
++                d[x * 4 + 2] = s[x * 4 + 1]; d[x * 4 + 3] = s[x * 4 + 2];
++            }
++        }
++        { static int n = 0;
++          if (n < 8 || (n % 300) == 0) {
++              const u8* s = (const u8*)mapped;
++              fprintf(stderr, "[LUMRB] off=0x%08X %ux%u pitch=%u -> guest 0x%X px0 R=%u G=%u B=%u A=%u%c",
++                      r->off, r->w, r->h, gpitch, goff, s[0], s[1], s[2], s[3], 10); }
++          n++; }
++        D3D12_RANGE wr = {0, 0};
++        r->rb->lpVtbl->Unmap(r->rb, 0, &wr);
++    }
++}
++
+ static void render_frame(void)
+ {
+     vfa_sync();   /* the command list reads vp_vb: every queued fetch must be done */
+@@ -5008,6 +5133,7 @@ static void render_frame(void)
+      * polygons). These workloads are a few draws/frame, so full serialisation
+      * costs little. */
+     wait_for_gpu();
++    lum_readback_finish();   /* LUM_READBACK: last frame's small targets -> guest memory */
+ 
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */
+@@ -5282,8 +5408,10 @@ static void render_frame(void)
+             const int _z = dt_find(dr->rt_off & ~ZT_TAG);
+             if (_z >= 0) s_zrt[_z].cast = 1;
+         }
+-        else if (dr->is_vp && dr->rt_off)
+-            off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt);
++        else if (dr->is_vp && dr->rt_off) {
++            const int _s = off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt);
++            if (_s >= 0 && dr->rt_pitch) s_d3d.off_rt[_s].pitch = dr->rt_pitch;
++        }
+         for (int _m = 0; _m < 3; _m++)
+             if (dr->is_vp && dr->rt_mrt[_m])
+                 off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
+@@ -6414,6 +6542,8 @@ skip_dump_consider: ;
+         s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &barrier);
+     }
+ 
++    lum_readback_issue();    /* LUM_READBACK: copy this frame's small targets out */
++
+     /* Close and execute */
+     s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
+@@ -6778,6 +6908,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+             dr->rt_off = rt; memcpy(dr->rt_mrt, mrt, sizeof(mrt));
+             dr->rt_w = rt_w; dr->rt_h = rt_h;
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++            dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
+             memcpy(dr->cc, cc, sizeof(cc));
+             dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
+             if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
+@@ -8395,6 +8526,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                     dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
+                 }
+                 dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++            dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
+                 if (s_d3d.current_rsx_state) {
+                     dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+                     dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -8523,6 +8655,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
+             }
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++            dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
+             if (s_d3d.current_rsx_state) {
+                 dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+                 dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -8708,6 +8841,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+             dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
+         }
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++            dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
+         if (s_d3d.current_rsx_state) {
+             dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+             dr->vp_y = s_d3d.current_rsx_state->viewport_y;

@@ -1,0 +1,134 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index e28c304..a0eb80c 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -86,6 +86,7 @@
+  * CreateGraphicsPipelineState with E_INVALIDARG -- and, uncached, was
+  * recompiled on every draw until the frame never finished. */
+ #define RSX_TEX_UNITS      16
++#define U0W_SAMPLERS        8   /* unit 0 wrap-mode samplers s16..s23 (u0_wrap_mode) */
+ #define VERTEX_STRIDE       36  /* bytes per host vertex: pos3 + col4 + uv2 */
+ 
+ typedef struct {
+@@ -1359,7 +1360,7 @@ static int init_d3d12(u32 width, u32 height)
+         rp[2].Descriptor.ShaderRegister = 1;
+         rp[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+ 
+-        D3D12_STATIC_SAMPLER_DESC samp[RSX_TEX_UNITS] = {0};
++        D3D12_STATIC_SAMPLER_DESC samp[RSX_TEX_UNITS + U0W_SAMPLERS] = {0};
+         for (int _s = 0; _s < RSX_TEX_UNITS; _s++) {
+             samp[_s].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+             samp[_s].AddressU = samp[_s].AddressV = samp[_s].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+@@ -1396,10 +1397,22 @@ static int init_d3d12(u32 width, u32 height)
+             samp[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+             samp[0].AddressU = samp[0].AddressV = samp[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+         }
++        /* s16..s23: unit 0 with the guest's own S/T wrap (u0_wrap_mode), same
++         * filter as s0. s0 stays clamp/clamp for draws that ask for clamp. */
++        for (int _i = 0; _i < U0W_SAMPLERS; _i++) {
++            static const D3D12_TEXTURE_ADDRESS_MODE am[3] = {
++                D3D12_TEXTURE_ADDRESS_MODE_WRAP, D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
++                D3D12_TEXTURE_ADDRESS_MODE_CLAMP };
++            D3D12_STATIC_SAMPLER_DESC* d = &samp[RSX_TEX_UNITS + _i];
++            *d = samp[0];
++            d->AddressU = am[_i / 3]; d->AddressV = am[_i % 3];
++            d->AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++            d->ShaderRegister = (UINT)(RSX_TEX_UNITS + _i);
++        }
+ 
+         D3D12_ROOT_SIGNATURE_DESC rd = {0};
+         rd.NumParameters = 3; rd.pParameters = rp;
+-        rd.NumStaticSamplers = RSX_TEX_UNITS; rd.pStaticSamplers = samp;
++        rd.NumStaticSamplers = RSX_TEX_UNITS + U0W_SAMPLERS; rd.pStaticSamplers = samp;
+         rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+ 
+         ID3DBlob* sig = NULL; ID3DBlob* err = NULL;
+@@ -2488,6 +2501,30 @@ static int s_pso_pending_hit = 0;
+  * their normal output. Set around vp_get_fp_pso by the callers; such draws get
+  * their own pipelines (the code hash is salted). */
+ static int s_idcolor_draw = 0;
++/* Unit 0's static sampler (s0) is POINT + CLAMP for the debug-font atlas, but
++ * J-Stars binds most materials' main texture there, tiled ones included: its
++ * Temple of Athena star layer (fp 0x09CA7F81, 1024x1024 DXT5) repeated the
++ * texture's edge texels into long parallel lines and left the rest of the sky
++ * empty (jstars-notes STAGE_TEXTURES.md §5, FINDINGS §57). The draw's
++ * TEXTURE_ADDRESS word picks one of s16..s23 instead: wrap S in bits 0-3,
++ * wrap T in bits 8-11; 1 = wrap, 2 = mirror, anything else is treated as
++ * clamp (border and the mirror-once modes have no exact static sampler).
++ * Clamp on both axes keeps s0, so those draws are unchanged. The filter stays
++ * s0's: the plant boxes S0_LINEAR showed came from LINEAR, not from wrap.
++ * U0_WRAP=0 turns this off; U0_WRAP_LOG=1 prints each (fp, mode) once.
++ * Set around vp_get_fp_pso by the callers: 0 = s0, else 1 + sampler index
++ * (3 * modeS + modeT, 0 wrap / 1 mirror / 2 clamp). */
++static int s_u0_mode = 0;
++static int u0_wrap_mode(const D3D12DrawRecord* dr)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("U0_WRAP"); on = !(e && e[0] == '0'); }
++    if (!on || !dr->tex[0].set) return 0;
++    const u32 ws = dr->tex[0].addr & 0xFu, wt = (dr->tex[0].addr >> 8) & 0xFu;
++    const int ms = ws == 1 ? 0 : ws == 2 ? 1 : 2, mt = wt == 1 ? 0 : wt == 2 ? 1 : 2;
++    if (ms == 2 && mt == 2) return 0;
++    return 1 + 3 * ms + mt;
++}
+ static u32 idcolor_rt(void)
+ {
+     static int init = 0; static u32 rt = 0;
+@@ -3341,6 +3378,9 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     }
+     const u32 uhash_code = uhash;   /* FP_IDCOLOR_RT salts uhash below */
+     if (s_idcolor_draw) uhash ^= 0x1DC0104Fu;
++    /* Unit 0 read through a depth helper keeps its own sampling (s0). */
++    const int u0_mode = (zi && ((zi->shadow_mask | zi->bitcast_mask) & 1u)) ? 0 : s_u0_mode;
++    if (u0_mode) uhash ^= 0x500A0000u + (u32)u0_mode * 0x9E3779B1u;
+ 
+     s_perf_pso_calls++;
+     for (int i = 0; i < s_d3d.vp_fp_n; i++)
+@@ -3525,6 +3565,31 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             printf("[FP] fp=0x%08X: depth bitcast rewrite did not fit\n", fp_addr);
+         PSO_NOTE_FAIL(); return NULL;
+     }
++    if (u0_mode) {
++        char decl[64];
++        snprintf(decl, sizeof decl, "SamplerState _rsx_samp0a : register(s%d);\n",
++                 RSX_TEX_UNITS + u0_mode - 1);
++        char* at = strstr(hlsl, " main(");
++        while (at && at > hlsl && at[-1] != '\n') at--;
++        const size_t dl = strlen(decl), used = strlen(hlsl) + 1;
++        if (at && strstr(hlsl, "rsx_samp[0],") && used + dl < sizeof hlsl) {
++            hlsl_replace_all(hlsl, sizeof hlsl, "rsx_samp[0],", "_rsx_samp0a,");
++            at = strstr(hlsl, " main(");
++            while (at > hlsl && at[-1] != '\n') at--;
++            memmove(at + dl, at, strlen(hlsl) + 1 - (size_t)(at - hlsl));
++            memcpy(at, decl, dl);
++            static int lg = -1;
++            if (lg < 0) lg = getenv("U0_WRAP_LOG") ? 1 : 0;
++            if (lg) { static u32 seen[64][2]; static int ns = 0; int known = 0;
++                for (int i = 0; i < ns; i++)
++                    if (seen[i][0] == uhash_code && seen[i][1] == (u32)u0_mode) known = 1;
++                if (!known && ns < 64) { seen[ns][0] = uhash_code; seen[ns][1] = (u32)u0_mode; ns++;
++                    static const char* nm[3] = { "wrap", "mirror", "clamp" };
++                    fprintf(stderr, "[U0WRAP] fp=0x%X code=0x%08X s=%s t=%s (s%d)%c",
++                            fp_addr, uhash_code, nm[(u0_mode - 1) / 3], nm[(u0_mode - 1) % 3],
++                            RSX_TEX_UNITS + u0_mode - 1, 10); } }
++        }
++    }
+     if (zi && zi->shadow_mask && zpass_show()) {
+         const char* only = getenv("ZPASS_SHOW_FP");
+         if (!only || (u32)strtoul(only, NULL, 16) == fp_addr) {
+@@ -6617,6 +6682,7 @@ static void render_frame(void)
+         double _ps0 = perf_on() ? perf_now() : 0.0;
+         u8 _em[16]; const u64 _ek = dr_expand_key(dr, _em);
+         s_idcolor_draw = idcolor_rt() && dr->rt_off == idcolor_rt();
++        s_u0_mode = u0_wrap_mode(dr);
+         if (dr->fp_addr) vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+                                        dr_num_rts(dr),
+                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+@@ -7052,6 +7118,7 @@ static void render_frame(void)
+                  * back to the hardcoded atlas/colour PS pair. */
+                 u8 _em[16]; const u64 _ek = dr_expand_key(dr, _em);
+                 s_idcolor_draw = idcolor_rt() && dr->rt_off == idcolor_rt();
++                s_u0_mode = u0_wrap_mode(dr);
+                 ID3D12PipelineState* dpso =
+                     dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+                                                 dr_num_rts(dr),

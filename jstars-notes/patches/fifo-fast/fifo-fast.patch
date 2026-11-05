@@ -1,0 +1,126 @@
+From ac1b833f8f66c4f01ca8b71d8e2c598739611fc2 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 15:14:07 +0100
+Subject: [PATCH] rsx: FIFO_FAST takes SET_TRANSFORM_CONSTANT words straight to
+ their handler (FIFO_FAST=0 = old)
+
+---
+ libs/video/cellGcmSys.c   | 27 +++++++++++++++++++++++++-
+ libs/video/rsx_commands.c | 40 +++++++++++++++++++++++++++++++++++++++
+ libs/video/rsx_commands.h |  4 ++++
+ 3 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index a34ec4e..d97d473 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2029,7 +2029,32 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                 s_fifo_getoff += 4 + count * 4;
+                 continue;
+             }
+-            for (u32 i = 0; i < count; i++) {
++            /* FIFO_FAST (see rsx_tconst_fast): a run of SET_TRANSFORM_CONSTANT
++             * words on subchannel 0 -- the bulk of a fight frame's FIFO data --
++             * goes straight to the constant handler, without the per-word
++             * diagnostics and dispatch below. Only while none of those
++             * diagnostics is on (they would see these words), so the result
++             * is the same; the loop below takes over at the first word that
++             * is not a constant. */
++            u32 i_fast = 0;
++            { static int ok = -1;
++              if (ok < 0) ok = rsx_tconst_fast_on() && !getenv("GCM_SUBCH7") && !getenv("GCM_OBJDBG") &&
++                               !getenv("GCM_SUBCH_GATE") && !getenv("GCM_VAL_WATCH") &&
++                               !getenv("RSX_LIVE_FEED_DBG") && !rsx_live_draw_enabled() &&
++                               !rsx_draw_engine_enabled();
++              if (ok && subch == 0) {
++                  int stop = 0;
++                  for (; i_fast < count; i_fast++) {
++                      const u32 m = (type == 0) ? method + i_fast * 4 : method;
++                      if (m < NV4097_SET_TRANSFORM_CONSTANT ||
++                          m >= NV4097_SET_TRANSFORM_CONSTANT + NV4097_SET_TRANSFORM_CONSTANT_DWORDS * 4) break;
++                      const u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i_fast * 4);
++                      if (!dea) { stop = 1; break; }
++                      rsx_tconst_fast(&s_state, m, vm_read32(dea));
++                  }
++                  if (stop) i_fast = count;   /* as the loop below: an unmapped word ends the block */
++              } }
++            for (u32 i = i_fast; i < count; i++) {
+                 u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
+                 if (!dea) break;
+                 u32 m = (type == 0) ? method + i * 4 : method;
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 6059977..ada021e 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -382,6 +382,44 @@ void (*g_rsx_sync_hook)(void) = 0;
+ 
+ 
+ 
++/* FIFO_FAST (default on, FIFO_FAST=0 off): SET_TRANSFORM_CONSTANT words --
++ * the bulk of a frame's FIFO data in a fight -- used to fall through ~70
++ * range and equality tests in rsx_process_method before reaching their
++ * handler (the drawing thread spends about half its own code time in that
++ * function on Hidden Leaf, jstars-notes CPU_PROFILE §28). This is the same
++ * handler, taken first; nothing above the original one claims
++ * 0x1F00..0x1F7C. Off while the handler's debug switches (TCONST_DBG,
++ * SEQ_DBG) or RSX_TRACE are set. Returns 1 when it handled the word. */
++int rsx_tconst_fast_on(void)
++{
++    static int fast = -1;
++    if (fast < 0) { const char* e = getenv("FIFO_FAST");
++                    fast = ((e && *e == '0') || getenv("TCONST_DBG") || getenv("SEQ_DBG") ||
++                            getenv("RSX_TRACE")) ? 0 : 1; }
++    return fast;
++}
++int rsx_tconst_fast(rsx_state* state, u32 method, u32 data)
++{
++    if (method < NV4097_SET_TRANSFORM_CONSTANT ||
++        method >= NV4097_SET_TRANSFORM_CONSTANT + NV4097_SET_TRANSFORM_CONSTANT_DWORDS * 4 ||
++        !rsx_tconst_fast_on())
++        return 0;
++    const u32 reg_offset = (method - NV4097_SET_TRANSFORM_CONSTANT) / 4;
++    const u32 slot = state->transform_constant_load + (reg_offset >> 2);
++    if (slot < RSX_MAX_VERTEX_CONSTANTS) {
++        memcpy(&state->vertex_constants[slot][reg_offset & 3], &data, 4);
++        if (!state->vertex_constants_dirty) {
++            state->vertex_constants_lo = slot;
++            state->vertex_constants_hi = slot;
++            state->vertex_constants_dirty = 1;
++        } else {
++            if (slot < state->vertex_constants_lo) state->vertex_constants_lo = slot;
++            if (slot > state->vertex_constants_hi) state->vertex_constants_hi = slot;
++        }
++    }
++    return 1;
++}
++
+ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+ {
+     /* Guest-visible progress: NV406E SET_REFERENCE (0x50) and semaphore
+@@ -398,6 +436,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     { static int _rt=-1; if(_rt<0){ const char* e=getenv("RSX_TRACE");
+         _rt = e ? (atoi(e) > 1 ? atoi(e) : 250) : 0; }
+       if(_rt){ static int _m=0; if(_m++<_rt) fprintf(stderr,"[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
++    /* FIFO_FAST: SET_TRANSFORM_CONSTANT first (rsx_tconst_fast, above). */
++    if (rsx_tconst_fast(state, method, data)) return 0;
+     /* Back-end write label / semaphore (cellGcmSetWriteBackEndLabel): the RSX
+      * writes a value to a report/label the CPU polls for CPU<->RSX sync (double
+      * buffering). Real hardware DOES this; without it the game's frame-fence
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 93d82c6..72f1b18 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -421,6 +421,10 @@ void rsx_state_init(rsx_state* state);
+  * data:   32-bit value to write
+  * Returns 0 on success, -1 if method is unrecognized. */
+ int rsx_process_method(rsx_state* state, u32 method, u32 data);
++/* FIFO_FAST: the SET_TRANSFORM_CONSTANT handler on its own (returns 1 when
++ * it handled the word); rsx_tconst_fast_on() says whether the fast path is on. */
++int rsx_tconst_fast_on(void);
++int rsx_tconst_fast(rsx_state* state, u32 method, u32 data);
+ 
+ /* Called (when set) before any method that makes RSX progress visible to the
+  * guest -- label/semaphore writes, SET_REFERENCE, reports -- and by the FIFO
+-- 
+2.56.0.windows.2
+

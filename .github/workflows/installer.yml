@@ -1,0 +1,140 @@
+name: installer
+
+# Builds jsp-setup.exe (and, if asked, the portable zip) on a Windows runner, the same steps as "Building the installer"
+# in installer/README.md. Started by hand only (Actions tab, "Run workflow"). The package holds no game data: it builds
+# the game on the player's PC from their own copy. The files are kept as a workflow artifact for a few days, visible to
+# whoever can see this repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      portable:
+        description: Also build the portable zip
+        type: boolean
+        default: false
+      keep_days:
+        description: Days to keep the files (1-90)
+        type: number
+        default: 7
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Not in installer/tools/toolchain.json: the embeddable Python (the payload's toolchain/python), the font for the
+  # installer art and Inno Setup. Each is pinned by version and SHA-256 here.
+  PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip
+  PYTHON_EMBED_SHA256: 97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297
+  PLEX_URL: https://github.com/IBM/plex/releases/download/%40ibm%2Fplex-mono%401.1.0/ibm-plex-mono.zip
+  PLEX_SHA256: 4bfc936d0e1fd19db6327a3786eabdbc3dc0d464500576f6458f6706df68d26c
+  # Build-time only, never shipped. The README asks for 6.7 or newer; 6.7.3 is pinned so every run uses the same compiler.
+  INNO_VERSION: '6.7.3'
+  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
+  INNO_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
+
+jobs:
+  setup:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Pillow and numpy for the installer art
+        run: python -m pip install --disable-pip-version-check pillow==12.3.0 numpy==2.5.3
+
+      - name: Embeddable Python and the font (pinned downloads)
+        shell: pwsh
+        run: |
+          $dl = Join-Path $env:RUNNER_TEMP 'dl'
+          New-Item -ItemType Directory -Force -Path $dl, build\installer\fonts | Out-Null
+          foreach ($p in @(@($env:PYTHON_EMBED_URL, $env:PYTHON_EMBED_SHA256, 'python.zip'), @($env:PLEX_URL, $env:PLEX_SHA256, 'plex.zip'))) {
+            $f = Join-Path $dl $p[2]
+            Invoke-WebRequest -Uri $p[0] -OutFile $f
+            $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
+            if ($h -ne $p[1]) { Write-Output "$($p[2]): SHA-256 $h, expected $($p[1])"; exit 1 }
+          }
+          Expand-Archive -Path (Join-Path $dl 'python.zip') -DestinationPath build\installer\toolchain-cache\python
+          Expand-Archive -Path (Join-Path $dl 'plex.zip') -DestinationPath (Join-Path $dl 'plex')
+          Copy-Item (Join-Path $dl 'plex\ibm-plex-mono\fonts\complete\ttf\IBMPlexMono-Bold.ttf') build\installer\fonts\
+
+      - name: Inno Setup (pinned)
+        # Always the pinned version, the same approach as the Killzone 3 port's release workflow. ISCC.exe carries no
+        # version resource (it reads 0.0.0.0); the uninstaller (unins000.exe) next to it does, padded with spaces.
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $unins = Join-Path (Split-Path $iscc) 'unins000.exe'
+          $have = if ((Test-Path $iscc) -and (Test-Path $unins)) { (Get-Item $unins).VersionInfo.ProductVersion.Trim() } else { '' }
+          Write-Output "Inno Setup on the image: '$have'"
+          if ("$have" -ne $env:INNO_VERSION) {
+            # The official installer, checked against INNO_SHA256 before it runs.
+            $exe = Join-Path $env:RUNNER_TEMP "innosetup-$env:INNO_VERSION.exe"
+            Invoke-WebRequest -Uri $env:INNO_URL -OutFile $exe
+            $got = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+            if ($got -ne $env:INNO_SHA256) { Write-Output "Inno Setup: SHA-256 $got, expected $env:INNO_SHA256"; exit 1 }
+            $p = Start-Process $exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER' -Wait -PassThru
+            if ($p.ExitCode) { Write-Output "Inno Setup install exit $($p.ExitCode)"; exit 1 }
+            # /CURRENTUSER installs under %LOCALAPPDATA%\Programs
+            $iscc = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'
+            $unins = Join-Path (Split-Path $iscc) 'unins000.exe'
+          }
+          if (-not (Test-Path $iscc)) { Write-Output 'ISCC not found'; exit 1 }
+          $have = (Get-Item $unins).VersionInfo.ProductVersion.Trim()
+          if ("$have" -ne $env:INNO_VERSION) { Write-Output "Inno Setup is '$have', not $env:INNO_VERSION"; exit 1 }
+          Write-Output "ISCC $have at $iscc"
+          "ISCC=$iscc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Toolchain, art and music
+        # pwsh does not stop at a failing program in a multi-line step: check each exit code.
+        shell: pwsh
+        run: |
+          python installer\tools\fetch_toolchain.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python installer\tools\installer_art.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python installer\tools\installer_music.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Launcher
+        run: build\installer\toolchain-cache\trees\llvm-mingw\bin\x86_64-w64-mingw32-clang.exe -O2 -mwindows -s -o build\installer\jsp-launcher.exe installer\launcher\launcher.c
+
+      - name: Payload and setup
+        shell: pwsh
+        run: |
+          python installer\tools\assemble_payload.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $env:ISCC "/DPayload=$PWD\build\installer\payload" "/O$PWD\build\installer\out" "$PWD\installer\jsp.iss"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path build\installer\out\jsp-setup.exe)) { exit 1 }
+
+      - name: Portable zip
+        if: inputs.portable
+        run: python installer\tools\assemble_portable.py
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          # -Exclude filters only with a wildcard in the path (out\*); without it the list is empty and nothing is written.
+          $sums = Get-ChildItem build\installer\out\* -File -Exclude *.sha256, SHA256SUMS.txt | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
+          }
+          if (-not $sums) { Write-Output 'no files to checksum'; exit 1 }
+          $sums | Tee-Object -FilePath build\installer\out\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: jsp-installer-${{ github.sha }}
+          path: build/installer/out/
+          retention-days: ${{ inputs.keep_days || 7 }}
+          if-no-files-found: error

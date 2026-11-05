@@ -1,0 +1,98 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -9711,17 +9711,40 @@
+     return on;
+ }
+ 
+-/* Does batch [first, ...) of `prim` continue the stream the previous record holds? */
+-static int sf_continues(int indexed, u32 prim, u32 first)
++/* Does batch [first, first+count) of `prim` continue the stream the previous
++ * record holds? s_sf_why says why not (FAN_LOG prints it): 1 FAN_JOIN=0,
++ * 2 no stream, 3 other primitive/path, 4 not contiguous, 5 another record in
++ * between (or a mid-frame flush), 6 other BEGIN/END, 7 other fragment program,
++ * 8 previous record not a VP triangle list, 9 a restart index in the range. */
++static int s_sf_why;
++static int sf_continues(int indexed, u32 prim, u32 first, u32 count)
+ {
+     const rsx_state* st = s_d3d.current_rsx_state;
+-    if (!fan_join_on() || !st || !s_sf.valid || s_d3d.draw_count <= 0) return 0;
+-    if (s_sf.indexed != indexed || s_sf.prim != prim || s_sf.end != first) return 0;
+-    if (s_sf.rec != (int)s_d3d.draw_count - 1) return 0;
+-    if (s_sf.epoch != st->begin_epoch || s_sf.fp != st->shader_program) return 0;
+-    if (indexed && st->restart_enable) return 0;
++    s_sf_why = 0;
++    if (!fan_join_on()) { s_sf_why = 1; return 0; }
++    if (!st || !s_sf.valid || s_d3d.draw_count <= 0) { s_sf_why = 2; return 0; }
++    if (s_sf.indexed != indexed || s_sf.prim != prim) { s_sf_why = 3; return 0; }
++    if (s_sf.end != first) { s_sf_why = 4; return 0; }
++    if (s_sf.rec != (int)s_d3d.draw_count - 1) { s_sf_why = 5; return 0; }
++    if (s_sf.epoch != st->begin_epoch) { s_sf_why = 6; return 0; }
++    if (s_sf.fp != st->shader_program) { s_sf_why = 7; return 0; }
+     const D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
+-    if (!pv->is_vp || pv->topology != RSX_TOPOLOGY_TRIANGLES) return 0;
++    if (!pv->is_vp || pv->topology != RSX_TOPOLOGY_TRIANGLES) { s_sf_why = 8; return 0; }
++    if (indexed) {
++        /* Primitive restart (J-Stars keeps it enabled for its strips): the
++         * hardware starts a new fan at a restart index, so join only when no
++         * index the joined triangles use is the restart value. Same width
++         * rule as upload_strip_vp_native: a u16 buffer cannot hold a sentinel
++         * above 0xFFFF. */
++        const int idx16 = (((st->index_array_dma >> 4) & 0xF) == 1);
++        const int restart = st->restart_enable && !(idx16 && st->restart_index > 0xFFFFu);
++        if (restart) {
++            if (count > 256 || first == 0) { s_sf_why = 9; return 0; }
++            if (read_guest_index(st, s_sf.start) == st->restart_index) { s_sf_why = 9; return 0; }
++            for (u32 p = first - 1; p < first + count; p++)
++                if (read_guest_index(st, p) == st->restart_index) { s_sf_why = 9; return 0; }
++        }
++    }
+     return 1;
+ }
+ 
+@@ -9809,12 +9832,13 @@
+     if (n >= 600 && (n % 200) != 0) { n++; return; }
+     n++;
+     const rsx_state* st = s_d3d.current_rsx_state;
+-    fprintf(stderr, "[FANLOG] f=%llu %s prim=%u first=%u count=%u epoch=%u rt=0x%08X fp=0x%08X %s emitted=%u rec=%d n=%u\n",
++    fprintf(stderr, "[FANLOG] f=%llu %s prim=%u first=%u count=%u epoch=%u rt=0x%08X fp=0x%08X %s why=%d emitted=%u rec=%d n=%u restart=%u/0x%X dma=0x%X\n",
+             (unsigned long long)s_d3d.frame_count, indexed ? "indexed" : "arrays", prim, first, count,
+             st ? st->begin_epoch : 0u, rt, st ? st->shader_program : 0u,
+-            how == 1 ? "JOINED" : how == 2 ? "cont-newrec" : "new",
++            how == 1 ? "JOINED" : how == 2 ? "cont-newrec" : "new", how == 0 ? s_sf_why : 0,
+             emitted, s_d3d.draw_count - 1,
+-            s_d3d.draw_count > 0 ? s_d3d.draws[s_d3d.draw_count - 1].vertex_count : 0u);
++            s_d3d.draw_count > 0 ? s_d3d.draws[s_d3d.draw_count - 1].vertex_count : 0u,
++            st ? st->restart_enable : 0u, st ? st->restart_index : 0u, st ? st->index_array_dma : 0u);
+ }
+ 
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -9972,9 +9996,9 @@
+         s_d3d.current_rsx_state && s_d3d.current_rsx_state->vp_ucode_bytes >= 16) {
+         /* fan-join: a STRIP/FAN batch continuing the previous batch's stream
+          * (same BEGIN/END) is expanded against the stream, not on its own. */
+-        int sfc = sf_continues(0, primitive, first);
++        int sfc = sf_continues(0, primitive, first, count);
+         vp_flush_if_full(count, (s_d3d.merge_prev_draw && s_d3d.merge_first_end == first) || sfc);
+-        if (sfc) sfc = sf_continues(0, primitive, first);   /* a mid-frame flush drops the anchor */
++        if (sfc) sfc = sf_continues(0, primitive, first, count);   /* a mid-frame flush drops the anchor */
+         u32 rec = s_d3d.vp_vb_offset;
+         u32 emitted = sfc
+             ? VF_TIMED(upload_sf_cont_vp(s_d3d.current_rsx_state, 0, primitive, first, count))
+@@ -10149,7 +10173,7 @@
+      * list. Other primitives are skipped rather than drawn wrong. */
+     u32 emitted = 0;
+     int six_new = 0;   /* STRIP_INDEXED: the record created below is indexed */
+-    int sfc = (primitive == RSX_PRIMITIVE_TRIANGLE_FAN) ? sf_continues(1, primitive, first) : 0;   /* fan-join */
++    int sfc = (primitive == RSX_PRIMITIVE_TRIANGLE_FAN) ? sf_continues(1, primitive, first, count) : 0;   /* fan-join */
+     vp_flush_if_full(count, (s_d3d.merge_prev_draw &&
+                             (s_d3d.merge_first_end == first ||
+                              primitive == RSX_PRIMITIVE_TRIANGLE_STRIP)) || sfc);
+@@ -10208,7 +10232,7 @@
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_FAN) {
+         /* fan-join: an index batch continuing the previous fan batch of this
+          * BEGIN/END keeps the stream's first vertex as the fan centre. */
+-        if (sfc) sfc = sf_continues(1, primitive, first);   /* a mid-frame flush drops the anchor */
++        if (sfc) sfc = sf_continues(1, primitive, first, count);   /* a mid-frame flush drops the anchor */
+         emitted = sfc ? VF_TIMED(upload_sf_cont_vp(s_d3d.current_rsx_state, 1, primitive, first, count))
+                       : VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 1));
+         if (sfc && emitted && sf_append(rec, emitted, first, count)) {

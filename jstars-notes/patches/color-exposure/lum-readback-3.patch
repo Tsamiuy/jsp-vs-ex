@@ -1,0 +1,157 @@
+From 55406e423dcb5c632c6be91dc989d62737b0fb69 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 16:05:36 +0000
+Subject: [PATCH] lum-readback-3: resolve the readback target through its DMA
+ context; per-target log
+
+---
+ libs/video/rsx_commands.c      |  4 ++++
+ libs/video/rsx_commands.h      |  8 ++++++++
+ libs/video/rsx_d3d12_backend.c | 33 ++++++++++++++++++++++++---------
+ 3 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index a570985..c4f6106 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -127,6 +127,10 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
+         state->surface_clip_h = (data >> 16) & 0xFFFF;
+         state->surface_dirty = 1;
+         return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_A: state->surface_color_dma[0] = data; return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_B: state->surface_color_dma[1] = data; return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_C: state->surface_color_dma[2] = data; return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_D: state->surface_color_dma[3] = data; return 0;
+     case NV4097_SET_SURFACE_COLOR_AOFFSET:
+         state->surface_color_offset[0] = data;
+         { static int _s = -1; if (_s < 0) _s = getenv("SURFDBG") ? 1 : 0;
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 4e576cc..74ba878 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -57,6 +57,8 @@ extern "C" {
+ /* ...and the same question for the depth buffer, which a texture unit coming
+  * back to sample it has to agree with. */
+ #define NV4097_SET_CONTEXT_DMA_ZETA            0x00000198
++#define NV4097_SET_CONTEXT_DMA_COLOR_C         0x000001B4
++#define NV4097_SET_CONTEXT_DMA_COLOR_D         0x000001B8
+ #define CELL_GCM_CONTEXT_DMA_MEMORY_FRAME_BUFFER 0xFEED0000
+ #define CELL_GCM_CONTEXT_DMA_MEMORY_HOST_BUFFER  0xFEED0001
+ 
+@@ -253,6 +255,12 @@ typedef struct rsx_state {
+     u32 surface_format;
+     u32 surface_color_offset[RSX_MAX_RENDER_TARGETS];
+     u32 surface_color_pitch[RSX_MAX_RENDER_TARGETS];
++    /* SET_CONTEXT_DMA_COLOR_A..D handles (0xFEED0000 local, 0xFEED0001 main;
++     * 0 = never set). Tells a readback which memory a colour surface's
++     * offset lives in: J-Stars' 20x11 luminance target sits at IO offset
++     * 0x039FFA40, the tail of its 0x3A00000 IO window, so the PPU reads it
++     * from main memory, not from local offset 0x039FFA40 (LUM_READBACK). */
++    u32 surface_color_dma[RSX_MAX_RENDER_TARGETS];
+     u32 surface_zeta_offset;
+     u32 surface_zeta_pitch;
+     u32 surface_clip_x, surface_clip_y;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b367080..d9ee372 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -156,6 +156,7 @@ typedef struct {
+     u32 rt_w, rt_h;     /* surface clip dims at record time (offscreen RT size) */
+     u32 rt_fmt;         /* RSX surface colour format (SET_SURFACE_FORMAT [4:0]) */
+     u32 rt_pitch;       /* SET_SURFACE_PITCH_A at record time (LUM_READBACK) */
++    u32 rt_dma;         /* SET_CONTEXT_DMA_COLOR_A at record time (LUM_READBACK) */
+     u32 clip_w, clip_h; /* raw SET_SURFACE_CLIP dims, before the <16 => window-size
+                          * fallback of rsx_color_target_dims (LUM_READBACK) */
+     /* Guest viewport rect at draw time (target pixels). Sub-viewport layouts
+@@ -262,6 +263,7 @@ typedef struct {
+     u32                   rb_pitch;    /* its row pitch (256-aligned) */
+     int                   rb_pending;  /* a copy into rb is in the submitted command list */
+     u32                   gw, gh;      /* guest surface clip dims when last drawn (LUM_READBACK) */
++    u32                   dma;         /* its SET_CONTEXT_DMA_COLOR handle (0 = unknown) */
+     u32                   rb_w, rb_h;  /* rect copied into rb */
+ } OffRT;
+ /* Offscreen render targets live at once. J-Stars' matches use 17 in one frame
+@@ -5088,9 +5090,14 @@ static void lum_readback_finish(void)
+         if (!r->rb || !r->rb_pending) continue;
+         r->rb_pending = 0;
+         if (!vm_base) continue;
+-        u32 goff = cellGcmResolveLocated(1, r->off);
+-        if (goff == 0xFFFFFFFFu) goff = cellGcmResolveLocated(0, r->off);
+-        if (goff == 0xFFFFFFFFu) continue;
++        /* Which memory the surface is in comes from its DMA context, not
++         * from trying local first: local offset 0x039FFA40 always resolves,
++         * but the 20x11 target is at IO offset 0x039FFA40 in main memory
++         * (the last 1.4 KB of the 0x3A00000 IO window), which is where the
++         * PPU reads it. v2 wrote every frame to the local alias. */
++        const int main_mem = r->dma == 0xFEED0001u;
++        u32 goff = cellGcmResolveLocated(main_mem ? 0 : 1, r->off);
++        if (goff == 0xFFFFFFFFu || goff == 0u) continue;
+         const u32 cw = r->rb_w ? r->rb_w : r->w, ch = r->rb_h ? r->rb_h : r->h;
+         const u32 gpitch = r->pitch ? r->pitch : cw * 4u;
+         if (gpitch < cw * 4u) continue;   /* a pitch narrower than the rect: never overrun */
+@@ -5107,13 +5114,16 @@ static void lum_readback_finish(void)
+                 sum += (u64)s[x * 4] + s[x * 4 + 1] + s[x * 4 + 2];
+             }
+         }
+-        { static int n = 0;
+-          if (n < 16 || (n % 300) == 0) {
++        /* Log cadence is per target: v2 counted all targets together, and
++         * with two targets per frame the "every 300th" line always fell on
++         * the same one, so the 20x11 target was never seen after frame 8. */
++        { static u32 n[MAX_OFF_RTS];
++          if (n[i] < 8 || (n[i] % 150) == 0) {
+               const u8* s = (const u8*)mapped;
+-              fprintf(stderr, "[LUMRB] off=0x%08X %ux%u (res %ux%u) pitch=%u -> guest 0x%X px0 R=%u G=%u B=%u A=%u meanRGB=%u%c",
+-                      r->off, cw, ch, r->w, r->h, gpitch, goff, s[0], s[1], s[2], s[3],
+-                      (unsigned)(sum / ((u64)cw * ch * 3u)), 10); }
+-          n++; }
++              fprintf(stderr, "[LUMRB] off=0x%08X dma=0x%08X %ux%u (res %ux%u) pitch=%u -> guest 0x%X (%s) px0 R=%u G=%u B=%u A=%u meanRGB=%u%c",
++                      r->off, r->dma, cw, ch, r->w, r->h, gpitch, goff, main_mem ? "main" : "local",
++                      s[0], s[1], s[2], s[3], (unsigned)(sum / ((u64)cw * ch * 3u)), 10); }
++          n[i]++; }
+         D3D12_RANGE wr = {0, 0};
+         r->rb->lpVtbl->Unmap(r->rb, 0, &wr);
+     }
+@@ -5432,6 +5442,7 @@ static void render_frame(void)
+         else if (dr->is_vp && dr->rt_off) {
+             const int _s = off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt);
+             if (_s >= 0 && dr->rt_pitch) s_d3d.off_rt[_s].pitch = dr->rt_pitch;
++            if (_s >= 0 && dr->rt_dma) s_d3d.off_rt[_s].dma = dr->rt_dma;
+             if (_s >= 0 && dr->clip_w && dr->clip_h) {
+                 s_d3d.off_rt[_s].gw = dr->clip_w; s_d3d.off_rt[_s].gh = dr->clip_h; }
+         }
+@@ -6932,6 +6943,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+             dr->rt_w = rt_w; dr->rt_h = rt_h;
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->rt_dma = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_dma[0] : 0;
+             dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
+             dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+             memcpy(dr->cc, cc, sizeof(cc));
+@@ -8552,6 +8564,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 }
+                 dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->rt_dma = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_dma[0] : 0;
+             dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
+             dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+                 if (s_d3d.current_rsx_state) {
+@@ -8683,6 +8696,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+             }
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->rt_dma = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_dma[0] : 0;
+             dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
+             dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+             if (s_d3d.current_rsx_state) {
+@@ -8871,6 +8885,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         }
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->rt_dma = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_dma[0] : 0;
+             dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
+             dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+         if (s_d3d.current_rsx_state) {
+-- 
+2.43.0
+

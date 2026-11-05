@@ -1,0 +1,33 @@
+From ecc267e86d4a9dc00861ede0cf7bfc92ca6d8b02 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 17:00:48 +0000
+Subject: [PATCH] lum-readback-4: route SET_CONTEXT_DMA_COLOR_A..D to
+ process_surface_method
+
+---
+ libs/video/rsx_commands.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index a47545e..c6f9271 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -421,8 +421,14 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
+         return 0;
+       } }
++    /* The colour/zeta DMA context handles (0x18C, 0x194, 0x198, 0x1B4, 0x1B8)
++     * sit below the surface register block, so the range gate above never
++     * routed them: lum-readback-3's cases in process_surface_method were dead
++     * and every readback logged dma=0 (jstars-notes FINDINGS §40). */
+     if ((method >= 0x200 && method <= 0x23C) ||
+-        (method >= 0x280 && method <= 0x28C))
++        (method >= 0x280 && method <= 0x28C) ||
++        method == NV4097_SET_CONTEXT_DMA_COLOR_A || method == NV4097_SET_CONTEXT_DMA_COLOR_B ||
++        method == NV4097_SET_CONTEXT_DMA_COLOR_C || method == NV4097_SET_CONTEXT_DMA_COLOR_D)
+         return process_surface_method(state, method, data);
+ 
+     /* Texture methods: 0x1A00..0x1A00 + 16*0x20 - 1 */
+-- 
+2.43.0
+

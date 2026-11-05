@@ -1,0 +1,85 @@
+Build with the bundled llvm-mingw. Applied by installer/tools/assemble_payload.py to the payload's copy of the toolkit; the checked-out
+repository is not edited.
+clang for the MinGW target ignores __declspec(thread) ("unknown attribute 'thread' ignored"), so these per-thread variables became one
+shared copy for all threads. The worst is spu_workload.c's per-thread job fingerprint cache: shared between the SPU worker threads, it
+handed jobs the wrong image, every Spurs job chain waited 20 s and gave up, and the game never reached the title (Windows, installer
+tests 2 and 5 of issue #57). _Thread_local is the same thing for MSVC and for clang/GCC on MinGW.
+Tested on Windows 11 (v15 tree, bundled llvm-mingw): before, 0 frames and 20 "still closed" give-ups in 60 s; after, 509 flip lines
+and 0 give-ups in 60 s, the menu at 36 s, a Free Battle at 29.5 flips/s and 0.0% silent sound blocks in the fight.
+diff --git a/ps3recomp/libs/video/cellGcmSys.c b/ps3recomp/libs/video/cellGcmSys.c
+--- a/ps3recomp/libs/video/cellGcmSys.c
++++ b/ps3recomp/libs/video/cellGcmSys.c
+@@ -1877,7 +1877,7 @@ void cellGcm_fifo_kick_wait(unsigned ms)
+              * so a kick ends the step at once. The spin was a third of this
+              * thread's time, all of it kernel (jstars-notes CPU_PROFILE §26). */
+             static int psleep = -1;
+-            static __declspec(thread) HANDLE t_timer;
++            static _Thread_local HANDLE t_timer;
+             if (psleep < 0) { const char* e = getenv("GCM_PUT_POLL_SLEEP"); psleep = (e && *e == '0') ? 0 : 1; }
+             if (psleep && !t_timer)
+                 t_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+diff --git a/ps3recomp/runtime/spu/spu_drain.c b/ps3recomp/runtime/spu/spu_drain.c
+--- a/ps3recomp/runtime/spu/spu_drain.c
++++ b/ps3recomp/runtime/spu/spu_drain.c
+@@ -353,8 +353,8 @@ void spu_depth_guard(spu_context* ctx)
+     static uint32_t s_ring_shared[RING];
+     static uint32_t s_n_shared;
+ #ifdef _WIN32
+-    static __declspec(thread) uint32_t t_ring[RING];
+-    static __declspec(thread) uint32_t t_n;
++    static _Thread_local uint32_t t_ring[RING];
++    static _Thread_local uint32_t t_n;
+ #else
+     static _Thread_local uint32_t t_ring[RING];
+     static _Thread_local uint32_t t_n;
+diff --git a/ps3recomp/runtime/spu/spu_workload.c b/ps3recomp/runtime/spu/spu_workload.c
+--- a/ps3recomp/runtime/spu/spu_workload.c
++++ b/ps3recomp/runtime/spu/spu_workload.c
+@@ -49,7 +49,7 @@ uint64_t spu_workload_fingerprint(const void* data, size_t n)
+  * give; any byte that differs takes the full hash again. Images over 256 KB are
+  * always hashed. */
+ #ifdef _WIN32
+-#define SPU_FP_TLS __declspec(thread)
++#define SPU_FP_TLS _Thread_local
+ #else
+ #define SPU_FP_TLS _Thread_local
+ #endif
+diff --git a/ps3recomp/runtime/syscalls/sys_event.c b/ps3recomp/runtime/syscalls/sys_event.c
+--- a/ps3recomp/runtime/syscalls/sys_event.c
++++ b/ps3recomp/runtime/syscalls/sys_event.c
+@@ -310,8 +310,8 @@ static void evq_push_wake(uint32_t queue_id)
+ /* Wait up to timeout_us for a push to queue_id (or the timer). */
+ static void evq_subms_wait(uint32_t queue_id, uint64_t timeout_us)
+ {
+-    static __declspec(thread) HANDLE t_timer;
+-    static __declspec(thread) int t_state;          /* 0 untried, 1 ok, -1 none */
++    static _Thread_local HANDLE t_timer;
++    static _Thread_local int t_state;          /* 0 untried, 1 ok, -1 none */
+     if (t_state == 0) {
+         t_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+         t_state = t_timer ? 1 : -1;
+@@ -332,8 +332,8 @@ static void evq_subms_wait(uint32_t queue_id, uint64_t timeout_us)
+ /* Is this the same thread polling the same empty queue again within 2 ms? */
+ static int evq_is_poll_loop(uint32_t queue_id)
+ {
+-    static __declspec(thread) uint32_t t_q;
+-    static __declspec(thread) int64_t t_last;
++    static _Thread_local uint32_t t_q;
++    static _Thread_local int64_t t_last;
+     LARGE_INTEGER now; QueryPerformanceCounter(&now);
+     static LARGE_INTEGER f; if (!f.QuadPart) QueryPerformanceFrequency(&f);
+     const int loop = (t_q == queue_id) && (now.QuadPart - t_last) < f.QuadPart / 500;
+diff --git a/ps3recomp/runtime/syscalls/sys_timer.c b/ps3recomp/runtime/syscalls/sys_timer.c
+--- a/ps3recomp/runtime/syscalls/sys_timer.c
++++ b/ps3recomp/runtime/syscalls/sys_timer.c
+@@ -151,8 +151,8 @@ static unsigned precise_sleep_spin_us(void)
+  * (older Windows): the caller then spins as before. */
+ static int precise_sleep_us(uint64_t usec)
+ {
+-    static __declspec(thread) HANDLE t_timer;
+-    static __declspec(thread) int t_state;       /* 0 untried, 1 ok, -1 unavailable */
++    static _Thread_local HANDLE t_timer;
++    static _Thread_local int t_state;       /* 0 untried, 1 ok, -1 unavailable */
+     if (t_state == 0) {
+         t_timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_ALL_ACCESS);

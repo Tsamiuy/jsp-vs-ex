@@ -1,0 +1,211 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 30af9e1..2d11786 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2409,7 +2409,7 @@ static void dr_z_info(const D3D12DrawRecord* dr, DrZInfo* zi)
+     memset(zi, 0, sizeof *zi);
+     if (!zpass_on() && !zeta_targets_on()) return;
+     for (int u = 0; u < RSX_TEX_UNITS && u < 16; u++) {
+-        if (!dr->tex[u].set || dt_find(dr->tex[u].raw) < 0) continue;
++        if (!dr->tex[u].set || !dt_handoff_ok(dt_find(dr->tex[u].raw))) continue;
+         const u32 base = dr->tex[u].fmt & 0x9Fu;
+         if (base >= 0x90 && base <= 0x93) {
+             rsx_fp_shadow_desc sd;
+@@ -2437,7 +2437,15 @@ static void dr_z_info(const D3D12DrawRecord* dr, DrZInfo* zi)
+     else if (zeta_targets_on() && dr->rt_off && dr->zt_off && dt_find(dr->zt_off) >= 0) {
+         static int forced = -1;
+         if (forced < 0) forced = getenv("ZETA_FORCED_DEPTH") ? 1 : 0;
+-        if (!forced) zi->zonly_state = dr->zstate ? dr->zstate : 0x133u;
++        /* v3: the guest's test enable and write mask (what fixed the HUD
++         * boxes), but the function stays LESS_EQUAL as in v1, under which the
++         * water rendered; ZETA_GUEST_FUNC=1 uses the guest function too (v2). */
++        static int gfunc = -1;
++        if (gfunc < 0) gfunc = getenv("ZETA_GUEST_FUNC") ? 1 : 0;
++        if (!forced) {
++            const u32 zs = dr->zstate ? dr->zstate : 0x133u;
++            zi->zonly_state = gfunc ? zs : ((zs & ~0x70u) | (3u << 4));
++        }
+     }
+     if (!zi->shadow_mask && !zi->bitcast_mask && !zi->zonly_state) return;
+     u64 k = 1469598103934665603ULL;
+@@ -4115,6 +4123,8 @@ typedef struct {
+     ID3D12Resource*       snap;
+     D3D12_RESOURCE_STATES snap_st;
+     int                   dirty;
++    int                   color_used;  /* a colour pass depth-tests against it */
++    int                   cast;        /* a depth-only pass drew into it */
+ } DepthRT;
+ static DepthRT               s_zrt[MAX_DEPTH_RTS];
+ static ID3D12DescriptorHeap* s_zrt_dsv_heap;
+@@ -4259,11 +4269,27 @@ static int dt_get(u32 off, u32 w, u32 h)
+     z->st = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+     z->snap_st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+     z->fresh = 1; z->used = 1; z->dirty = 1;
++    z->color_used = 0; z->cast = 0;
+     if (zpass_dbg())
+         fprintf(stderr, "[ZPASS] depth target %d: zeta 0x%08X %ux%u%c", i, off, w, h, 10);
+     return i;
+ }
+ 
++/* May a texture unit bound at this DepthRT's offset sample it? Only when it
++ * holds real depth: a colour pass's zeta (ZETA_TARGETS), or a map the shadow
++ * casters drew (SHADOW_PASSES). v2 handed off every DepthRT, including the
++ * shadow cascades that only ever got the game's clears (the casters are not
++ * drawn without SHADOW_PASSES), and Ace turned into a black silhouette.
++ * ZETA_HANDOFF_ALL=1 = v2. */
++static int dt_handoff_ok(int zt)
++{
++    static int all = -1;
++    if (all < 0) all = getenv("ZETA_HANDOFF_ALL") ? 1 : 0;
++    if (zt < 0) return 0;
++    if (all) return 1;
++    return s_zrt[zt].color_used || (s_zrt[zt].cast && zpass_on());
++}
++
+ static int off_rt_find(u32 off)
+ {
+     if (!off) return -1;
+@@ -5056,8 +5082,14 @@ static void render_frame(void)
+         D3D12DrawRecord* dr = &s_d3d.draws[_d];
+         if (dr->is_vp && dr_is_zonly(dr))
+             dt_get(dr->rt_off & ~ZT_TAG, dr->rt_w, dr->rt_h);
+-        if (dr->is_vp && dr->zt_off && dr->rt_off && !dr_is_zonly(dr))
+-            dt_get(dr->zt_off, dr->rt_w, dr->rt_h);   /* ZETA_TARGETS */
++        if (dr->is_vp && dr->zt_off && dr->rt_off && !dr_is_zonly(dr)) {
++            const int _z = dt_get(dr->zt_off, dr->rt_w, dr->rt_h);   /* ZETA_TARGETS */
++            if (_z >= 0 && !dr->is_clear) s_zrt[_z].color_used = 1;
++        }
++        if (dr->is_vp && dr_is_zonly(dr) && !dr->is_clear) {
++            const int _z = dt_find(dr->rt_off & ~ZT_TAG);
++            if (_z >= 0) s_zrt[_z].cast = 1;
++        }
+         else if (dr->is_vp && dr->rt_off)
+             off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt);
+         for (int _m = 0; _m < 3; _m++)
+@@ -5174,7 +5206,7 @@ static void render_frame(void)
+              * that depth (.r); dr_z_info tells the FP how to use it. */
+             if (dr->tex[_u].set && (zpass_on() || zeta_targets_on())) {
+                 int zt = dt_find(dr->tex[_u].raw);
+-                if (zt >= 0) {
++                if (zt >= 0 && dt_handoff_ok(zt)) {
+                     dr->tex_zt[_u] = zt;
+                     srv_write(wslot, s_zrt[zt].snap, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+                               D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+@@ -5554,8 +5586,17 @@ static void render_frame(void)
+                         D3D12_CLEAR_FLAGS fl = (D3D12_CLEAR_FLAGS)(
+                             ((cf & 1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
+                             ((cf & 2u) ? D3D12_CLEAR_FLAG_STENCIL : 0));
++                        /* RSX clears the surface clip, not the whole buffer: a
++                         * smaller pass sharing the zeta (the 256x256 reflection)
++                         * must not wipe the scene's depth. ZETA_FULL_CLEAR=1 = old. */
++                        static int fullc = -1;
++                        if (fullc < 0) fullc = getenv("ZETA_FULL_CLEAR") ? 1 : 0;
++                        D3D12_RECT zr = {0, 0, (LONG)dr->rt_w, (LONG)dr->rt_h};
++                        const int part = !fullc && dr->rt_w && dr->rt_h &&
++                                         (dr->rt_w < s_zrt[zt].w || dr->rt_h < s_zrt[zt].h);
+                         if (fl) s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, zh,
+-                                    fl, dr->cc[0], (UINT8)dr->cc[1], 0, NULL);
++                                    fl, dr->cc[0], (UINT8)dr->cc[1], part ? 1u : 0u,
++                                    part ? &zr : NULL);
+                         zn_clear[zt]++; zlast_clear[zt] = dr->cc[0];
+                         s_zrt[zt].fresh = 0;
+                         continue;
+@@ -5656,6 +5697,17 @@ static void render_frame(void)
+                     for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
+                 }
+                 if (czt >= 0) s_zrt[czt].dirty = 1;
++                if (czt >= 0 && !dr->is_clear && zpass_dbg()) {
++                    static u32 seen[32]; static int ns = 0; int known = 0;
++                    const u32 k = dr->fp_addr ^ (dr->zstate << 20) ^ ((u32)czt << 28);
++                    for (int i = 0; i < ns; i++) if (seen[i] == k) known = 1;
++                    if (!known && ns < 32) { seen[ns++] = k;
++                        fprintf(stderr, "[ZPASS] colour op on kept zeta 0x%08X: fp=0x%X rt=0x%08X"
++                                        " zstate=0x%03X (test %u write %u func %u) verts=%u%c",
++                                s_zrt[czt].off, dr->fp_addr, dr->rt_off, dr->zstate,
++                                dr->zstate & 1u, (dr->zstate >> 1) & 1u, (dr->zstate >> 4) & 7u,
++                                dr->vertex_count, 10); }
++                }
+                 if (dr->is_clear && (dr->zclr & 3u)) {   /* ZETA_TARGETS depth/stencil clear */
+                     const D3D12_CLEAR_FLAGS zf = (D3D12_CLEAR_FLAGS)(
+                         ((dr->zclr & 1u) ? D3D12_CLEAR_FLAG_DEPTH : 0) |
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 33e35de..9e19b9d 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -345,6 +345,20 @@ static void decode_src(u32 w, int abs_bit, Src* s)
+ /* HLSL expression for the interpolated input selected by OPDEST.INPUT_SRC.
+  * The backend's passthrough VS forwards COL0/COL1/FOG/TEXCOORD0..7; WPOS maps
+  * to SV_POSITION (screen-space — an approximation of the RSX window coord). */
++/* RSX has ten texture coordinate inputs: TEX8 (0xC) and TEX9 (0xD) follow
++ * TEX0..7. They used to read as zero. J-Stars' materials compute their
++ * shadow-map lookups from them, so every cascade tap sampled at 0/0 (FINDINGS
++ * zeta v3). They are declared in PSInput only when a program reads them, so
++ * a pixel shader paired with a vertex shader that lacks TEXCOORD8/9 still
++ * links. FP_TC89=0 restores the zeros. */
++static int s_fp_uses_tc89;
++static int fp_tc89_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FP_TC89"); on = e ? atoi(e) : 1; }
++    return on;
++}
++
+ static const char* input_expr(u32 input_src)
+ {
+     static const char* tc[8] = {
+@@ -359,7 +373,11 @@ static const char* input_expr(u32 input_src)
+     case 0x3: return "input.fog";      /* FOGC */
+     default:
+         if (input_src >= 0x4 && input_src <= 0xB) return tc[input_src - 0x4]; /* TC0..7 */
+-        return "float4(0,0,0,0)";      /* TC8/TC9/FACING not plumbed */
++        if ((input_src == 0xC || input_src == 0xD) && fp_tc89_on()) {
++            s_fp_uses_tc89 = 1;
++            return input_src == 0xC ? "input.tc8" : "input.tc9";
++        }
++        return "float4(0,0,0,0)";      /* FACING (and TC8/9 with FP_TC89=0) not plumbed */
+     }
+ }
+ 
+@@ -560,6 +578,7 @@ static int rsx_fp_decompile_internal(
+     char* out, u32 out_size, u32* out_constant_count)
+ {
+     if (!ucode || !out || out_size == 0) return -1;
++    s_fp_uses_tc89 = 0;
+     const u32 gamma_units = rsx_fp_texture_gamma_units(ucode, max_bytes, gamma_masks);
+ 
+     const u32 sampled_units = rsx_fp_texture_units(ucode, max_bytes);
+@@ -1103,8 +1122,10 @@ static int rsx_fp_decompile_internal(
+         "    float4 position : SV_POSITION; float4 col0 : COLOR0; float4 col1 : COLOR1;\n"
+         "    float4 fog : FOG;\n"
+         "    float4 tc0:TEXCOORD0; float4 tc1:TEXCOORD1; float4 tc2:TEXCOORD2; float4 tc3:TEXCOORD3;\n"
+-        "    float4 tc4:TEXCOORD4; float4 tc5:TEXCOORD5; float4 tc6:TEXCOORD6; float4 tc7:TEXCOORD7;\n"
+-        "};\n");
++        "    float4 tc4:TEXCOORD4; float4 tc5:TEXCOORD5; float4 tc6:TEXCOORD6; float4 tc7:TEXCOORD7;\n");
++    if (s_fp_uses_tc89)
++        out_puts(&p, "    float4 tc8:TEXCOORD8; float4 tc9:TEXCOORD9;\n");
++    out_puts(&p, "};\n");
+     /* Texture bank. With no cube units (the default) emit the exact legacy
+      * array declaration so 2D-only programs are byte-identical. When any unit
+      * is a cubemap, declare each unit individually at its t-register so the
+diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
+index edd01d6..a35be4f 100644
+--- a/libs/video/rsx_vp_decompiler.c
++++ b/libs/video/rsx_vp_decompiler.c
+@@ -590,6 +590,7 @@ static int rsx_vp_decompile_impl(
+         "    float4 fog:FOG;\n"
+         "    float4 t0:TEXCOORD0; float4 t1:TEXCOORD1; float4 t2:TEXCOORD2; float4 t3:TEXCOORD3;\n"
+         "    float4 t4:TEXCOORD4; float4 t5:TEXCOORD5; float4 t6:TEXCOORD6; float4 t7:TEXCOORD7;\n"
++        "    float4 t8:TEXCOORD8; float4 t9:TEXCOORD9;\n"
+         "};\n"
+         /* b0: 512 vec4 transform constants + the RSX viewport transform,
+          * pre-mapped by the harness to D3D clip space:
+@@ -663,6 +664,9 @@ static int rsx_vp_decompile_impl(
+         "    Out.col0 = o[1]; Out.col1 = o[2]; Out.fog = o[5].xxxx;\n"
+         "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
+         "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"
++        /* TEX8 is output register 15; TEX9 shares register 6 with the point
++         * size (RPCS3's vertex output table does the same). */
++        "    Out.t8=o[15]; Out.t9=o[6];\n"
+         "    return Out;\n"
+         "}\n");
+ 

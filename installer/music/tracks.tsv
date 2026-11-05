@@ -1,0 +1,10 @@
+# file	mode	rate	title	author	source
+# Mode, rate, title and author from the bytebeat-composer library (2026-11-03): track 2-6 code
+# identical, track 1 0.98 similar to the library's minified code. Mode left empty in the library = Bytebeat.
+# Licence: the library's MIT licence, see NOTICE.md.
+track1.js	floatbeat	48000	true phonk indeed	eSlashMachine	https://dollchan.net/btb/res/6946.html#11537
+track2.js	bytebeat	48000	difficult level	computerman113	https://www.reddit.com/r/bytebeat/comments/1hfy2uj/difficult_level/
+track3.js	bytebeat	44100	Changsha wip	D3nschøt	https://www.reddit.com/r/bytebeat/comments/1df4gxo/idk/
+track4.js	bytebeat	22050	a new adventure	Demari Smith	https://dollchan.net/btb/res/3.html#5895
+track5.js	floatbeat	48000	generator	eSlashMachine	https://dollchan.net/btb/res/6946.html#14913
+track6.js	floatbeat	48000	dystopia	eSlashMachine	https://dollchan.net/btb/res/6946.html#12004

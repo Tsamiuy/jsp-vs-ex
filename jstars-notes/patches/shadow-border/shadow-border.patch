@@ -1,0 +1,39 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 7468630..15d3651 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1370,6 +1370,19 @@ static int init_d3d12(u32 width, u32 height)
+               if (e && (strtoul(e, NULL, 16) & (1ul << _s)))
+                   samp[_s].AddressU = samp[_s].AddressV = samp[_s].AddressW =
+                       D3D12_TEXTURE_ADDRESS_MODE_CLAMP; }
++            /* S_BORDER_UNITS=<hex mask> (test): clamp-to-border with an opaque
++             * white border on those units. For shadow maps (J-Stars: units 7
++             * and 8) that makes every lookup outside the map read depth 1.0,
++             * i.e. "nothing in front", so ground beyond a cascade is lit. WRAP
++             * read random map texels there and CLAMP read the map's edge, which
++             * darkened the Namek ground near the camera (FINDINGS §46). Wins
++             * over S_CLAMP_UNITS for the same unit. */
++            { const char* e = getenv("S_BORDER_UNITS");
++              if (e && (strtoul(e, NULL, 16) & (1ul << _s))) {
++                  samp[_s].AddressU = samp[_s].AddressV = samp[_s].AddressW =
++                      D3D12_TEXTURE_ADDRESS_MODE_BORDER;
++                  samp[_s].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
++              } }
+             samp[_s].ShaderRegister = (UINT)_s;
+             samp[_s].MaxLOD = D3D12_FLOAT32_MAX;
+             samp[_s].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+@@ -6451,10 +6464,12 @@ static void render_frame(void)
+                         if (!known && ns < 24) { seen[ns++] = k;
+                             const DrZInfo* zq = dr_z(dr);
+                             fprintf(stderr, "[ZPASS] fp=0x%X unit %d samples zeta 0x%08X fmt=0x%02X"
+-                                            " remap=0x%04X zfunc=%u ctl0=0x%08X -> %s%c",
++                                            " remap=0x%04X zfunc=%u ctl0=0x%08X addr=0x%08X (wrap s=%u t=%u)"
++                                            " -> %s%c",
+                                     dr->fp_addr, _u, dr->tex[_u].raw, dr->tex[_u].fmt,
+                                     dr->tex[_u].ctrl1 & 0xFFFFu, dr->tex[_u].addr >> 28,
+-                                    dr->tex[_u].ctl0,
++                                    dr->tex[_u].ctl0, dr->tex[_u].addr,
++                                    dr->tex[_u].addr & 0xFu, (dr->tex[_u].addr >> 8) & 0xFu,
+                                     ((zq->shadow_mask >> _u) & 1u) ? "depth compare"
+                                     : ((zq->bitcast_mask >> _u) & 1u) ? "A8R8G8B8 bitcast"
+                                     : "plain depth read", 10); }

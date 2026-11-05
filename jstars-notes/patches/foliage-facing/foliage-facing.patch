@@ -1,0 +1,53 @@
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 9e19b9d..3eb159f 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -352,6 +352,18 @@ static void decode_src(u32 w, int abs_bit, Src* s)
+  * a pixel shader paired with a vertex shader that lacks TEXCOORD8/9 still
+  * links. FP_TC89=0 restores the zeros. */
+ static int s_fp_uses_tc89;
++/* FACING (input 0xE, RSX "SSA"): +1 on front faces, -1 on back faces, as
++ * RPCS3 feeds it. It used to read as zero. J-Stars' two-sided leaf cards
++ * (3-4 vertex draws, e.g. fp 0x0FC03741 / 0x0FC040C1 in rsxcap_skin) multiply
++ * a vector by it, which came out zero, and the leaves shaded black.
++ * Opt-in for now: FP_FACING=1. Declared in PSInput only when read. */
++static int s_fp_uses_facing;
++static int fp_facing_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FP_FACING"); on = e ? atoi(e) : 0; }
++    return on;
++}
+ static int fp_tc89_on(void)
+ {
+     static int on = -1;
+@@ -377,7 +389,11 @@ static const char* input_expr(u32 input_src)
+             s_fp_uses_tc89 = 1;
+             return input_src == 0xC ? "input.tc8" : "input.tc9";
+         }
+-        return "float4(0,0,0,0)";      /* FACING (and TC8/9 with FP_TC89=0) not plumbed */
++        if (input_src == 0xE && fp_facing_on()) {
++            s_fp_uses_facing = 1;
++            return "(input.front ? float4(1,1,1,1) : float4(-1,-1,-1,-1))";
++        }
++        return "float4(0,0,0,0)";      /* FACING without FP_FACING=1, TC8/9 with FP_TC89=0 */
+     }
+ }
+ 
+@@ -579,6 +595,7 @@ static int rsx_fp_decompile_internal(
+ {
+     if (!ucode || !out || out_size == 0) return -1;
+     s_fp_uses_tc89 = 0;
++    s_fp_uses_facing = 0;
+     const u32 gamma_units = rsx_fp_texture_gamma_units(ucode, max_bytes, gamma_masks);
+ 
+     const u32 sampled_units = rsx_fp_texture_units(ucode, max_bytes);
+@@ -1125,6 +1142,8 @@ static int rsx_fp_decompile_internal(
+         "    float4 tc4:TEXCOORD4; float4 tc5:TEXCOORD5; float4 tc6:TEXCOORD6; float4 tc7:TEXCOORD7;\n");
+     if (s_fp_uses_tc89)
+         out_puts(&p, "    float4 tc8:TEXCOORD8; float4 tc9:TEXCOORD9;\n");
++    if (s_fp_uses_facing)
++        out_puts(&p, "    bool front : SV_IsFrontFace;\n");
+     out_puts(&p, "};\n");
+     /* Texture bank. With no cube units (the default) emit the exact legacy
+      * array declaration so 2D-only programs are byte-identical. When any unit

@@ -1,0 +1,61 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 50953bd..1b23f7b 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3100,6 +3100,40 @@ static int zbitcast_rewrite(char* hlsl, size_t cap, const DrZInfo* zi)
+     return 1;
+ }
+ 
++/* ZPASS_SHOW=<n> (diagnostic): rewrite every depth-comparison helper the
++ * decompiler emitted (_rsx_shadow_cmpN) to return something visible instead
++ * of the comparison, to see what the shadow lookups get:
++ *   1 = always "in shadow" (does the material use the term at all?)
++ *   2 = the stored map depth (are the casters in the map, and where?)
++ *   3 = the receiver's reference depth (compare its range with 2)
++ *   4 = always "lit"
++ * Only programs that compare (DEPTH24_D8/16 + zfunc, or A8R8G8B8 + zfunc read
++ * with TXP) change; ZPASS_SHOW_FP=<hex> limits it to one program. */
++static int zpass_show(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("ZPASS_SHOW"); v = e ? atoi(e) : 0; }
++    return v;
++}
++static void zshow_rewrite(char* hlsl, size_t cap, int mode)
++{
++    const char* repl = mode == 1 ? "1.0" : mode == 2 ? "depth" : mode == 3 ? "reference" : "0.0";
++    char* at = hlsl;
++    while ((at = strstr(at, "float _rsx_shadow_cmp")) != NULL) {
++        char* r = strstr(at, "return (float)(");
++        char* e = r ? strstr(r, "); }") : NULL;
++        char* nl = strchr(at, '\n');
++        if (!r || !e || (nl && e > nl)) { at++; continue; }
++        r += strlen("return (float)(");
++        const size_t oldlen = (size_t)(e - r), newlen = strlen(repl);
++        const size_t used = strlen(hlsl) + 1;
++        if (used + newlen - oldlen > cap) return;
++        memmove(r + newlen, e, used - (size_t)(e - hlsl));
++        memcpy(r, repl, newlen);
++        at = r + newlen;
++    }
++}
++
+ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+                                           u32 cube_mask, u64 gamma, u64 expand,
+@@ -3330,6 +3364,15 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             printf("[FP] fp=0x%08X: depth bitcast rewrite did not fit\n", fp_addr);
+         PSO_NOTE_FAIL(); return NULL;
+     }
++    if (zi && zi->shadow_mask && zpass_show()) {
++        const char* only = getenv("ZPASS_SHOW_FP");
++        if (!only || (u32)strtoul(only, NULL, 16) == fp_addr) {
++            zshow_rewrite(hlsl, sizeof hlsl, zpass_show());
++            static int _zs = 0; if (_zs++ < 16)
++                fprintf(stderr, "[ZPASS] show mode %d on fp=0x%X (compare units 0x%X)%c",
++                        zpass_show(), fp_addr, zi->shadow_mask, 10);
++        }
++    }
+     /* FP_LIST=1: every program the title actually compiles, with its size. A
+      * fragment program that hangs the GPU shows up here as an implausible
+      * instruction count long before it shows up as a TDR. */

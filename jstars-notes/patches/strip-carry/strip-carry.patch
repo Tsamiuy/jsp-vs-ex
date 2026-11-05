@@ -1,0 +1,80 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index cf01324..2044211 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6069,7 +6069,16 @@ static void render_frame(void)
+     if (perf_on()) {
+         static double s_t_prev = 0.0; static int s_n = 0;
+         double now = perf_now();
+-        if (s_t_prev > 0.0) s_perf_frame += now - s_t_prev;
++        /* [PERF4]: batch intervals in vblank-sized buckets. With flip mode
++         * VSYNC the guest's flips complete on the 60 Hz ticks, so frame times
++         * should cluster at 16.7 ms multiples: 30 fps needs every frame's work
++         * to fit in 33 ms, and anything between 34 and 50 ms shows as ~20. */
++        static u32 s_ivl[6];
++        if (s_t_prev > 0.0) {
++            s_perf_frame += now - s_t_prev;
++            const double ms = (now - s_t_prev) * 1e3;
++            s_ivl[ms < 20.0 ? 0 : ms < 37.0 ? 1 : ms < 54.0 ? 2 : ms < 70.0 ? 3 : ms < 87.0 ? 4 : 5]++;
++        }
+         s_t_prev = now;
+         if (++s_n % 20 == 0) {
+             double fr = s_perf_frame > 0 ? s_perf_frame : 1;
+@@ -6114,6 +6123,9 @@ static void render_frame(void)
+               }
+               fprintf(stderr, "%s | created %llu%c", line, (unsigned long long)s_txs_create, 10);
+               s_txs_create = 0; }
++            fprintf(stderr, "[PERF4] batch intervals: <20ms %u | 20-37 %u | 37-54 %u | 54-70 %u | 70-87 %u | >87 %u%c",
++                    s_ivl[0], s_ivl[1], s_ivl[2], s_ivl[3], s_ivl[4], s_ivl[5], 10);
++            memset(s_ivl, 0, sizeof s_ivl);
+             s_perf_present = 0.0; s_perf_rf_mid = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+@@ -7989,7 +8001,23 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+     s_req_verts += count; s_req_draws++;
+     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+     if (!state->vertex_attribs[0].enabled) return 0;
+-    if (t0 == 0) s_strip_pending = 0;
++    /* The guest vertex behind this record's last output so far, carried from
++     * the previous call (list mode only). A join at o == 0 repeats that
++     * vertex; knowing its index lets the list name it instead of copying it
++     * out of the upload heap after the fetch. Match strips are 3-index
++     * pieces + restart, 4 entries, and FIFO batches are 256 indices, so
++     * nearly EVERY call starts with that join: the copy forced a full
++     * VFETCH_ASYNC sync and a synchronous fetch per call, which is why async
++     * saved ~8 ms instead of ~25 (perf/speed30-2026-10-20).
++     * Opt-in like the rest of the async work: on with VFETCH_ASYNC=1 or
++     * STRIP_CARRY=1; STRIP_CARRY=0 forces the old copy. */
++    static u32 s_native_last_vi = 0; static int s_native_last_ok = 0;
++    if (t0 == 0) { s_strip_pending = 0; s_native_last_ok = 0; }
++    static int carry_off = -1;
++    if (carry_off < 0) {
++        const char* e = getenv("STRIP_CARRY");
++        carry_off = e ? (*e == '0') : !getenv("VFETCH_ASYNC");
++    }
+     u32 maxv = (MAX_VP_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+@@ -8049,7 +8077,10 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+             /* join: repeat the previous vertex, then this one (twice if the
+              * piece would otherwise start at an odd position). Decoded once. */
+             if (use_list) {
+-                if (o == 0) { prev0 = 1; s_nl[o] = v; }   /* placeholder, fixed below */
++                if (o == 0) {
++                    if (s_native_last_ok && !carry_off) s_nl[o] = s_native_last_vi;
++                    else { prev0 = 1; s_nl[o] = v; }   /* placeholder, fixed below */
++                }
+                 else        s_nl[o] = s_nl[o - 1];
+                 o++;
+                 s_nl[o] = v; o++;
+@@ -8069,7 +8100,10 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+         if (use_list) { s_nl[o] = v; o++; }
+         else { vf_one(plan, state, v, &out[o*16]); o++; }
+     }
++    if (!use_list && o) s_native_last_ok = 0;
+     if (use_list && o) {
++        s_native_last_vi = s_nl[o - 1];   /* (a prev0 placeholder is never last) */
++        s_native_last_ok = 1;
+         if (prev0) {
+             /* out[-1] may still be queued: finish it, then fetch and copy. */
+             vfa_sync();

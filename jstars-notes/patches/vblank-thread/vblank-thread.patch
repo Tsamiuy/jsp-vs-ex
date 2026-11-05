@@ -1,0 +1,86 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -99,6 +99,7 @@
+ int      cellGcm_take_flip_pending(void);
+ void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
+ void     cellGcm_fifo_kick_wait(unsigned ms); /* idle wait, woken by a kick */
++void*    cellGcm_fifo_kick_event(void);       /* the kick that ends that wait */
+ unsigned cellGcm_flip_request_count(void);
+ }
+ 
+@@ -177,6 +178,54 @@
+     InterlockedIncrement(&g_frames_presented);
+ }
+ 
++/* VBLANK_THREAD=1 (opt-in): the 60 Hz vblank/flip tick on its own thread.
++ *
++ * In frame_clock below, the tick is fired by the drawing thread between
++ * drains, so while it decodes and draws a frame (15-20 ms on Hidden Leaf) no
++ * tick happens; the late ones then fire in a burst. J-Stars waits for a
++ * vblank after every flip request before it flushes the next frame, so that
++ * wait ended late too: FRAME_TL measured 20-23 ms from a flip request to the
++ * first tick after it, where on-time ticks allow 16.7 at most
++ * (jstars-notes CPU_PROFILE §38-39). The game then flushes its next frame
++ * late and the drawing thread waits for it. Here the tick keeps time on its
++ * own, as the hardware vblank does; it kicks the drawing thread, which
++ * drains (labels) and presents as before. */
++#if defined(_WIN32)
++static int vblank_thread_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("VBLANK_THREAD"); v = (e && *e && *e != '0') ? 1 : 0; }
++    return v;
++}
++
++static DWORD WINAPI vblank_thread(LPVOID)
++{
++    LARGE_INTEGER qf, qn; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&qn);
++    const double period = 1000.0 / 60.0;
++    double next = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart + period;
++    HANDLE kick = (HANDLE)cellGcm_fifo_kick_event();
++    HANDLE tm = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
++    for (;;) {
++        QueryPerformanceCounter(&qn);
++        const double now = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
++        if (now < next) {
++            LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((next - now) * 10000.0);
++            if (tm && SetWaitableTimer(tm, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(tm, INFINITE);
++            else Sleep(1);
++            continue;   /* a timer can end early: check the clock again */
++        }
++        cellGcmTickVBlank();
++        cellGcmTickFlip();
++        if (kick) SetEvent(kick);
++        next += period;
++        if (now - next > 100.0) next = now + period;   /* stalled (debugger): resync */
++    }
++    return 0;
++}
++#else
++static int vblank_thread_on(void) { return 0; }   /* the frame clock ticks as before */
++#endif
++
+ static DWORD WINAPI frame_clock(LPVOID)
+ {
+     const char* title = getenv("PS3_TITLE");
+@@ -208,8 +257,20 @@
+     const double q_period = 1000.0 / 60.0;
+     double q_next = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
+     if (vqpc) fprintf(stderr, "[rsx] VBLANK_QPC: vblank tick from QPC, %.4f ms\n", q_period);
++    const int vthread = vblank_thread_on();
++#if defined(_WIN32)
++    if (vthread) {
++        HANDLE h = CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
++        if (h) { SetThreadPriority(h, THREAD_PRIORITY_HIGHEST); CloseHandle(h); }
++        fprintf(stderr, "[rsx] VBLANK_THREAD: vblank/flip tick on its own thread\n");
++    }
++#endif
+ 
+     for (;;) {
++        if (vthread) {   /* the tick runs elsewhere: wait for a kick (tick or guest), then drain */
++            cellGcm_fifo_kick_wait(4);
++            goto outer_cadence;
++        }
+         if (vqpc) {
+             QueryPerformanceCounter(&qn);
+             const double qms = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;

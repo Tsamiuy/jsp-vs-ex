@@ -1,0 +1,49 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -100,6 +100,8 @@
+ void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
+ void     cellGcm_fifo_kick_wait(unsigned ms); /* idle wait, woken by a kick */
+ void*    cellGcm_fifo_kick_event(void);       /* the kick that ends that wait */
++void     cellGcm_flip_gate_present(int on);   /* flips complete only once presented */
++void     cellGcm_flip_presented(unsigned n);  /* ...and this many have been */
+ unsigned cellGcm_flip_request_count(void);
+ }
+ 
+@@ -189,7 +191,14 @@
+  * (jstars-notes CPU_PROFILE §38-39). The game then flushes its next frame
+  * late and the drawing thread waits for it. Here the tick keeps time on its
+  * own, as the hardware vblank does; it kicks the drawing thread, which
+- * drains (labels) and presents as before. */
++ * drains (labels) and presents as before.
++ *
++ * A tick that no longer waits for the drain must not complete flips the
++ * drawing thread has not shown yet: the first version did, the title ran
++ * ahead and rewrote buffers still to be drawn (HUD as black boxes, broken
++ * geometry; a run stuck on a black screen; CPU_PROFILE §40). So with the
++ * thread on, a FIFO flip completes only after it is presented (cellGcmSys
++ * present gate; PRESENT_GATE=0 turns the gate off for comparison). */
+ #if defined(_WIN32)
+ static int vblank_thread_on(void)
+ {
+@@ -262,7 +271,11 @@
+     if (vthread) {
+         HANDLE h = CreateThread(NULL, 0, vblank_thread, NULL, 0, NULL);
+         if (h) { SetThreadPriority(h, THREAD_PRIORITY_HIGHEST); CloseHandle(h); }
+-        fprintf(stderr, "[rsx] VBLANK_THREAD: vblank/flip tick on its own thread\n");
++        const char* pg = getenv("PRESENT_GATE");
++        const int gate = !(pg && *pg == '0');
++        cellGcm_flip_gate_present(gate);
++        fprintf(stderr, "[rsx] VBLANK_THREAD: vblank/flip tick on its own thread, present gate %s\n",
++                gate ? "on" : "off");
+     }
+ #endif
+ 
+@@ -355,6 +368,8 @@
+             } else if (fc == 0) {
+                 rsx_backend_present();
+             }
++            /* VBLANK_THREAD: every flip decoded so far has been presented. */
++            if (vthread) cellGcm_flip_presented(last_flip);
+         }
+     }
+     return 0;

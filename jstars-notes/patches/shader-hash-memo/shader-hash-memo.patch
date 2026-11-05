@@ -1,0 +1,275 @@
+From 7ad5e35a722d60963fd3bc45c2519688ba21fc9e Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 15:06:11 +0200
+Subject: [PATCH] video: memo the per-draw shader hashes (SHADER_HASH_MEMO,
+ default on)
+
+---
+ libs/video/rsx_commands.c      | 12 +++++-
+ libs/video/rsx_commands.h      |  3 ++
+ libs/video/rsx_d3d12_backend.c | 58 +++++++++++++++++++++------
+ libs/video/rsx_fp_decompiler.c | 72 ++++++++++++++++++++++++++++++++++
+ libs/video/rsx_fp_decompiler.h |  5 +++
+ 5 files changed, 138 insertions(+), 12 deletions(-)
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index f942560..6059977 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -76,6 +76,15 @@ rsx_backend* rsx_get_backend(void)
+  * State initialization
+  * -----------------------------------------------------------------------*/
+ 
++/* rsx_state.vp_gen values: unique across all states and never 0, so a memo
++ * keyed on one can't be fooled by a state re-initialised or swapped. */
++static u32 rsx_vp_gen_next(void)
++{
++    static u32 seq = 0;
++    if (++seq == 0) seq = 1;
++    return seq;
++}
++
+ void rsx_state_init(rsx_state* state)
+ {
+     memset(state, 0, sizeof(rsx_state));
+@@ -658,7 +667,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     }
+ 
+     if (method == NV4097_SET_TRANSFORM_PROGRAM_START) {
+-        if (state->transform_program_start != data) state->vp_dirty = 1;
++        if (state->transform_program_start != data) { state->vp_dirty = 1; state->vp_gen = rsx_vp_gen_next(); }
+         state->transform_program_start = data;
+         state->shader_dirty = 1;
+         return 0;
+@@ -679,6 +688,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+             state->vp_ucode_write = w + 4;
+             if (w + 4 > state->vp_ucode_bytes) state->vp_ucode_bytes = w + 4;
+             state->vp_dirty = 1;
++            state->vp_gen = rsx_vp_gen_next();
+         }
+         return 0;
+     }
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 74ba878..93d82c6 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -395,6 +395,9 @@ typedef struct rsx_state {
+     u32 vp_ucode_write;       /* byte write cursor (from SET_TRANSFORM_PROGRAM_LOAD) */
+     u32 vp_ucode_bytes;       /* highest byte written + 1 */
+     int vp_dirty;             /* program changed since last translate */
++    u32 vp_gen;               /* new value from a global counter on every vp_ucode word
++                               * or start-slot change; 0 = unknown. The backend keys its
++                               * per-draw vertex-program memos on it (SHADER_HASH_MEMO) */
+ 
+     /* Dirty flags for incremental state updates */
+     int surface_dirty;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 982ebc0..11313b4 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2267,6 +2267,18 @@ extern void rsx_vp_set_branch_base(u32 start_slot);
+ static u32 s_vs_batch = 1;
+ static u32 s_vs_last_batch[VP_VS_CACHE];
+ 
++/* SHADER_HASH_MEMO (default on, =0 off): reuse per-program hashes instead of
++ * re-hashing the shader microcode on every draw. Exact: the fragment program
++ * memo compares the instruction bytes (rsx_fp_code_hash_memo); the vertex
++ * program memos key on rsx_state.vp_gen, which every microcode word and start
++ * slot change renews. */
++static int shader_hash_memo_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SHADER_HASH_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++
+ static u32 vp_hash_ucode(const u8* p, u32 n)
+ {
+     u32 h = 2166136261u;
+@@ -2784,11 +2796,21 @@ static int vp_get_vs(const rsx_state* st)
+      * it folded every other resident program into this one's identity: each
+      * later upload anywhere in the store re-keyed the active VP, recompiled
+      * it, and spawned a fresh family of FP pipelines. */
+-    { u32 ninstr = rsx_vp_program_size_instrs(vuc, vlen);
+-      if (ninstr) vlen = ninstr * 16u; }
+-    u32 hash = vp_hash_ucode(vuc, vlen);
+-    hash = (hash ^ (vstart / 16u)) * 16777619u;
+-    if (!hash) hash = 1u;
++    /* The byte-wise hash runs per draw record: keep it per program version
++     * (rsx_state.vp_gen changes with every microcode word or start slot), so
++     * an unchanged program reuses it. SHADER_HASH_MEMO=0 hashes every time. */
++    static const rsx_state* memo_st = NULL; static u32 memo_gen = 0, memo_hash = 0, memo_vlen = 0;
++    u32 hash;
++    if (shader_hash_memo_on() && st->vp_gen && st == memo_st && st->vp_gen == memo_gen) {
++        hash = memo_hash; vlen = memo_vlen;
++    } else {
++        { u32 ninstr = rsx_vp_program_size_instrs(vuc, vlen);
++          if (ninstr) vlen = ninstr * 16u; }
++        hash = vp_hash_ucode(vuc, vlen);
++        hash = (hash ^ (vstart / 16u)) * 16777619u;
++        if (!hash) hash = 1u;
++        memo_st = st; memo_gen = st->vp_gen; memo_hash = hash; memo_vlen = vlen;
++    }
+     for (int i = 0; i < s_d3d.vp_vs_n; i++)
+         if (s_d3d.vp_vs[i].hash == hash) { s_vs_last_batch[i] = s_vs_batch; return i; }
+ 
+@@ -3420,16 +3442,21 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+      * so hashing them made the pipeline key move every draw. */
+     u32 uhash;
+     {
+-        u32 usz = rsx_fp_program_size(vm_base + off, FP_MAX_BYTES);
+-        if (usz == 0) usz = 64;
+-        s_perf_pso_hashbytes += (int)usz;
+-        if (getenv("FP_CONSTBUF") && getenv("FP_CONSTBUF")[0] == '0') {
++        static int fp_constbuf_off = -1;
++        if (fp_constbuf_off < 0) { const char* e = getenv("FP_CONSTBUF"); fp_constbuf_off = (e && e[0] == '0') ? 1 : 0; }
++        u32 usz;
++        if (fp_constbuf_off) {
++            usz = rsx_fp_program_size(vm_base + off, FP_MAX_BYTES);
++            if (usz == 0) usz = 64;
+             uhash = 2166136261u;
+             const u8* up = vm_base + off;
+             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
+         } else {
+-            uhash = rsx_fp_code_hash(vm_base + off, FP_MAX_BYTES);
++            /* Memoised rsx_fp_code_hash (same value), SHADER_HASH_MEMO=0 off. */
++            uhash = rsx_fp_code_hash_memo(vm_base + off, FP_MAX_BYTES, &usz);
++            if (usz == 0) usz = 64;
+         }
++        s_perf_pso_hashbytes += (int)usz;
+     }
+     const u32 uhash_code = uhash;   /* FP_IDCOLOR_RT salts uhash below */
+     if (s_idcolor_draw) uhash ^= 0x1DC0104Fu;
+@@ -8544,6 +8571,12 @@ static u32 vf_input_mask(const rsx_state* st)
+     { static int off = -1; if (off < 0) off = getenv("VP_START_OFF") ? 1 : 0;
+       if (!off) vstart = st->transform_program_start * 16u; }
+     if (vstart >= st->vp_ucode_bytes) vstart = 0;
++    /* Runs per FIFO index batch (~2,000 a frame in a fight): the mask of an
++     * unchanged program version (rsx_state.vp_gen) is reused without
++     * re-hashing it. SHADER_HASH_MEMO=0 hashes every time. */
++    static const rsx_state* memo_st = NULL; static u32 memo_gen = 0, memo_mask = 0;
++    if (shader_hash_memo_on() && st->vp_gen && st == memo_st && st->vp_gen == memo_gen)
++        return memo_mask;
+     const u8* vuc = st->vp_ucode + vstart;
+     u32 vlen = st->vp_ucode_bytes - vstart;
+     { u32 ninstr = rsx_vp_program_size_instrs(vuc, vlen);
+@@ -8556,8 +8589,10 @@ static u32 vf_input_mask(const rsx_state* st)
+     static struct { u32 hash, vstart, vlen, mask; } cache[256];
+     const u32 slot = (h ^ (h >> 8) ^ (h >> 16)) & 255u;
+     if (cache[slot].mask && cache[slot].hash == h &&
+-        cache[slot].vstart == vstart && cache[slot].vlen == vlen)
++        cache[slot].vstart == vstart && cache[slot].vlen == vlen) {
++        memo_st = st; memo_gen = st->vp_gen; memo_mask = cache[slot].mask;
+         return cache[slot].mask;
++    }
+     rsx_vp_input_analysis an;
+     u32 mask = 0xFFFFu;
+     if (rsx_vp_analyze_inputs(vuc, vlen, &an) >= 0 && an.exact)
+@@ -8570,6 +8605,7 @@ static u32 vf_input_mask(const rsx_state* st)
+     { static int dbg = -1; if (dbg < 0) dbg = getenv("VFETCH_DBG") ? 1 : 0;
+       if (dbg) fprintf(stderr, "[VFETCH] vp start=%u instrs=%u mask=0x%04X%s%c",
+                        vstart / 16u, vlen / 16u, mask, mask == 0xFFFFu ? " (all)" : "", 10); }
++    memo_st = st; memo_gen = st->vp_gen; memo_mask = mask;
+     return mask;
+ }
+ 
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 6efb0b9..d856eb0 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -1600,6 +1600,78 @@ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes)
+     return h;
+ }
+ 
++/* The draw path calls rsx_fp_code_hash for every draw (~1,100 a frame in a
++ * J-Stars fight), and its byte-wise FNV is a serial multiply per byte. The
++ * hash depends only on the instruction blocks it visits, so: walk the program
++ * the same way, copy those blocks out and fold them into a cheap 64-bit key,
++ * then look the key up in a small per-thread table whose entries keep the
++ * blocks they were hashed from. A hit needs the same block count and identical
++ * blocks (memcmp), i.e. exactly the bytes rsx_fp_code_hash would hash, so the
++ * answer is the same. Keyed by content, not address: J-Stars copies every
++ * draw's program into a ring. The inline constants are not compared, as they
++ * are not hashed. SHADER_HASH_MEMO=0 hashes every call. */
++#define FPM_SETS 256u
++#define FPM_WAYS 4u
++typedef struct { u64 key; u32 nblk, hash, size, cap; u8* blk; } FpMemoEntry;
++typedef struct { FpMemoEntry e[FPM_SETS][FPM_WAYS]; u8 rr[FPM_SETS]; u8 scratch[16384]; } FpMemo;
++#if defined(_MSC_VER)
++static __declspec(thread) FpMemo* t_fpm;
++#else
++static __thread FpMemo* t_fpm;
++#endif
++
++u32 rsx_fp_code_hash_memo(const u8* ucode, u32 max_bytes, u32* size_out)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SHADER_HASH_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++    FpMemo* m = t_fpm;
++    if (on && !m && ucode) m = t_fpm = (FpMemo*)calloc(1, sizeof(FpMemo));
++    if (!on || !m || !ucode || max_bytes > sizeof m->scratch) {
++        if (size_out) *size_out = rsx_fp_program_size(ucode, max_bytes);
++        return rsx_fp_code_hash(ucode, max_bytes);
++    }
++    /* The walk of rsx_fp_code_hash, copying instead of hashing. */
++    u64 k = 0x9E3779B97F4A7C15ull;
++    u32 off = 0, n = 0, size = 0;
++    while (off + 16 <= max_bytes) {
++        const u32 w0 = rsx_fp_read_word(ucode + off + 0);
++        const u32 w1 = rsx_fp_read_word(ucode + off + 4);
++        const u32 w2 = rsx_fp_read_word(ucode + off + 8);
++        const u32 w3 = rsx_fp_read_word(ucode + off + 12);
++        u64 a, b;
++        memcpy(&a, ucode + off, 8); memcpy(&b, ucode + off + 8, 8);
++        memcpy(m->scratch + (size_t)n * 16u, ucode + off, 16);
++        k = ((k << 23) | (k >> 41)) ^ a ^ (b * 0xC2B2AE3D27D4EB4Full);
++        n++;
++        off += 16;
++        const int is_branch = (w2 & FP_BRANCH) != 0;
++        const int has_k = !is_branch &&
++            ((((w1 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST) ||
++             (((w2 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST) ||
++             (((w3 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST));
++        if (has_k) off += 16;
++        if (w0 & FP_END) { size = off < max_bytes ? off : max_bytes; break; }
++    }
++    k ^= (u64)n * 0x9E3779B97F4A7C15ull;
++    if (size_out) *size_out = size;
++    const u32 set = (u32)(k ^ (k >> 29) ^ (k >> 47)) & (FPM_SETS - 1u);
++    FpMemoEntry* e = m->e[set];
++    for (u32 w = 0; w < FPM_WAYS; w++)
++        if (e[w].blk && e[w].key == k && e[w].nblk == n &&
++            memcmp(e[w].blk, m->scratch, (size_t)n * 16u) == 0)
++            return e[w].hash;
++    const u32 h = rsx_fp_code_hash(ucode, max_bytes);
++    FpMemoEntry* v = &e[m->rr[set]++ % FPM_WAYS];
++    if (v->cap < n * 16u || !v->blk) {
++        u8* nb = (u8*)realloc(v->blk, n ? (size_t)n * 16u : 16u);
++        if (!nb) return h;
++        v->blk = nb; v->cap = n ? n * 16u : 16u;
++    }
++    memcpy(v->blk, m->scratch, (size_t)n * 16u);
++    v->key = k; v->nblk = n; v->hash = h; v->size = size;
++    return h;
++}
++
+ /* Scale texel-space coordinates to the 0..1 range HLSL sampling expects.
+  *
+  * An RSX texture whose format carries RSX_TEX_FMT_UNNORM (0x40) is addressed in
+diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
+index 09e7bd3..2497468 100644
+--- a/libs/video/rsx_fp_decompiler.h
++++ b/libs/video/rsx_fp_decompiler.h
+@@ -235,4 +235,9 @@ u32 rsx_fp_program_size(const u8* ucode, u32 max_bytes);
+ /* Kept from this tree (see the .c) -- used by rsx_d3d12_backend.c. */
+ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_out);
+ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes);
++/* rsx_fp_code_hash's answer without re-hashing a program seen before (a
++ * per-thread table keyed by its instruction words, verified word for word).
++ * *size_out gets the bytes up to END (0 = no END within max_bytes).
++ * SHADER_HASH_MEMO=0 hashes every call. */
++u32 rsx_fp_code_hash_memo(const u8* ucode, u32 max_bytes, u32* size_out);
+ #endif /* PS3RECOMP_RSX_FP_DECOMPILER_H */
+-- 
+2.56.0.windows.2
+

@@ -1,0 +1,14 @@
+# Dependabot: GitHub Actions versions only, weekly. The repository has no other package manifest: the Python tools use
+# the standard library, and the C++ port builds against a separate ps3recomp checkout (docs/BUILDING.md) that
+# Dependabot does not track.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,105 @@
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 1baea72..2d19532 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -632,6 +632,69 @@ static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
+     return 0;
+ }
+ 
++/* PS3_SAMPLE_CHAIN=1: where the MAIN guest thread is, as a short guest call
++ * chain, whether it is running or waiting. The plain histogram only counts
++ * samples whose RIP is in lifted code, and a waiting thread's RIP is in ntdll,
++ * so "main thread 70% in ntdll" said nothing about WHAT it waits on. Here
++ * every sample of the boot thread is keyed by its first SAMP_CHAIN distinct
++ * lifted functions (the RIP's own, then return addresses found on the stack,
++ * innermost first) and flagged waiting if the RIP is in ntdll. Stack scanning
++ * can also pick up stale return addresses, so read the top chains, which
++ * repeat, rather than a single one. Other threads are sampled as before. */
++#define SAMP_CHAIN   4
++#define SAMP_CHAINS  512
++static int s_samp_chain = -1;
++static struct { uint32_t f[SAMP_CHAIN]; uint64_t n, wait; } s_chain[SAMP_CHAINS];
++static uint64_t s_chain_total, s_chain_wait;
++
++static void samp_chain_hit(const CONTEXT* c, int waiting)
++{
++    uint32_t f[SAMP_CHAIN] = {0};
++    int nf = 0;
++    uint32_t g = samp_lookup((uintptr_t)c->Rip);
++    if (g) f[nf++] = g;
++    const uintptr_t* sp = (const uintptr_t*)c->Rsp;
++    for (int i = 0; i < 1024 && nf < SAMP_CHAIN; i++) {    /* 8 KB of stack */
++        uintptr_t v;
++        __try { v = sp[i]; } __except (1) { break; }
++        uint32_t h = samp_lookup(v);
++        if (!h) continue;
++        int dup = 0;
++        for (int k = 0; k < nf; k++) if (f[k] == h) dup = 1;
++        if (!dup) f[nf++] = h;
++    }
++    s_chain_total++;
++    if (waiting) s_chain_wait++;
++    uint32_t hsh = 2166136261u;
++    for (int k = 0; k < SAMP_CHAIN; k++) { hsh ^= f[k]; hsh *= 16777619u; }
++    for (uint32_t n = 0, i = hsh % SAMP_CHAINS; n < SAMP_CHAINS; n++, i = (i + 1) % SAMP_CHAINS) {
++        if (s_chain[i].n == 0) { memcpy(s_chain[i].f, f, sizeof f); s_chain[i].n = 1; s_chain[i].wait = (uint64_t)waiting; return; }
++        if (!memcmp(s_chain[i].f, f, sizeof f)) { s_chain[i].n++; s_chain[i].wait += (uint64_t)waiting; return; }
++    }
++}
++
++static void samp_chain_report(void)
++{
++    if (s_samp_chain <= 0 || !s_chain_total) return;
++    fprintf(stderr, "[samp] main thread: %llu samples, %.1f%% waiting (RIP in ntdll); top chains:\n",
++            (unsigned long long)s_chain_total, 100.0 * (double)s_chain_wait / (double)s_chain_total);
++    for (int rank = 0; rank < 12; rank++) {
++        int bi = -1; uint64_t best = 0;
++        for (int k = 0; k < SAMP_CHAINS; k++) if (s_chain[k].n > best) { best = s_chain[k].n; bi = k; }
++        if (bi < 0) break;
++        fprintf(stderr, "[samp]   %5.1f%% (%llu, %llu waiting)",
++                100.0 * (double)best / (double)s_chain_total,
++                (unsigned long long)best, (unsigned long long)s_chain[bi].wait);
++        for (int k = 0; k < SAMP_CHAIN && s_chain[bi].f[k]; k++)
++            fprintf(stderr, "%s%s%08X", k ? " <- " : "  ",
++                    (s_chain[bi].f[k] & 0x80000000u) ? "spu_LS_" : "func_", s_chain[bi].f[k] & 0x7FFFFFFFu);
++        fprintf(stderr, "\n");
++        s_chain[bi].n = 0;
++    }
++    memset(s_chain, 0, sizeof s_chain);
++    s_chain_total = s_chain_wait = 0;
++}
++
+ static DWORD WINAPI samp_thread(LPVOID p)
+ {
+     unsigned period = (unsigned)(uintptr_t)p;
+@@ -659,6 +722,14 @@ static DWORD WINAPI samp_thread(LPVOID p)
+                     CONTEXT c; c.ContextFlags = CONTEXT_CONTROL;
+                     if (GetThreadContext(h, &c)) {
+                         s_samp_total++;
++                        if (s_samp_chain > 0 && te.th32ThreadID == s_samp_boot_tid) {
++                            static HMODULE s_ntdll = GetModuleHandleA("ntdll.dll");
++                            HMODULE m = NULL;
++                            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++                                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                                               (LPCSTR)c.Rip, &m);
++                            samp_chain_hit(&c, m && m == s_ntdll);
++                        }
+                         uint32_t g = samp_lookup((uintptr_t)c.Rip);
+                         if (!g && s_samp_main > 0) g = samp_stack_guest(h, &c);
+                         if (g) { s_samp_guest++; samp_hit(g); samp_tid_hit(te.th32ThreadID);
+@@ -678,6 +749,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
+             fprintf(stderr, "[samp] --- report at t=%llums ---\n",
+                     (unsigned long long)(GetTickCount64() - t0));
+             samp_report();
++            samp_chain_report();
+             if (ei + 1 < sizeof early / sizeof early[0]) { ei++; next_report = t0 + early[ei]; }
+             else next_report = GetTickCount64() + 10000;
+         }
+@@ -735,6 +807,7 @@ void ps3_sampler_start(void)
+     unsigned ms = (unsigned)atoi(e); if (!ms) ms = 5;
+     s_samp_boot_tid = GetCurrentThreadId();
+     s_samp_main = getenv("PS3_SAMPLE_MAIN") ? 1 : 0;
++    s_samp_chain = getenv("PS3_SAMPLE_CHAIN") ? 1 : 0;
+     /* Self-check: does .pdata actually describe the lifted bodies? If not, the
+      * exact attribution mode misses ALL guest code by construction and its "0
+      * guest samples" means nothing. Print it rather than assume either way. */

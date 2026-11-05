@@ -1,0 +1,56 @@
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 0a303ba..07c4f6c 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -1313,16 +1313,45 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+                            only==-3 ? "ALL images" : "one image id "
+                                                      "(a bare number is an IMAGE ID, not on/off)");
+         }
+-        if ((dt && (spu->image_id==22 || spu->image_id==23)) ||
+-            only==-3 || (only >= 0 && spu->image_id == only)) {
+-            static int _n=0; if (_n++ < 160)
+-                fprintf(stderr, "[DMA] img%d cmd=0x%02X lsa=0x%05X ea=0x%09llX size=0x%X tag=%u\n",
+-                        spu->image_id, cmd, lsa, (unsigned long long)ea, size, tag);
++        /* SPU_DMATRACE_AFTER=<s>: start tracing s seconds after the first
++         * traced transfer (boot used up the 160 lines before the effect being
++         * studied ran). SPU_DMATRACE_N=<n>: lines to print (default 160). Each
++         * line then carries flip= (cellGcm_flip_request_count) so it lines up
++         * with [VPCODE]/[dma-range] (jstars-notes VFX.md: image 17, job
++         * 0x857F80, PUTs zero quads for the Kamehameha). */
++        static unsigned long long tr_first = 0, tr_after = 0; static int tr_max = -1;
++        if (tr_max < 0) { const char* a = getenv("SPU_DMATRACE_AFTER");
++            tr_after = a ? (unsigned long long)(atof(a) * 1000.0) : 0;
++            const char* n = getenv("SPU_DMATRACE_N"); tr_max = n ? atoi(n) : 160; }
++        int tr_on = 1;
++        if (tr_after) { extern unsigned long long ps3_ms_now(void);
++            const unsigned long long now = ps3_ms_now();
++            if (!tr_first) tr_first = now;
++            tr_on = now - tr_first >= tr_after; }
++        if (tr_on && ((dt && (spu->image_id==22 || spu->image_id==23)) ||
++            only==-3 || (only >= 0 && spu->image_id == only))) {
++            static int _n=0; if (_n++ < tr_max) {
++                extern unsigned int cellGcm_flip_request_count(void);
++                fprintf(stderr, "[DMA] img%d cmd=0x%02X lsa=0x%05X ea=0x%09llX size=0x%X tag=%u flip=%u pc=0x%05X\n",
++                        spu->image_id, cmd, lsa, (unsigned long long)ea, size, tag,
++                        cellGcm_flip_request_count(), (uint32_t)spu->pc & SPU_LS_MASK);
++                /* PUTs: how much of the outgoing data is non-zero. */
++                if ((cmd & 0xF0) == 0x20 && size) {
++                    uint32_t nz = 0; for (uint32_t k = 0; k < size; k++) if (spu->ls[(lsa + k) & SPU_LS_MASK]) nz++;
++                    fprintf(stderr, "        put nonzero=%u/%u%c", nz, size, 10);
++                }
++                /* GETs larger than the 64-byte dump: the non-zero count. */
++                if (mfc_is_get(cmd) && size > 64 && vm_base && mfc_ea_range_committed(ea, size)) {
++                    const uint8_t* g = vm_base + (uint32_t)ea; uint32_t nz = 0;
++                    for (uint32_t k = 0; k < size; k++) if (g[k]) nz++;
++                    fprintf(stderr, "        get nonzero=%u/%u%c", nz, size, 10);
++                }
++            }
+             /* Show what a GET actually delivered. A job that reads its parameter
+              * block and then computes a nonsense address is telling you the block
+              * was empty, not that its arithmetic is wrong -- but only if you can
+              * see the bytes. */
+-            if (_n <= 160 && mfc_is_get(cmd) && size <= 64 && vm_base &&
++            if (_n <= tr_max && mfc_is_get(cmd) && size <= 64 && vm_base &&
+                 mfc_ea_range_committed(ea, size)) {
+                 const uint8_t* s = vm_base + (uint32_t)ea;
+                 fprintf(stderr, "        got:");

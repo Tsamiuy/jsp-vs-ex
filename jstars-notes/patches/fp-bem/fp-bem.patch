@@ -1,0 +1,80 @@
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index d856eb0..e96cb70 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -888,13 +888,6 @@ static int rsx_fp_decompile_internal(
+             continue;
+         }
+ 
+-        if (gamma_masks && gamma_masks[tex_unit] && !(w0 & (1u << 21)) &&
+-            (opcode == OP_TXD || opcode == OP_TEXBEM || opcode == OP_TXPBEM)) {
+-            static u32 reported;
+-            if (reported++ < 32)
+-                fprintf(stderr, "[RSX fp] gamma fetch opcode %u unsupported on unit %u\n", opcode, tex_unit);
+-            return -1;
+-        }
+ 
+         /* Build the RHS expression for this opcode. */
+         char rhs[640];
+@@ -970,7 +963,14 @@ static int rsx_fp_decompile_internal(
+         case OP_SGT: snprintf(rhs, sizeof(rhs), "(float4)((%s) >  (%s))", a, b); break;
+         case OP_SNE: snprintf(rhs, sizeof(rhs), "(float4)((%s) != (%s))", a, b); break;
+         case OP_SEQ: snprintf(rhs, sizeof(rhs), "(float4)((%s) == (%s))", a, b); break;
+-        case OP_TEX:
++        /* TEXBEM / TXPBEM: the bump-environment forms of TEX / TXP. RSX's BEM
++         * offset comes from fixed-function state these programs don't use, and
++         * RPCS3 decodes them as plain TEX / TXP. Until now they fell to the
++         * TODO default (no write), or, on a gamma (sRGB) unit, failed the whole
++         * program, so its draws were skipped: J-Stars fp 0x0FCB3F81 starts with
++         * TXPBEM on gamma unit 0 (ground patches missing in a 720p session,
++         * jstars-notes/patches/fp-bem). */
++        case OP_TEX: case OP_TEXBEM:
+             if (shadow && shadow[tex_unit].enabled) {
+                 snprintf(rhs, sizeof(rhs), "_rsx_shadow%u((%s).xyz)", tex_unit, a);
+                 break;
+@@ -986,7 +986,7 @@ static int rsx_fp_decompile_internal(
+                 snprintf(rhs, sizeof(rhs),
+                          "rsx_tex[%u].Sample(rsx_samp[%u], (%s).xy)", tex_unit, tex_unit, a);
+             break;
+-        case OP_TXP:
++        case OP_TXP: case OP_TXPBEM:
+             if (shadow && shadow[tex_unit].enabled) {
+                 snprintf(rhs, sizeof(rhs), "_rsx_shadow%u((%s).xyz / (%s).w)", tex_unit, a, a);
+                 break;
+@@ -1005,6 +1005,16 @@ static int rsx_fp_decompile_internal(
+                          "rsx_tex[%u].Sample(rsx_samp[%u], (%s).xy / (%s).w)",
+                          tex_unit, tex_unit, a, a);
+             break;
++        case OP_TXD: {
++            /* Explicit-gradient sample: ddx = src1, ddy = src2 (RPCS3
++             * TEXTURE_SAMPLE2D_GRAD). */
++            const int cube = (tex_cube_mask >> tex_unit) & 1u;
++            char tn[32];
++            snprintf(tn, sizeof(tn), tex_cube_mask ? "rsx_tex%u" : "rsx_tex[%u]", tex_unit);
++            snprintf(rhs, sizeof(rhs), "%s.SampleGrad(rsx_samp[%u], (%s).%s, (%s).%s, (%s).%s)", tn,
++                     tex_unit, a, cube ? "xyz" : "xy", b, cube ? "xyz" : "xy", c, cube ? "xyz" : "xy");
++            break;
++        }
+         case OP_TXB: case OP_TXL: {
+             /* Biased / explicit-LOD sample; bias or LOD is src1.x (RPCS3
+              * TEXTURE_SAMPLE2D_BIAS / _LOD). GH3's fret buttons and fret lines
+@@ -1051,7 +1061,8 @@ static int rsx_fp_decompile_internal(
+         }
+ 
+         if (gamma_masks && gamma_masks[tex_unit] && !(w0 & (1u << 21)) &&
+-            (opcode == OP_TEX || opcode == OP_TXP || opcode == OP_TXB || opcode == OP_TXL)) {
++            (opcode == OP_TEX || opcode == OP_TXP || opcode == OP_TXB || opcode == OP_TXL ||
++             opcode == OP_TXD || opcode == OP_TEXBEM || opcode == OP_TXPBEM)) {
+             char sample[sizeof rhs]; memcpy(sample, rhs, sizeof sample);
+             const int length = snprintf(rhs, sizeof rhs, "_rsx_gamma_input(%s, %uu)",
+                                         sample, gamma_masks[tex_unit] & 15u);
+@@ -1068,7 +1079,8 @@ static int rsx_fp_decompile_internal(
+          * form, so the feature stays opt-in; upstream applies _bx2 everywhere. */
+         if (expand_masks && ((w0 & (1u << 21)) || expand_masks[tex_unit]) &&
+             !(shadow && shadow[tex_unit].enabled) &&
+-            (opcode == OP_TEX || opcode == OP_TXP || opcode == OP_TXB || opcode == OP_TXL)) {
++            (opcode == OP_TEX || opcode == OP_TXP || opcode == OP_TXB || opcode == OP_TXL ||
++             opcode == OP_TXD || opcode == OP_TEXBEM || opcode == OP_TXPBEM)) {
+             const int bx2 = (w0 & (1u << 21)) != 0;
+             u32 mask = bx2 ? 15u : (expand_masks[tex_unit] & 0x1Fu);
+             if (!bx2 && gamma_masks) mask &= ~(gamma_masks[tex_unit] & 15u);

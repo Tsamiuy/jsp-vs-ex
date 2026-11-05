@@ -1,0 +1,160 @@
+From 4fb406dea6f48c2135a1a2f94d8fd8095fc44cb8 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 19:23:05 +0100
+Subject: [PATCH] d3d12: VPULL_MEMO reuses the fetch plan while vertex state is
+ unchanged; TEX_HINT starts the texture slot scan at the remembered slot
+
+---
+ libs/video/rsx_commands.c      |  9 ++++--
+ libs/video/rsx_commands.h      |  3 ++
+ libs/video/rsx_d3d12_backend.c | 50 ++++++++++++++++++++++++++++++++--
+ 3 files changed, 57 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index cc8374b..f3cc7e9 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -360,6 +360,7 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
+         attr->enabled   = (attr->size != 0);
+         attr->format    = data;
+         state->vertex_dirty = 1;
++        state->vattr_gen = rsx_vp_gen_next();
+         return 0;
+     }
+ 
+@@ -368,6 +369,7 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
+         u32 index = (method - NV4097_SET_VERTEX_DATA_ARRAY_OFFSET) / 4;
+         state->vertex_attribs[index].offset = data;
+         state->vertex_dirty = 1;
++        state->vattr_gen = rsx_vp_gen_next();
+         return 0;
+     }
+ 
+@@ -475,7 +477,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+      * value) for the sub-channel path. */
+     /* NV4097_SET_FREQUENCY_DIVIDER_OPERATION: per-attribute modulo/divide mask
+      * for the frequency divisor (instancing). Captured for read_vp_vertex. */
+-    if (method == 0x00001FC0) { state->frequency_divider_op = data; return 0; }
++    if (method == 0x00001FC0) { state->frequency_divider_op = data; state->vattr_gen = rsx_vp_gen_next(); return 0; }
+ 
+     { static u32 s_sem_off = 0;
+       if (method == 0x1D6C) { s_sem_off = data; return 0; }
+@@ -778,6 +780,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         u32 lane = ((method - 0x1C00u) >> 2) & 3;   /* x/y/z/w   */
+         float f; memcpy(&f, &data, 4);
+         state->vertex_data4f[idx][lane] = f;
++        state->vattr_gen = rsx_vp_gen_next();
+         { static int _d = -1; if (_d < 0) _d = getenv("VDATA_DBG") ? 1 : 0;
+           static int _n = 0;
+           if (_d && _n < 400) { _n++;
+@@ -960,8 +963,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     if (method == 0x1DAC) { state->restart_enable = data & 1u; return 0; }
+     if (method == 0x1DB0) { state->restart_index = data; return 0; }
+     /* Added to every vertex array address / element index (rsx_vertex_fetch.c). */
+-    if (method == 0x1738) { state->vertex_data_base_offset = data; return 0; }
+-    if (method == 0x173C) { state->vertex_data_base_index = data; return 0; }
++    if (method == 0x1738) { state->vertex_data_base_offset = data; state->vattr_gen = rsx_vp_gen_next(); return 0; }
++    if (method == 0x173C) { state->vertex_data_base_index = data; state->vattr_gen = rsx_vp_gen_next(); return 0; }
+     if (method == NV4097_DRAW_INDEX_ARRAY) {
+         /* [23:0] first index, [31:24] count-1 (same packing as DRAW_ARRAYS). */
+         u32 first = data & 0xFFFFFF;
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index edf6577..d2cb3a4 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -395,6 +395,9 @@ typedef struct rsx_state {
+     u32 vp_ucode_write;       /* byte write cursor (from SET_TRANSFORM_PROGRAM_LOAD) */
+     u32 vp_ucode_bytes;       /* highest byte written + 1 */
+     int vp_dirty;             /* program changed since last translate */
++    u32 vattr_gen;            /* the same kind of value, renewed on every vertex-array
++                               * format/offset, constant attribute (DATA4F), base
++                               * offset/index and frequency-divider write (VPULL_MEMO) */
+     u32 vp_gen;               /* new value from a global counter on every vp_ucode word
+                                * or start-slot change; 0 = unknown. The backend keys its
+                                * per-draw vertex-program memos on it (SHADER_HASH_MEMO) */
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index e9a4ca4..75de726 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4647,6 +4647,14 @@ static int menu_fmt16(u32 b)
+     return on && (b == 0x82 || b == 0x83 || b == 0x84 || b == 0x97 || b == 0x9D || b == 0x9E);
+ }
+ 
++/* TEX_HINT: slot + 1 last seen holding a texture key, by hash (0 = none). */
++static u16 s_tex_hint[4096];
++static u32 tex_hint_hash(u32 key, u32 w, u32 h, u32 fmt, int cube)
++{
++    u32 x = key * 2654435761u ^ (w * 40503u) ^ (h << 11) ^ (fmt << 21) ^ (u32)cube;
++    return (x ^ (x >> 15)) & 4095u;
++}
++
+ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
+ {
+     s_txo = TXO_FAIL;
+@@ -4708,7 +4716,25 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     static int nslots = -1;
+     if (nslots < 0) { const char* e = getenv("TEX_SLOTS"); nslots = e ? atoi(e) : VP_TEX_SLOTS_DEFAULT;
+                       if (nslots < 1 || nslots > VP_TEX_SLOTS) nslots = VP_TEX_SLOTS; }
+-    for (int i = 0; i < nslots; i++) {
++    /* TEX_HINT (default on, TEX_HINT=0 off): the scan below looks through up to
++     * 1024 slots for the one holding this texture, for every bind the per-batch
++     * memo misses (vp_upload_tex_slot, 9% of the drawing thread's own time on
++     * Hidden Leaf, jstars-notes CPU_PROFILE §32). A key lives in one slot only
++     * (a stale match is redone in place; a new texture takes a free slot only
++     * when nothing matches), so a slot remembered for this key that still holds
++     * it IS the slot the scan would find: start the scan there. */
++    int i_start = 0;
++    { static int hint_on = -1;
++      if (hint_on < 0) { const char* e = getenv("TEX_HINT"); hint_on = (e && *e == '0') ? 0 : 1; }
++      if (hint_on) {
++          const int hs = s_tex_hint[tex_hint_hash(key_off, w, h, fmt, cube)] - 1;
++          if (hs >= 0 && hs < nslots) {
++              const VPTexSlot* c = &s_d3d.vp_tex[hs];
++              if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt && c->cube == cube)
++                  i_start = hs;
++          }
++      } }
++    for (int i = i_start; i < nslots; i++) {
+         VPTexSlot* c = &s_d3d.vp_tex[i];
+         if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
+             && c->cube == cube) {
+@@ -5331,6 +5357,10 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+         }
+     }
+     r = vp_upload_tex_slot_impl(off, w, h, fmt, cube, mips);
++    if (r >= 0) {   /* TEX_HINT: remember where this key lives now */
++        const VPTexSlot* c = &s_d3d.vp_tex[r];
++        if (c->res) s_tex_hint[tex_hint_hash(c->key, c->w, c->h, c->fmt, c->cube)] = (u16)(r + 1);
++    }
+     if (!legacy && r >= 0) {
+         memo[hh].gen = s_tex_gen; memo[hh].key = off; memo[hh].w = w; memo[hh].h = h;
+         memo[hh].fmt = fmt; memo[hh].cube = cube; memo[hh].slot = r;
+@@ -10098,8 +10128,24 @@ static int vpull_prepare(const rsx_state* st)
+     extern uint8_t* vm_base;
+     if (!st || !vm_base || !s_vpull.ring_mapped || !s_six.mapped) return 0;
+     if (!st->vertex_attribs[0].enabled) return 0;
++    /* VPULL_MEMO (default on, VPULL_MEMO=0 off): a strip record arrives as
++     * many 256-index batches with the same vertex state, and this rebuilt the
++     * fetch plan and layout for every one (13% of the drawing thread's own
++     * time on Hidden Leaf, jstars-notes CPU_PROFILE §32). The plan depends only
++     * on the vertex program (vp_gen) and the vertex-array state (vattr_gen),
++     * both renewed on every write that could change it, so while neither has
++     * changed the plan, layout and table from last time are the same. */
++    static int memo = -1;
++    if (memo < 0) { const char* e = getenv("VPULL_MEMO"); memo = (e && *e == '0') ? 0 : 1; }
++    static const rsx_state* m_st = NULL; static u32 m_vp = 0, m_attr = 0; static int m_ok = 0;
++    if (memo && st->vp_gen && st->vattr_gen && st == m_st && st->vp_gen == m_vp && st->vattr_gen == m_attr) {
++        if (!m_ok) s_vpull.n_cpu++;
++        return m_ok;
++    }
+     rsx_fetch_plan_init(st, vf_input_mask(st), &s_vpull.plan);
+-    if (rsx_vpull_layout_from_plan(&s_vpull.plan, &s_vpull.lay, &s_vpull.tab_cur)) return 1;
++    m_ok = rsx_vpull_layout_from_plan(&s_vpull.plan, &s_vpull.lay, &s_vpull.tab_cur);
++    m_st = st; m_vp = st->vp_gen; m_attr = st->vattr_gen;
++    if (m_ok) return 1;
+     s_vpull.n_cpu++;
+     return 0;
+ }
+-- 
+2.56.0.windows.2
+

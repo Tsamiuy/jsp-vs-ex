@@ -1,0 +1,110 @@
+From f86ee980fa52907bf7ed192898f6de3528bdfeec Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 16:35:38 +0000
+Subject: [PATCH] rt-drawlog: RT_DRAWLOG FIFO-level log of commands targeting
+ given colour surfaces
+
+---
+ libs/video/rsx_commands.c | 44 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index c4f6106..a47545e 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -133,6 +133,9 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
+     case NV4097_SET_CONTEXT_DMA_COLOR_D: state->surface_color_dma[3] = data; return 0;
+     case NV4097_SET_SURFACE_COLOR_AOFFSET:
+         state->surface_color_offset[0] = data;
++        RT_DRAWLOG(state, "surface A=0x%08X target=0x%X clip=%ux%u dma=0x%08X", data,
++                   state->color_target, state->surface_clip_w, state->surface_clip_h,
++                   state->surface_color_dma[0]);
+         { static int _s = -1; if (_s < 0) _s = getenv("SURFDBG") ? 1 : 0;
+           static unsigned _seen[32]; static int _n = 0;
+           if (_s) { int f = 0; for (int k = 0; k < _n; k++) if (_seen[k] == data) f = 1;
+@@ -157,6 +160,7 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
+         state->surface_dirty = 1;
+         return 0;
+     case NV4097_SET_SURFACE_COLOR_TARGET:
++        RT_DRAWLOG(state, "color_target=0x%X (A=0x%08X)", data, state->surface_color_offset[0]);
+         { static int _ct=0; if (_ct++ < 24 && getenv("RTT_DUMP"))
+             fprintf(stderr, "[RSXCT] color_target=0x%X offA=0x%X offB=0x%X offC=0x%X offD=0x%X%s",
+                     data, state->surface_color_offset[0], state->surface_color_offset[1],
+@@ -339,6 +343,35 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
+ 
+ void (*g_rsx_sync_hook)(void) = 0;
+ 
++
++/* RT_DRAWLOG=<hex>[,<hex>...] (up to 8 surface offsets): log every command
++ * that targets one of these colour surfaces as it leaves the FIFO -- surface
++ * binds, clears, BEGIN and the draw batches -- before the backend filters
++ * anything. Tells "the game never issues draws into this surface" from "the
++ * backend drops them" (J-Stars' glare layer 0x0E590000 is cleared every
++ * frame and drawn in no capture, jstars-notes COLOR_EXPOSURE.md round 4).
++ * RT_DRAWLOG_MAX caps the lines (default 400). */
++static int rt_drawlog_match(const rsx_state* st)
++{
++    static int init = 0; static u32 list[8]; static int n = 0;
++    if (!init) { init = 1; const char* e = getenv("RT_DRAWLOG");
++        while (e && *e && n < 8) { char* end; u32 v = (u32)strtoul(e, &end, 16);
++            if (end == e) break; list[n++] = v; e = (*end == ',') ? end + 1 : end; } }
++    if (!n) return 0;
++    for (int i = 0; i < n; i++)
++        for (int t = 0; t < RSX_MAX_RENDER_TARGETS; t++)
++            if (st->surface_color_offset[t] == list[i]) return 1;
++    return 0;
++}
++static int rt_drawlog_budget(void)
++{
++    static int cap = -1; static int used = 0;
++    if (cap < 0) { const char* e = getenv("RT_DRAWLOG_MAX"); cap = e ? atoi(e) : 400; }
++    return used++ < cap;
++}
++#define RT_DRAWLOG(st, ...) do { if (rt_drawlog_match(st) && rt_drawlog_budget()) { \
++        fprintf(stderr, "[RTDRAW] " __VA_ARGS__); fputc(10, stderr); } } while (0)
++
+ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+ {
+     /* Guest-visible progress: NV406E SET_REFERENCE (0x50) and semaphore
+@@ -478,6 +511,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     }
+     if (method == NV4097_CLEAR_SURFACE) {
+         { static int _c=0; if (_c++ < 12) fprintf(stderr, "[RSX] CLEAR_SURFACE mask=0x%X color=0x%08X\n", data, state->color_clear_value); }
++        RT_DRAWLOG(state, "clear A=0x%08X mask=0x%X color=0x%08X", state->surface_color_offset[0],
++                   data, state->color_clear_value);
+         if (s_backend && s_backend->clear) {
+             float depth = (float)(state->zstencil_clear_value >> 8) / (float)0xFFFFFF;
+             u8 stencil = state->zstencil_clear_value & 0xFF;
+@@ -728,6 +763,10 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     if (method == NV4097_SET_BEGIN_END) {
+         if (data != 0) {
+             state->primitive_type = data;
++            RT_DRAWLOG(state, "begin A=0x%08X target=0x%X prim=%u fp=0x%08X attr0=%d vp=%u,%u %ux%u",
++                       state->surface_color_offset[0], state->color_target, data,
++                       state->shader_program, state->vertex_attribs[0].enabled,
++                       state->viewport_x, state->viewport_y, state->viewport_w, state->viewport_h);
+             state->in_begin_end = 1;
+             state->begin_epoch++;
+ 
+@@ -800,6 +839,8 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+                 }
+             }
+         }
++        RT_DRAWLOG(state, "draw_arrays A=0x%08X prim=%u first=%u count=%u",
++                   state->surface_color_offset[0], state->primitive_type, first, count);
+         ps3_ms("rsx:draw_arrays");
+         if (s_backend && s_backend->draw_arrays)
+             s_backend->draw_arrays(s_backend->userdata, state->primitive_type, first, count);
+@@ -842,6 +883,9 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         u32 first = data & 0xFFFFFF;
+         u32 count = ((data >> 24) & 0xFF) + 1;
+         { static int _d=0; if (_d++ < 8) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
++        RT_DRAWLOG(state, "draw_indexed A=0x%08X prim=%u first=%u count=%u idx=0x%08X dma=0x%X",
++                   state->surface_color_offset[0], state->primitive_type, first, count,
++                   state->index_array_offset, state->index_array_dma);
+         ps3_ms("rsx:draw_indexed");
+         if (s_backend && s_backend->draw_indexed)
+             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,
+-- 
+2.43.0
+

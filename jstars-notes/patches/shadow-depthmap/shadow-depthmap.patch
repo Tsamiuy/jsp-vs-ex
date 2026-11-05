@@ -1,0 +1,51 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 511cad3..cc4b8c1 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3171,9 +3171,16 @@ static int zpass_show(void)
+ }
+ static void zshow_rewrite(char* hlsl, size_t cap, int mode)
+ {
+-    const char* repl = mode == 1 ? "1.0" : mode == 2 ? "depth" : mode == 3 ? "reference" : "0.0";
++    /* 5 = 0.5 + 4*(reference - depth): mid-grey where they agree, bright
++     * where the receiver is behind the map (reference > depth), dark where
++     * in front. ZPASS_SHOW_UNIT=<n> limits the rewrite to unit n's helper. */
++    const char* repl = mode == 1 ? "1.0" : mode == 2 ? "depth" : mode == 3 ? "reference"
++                     : mode == 5 ? "saturate(0.5 + 4.0 * (reference - depth))" : "0.0";
++    const char* un = getenv("ZPASS_SHOW_UNIT");
++    char want[48] = "float _rsx_shadow_cmp";
++    if (un) snprintf(want, sizeof want, "float _rsx_shadow_cmp%d(", atoi(un));
+     char* at = hlsl;
+-    while ((at = strstr(at, "float _rsx_shadow_cmp")) != NULL) {
++    while ((at = strstr(at, want)) != NULL) {
+         char* r = strstr(at, "return (float)(");
+         char* e = r ? strstr(r, "); }") : NULL;
+         char* nl = strchr(at, '\n');
+@@ -4862,6 +4869,27 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+     vpx[4] = vpx[5] = vpx[7] = 0.0f;
+     if (vs_[2] != 0.0f) { vpx[2] = vs_[2]; vpx[6] = vo_[2]; }
+     else                { vpx[2] = 1.0f;   vpx[6] = 0.0f;   }
++    /* Depth-only (shadow caster) ops: the z mapping decides the map's values.
++     * ZPASS_SHOW (FINDINGS §41) read the stored map as ~0 under the whole
++     * floor while receivers' references are ~1, so every receiver came out
++     * "in shadow". ZPASS_DBG logs each caster mapping once; the candidate
++     * fix ZPASS_CASTER_Z01=1 forces the GL [-1,1] -> [0,1] mapping (scale
++     * 0.5, offset 0.5) on casters, as cellGcmSetViewport's defaults do. */
++    if (dr && dr_is_zonly(dr)) {
++        if (zpass_dbg()) {
++            static float seen[16][2]; static int ns = 0; int known = 0;
++            for (int i = 0; i < ns; i++)
++                if (seen[i][0] == vs_[2] && seen[i][1] == vo_[2]) known = 1;
++            if (!known && ns < 16) { seen[ns][0] = vs_[2]; seen[ns][1] = vo_[2]; ns++;
++                fprintf(stderr, "[ZPASS] caster z map: viewport scale.z=%g offset.z=%g clip=[%g,%g]"
++                                " polyoffset fill=%d scale=%g bias=%g zstate=0x%03X%c",
++                        (double)vs_[2], (double)vo_[2], (double)st->clip_min, (double)st->clip_max,
++                        st->poly_offset_fill, (double)st->poly_offset_scale,
++                        (double)st->poly_offset_bias, dr->zstate, 10); }
++        }
++        { static int z01 = -1; if (z01 < 0) z01 = getenv("ZPASS_CASTER_Z01") ? 1 : 0;
++          if (z01) { vpx[2] = 0.5f; vpx[6] = 0.5f; } }
++    }
+     /* DBG_ZOOM=<k> with DBG_CENTER="cx,cy": a debug camera applied in CLIP space,
+      * not a framebuffer crop -- the geometry is re-rasterized at full resolution.
+      * The shader epilogue already computes

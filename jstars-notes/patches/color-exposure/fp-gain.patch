@@ -1,0 +1,77 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 2a488b6..6a6d267 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1841,9 +1841,11 @@ static void cap_write_fp(const char* path, const D3D12DrawRecord* r)
+                                          hlsl, sizeof(hlsl), &nconst);
+     FILE* f = fopen(path, "w");
+     if (!f) return;
+-    fprintf(f, "/* fp=0x%08X instrs=%d consts=%u rt=0x%08X n=%u blend=%d bk=0x%X cmask=%X exp32=%d\n",
+-            r->fp_addr, n, nconst, r->rt_off, r->vertex_count, r->blend, r->blend_key, r->cmask,
+-            r->fp_exp32);
++    /* code= is the program's code hash (rsx_fp_code_hash), the identity the
++     * pipeline cache and FP_GAIN_KEYS use; addresses move between runs. */
++    fprintf(f, "/* fp=0x%08X code=0x%08X instrs=%d consts=%u rt=0x%08X n=%u blend=%d bk=0x%X cmask=%X exp32=%d\n",
++            r->fp_addr, rsx_fp_code_hash(vm_base + off, FP_MAX_BYTES), n, nconst, r->rt_off,
++            r->vertex_count, r->blend, r->blend_key, r->cmask, r->fp_exp32);
+     for (int u = 0; u < RSX_TEX_UNITS; u++)
+         if (r->tex[u].set)
+             fprintf(f, "   t%-2d raw=0x%08X fmt=0x%02X %ux%u remap=0x%04X rt_slot=%d\n", u,
+@@ -3496,6 +3498,57 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     { static int fl = -1; if (fl < 0) fl = getenv("FP_LIST") ? 1 : 0;
+       if (fl) fprintf(stderr, "[FPLIST] fp=0x%08X instrs=%d hlsl=%u bytes%c",
+                       fp_addr, n, (unsigned)strlen(hlsl), 10); }
++    /* FP_GAIN / FP_EXPOSURE (jstars-notes COLOR_EXPOSURE.md, "Character-only
++     * brightness"): change the brightness of chosen fragment programs only,
++     * before the scene is written, so the whole-frame tone-map sees a darker
++     * or brighter object. Selection: FP_GAIN_KEYS=<hex>[,<hex>...] lists code
++     * hashes (the code= of [FPGAIN] lines and of RSX_CAP shader headers),
++     * and/or FP_GAIN_MININSTR=<n> takes every program with at least n
++     * instructions (J-Stars' character shaders are the long ones, ~200+,
++     * stage shaders are short). Effect: FP_GAIN=<g> multiplies rgb by g;
++     * FP_EXPOSURE=<E> multiplies rgb by Lm = L*E/(L*E+1), L being the pixel's
++     * luminance as the tone-map sees it (rgb/alpha/4 . (0.2125,0.7154,0.0721)),
++     * which is what TONEMAP_EXPOSURE=<E> did to every pixel while the game's
++     * own exposure sits at 7200 (Lm = 1). Off unless an effect AND a selector
++     * are set. FP_GAIN_LOG=1 lists each program once as it compiles. The
++     * inserted text is part of the HLSL, so the shader-cache key follows it. */
++    { static int gi = -1; static float gg = 1.0f, ge = 0.0f; static int gmin = 0, glog = 0;
++      static u32 gkeys[32]; static int gnk = 0;
++      if (gi < 0) { gi = 0; const char* e;
++          if ((e = getenv("FP_GAIN")) && e[0]) { gg = (float)atof(e); gi = 1; }
++          if ((e = getenv("FP_EXPOSURE")) && e[0]) { ge = (float)atof(e); gi = 1; }
++          if ((e = getenv("FP_GAIN_MININSTR")) && e[0]) gmin = atoi(e);
++          glog = getenv("FP_GAIN_LOG") ? 1 : 0;
++          if ((e = getenv("FP_GAIN_KEYS")) && e[0]) {
++              while (*e && gnk < 32) { char* end = NULL; u32 v = (u32)strtoul(e, &end, 16);
++                  if (end == e) break; gkeys[gnk++] = v; e = end;
++                  while (*e == ',' || *e == ' ') e++; } }
++          if (gi && !gnk && gmin <= 0) gi = 0;
++          if (gi || glog) fprintf(stderr, "[FPGAIN] %s: gain=%g exposure=%g keys=%d mininstr=%d%c",
++                                  gi ? "on" : "off (no selector or no effect)", gg, ge, gnk, gmin, 10); }
++      int sel = 0;
++      if (gi) { for (int i = 0; i < gnk; i++) if (gkeys[i] == uhash) sel = 1;
++                if (gmin > 0 && n >= gmin) sel = 1; }
++      if (glog) { static u32 seen[128]; static int ns = 0; int f = 0;
++          for (int i = 0; i < ns; i++) if (seen[i] == uhash) f = 1;
++          if (!f) { if (ns < 128) seen[ns++] = uhash;
++              fprintf(stderr, "[FPGAIN] fp=0x%08X code=0x%08X instrs=%d consts=%u nrt=%d blend=%u%s%c",
++                      fp_addr, uhash, n, fp_nconst, nrt, blend, sel ? " (adjusted)" : "", 10); } }
++      if (sel && n > 0) {
++          char* rp = strstr(hlsl, "    return (_o == _o)");
++          char ins[320]; int il = 0;
++          if (ge > 0.0f)
++              il = snprintf(ins, sizeof(ins),
++                  "    { float _fl = dot(_o.rgb / max(_o.a, 1e-3) * 0.25, float3(0.2125, 0.7154, 0.0721));"
++                  " _o.rgb *= (_fl * %.6ff) / (_fl * %.6ff + 1.0f); }\n", ge, ge);
++          if (gg != 1.0f && il >= 0)
++              il += snprintf(ins + il, sizeof(ins) - (size_t)il, "    _o.rgb *= %.6ff;\n", gg);
++          if (rp && il > 0 && strlen(hlsl) + (size_t)il + 1 < sizeof(hlsl)) {
++              memmove(rp + il, rp, strlen(rp) + 1); memcpy(rp, ins, (size_t)il); }
++          else if (!rp) { static int w = 0; if (w++ < 4)
++              fprintf(stderr, "[FPGAIN] fp=0x%08X: no single-output epilogue, not adjusted%c",
++                      fp_addr, 10); }
++      } }
+     if (getenv("FP_DUMP")) { static int _d=0; if (_d++ < 4) {
+         FILE* f = fopen("fp_dump.hlsl", _d==1 ? "w" : "a");
+         if (f) {

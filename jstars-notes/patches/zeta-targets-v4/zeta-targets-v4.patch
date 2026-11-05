@@ -1,0 +1,62 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1256cde..f93731f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2372,13 +2372,38 @@ typedef struct {
+  * .x ~ 1 everywhere and every character went black (FINDINGS §29).
+  * ZPASS_ARGB_BITCAST=1 restores the byte bitcast. (ZPASS_ARGB_CMP is now the
+  * default and has no effect.) */
++/* v4: an A8R8G8B8 view of a zeta is a byte bitcast again, as in v1 and as
++ * RPCS3 treats it; only DEPTH24_D8/DEPTH16 views compare. J-Stars' fog pass
++ * (fp 0x0FC9ED81, rsxcap_skin frame_01 op305) binds the scene zeta 0x0E960000
++ * at t0 as A8R8G8B8 with remap 0xAA93 and zfunc 4, floors the bytes and
++ * rebuilds the depth with dot(rgb, (1/256, 1/65536, 1/2^24)) -- a comparison
++ * result there blacked out the whole frame (ZETA_TARGETS=1 alone, FINDINGS
++ * §31). v1's black silhouettes with the bitcast came from the shadow lookups
++ * having no coordinates (TEX8/TEX9, fixed in v3), not from the bitcast.
++ * ZPASS_ARGB_CMP=1 = v2/v3 (compare when zfunc is set). */
+ static int zargb_cmp(void)
+ {
+     static int on = -1;
+-    if (on < 0) on = getenv("ZPASS_ARGB_BITCAST") ? 0 : 1;
++    if (on < 0) on = getenv("ZPASS_ARGB_CMP") ? 1 : 0;
+     return on;
+ }
+ 
++/* ZPASS_CMP_OFF=1: never hand a DepthRT to a DEPTH24_D8/DEPTH16 unit (it gets
++ * the old null view, i.e. "lit"). Isolates the comparison path when judging
++ * the hard black cast shadows on the ground (zeta v4 README). */
++static int zcmp_off(void)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("ZPASS_CMP_OFF") ? 1 : 0;
++    return on;
++}
++static int zunit_handoff_ok(u32 fmt, int zt)
++{
++    const u32 b = fmt & 0x9Fu;
++    if (zcmp_off() && b >= 0x90 && b <= 0x93) return 0;
++    return dt_handoff_ok(zt);
++}
++
+ /* Comparison descriptor for a unit read as DEPTH24_D8 (fmt is the format byte
+  * to use). The decompiler only emits matching nearest/linear min+mag filters on
+  * one level; for anything else (a mip count > 1, a mipmapped min filter with a
+@@ -2410,7 +2435,7 @@ static void dr_z_info(const D3D12DrawRecord* dr, DrZInfo* zi)
+     memset(zi, 0, sizeof *zi);
+     if (!zpass_on() && !zeta_targets_on()) return;
+     for (int u = 0; u < RSX_TEX_UNITS && u < 16; u++) {
+-        if (!dr->tex[u].set || !dt_handoff_ok(dt_find(dr->tex[u].raw))) continue;
++        if (!dr->tex[u].set || !zunit_handoff_ok(dr->tex[u].fmt, dt_find(dr->tex[u].raw))) continue;
+         const u32 base = dr->tex[u].fmt & 0x9Fu;
+         if (base >= 0x90 && base <= 0x93) {
+             rsx_fp_shadow_desc sd;
+@@ -5207,7 +5232,7 @@ static void render_frame(void)
+              * that depth (.r); dr_z_info tells the FP how to use it. */
+             if (dr->tex[_u].set && (zpass_on() || zeta_targets_on())) {
+                 int zt = dt_find(dr->tex[_u].raw);
+-                if (zt >= 0 && dt_handoff_ok(zt)) {
++                if (zt >= 0 && zunit_handoff_ok(dr->tex[_u].fmt, zt)) {
+                     dr->tex_zt[_u] = zt;
+                     srv_write(wslot, s_zrt[zt].snap, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+                               D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);

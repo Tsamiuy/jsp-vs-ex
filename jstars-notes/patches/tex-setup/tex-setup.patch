@@ -1,0 +1,177 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3c13dfd..21e4bf0 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -194,6 +194,8 @@ typedef struct {
+                          * shift it, so keying on off never matches the raw offset
+                          * a later draw arrives with, and every draw re-uploads. */
+     int used;           /* referenced this frame */
++    u32 vframe;         /* guest flip count when the source was last verified
++                         * (TEX_VERIFY=frame only) */
+ } VPTexSlot;
+ /* Distinct textures uploadable per frame. Four was enough for a UI/atlas-style
+  * frame but not for a scene: this title binds ~20 distinct textures per frame,
+@@ -2791,8 +2793,26 @@ static u32 tex_csum(const u8* base, u32 nbytes)
+     return h;
+ }
+ 
+-static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
++/* Texture-setup accounting for [PERF3]: what each vp_upload_tex_slot call
++ * actually did. A same-batch re-bind costs a slot scan; a texture held from
++ * an earlier batch costs a sparse checksum of its guest bytes; a changed or
++ * new texture costs a full decode + copy. The timing run had 187k calls per
++ * 20-batch window at ~2.9 us each, and only these counters say which kind
++ * they are. */
++enum { TXO_MEMO, TXO_USED, TXO_SAME, TXO_FRAME, TXO_STALE, TXO_NEW, TXO_NOSLOT, TXO_FAIL, TXO_N };
++static const char* const s_txo_name[TXO_N] = {
++    "memo", "bound", "csum-same", "frame-ok", "reupload", "new", "no-slot", "fail" };
++static int    s_txo;               /* outcome of the last _impl call */
++static u64    s_txs_n[TXO_N];
++static double s_txs_t[TXO_N];
++static u64    s_txs_create;        /* texture resources (re)created */
++static u32    s_tex_gen = 1;       /* bumped where vp_tex[].used is reset */
++
++static int tex_verify_frame(void);
++extern unsigned cellGcm_flip_request_count(void);
++static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
+ {
++    s_txo = TXO_FAIL;
+     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
+      * tried against the TDR and does not help, because PERF shows the upload
+      * path costing 0.01s for 775 calls. Kept because it is the right lever if a
+@@ -2852,7 +2872,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+         VPTexSlot* c = &s_d3d.vp_tex[i];
+         if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
+             && c->cube == cube) {
+-            if (c->used) return i;                /* already bound this frame */
++            if (c->used) { s_txo = TXO_USED; return i; }   /* already bound this frame */
+             { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
+               if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
+                                  nocache = e ? atoi(e) : 0; }
+@@ -2860,9 +2880,20 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+             /* Held from an earlier frame: re-upload only if the guest bytes
+              * changed. Most of this scene's textures are static, and converting
+              * every one of them every frame was ~70% of the frame's CPU time. */
++            /* TEX_VERIFY=frame (opt-in): trust a slot already verified or
++             * uploaded during this guest frame, i.e. checksum once per frame
++             * instead of once per batch. Before the mid-frame flush a frame was
++             * one batch, so this is the old behaviour; it differs only if the
++             * guest rewrites a texture's bytes in place within one frame. */
++            if (tex_verify_frame() && c->vframe == cellGcm_flip_request_count()) {
++                c->used = 1; s_txo = TXO_FRAME; return i;
++            }
+             u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+             u32 cs = TEX_CSUM(vm_base + c->off, nb);
+-            if (cs == c->csum) { c->used = 1; return i; }
++            if (cs == c->csum) {
++                c->used = 1; c->vframe = cellGcm_flip_request_count();
++                s_txo = TXO_SAME; return i;
++            }
+             slot = i; break;                      /* stale: fall through and redo */
+         }
+         if (!c->used && freeslot < 0) freeslot = i;
+@@ -2920,7 +2951,8 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     /* A stale cache entry (slot >= 0) re-uses its own slot; otherwise take a
+      * free one. Without this the stale path fell through to freeslot and either
+      * duplicated the texture into a second slot or bailed when none was free. */
+-    if (slot < 0 && freeslot < 0) return -1;      /* out of slots this frame */
++    if (slot < 0 && freeslot < 0) { s_txo = TXO_NOSLOT; return -1; }   /* out of slots this frame */
++    s_txo = (slot >= 0) ? TXO_STALE : TXO_NEW;
+     /* TEX_SRCDBG=<N>: is the guest memory this slot uploads FROM actually
+      * populated? An empty source and a broken sampler both render flat. */
+     { static int cap = -1, n = 0;
+@@ -3008,6 +3040,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+             t->res->lpVtbl->Release(t->res); t->res = NULL; return -1;
+         }
+         fresh = 1;
++        s_txs_create++;
+     }
+ 
+     void* mapped = NULL; D3D12_RANGE nr = {0,0};
+@@ -3377,13 +3410,59 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, t->res, &sv, sh);
+ 
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+-    t->cube = cube; t->used = 1;
++    t->cube = cube; t->used = 1; t->vframe = cellGcm_flip_request_count();
+     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+       t->csum = TEX_CSUM(vm_base + off, nb); }
+     #undef TEX_CSUM
+     return slot;
+ }
+ 
++/* Same-batch memo in front of vp_upload_tex_slot_impl. A match frame binds
++ * ~9.4k texture units per batch, almost all of them a texture an earlier draw
++ * of the same batch already resolved; the memo answers those without the
++ * 96-slot scan. It returns only what the scan itself would: the remembered
++ * slot is re-checked against the same key fields and must still be marked
++ * used in this batch, and a key can only ever live in one slot (_impl reuses
++ * a matching slot in place and takes a free one only when nothing matches).
++ * TEXCACHE_LEGACY=1 turns the memo off; TEX_BUDGET disables it too, since
++ * the budget counts every call. */
++static int tex_verify_frame(void);
++static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
++{
++    static int legacy = -1;
++    if (legacy < 0) legacy = (getenv("TEXCACHE_LEGACY") || getenv("TEX_BUDGET")) ? 1 : 0;
++    const int perf = perf_on();
++    const double t0 = perf ? perf_now() : 0.0;
++    enum { MEMO_N = 4096 };
++    static struct { u32 gen, key, w, h, fmt; s32 cube, slot; } memo[MEMO_N];
++    u32 hh = (off * 2654435761u) ^ (w * 40503u) ^ (h << 7) ^ (fmt << 21) ^ (u32)cube;
++    hh = (hh ^ (hh >> 15)) & (MEMO_N - 1);
++    int r;
++    if (!legacy && memo[hh].gen == s_tex_gen && memo[hh].key == off && memo[hh].w == w &&
++        memo[hh].h == h && memo[hh].fmt == fmt && memo[hh].cube == cube) {
++        const VPTexSlot* c = &s_d3d.vp_tex[memo[hh].slot];
++        if (c->res && c->used && c->key == off && c->w == w && c->h == h &&
++            c->fmt == fmt && c->cube == cube) {
++            if (perf) { s_txs_n[TXO_MEMO]++; s_txs_t[TXO_MEMO] += perf_now() - t0; }
++            return memo[hh].slot;
++        }
++    }
++    r = vp_upload_tex_slot_impl(off, w, h, fmt, cube, mips);
++    if (!legacy && r >= 0) {
++        memo[hh].gen = s_tex_gen; memo[hh].key = off; memo[hh].w = w; memo[hh].h = h;
++        memo[hh].fmt = fmt; memo[hh].cube = cube; memo[hh].slot = r;
++    }
++    if (perf) { s_txs_n[s_txo]++; s_txs_t[s_txo] += perf_now() - t0; }
++    return r;
++}
++
++static int tex_verify_frame(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("TEX_VERIFY"); v = (e && !strcmp(e, "frame")) ? 1 : 0; }
++    return v;
++}
++
+ /* ---------------------------------------------------------------------------
+  * Render-to-texture: offscreen RT pool.
+  *
+@@ -4443,6 +4522,7 @@ static void render_frame(void)
+      * (tex_slot 1000+idx) -- no guest-memory upload. */
+     double _pre0 = perf_on() ? perf_now() : 0.0;
+     for (int _i = 0; _i < VP_TEX_SLOTS; _i++) s_d3d.vp_tex[_i].used = 0;
++    s_tex_gen++;                          /* invalidates the vp_upload_tex_slot memo */
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+         D3D12DrawRecord* dr = &s_d3d.draws[_d];
+         if (!dr->is_vp || dr->is_clear) continue;
+@@ -5187,6 +5267,17 @@ static void render_frame(void)
+                       dr, 100.0 * dr / fr, dn, dw, s_perf_vtx, s_perf_rf_mid,
+                       s_perf_present, 100.0 * s_perf_present / fr,
+                       rest, 100.0 * rest / fr, 10); }
++            /* [PERF3]: texture setup by outcome -- count and seconds. */
++            { char line[512]; int n = 0;
++              n += snprintf(line + n, sizeof line - n, "[PERF3] tex");
++              for (int k = 0; k < TXO_N; k++) {
++                  if (n < (int)sizeof line)
++                      n += snprintf(line + n, sizeof line - n, " | %s %llu %.3fs", s_txo_name[k],
++                                    (unsigned long long)s_txs_n[k], s_txs_t[k]);
++                  s_txs_n[k] = 0; s_txs_t[k] = 0.0;
++              }
++              fprintf(stderr, "%s | created %llu%c", line, (unsigned long long)s_txs_create, 10);
++              s_txs_create = 0; }
+             s_perf_present = 0.0; s_perf_rf_mid = 0.0;
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;

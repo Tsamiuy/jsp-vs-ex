@@ -1,0 +1,134 @@
+From 5aabc7b6b34af490316b2c3a5793e71c8d8c12cc Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 17:55:09 +0100
+Subject: [PATCH] d3d12: [PERF6] splits the drawing thread's frame time (PERF=1
+ only, diagnostic)
+
+---
+ libs/video/rsx_d3d12_backend.c | 51 ++++++++++++++++++++++++++++++----
+ 1 file changed, 46 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index ef87731..e9a4ca4 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -648,6 +648,9 @@ static u32 s_duck_off = 0;   /* as RESOLVED (what the uploader sees)   */
+ /* PERF=1: where a frame's CPU time actually goes. Guessing at this is how you
+  * spend an afternoon optimising the wrong loop. */
+ static double s_perf_tex = 0.0, s_perf_frame = 0.0, s_perf_vtx = 0.0, s_perf_rf = 0.0;
++/* [PERF6] (PERF=1): the drawing thread's frame split into its parts (jstars-notes
++ * CPU_PROFILE §30). Diagnostic only; nothing here changes what is drawn. */
++static double s_p6_gpuwait = 0.0, s_p6_submit = 0.0, s_p6_nextwait = 0.0, s_p6_draw = 0.0;
+ static double s_perf_gpu = 0.0, s_perf_pre = 0.0, s_perf_srv = 0.0, s_perf_pso = 0.0;
+ static int s_perf_pso_calls = 0, s_perf_pso_miss = 0, s_perf_pso_hashbytes = 0;
+ /* [PERF5] (shader-hitches patch): what a pipeline miss costs, split into the
+@@ -6588,7 +6591,9 @@ static void render_frame(void)
+      * (gcm/cube: triangles mixing stale and new vertices -> missing/sliver
+      * polygons). These workloads are a few draws/frame, so full serialisation
+      * costs little. */
+-    wait_for_gpu();
++    { const double _w0 = perf_on() ? perf_now() : 0.0;
++      wait_for_gpu();
++      if (perf_on()) s_p6_gpuwait += perf_now() - _w0; }   /* [PERF6] */
+     lum_readback_finish();   /* LUM_READBACK: last frame's small targets -> guest memory */
+ 
+     /* Compile the real vertex program once its microcode is captured, and keep
+@@ -7897,6 +7902,21 @@ static void render_frame(void)
+                       dr, 100.0 * dr / fr, dn, dw, s_perf_vtx, s_perf_rf_mid,
+                       s_perf_present, 100.0 * s_perf_present / fr,
+                       rest, 100.0 * rest / fr, s_perf_vfa_wait, 10);
++              /* [PERF6]: ms per batch. render_frame = gpu-wait + prepass + record
++               * + other (texture uploads, timed as [PERF] tex, happen in the
++               * prepass); after it: submit, next-frame fence wait; the drain =
++               * draw callbacks (incl. vtx and mid-frame renders) + the rest (FIFO
++               * decode, state methods). */
++              { const double k = 1000.0 / 20.0;
++                const double rf_other = s_perf_rf - s_p6_gpuwait - s_perf_pre - s_perf_gpu;
++                const double dr_other = dr - s_p6_draw;
++                fprintf(stderr, "[PERF6] ms/batch | render_frame %.1f = gpu-wait %.1f + prepass %.1f (textures %.1f)"
++                                " + record %.1f + other %.1f | submit %.1f | next-frame wait %.1f | present %.1f"
++                                " | drain %.1f = draws %.1f (vtx %.1f, mid-frame %.1f) + decode/other %.1f%c",
++                        s_perf_rf * k, s_p6_gpuwait * k, s_perf_pre * k, s_perf_tex * k, s_perf_gpu * k, rf_other * k,
++                        s_p6_submit * k, s_p6_nextwait * k, s_perf_present * k,
++                        dr * k, s_p6_draw * k, s_perf_vtx * k, s_perf_rf_mid * k, dr_other * k, 10);
++                s_p6_gpuwait = s_p6_submit = s_p6_nextwait = s_p6_draw = 0.0; }
+               s_perf_vfa_wait = 0.0; }
+             /* [PERF3]: texture setup by outcome -- count and seconds. */
+             { char line[512]; int n = 0;
+@@ -8109,9 +8129,11 @@ skip_dump_consider: ;
+     lum_readback_issue();    /* LUM_READBACK: copy this frame's small targets out */
+ 
+     /* Close and execute */
++    { const double _s0 = perf_on() ? perf_now() : 0.0;   /* [PERF6] */
+     s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
+     s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cmd_lists);
++    if (perf_on()) s_p6_submit += perf_now() - _s0; }
+ 
+     /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
+      * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
+@@ -8260,7 +8282,9 @@ skip_dump_consider: ;
+         if (perf_on()) s_perf_present += perf_now() - _pt;
+     }   /* skipped for an offscreen-only batch */
+ 
+-    move_to_next_frame();
++    { const double _n0 = perf_on() ? perf_now() : 0.0;   /* [PERF6]: waits for the next backbuffer's fence */
++      move_to_next_frame();
++      if (perf_on()) s_p6_nextwait += perf_now() - _n0; }
+ 
+     s_d3d.frame_count++;
+ 
+@@ -10548,7 +10572,7 @@ static void prim_log(const char* call, u32 primitive, u32 count)
+         fprintf(stderr, "[PRIM] %lu non-triangle draws so far (%d distinct)%c", total, ns, 10);
+ }
+ 
+-static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
++static void d3d12_draw_arrays_impl(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* lum-rt-drawlog (jstars-notes COLOR_EXPOSURE.md Round 10): LUM_RT=0E590000 logs every draw the FIFO hands
+      * the backend for that colour target, before the guards below can drop it. noct = rsx_no_color_target(). */
+@@ -10850,7 +10874,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+     }
+ }
+ 
+-static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
++static void d3d12_draw_indexed_impl(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* lum-rt-drawlog (jstars-notes COLOR_EXPOSURE.md Round 10): LUM_RT=0E590000 logs every draw the FIFO hands
+      * the backend for that colour target, before the guards below can drop it. noct = rsx_no_color_target(). */
+@@ -11078,6 +11102,23 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+     }
+ }
+ 
++/* [PERF6]: time in the draw callbacks (record building, vertex work, mid-frame
++ * flushes they trigger). */
++static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
++{
++    if (!perf_on()) { d3d12_draw_arrays_impl(ud, primitive, first, count); return; }
++    const double t0 = perf_now();
++    d3d12_draw_arrays_impl(ud, primitive, first, count);
++    s_p6_draw += perf_now() - t0;
++}
++static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
++{
++    if (!perf_on()) { d3d12_draw_indexed_impl(ud, primitive, first, count); return; }
++    const double t0 = perf_now();
++    d3d12_draw_indexed_impl(ud, primitive, first, count);
++    s_p6_draw += perf_now() - t0;
++}
++
+ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+ {
+     (void)ud;
+@@ -11390,7 +11431,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+     s_d3d12_backend.set_depth_stencil = d3d12_set_depth_stencil;
+     s_d3d12_backend.set_shader        = d3d12_set_shader;
+     s_d3d12_backend.set_vertex_attribs = d3d12_set_vertex_attribs;
+-    s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;
++    s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;   /* [PERF6] timed wrappers below */
+     s_d3d12_backend.draw_indexed      = d3d12_draw_indexed;
+     s_d3d12_backend.bind_texture      = d3d12_bind_texture;
+ 
+-- 
+2.56.0.windows.2
+

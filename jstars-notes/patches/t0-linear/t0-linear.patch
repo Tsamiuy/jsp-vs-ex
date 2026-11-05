@@ -1,0 +1,73 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 7f53968..25361ac 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2497,9 +2497,17 @@ static int s_idcolor_draw = 0;
+  * 2D lookups go through _t0w(): the coordinate is wrapped or mirrored in the
+  * shader and sampled with the original gradients (so mip selection does not
+  * jump at the seams). ps_5_0 has only 16 sampler registers, so extra static
+- * samplers are not an option. Sampler and filter are unchanged. Set around
+- * vp_get_fp_pso. */
+-static int s_t0_wrap = 0;   /* s_mode * 3 + t_mode, 0 clamp / 1 wrap / 2 mirror; 0 = as before */
++ * samplers are not an option. Set around vp_get_fp_pso.
++ * T0_LINEAR (default on, T0_LINEAR=0 off): such a draw also takes the game's
++ * own filter. When TEXTURE_FILTER asks for linear (mag [26:24] = 2, or min
++ * [18:16] = 2/4/6), _t0w samples through rsx_samp[1], which is LINEAR + WRAP
++ * like every unit but 0, and keeps clamped axes half a texel inside the
++ * edge so the wrap sampler cannot blend in the opposite edge. A repeated
++ * detail map point-sampled turned Namek's ground grainy (FINDINGS §58).
++ * The Penguin Village plant boxes are not a filter effect: they show with
++ * point filtering too (stages/s05/14_intro_b.png) and come from the alpha
++ * test that was missing until ALPHA_TEST. */
++static int s_t0_wrap = 0;   /* 9 * linear + s_mode * 3 + t_mode, 0 clamp / 1 wrap / 2 mirror; 0 = as before */
+ static int t0_wrap_on(void)
+ {
+     static int on = -1;
+@@ -2512,7 +2520,12 @@ static int dr_t0_wrap(const D3D12DrawRecord* dr)
+     const u32 a = dr->tex[0].addr;   /* TEXTURE_ADDRESS: wrap s [3:0], t [11:8]; 1 WRAP, 2 MIRROR */
+     const u32 ws = a & 0xFu, wt = (a >> 8) & 0xFu;
+     const int ms = ws == 1u ? 1 : ws == 2u ? 2 : 0, mt = wt == 1u ? 1 : wt == 2u ? 2 : 0;
+-    return ms * 3 + mt;
++    if (!ms && !mt) return 0;
++    static int lin_on = -1;
++    if (lin_on < 0) { const char* e = getenv("T0_LINEAR"); lin_on = e ? atoi(e) : 1; }
++    const u32 f = dr->tex[0].filt, minf = (f >> 16) & 7u, magf = (f >> 24) & 7u;
++    const int lin = lin_on && (magf == 2u || minf == 2u || minf == 4u || minf == 6u);
++    return lin * 9 + ms * 3 + mt;
+ }
+ static u32 idcolor_rt(void)
+ {
+@@ -3862,7 +3875,8 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+     }
+     if (s_t0_wrap && getenv("T0_WRAP_LOG")) { static int n = 0; if (n++ < 64)
+-        fprintf(stderr, "[T0WRAP] fp=0x%08X mode s=%d t=%d 2d=%d call=%d%c", fp_addr, s_t0_wrap / 3, s_t0_wrap % 3,
++        fprintf(stderr, "[T0WRAP] fp=0x%08X mode s=%d t=%d linear=%d 2d=%d call=%d%c", fp_addr,
++                (s_t0_wrap % 9) / 3, s_t0_wrap % 3, s_t0_wrap / 9,
+                 strstr(hlsl, "Texture2D    rsx_tex[16]") || strstr(hlsl, "Texture2D   rsx_tex0 "),
+                 strstr(hlsl, "rsx_tex[0].Sample(rsx_samp[0], ") || strstr(hlsl, "rsx_tex0.Sample(rsx_samp[0], "), 10); }
+     if (s_t0_wrap && (strstr(hlsl, "Texture2D    rsx_tex[16]") || strstr(hlsl, "Texture2D   rsx_tex0 "))) {   /* T0_WRAP */
+@@ -3875,15 +3889,19 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+         if (dp && strstr(hlsl, call)) {
+             char fn[400];
+             const int fl = snprintf(fn, sizeof fn,
+-                "float _t0a(float c, int m) { return m == 1 ? frac(c) : m == 2 ? 1.0 - abs(frac(c * 0.5) * 2.0 - 1.0) : c; }\n"
++                "float _t0a(float c, int m, float h) { return m == 1 ? frac(c) : m == 2 ? 1.0 - abs(frac(c * 0.5) * 2.0 - 1.0)"
++                " : h > 0.0 ? clamp(c, h, 1.0 - h) : c; }\n"
+                 "float4 _t0w(Texture2D t, SamplerState sp, float2 uv) {\n"
+-                "    return t.SampleGrad(sp, float2(_t0a(uv.x, %d), _t0a(uv.y, %d)), ddx(uv), ddy(uv)); }\n",
+-                s_t0_wrap / 3, s_t0_wrap % 3);
++                "    float2 h = 0; if (%d) { uint w, ht; t.GetDimensions(w, ht); h = 0.5 / float2(w, ht); }\n"
++                "    return t.SampleGrad(sp, float2(_t0a(uv.x, %d, h.x), _t0a(uv.y, %d, h.y)), ddx(uv), ddy(uv)); }\n",
++                s_t0_wrap / 9, (s_t0_wrap % 9) / 3, s_t0_wrap % 3);
+             char* ip = dp + sizeof(decl) - 1;
+             if (fl > 0 && strlen(hlsl) + (size_t)fl + 1 < sizeof(hlsl)) {
+                 memmove(ip + fl, ip, strlen(ip) + 1); memcpy(ip, fn, (size_t)fl);
+                 /* "<tex>.Sample(rsx_samp[0], " -> "_t0w(<tex>, rsx_samp[0], " */
+-                const char* to = arr ? "_t0w(rsx_tex[0], rsx_samp[0], " : "_t0w(rsx_tex0, rsx_samp[0], ";
++                const char* to = s_t0_wrap >= 9
++                    ? (arr ? "_t0w(rsx_tex[0], rsx_samp[1], " : "_t0w(rsx_tex0, rsx_samp[1], ")
++                    : (arr ? "_t0w(rsx_tex[0], rsx_samp[0], " : "_t0w(rsx_tex0, rsx_samp[0], ");
+                 const size_t ol = strlen(call), nlen = strlen(to);
+                 for (char* q = strstr(ip + fl, call); q; q = strstr(q + nlen, call)) {
+                     if (strlen(hlsl) + nlen - ol + 1 >= sizeof(hlsl)) break;

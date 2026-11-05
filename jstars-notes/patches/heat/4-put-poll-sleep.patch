@@ -1,0 +1,42 @@
+From 1c814978a2c0aa0b8dce7ce19c615777b23b83f7 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 12:51:29 +0100
+Subject: [PATCH] cellGcmSys: put-poll sleeps each step on a high-res timer
+ instead of spinning (GCM_PUT_POLL_SLEEP=0 = old)
+
+---
+ libs/video/cellGcmSys.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 836e408..a34ec4e 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1602,6 +1602,24 @@ void cellGcm_fifo_kick_wait(unsigned ms)
+             QueryPerformanceCounter(&t);
+             if (t.QuadPart >= deadline) return;
+             const LONGLONG until = t.QuadPart + step;
++            /* GCM_PUT_POLL_SLEEP (default on, =0 = the old SwitchToThread spin):
++             * sleep each step on a high-resolution timer, and on the kick event
++             * so a kick ends the step at once. The spin was a third of this
++             * thread's time, all of it kernel (jstars-notes CPU_PROFILE §26). */
++            static int psleep = -1;
++            static __declspec(thread) HANDLE t_timer;
++            if (psleep < 0) { const char* e = getenv("GCM_PUT_POLL_SLEEP"); psleep = (e && *e == '0') ? 0 : 1; }
++            if (psleep && !t_timer)
++                t_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
++            LARGE_INTEGER due;
++            due.QuadPart = -(((until < deadline ? until : deadline) - t.QuadPart) * 10000000LL / f.QuadPart);
++            if (psleep && t_timer && SetWaitableTimerEx(t_timer, &due, 0, NULL, NULL, NULL, 0)) {
++                HANDLE hs[2] = { t_timer, ev };
++                /* The kick event is auto-reset: this wait consumes it, so a
++                 * kick returns here, as the check at the top of the loop would. */
++                if (WaitForMultipleObjects(ev ? 2 : 1, hs, FALSE, 5) == WAIT_OBJECT_0 + 1) return;
++                continue;
++            }
+             do { SwitchToThread(); QueryPerformanceCounter(&t); }
+             while (t.QuadPart < until && t.QuadPart < deadline);
+         }
+-- 
+2.56.0.windows.2
+

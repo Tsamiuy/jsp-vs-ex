@@ -1,0 +1,84 @@
+From 54cc12593d46aa70ee8f4a988b4b2860147dd800 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 22:45:41 +0200
+Subject: [PATCH] d3d12: VPULL copies each vertex range once per record
+ (VPULL_ONCE, default on with VPULL=1)
+
+---
+ libs/video/rsx_d3d12_backend.c | 43 +++++++++++++++++++++++++++++-----
+ 1 file changed, 37 insertions(+), 6 deletions(-)
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 744b7cd..09cf6c2 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -722,6 +722,9 @@ static struct {
+     ID3D12Resource* lut;
+     u32 off;                   /* ring bytes used in the current batch */
+     u32 rec_base, rec_k;       /* the open record: region start, vertices reserved */
++    /* VPULL_ONCE: the open record's current segment. Guest vertices
++     * seg_lo..seg_hi-1 are at region vertices seg_k.. (copied once). */
++    u32 seg_k, seg_lo, seg_hi; int seg_valid;
+     rsx_fetch_plan plan;       /* vpull_prepare's result for the current call */
+     rsx_vpull_layout lay;
+     rsx_vpull_tab tab_cur;
+@@ -9896,14 +9899,39 @@ static u32 upload_strip_vpull(const rsx_state* state, u32 first, u32 count, int
+      * would copy mostly unused bytes: leave it to the CPU path. A continuing
+      * batch is pulled whatever it spans, or the strip would break. */
+     if (!cont && span > 4096u && span > 8u * count) { s_vpull.n_sparse++; return 0xFFFFFFFFu; }
+-    if (!cont) { s_vpull.rec_base = (s_vpull.off + 15u) & ~15u; s_vpull.rec_k = 0; }
+-    const u64 at = (u64)s_vpull.rec_base + (u64)s_vpull.rec_k * S;
+-    const u64 len = span ? (u64)(span - 1u) * S + lay->extent : 0;
++    if (!cont) { s_vpull.rec_base = (s_vpull.off + 15u) & ~15u; s_vpull.rec_k = 0; s_vpull.seg_valid = 0; }
++    /* VPULL_ONCE (default on, VPULL_ONCE=0 off): the batches of one record
++     * walk the same model, so copying each batch's whole span re-copied the
++     * same vertices over and over (~47 MB per batch in the demo), which
++     * filled the 64 MB ring and split heavy frames in two (CPU_PROFILE §17,
++     * §20). A batch whose vertices lie in, or just above, the record's
++     * current segment uses the copy already made and appends only the
++     * vertices above it; a batch that starts below the segment opens a new
++     * one, as every batch did before. */
++    static int once = -1;
++    if (once < 0) { const char* e = getenv("VPULL_ONCE"); once = (e && *e == '0') ? 0 : 1; }
++    u64 at = 0, len = 0; u32 copy_lo = vmin, k0 = 0, seg_k = 0, seg_lo = 0, seg_hi = 0;
++    if (span) {
++        if (once && cont && s_vpull.seg_valid && vmin >= s_vpull.seg_lo &&
++            vmin <= s_vpull.seg_hi + 64u) {
++            seg_k = s_vpull.seg_k; seg_lo = s_vpull.seg_lo; seg_hi = s_vpull.seg_hi;
++            if (vmax >= seg_hi) {   /* append seg_hi..vmax after the segment */
++                copy_lo = seg_hi;
++                at = (u64)s_vpull.rec_base + (u64)(seg_k + (seg_hi - seg_lo)) * S;
++                len = (u64)(vmax - seg_hi) * S + lay->extent;
++                seg_hi = vmax + 1u;
++            }
++        } else {                    /* a new segment at the end of the record */
++            seg_k = s_vpull.rec_k; seg_lo = vmin; seg_hi = vmax + 1u;
++            at = (u64)s_vpull.rec_base + (u64)s_vpull.rec_k * S;
++            len = (u64)(span - 1u) * S + lay->extent;
++        }
++        k0 = seg_k - seg_lo;        /* index = seg_k + (v - seg_lo), mod 2^32 */
++    }
+     if (at + len > VPULL_RING_BYTES || count > SIX_CAP - s_six.off) { s_vpull.n_drop++; s_drop_draws++; return 0; }
+     u8* ring = s_vpull.ring_mapped + (u64)s_d3d.vp_parity * (VPULL_RING_BYTES + VPULL_RING_SLACK);
+-    if (span) rsx_vpull_copy(ring + at, lay->base + vmin * S, (u32)len, lay->main, s_vpull.plan.local_base);
++    if (len) rsx_vpull_copy(ring + at, lay->base + copy_lo * S, (u32)len, lay->main, s_vpull.plan.local_base);
+     u32* ixo = s_six.mapped + (u64)s_d3d.vp_parity * SIX_CAP + s_six.off;
+-    const u32 k0 = s_vpull.rec_k - vmin;   /* index = rec_k + (v - vmin), mod 2^32 */
+     for (u32 k = 0; k < count; k++) {
+         u32 v;
+         if (idx16) { const u8* q = ib + (u64)(first + k) * 2; v = ((u32)q[0] << 8) | q[1]; }
+@@ -9911,7 +9939,10 @@ static u32 upload_strip_vpull(const rsx_state* state, u32 first, u32 count, int
+                v = ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3]; }
+         ixo[k] = (restart && v == ridx) ? 0xFFFFFFFFu : k0 + ((v + bix) & 0x000FFFFFu);
+     }
+-    if (span) s_vpull.rec_k += span + lay->pad;
++    if (span) {
++        s_vpull.seg_k = seg_k; s_vpull.seg_lo = seg_lo; s_vpull.seg_hi = seg_hi; s_vpull.seg_valid = 1;
++        s_vpull.rec_k = seg_k + (seg_hi - seg_lo) + lay->pad;
++    }
+     s_vpull.off = (u32)((u64)s_vpull.rec_base + (u64)s_vpull.rec_k * S);
+     if (!cont && s_d3d.draw_count < MAX_DRAWS)   /* the record this batch opens takes slot draw_count */
+         memcpy(s_vpull.tab_mapped + ((u64)s_d3d.vp_parity * MAX_DRAWS + s_d3d.draw_count) * RSX_VPULL_TAB_BYTES,
+-- 
+2.56.0.windows.2
+

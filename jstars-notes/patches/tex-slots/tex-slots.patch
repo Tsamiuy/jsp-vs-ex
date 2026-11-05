@@ -1,0 +1,45 @@
+From 14ee62c2777d8b1cb6b4ab4d170bd2ba1a2bcbb3 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 22:42:33 +0200
+Subject: [PATCH] d3d12: 2048 texture slots, 1024 used by default
+ (TEX_SLOTS=512 = old limit)
+
+---
+ libs/video/rsx_d3d12_backend.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c3a15e7..e1da97f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -348,8 +348,16 @@ typedef struct {
+  * 20-batch window that found no free slot. Each got a null SRV, so the
+  * surface drew untextured, and an alpha-tested material sampling 0 alpha was
+  * discarded outright (holes). TEX_SLOTS=<n> caps the usable slots at run time
+- * (TEX_SLOTS=96 = the old limit). */
+-#define VP_TEX_SLOTS 512
++ * (TEX_SLOTS=96 = the old limit).
++ * 512 was too few for Kameari: its street keeps more textures in rotation, so
++ * slots were evicted and the same textures re-created as the camera moved
++ * (~8,000 creates per fight against ~1,100 on Hidden Leaf, 'no-slot' > 0;
++ * jstars-notes CPU_PROFILE §18-19). The table now holds 2048 and 1024 are used
++ * by default; TEX_SLOTS=512 is the old limit, TEX_SLOTS=2048 the most. Each
++ * used slot keeps its texture and its upload buffer, so more slots cost
++ * memory only when the game really has that many textures in use. */
++#define VP_TEX_SLOTS 2048
++#define VP_TEX_SLOTS_DEFAULT 1024
+ 
+ /* Decompiled-VS cache: one entry per distinct vertex-program ucode seen at
+  * draw time (hashed). Apps switch VPs between draws (gcm/cube: its MVP cube VP
+@@ -4692,7 +4700,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     #define TEX_CSUM(base, nbytes) tex_csum((base), (nbytes))
+     int slot = -1, freeslot = -1;
+     static int nslots = -1;
+-    if (nslots < 0) { const char* e = getenv("TEX_SLOTS"); nslots = e ? atoi(e) : VP_TEX_SLOTS;
++    if (nslots < 0) { const char* e = getenv("TEX_SLOTS"); nslots = e ? atoi(e) : VP_TEX_SLOTS_DEFAULT;
+                       if (nslots < 1 || nslots > VP_TEX_SLOTS) nslots = VP_TEX_SLOTS; }
+     for (int i = 0; i < nslots; i++) {
+         VPTexSlot* c = &s_d3d.vp_tex[i];
+-- 
+2.56.0.windows.2
+

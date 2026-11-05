@@ -1,0 +1,14 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -380,6 +380,11 @@
+ 
+     ppu_recomp_register();   /* lifted function table -> address map */
+     jstars_debug_console_start();   /* PS3_DEBUG=<file>: query a running title */
++    /* PS3_SAMPLE=<ms>: the runtime's per-thread sampler (ppu_loader.cpp).
++     * After ppu_recomp_register(): it maps host RIPs through the lifted
++     * function table. Called from the boot thread, which it records as the
++     * main guest thread. A no-op unless PS3_SAMPLE is set. */
++    { extern void ps3_sampler_start(void); ps3_sampler_start(); }
+     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
+     ppu_hle_init();          /* firmware import NID -> HLE handlers */
+     ppu_sysprx_register();   /* boot-critical CRT */

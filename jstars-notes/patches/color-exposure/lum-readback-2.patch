@@ -1,0 +1,170 @@
+From 00d8805df4790d4384827b702808a837a1cd9d48 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 14:54:51 +0000
+Subject: [PATCH] lum-readback-2: read back the guest rect of small targets
+
+---
+ libs/video/rsx_d3d12_backend.c | 57 ++++++++++++++++++++++++++--------
+ 1 file changed, 44 insertions(+), 13 deletions(-)
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 63a61f3..b367080 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -156,6 +156,8 @@ typedef struct {
+     u32 rt_w, rt_h;     /* surface clip dims at record time (offscreen RT size) */
+     u32 rt_fmt;         /* RSX surface colour format (SET_SURFACE_FORMAT [4:0]) */
+     u32 rt_pitch;       /* SET_SURFACE_PITCH_A at record time (LUM_READBACK) */
++    u32 clip_w, clip_h; /* raw SET_SURFACE_CLIP dims, before the <16 => window-size
++                         * fallback of rsx_color_target_dims (LUM_READBACK) */
+     /* Guest viewport rect at draw time (target pixels). Sub-viewport layouts
+      * (wave's debug tiles) position quads with this, not with constants --
+      * forcing full-target viewports drew every tile window-sized. */
+@@ -259,6 +261,8 @@ typedef struct {
+     ID3D12Resource*       rb;          /* LUM_READBACK: readback buffer, lazily created */
+     u32                   rb_pitch;    /* its row pitch (256-aligned) */
+     int                   rb_pending;  /* a copy into rb is in the submitted command list */
++    u32                   gw, gh;      /* guest surface clip dims when last drawn (LUM_READBACK) */
++    u32                   rb_w, rb_h;  /* rect copied into rb */
+ } OffRT;
+ /* Offscreen render targets live at once. J-Stars' matches use 17 in one frame
+  * (scene, shadow-free post chain, bloom levels, HUD composite); at 16 the HUD
+@@ -5016,9 +5020,20 @@ static void lum_readback_issue(void)
+     for (int i = 0; i < MAX_OFF_RTS; i++) {
+         OffRT* r = &s_d3d.off_rt[i];
+         if (!r->res || !r->used || !r->w || !r->h) continue;
+-        if ((u64)r->w * r->h > lum_readback_maxpx()) continue;
++        /* The guest's surface size, not the D3D resource's: a 20x11 clip is
++         * below rsx_color_target_dims' 16-pixel floor, so its resource is
++         * window-sized (offrt[5] 0x039FFA40 1280x720 in every capture) and
++         * the first version of this skipped exactly the target it was for.
++         * Copy only the guest rect; its row writes then stay inside the
++         * guest's pitch*height instead of running 5 KB past each row. */
++        const u32 cw = (r->gw && r->gw < r->w) ? r->gw : r->w;
++        const u32 ch = (r->gh && r->gh < r->h) ? r->gh : r->h;
++        if ((u64)cw * ch > lum_readback_maxpx()) continue;
+         if (r->dxgi != (u32)DXGI_FORMAT_R8G8B8A8_UNORM) continue;
+-        const u32 pitch = (r->w * 4u + 255u) & ~255u;
++        const u32 pitch = (cw * 4u + 255u) & ~255u;
++        if (r->rb && (r->rb_w != cw || r->rb_h != ch)) {   /* guest rect changed */
++            r->rb->lpVtbl->Release(r->rb); r->rb = NULL; r->rb_pending = 0;
++        }
+         if (r->rb && r->rb_pitch != pitch) {   /* resized under the same offset */
+             r->rb->lpVtbl->Release(r->rb); r->rb = NULL; r->rb_pending = 0;
+         }
+@@ -5026,14 +5041,14 @@ static void lum_readback_issue(void)
+             D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+             D3D12_RESOURCE_DESC rd = {0};
+             rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+-            rd.Width = (u64)pitch * r->h; rd.Height = 1; rd.DepthOrArraySize = 1;
++            rd.Width = (u64)pitch * ch; rd.Height = 1; rd.DepthOrArraySize = 1;
+             rd.MipLevels = 1; rd.SampleDesc.Count = 1;
+             rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+             if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
+                     s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                     D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+                     &IID_ID3D12Resource, (void**)&r->rb)) || !r->rb) { r->rb = NULL; continue; }
+-            r->rb_pitch = pitch;
++            r->rb_pitch = pitch; r->rb_w = cw; r->rb_h = ch;
+         }
+         D3D12_RESOURCE_BARRIER b = {0};
+         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+@@ -5047,11 +5062,12 @@ static void lum_readback_issue(void)
+         D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
+         dst.pResource = r->rb; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+         dst.PlacedFootprint.Footprint.Format = (DXGI_FORMAT)r->dxgi;
+-        dst.PlacedFootprint.Footprint.Width = r->w; dst.PlacedFootprint.Footprint.Height = r->h;
++        dst.PlacedFootprint.Footprint.Width = cw; dst.PlacedFootprint.Footprint.Height = ch;
+         dst.PlacedFootprint.Footprint.Depth = 1; dst.PlacedFootprint.Footprint.RowPitch = pitch;
+         src.pResource = r->res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+         src.SubresourceIndex = 0;
+-        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
++        D3D12_BOX box = {0, 0, 0, cw, ch, 1};
++        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, &box);
+         if (r->st != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+             b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+             b.Transition.StateAfter  = r->st;
+@@ -5075,23 +5091,28 @@ static void lum_readback_finish(void)
+         u32 goff = cellGcmResolveLocated(1, r->off);
+         if (goff == 0xFFFFFFFFu) goff = cellGcmResolveLocated(0, r->off);
+         if (goff == 0xFFFFFFFFu) continue;
+-        const u32 gpitch = r->pitch ? r->pitch : r->w * 4u;
++        const u32 cw = r->rb_w ? r->rb_w : r->w, ch = r->rb_h ? r->rb_h : r->h;
++        const u32 gpitch = r->pitch ? r->pitch : cw * 4u;
++        if (gpitch < cw * 4u) continue;   /* a pitch narrower than the rect: never overrun */
+         void* mapped = NULL;
+-        D3D12_RANGE rr = {0, (SIZE_T)r->rb_pitch * r->h};
++        D3D12_RANGE rr = {0, (SIZE_T)r->rb_pitch * ch};
+         if (FAILED(r->rb->lpVtbl->Map(r->rb, 0, &rr, &mapped)) || !mapped) continue;
+-        for (u32 y = 0; y < r->h; y++) {
++        u64 sum = 0;
++        for (u32 y = 0; y < ch; y++) {
+             const u8* s = (const u8*)mapped + (size_t)y * r->rb_pitch;
+             u8* d = vm_base + goff + (size_t)y * gpitch;
+-            for (u32 x = 0; x < r->w; x++) {   /* R8G8B8A8 -> big-endian A8R8G8B8 */
++            for (u32 x = 0; x < cw; x++) {   /* R8G8B8A8 -> big-endian A8R8G8B8 */
+                 d[x * 4 + 0] = s[x * 4 + 3]; d[x * 4 + 1] = s[x * 4 + 0];
+                 d[x * 4 + 2] = s[x * 4 + 1]; d[x * 4 + 3] = s[x * 4 + 2];
++                sum += (u64)s[x * 4] + s[x * 4 + 1] + s[x * 4 + 2];
+             }
+         }
+         { static int n = 0;
+-          if (n < 8 || (n % 300) == 0) {
++          if (n < 16 || (n % 300) == 0) {
+               const u8* s = (const u8*)mapped;
+-              fprintf(stderr, "[LUMRB] off=0x%08X %ux%u pitch=%u -> guest 0x%X px0 R=%u G=%u B=%u A=%u%c",
+-                      r->off, r->w, r->h, gpitch, goff, s[0], s[1], s[2], s[3], 10); }
++              fprintf(stderr, "[LUMRB] off=0x%08X %ux%u (res %ux%u) pitch=%u -> guest 0x%X px0 R=%u G=%u B=%u A=%u meanRGB=%u%c",
++                      r->off, cw, ch, r->w, r->h, gpitch, goff, s[0], s[1], s[2], s[3],
++                      (unsigned)(sum / ((u64)cw * ch * 3u)), 10); }
+           n++; }
+         D3D12_RANGE wr = {0, 0};
+         r->rb->lpVtbl->Unmap(r->rb, 0, &wr);
+@@ -5411,6 +5432,8 @@ static void render_frame(void)
+         else if (dr->is_vp && dr->rt_off) {
+             const int _s = off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt);
+             if (_s >= 0 && dr->rt_pitch) s_d3d.off_rt[_s].pitch = dr->rt_pitch;
++            if (_s >= 0 && dr->clip_w && dr->clip_h) {
++                s_d3d.off_rt[_s].gw = dr->clip_w; s_d3d.off_rt[_s].gh = dr->clip_h; }
+         }
+         for (int _m = 0; _m < 3; _m++)
+             if (dr->is_vp && dr->rt_mrt[_m])
+@@ -6909,6 +6932,8 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+             dr->rt_w = rt_w; dr->rt_h = rt_h;
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
++            dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+             memcpy(dr->cc, cc, sizeof(cc));
+             dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
+             if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
+@@ -8527,6 +8552,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 }
+                 dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
++            dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+                 if (s_d3d.current_rsx_state) {
+                     dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+                     dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -8656,6 +8683,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+             }
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
++            dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+             if (s_d3d.current_rsx_state) {
+                 dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+                 dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -8842,6 +8871,8 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         }
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             dr->rt_pitch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_color_pitch[0] : 0;
++            dr->clip_w = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_w : 0;
++            dr->clip_h = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_clip_h : 0;
+         if (s_d3d.current_rsx_state) {
+             dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+             dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+-- 
+2.43.0
+

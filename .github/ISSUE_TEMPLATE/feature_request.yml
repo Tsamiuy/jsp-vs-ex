@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement or a PC feature
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Check [ROADMAP.md](../blob/main/docs/ROADMAP.md) and [FEATURES.md](../blob/main/docs/FEATURES.md) first; it may already be planned or done.
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like, and why?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Display/graphics, Controls/input, Audio, Modes and match options, Online, Installer/launcher, Linux, Other]
+  - type: checkboxes
+    id: gameplay
+    attributes:
+      label: Gameplay
+      options:
+        - label: This would change gameplay (it would then be an opt-in setting, the same for all players in an online match)
+  - type: input
+    id: version
+    attributes:
+      label: Port build (if it matters)
+      description: "Release number, or the commit (`git rev-parse --short HEAD`) of the build you ran."

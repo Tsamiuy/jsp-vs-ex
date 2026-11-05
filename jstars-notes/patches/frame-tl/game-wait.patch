@@ -1,0 +1,530 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 04ca454..dbe4bf8 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -136,10 +136,186 @@ static volatile int s_flip_pending = 0;
+  * derive it from the observed per-frame volume if a title outgrows it. */
+ #define GCM_FLIP_WRAP_BYTES 0x40000u
+ 
++#ifdef _WIN32
++/* FRAME_TL=1 (diagnostic, off by default): one line per 60 flips on where each
++ * frame's time goes between the game's main thread and the drawing thread
++ * (jstars-notes CPU_PROFILE §37). J-Stars' frame loop (func_006507DC) is: wait
++ * flip DONE -> reset, flip request + flush -> wait a vblank -> build the next
++ * frame -> poll the flip status again. Per flip request k:
++ *   vbl     request -> first vblank tick after it;
++ *   build   that tick -> the main thread's first flip-status poll (its next
++ *           frame is built), split into the thread's own CPU time and the rest
++ *           (blocked: SPU jobs, labels, sleeps);
++ *   flipw   first poll -> the poll that sees DONE;
++ *   walker  request -> the drawing thread decoding this flip's marker, and
++ *   present request -> that flip being taken for present (both include any
++ *           earlier frames still queued).
++ * A request interval over 37 ms is a missed 30 fps slot; the line counts how
++ * many of those had build > 16.7 ms and how many had walker > 33 ms. */
++#define FTL_RING 64u
++static int    s_ftl_on = -1;
++static double s_ftl_req[FTL_RING];          /* by request number */
++static volatile LONG s_ftl_nreq = 0, s_ftl_nwalk = 0, s_ftl_npres = 0;
++static volatile double s_ftl_tick = 0.0;    /* first vblank tick after the last request */
++static double s_ftl_poll = 0.0, s_ftl_done = 0.0;
++static u64    s_ftl_cyc_tick = 0, s_ftl_cyc_poll = 0;
++static HANDLE s_ftl_main = NULL;
++static DWORD  s_ftl_main_tid = 0;
++static double s_ftl_cyc_per_ms = 0.0;
++static double s_ftl_walk_lag[FTL_RING], s_ftl_pres_lag[FTL_RING];
++typedef struct { double n, interval, vbl, build, build_cpu, flipw, walk, pres;
++                 double max_interval, max_build, max_walk;
++                 unsigned long_iv, long_build, long_walk, long_both, build_over, walk_over, walk_missing; } FtlAcc;
++static FtlAcc s_ftl_acc;
++
++static int ftl_on(void)
++{
++    if (s_ftl_on < 0) {
++        const char* e = getenv("FRAME_TL");
++        s_ftl_on = (e && *e && *e != '0') ? 1 : 0;
++        if (s_ftl_on) {   /* thread cycle counts tick at the reference TSC rate */
++            LARGE_INTEGER f, a, b; ULONG64 c0 = 0, c1 = 0;
++            QueryPerformanceFrequency(&f);
++            QueryThreadCycleTime(GetCurrentThread(), &c0); QueryPerformanceCounter(&a);
++            do { QueryPerformanceCounter(&b); } while (b.QuadPart - a.QuadPart < f.QuadPart / 50);
++            QueryThreadCycleTime(GetCurrentThread(), &c1);
++            s_ftl_cyc_per_ms = (double)(c1 - c0) / ((double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart);
++        }
++    }
++    return s_ftl_on;
++}
++static double ftl_now(void)
++{
++    static LARGE_INTEGER f; LARGE_INTEGER c;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
++}
++static u64 ftl_main_cycles(void)
++{
++    ULONG64 c = 0;
++    if (s_ftl_main) QueryThreadCycleTime(s_ftl_main, &c);
++    return (u64)c;
++}
++
++/* Per request slot: the game-side times, filled when the next request closes
++ * the frame. A frame is counted FTL_LAG requests later, by when its flip
++ * marker has been decoded and presented even with the game running ahead. */
++#define FTL_LAG 6
++typedef struct { double iv, vbl, build, bcpu, flipw; } FtlGame;
++static FtlGame s_ftl_game[FTL_RING];
++
++static void ftl_count(LONG j)
++{
++    const FtlGame* g = &s_ftl_game[(u32)j % FTL_RING];
++    const double walk = s_ftl_walk_lag[(u32)j % FTL_RING];
++    const double pres = s_ftl_pres_lag[(u32)j % FTL_RING];
++    FtlAcc* a = &s_ftl_acc;
++    a->n++; a->interval += g->iv; a->vbl += g->vbl; a->build += g->build; a->build_cpu += g->bcpu;
++    a->flipw += g->flipw; a->walk += walk; a->pres += pres;
++    if (walk <= 0.0) a->walk_missing++;
++    if (g->iv > a->max_interval) a->max_interval = g->iv;
++    if (g->build > a->max_build) a->max_build = g->build;
++    if (walk > a->max_walk) a->max_walk = walk;
++    if (g->build > 16.7) a->build_over++;
++    if (walk > 33.3) a->walk_over++;
++    if (g->iv > 37.0) {
++        a->long_iv++;
++        if (g->build > 16.7 && walk > 33.3) a->long_both++;
++        else if (g->build > 16.7) a->long_build++;
++        else if (walk > 33.3) a->long_walk++;
++    }
++    if (a->n >= 60) {
++        const double n = a->n;
++        fprintf(stderr, "[FTL] %.0f flips | interval %.1f ms (max %.1f), %u over 37 ms: build>16.7 %u,"
++                        " walker>33 %u, both %u, neither %u | vbl %.1f | build %.1f (cpu %.1f, max %.1f,"
++                        " %u over 16.7) | flip wait %.1f | walker %.1f (max %.1f, %u over 33, %u not seen)"
++                        " | present %.1f%c",
++                n, a->interval / n, a->max_interval, a->long_iv, a->long_build, a->long_walk, a->long_both,
++                a->long_iv - a->long_build - a->long_walk - a->long_both,
++                a->vbl / n, a->build / n, a->build_cpu / n, a->max_build, a->build_over,
++                a->flipw / n, a->walk / n, a->max_walk, a->walk_over, a->walk_missing, a->pres / n, 10);
++        memset(a, 0, sizeof *a);
++    }
++}
++
++/* The game requested flip number s_ftl_nreq: close the previous frame's game side. */
++static void ftl_request(void)
++{
++    if (!ftl_on()) return;
++    const double now = ftl_now();
++    const LONG k = s_ftl_nreq;
++    if (k > 0) {
++        FtlGame* g = &s_ftl_game[(u32)(k - 1) % FTL_RING];
++        const double req = s_ftl_req[(u32)(k - 1) % FTL_RING];
++        const double poll = s_ftl_poll > 0.0 ? s_ftl_poll : now;
++        const double tick = s_ftl_tick > req ? s_ftl_tick : 0.0;
++        g->iv    = now - req;
++        g->vbl   = tick > 0.0 && tick < poll ? tick - req : poll - req;
++        g->build = poll - req - g->vbl;
++        g->bcpu  = (tick > 0.0 && tick < poll && s_ftl_cyc_poll > s_ftl_cyc_tick && s_ftl_cyc_per_ms > 0.0)
++                 ? (double)(s_ftl_cyc_poll - s_ftl_cyc_tick) / s_ftl_cyc_per_ms : 0.0;
++        g->flipw = s_ftl_done > poll ? s_ftl_done - poll : 0.0;
++        if (k - 1 >= FTL_LAG) ftl_count(k - 1 - FTL_LAG);
++    }
++    s_ftl_req[(u32)k % FTL_RING] = now;
++    s_ftl_walk_lag[(u32)k % FTL_RING] = 0.0;
++    s_ftl_pres_lag[(u32)k % FTL_RING] = 0.0;
++    s_ftl_tick = 0.0; s_ftl_poll = 0.0; s_ftl_done = 0.0;
++    MemoryBarrier();
++    InterlockedIncrement(&s_ftl_nreq);
++}
++
++/* A vblank tick (ticker thread): the first one after a request ends the vblank wait. */
++static void ftl_tick(void)
++{
++    if (s_ftl_on <= 0 || s_ftl_nreq == 0 || s_ftl_tick > 0.0) return;
++    s_ftl_cyc_tick = ftl_main_cycles();
++    s_ftl_tick = ftl_now();
++}
++
++/* The main thread polled the flip status; done = it saw DONE. */
++static void ftl_poll(int done)
++{
++    if (!ftl_on() || s_ftl_nreq == 0) return;
++    if (!s_ftl_main_tid) {   /* the first poller is the frame loop's thread */
++        s_ftl_main_tid = GetCurrentThreadId();
++        s_ftl_main = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, s_ftl_main_tid);
++    }
++    if (GetCurrentThreadId() != s_ftl_main_tid) return;
++    const double now = ftl_now();
++    if (s_ftl_poll == 0.0) { s_ftl_poll = now; s_ftl_cyc_poll = ftl_main_cycles(); }
++    if (done && s_ftl_done == 0.0) s_ftl_done = now;
++}
++
++/* The walker decoded a flip marker / the present thread took a flip. */
++static void ftl_walk(void)
++{
++    if (s_ftl_on <= 0) return;
++    LONG w = s_ftl_nwalk;
++    if (s_ftl_nreq - w > 8) w = s_ftl_nreq - 1;   /* markers lost to a resync: catch up */
++    if (w < s_ftl_nreq) { s_ftl_walk_lag[(u32)w % FTL_RING] = ftl_now() - s_ftl_req[(u32)w % FTL_RING]; s_ftl_nwalk = w + 1; }
++}
++static void ftl_present(void)
++{
++    if (s_ftl_on <= 0) return;
++    LONG p = s_ftl_npres;
++    if (s_ftl_nreq - p > 8) p = s_ftl_nreq - 1;
++    if (p < s_ftl_nreq) { s_ftl_pres_lag[(u32)p % FTL_RING] = ftl_now() - s_ftl_req[(u32)p % FTL_RING]; s_ftl_npres = p + 1; }
++}
++#else
++static void ftl_request(void) {}
++static void ftl_tick(void) {}
++static void ftl_poll(int done) { (void)done; }
++static void ftl_walk(void) {}
++static void ftl_present(void) {}
++#endif
++
+ int cellGcm_take_flip_pending(void)
+ {
+     int v = s_flip_pending;
+     s_flip_pending = 0;
++    if (v) ftl_present();   /* FRAME_TL */
+     return v;
+ }
+ 
+@@ -671,6 +847,9 @@ void cellGcmResetFlipStatus(void)
+     s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
+ }
+ 
++/* Set by the D3D12 backend (GAME_SAMPLE diagnostic); called once from the poll below. */
++void (*g_rsx_game_sample_hook)(void) = 0;
++
+ /* NID: 0xE315A0B2 */
+ u32 cellGcmGetFlipStatus(void)
+ {
+@@ -685,6 +864,11 @@ u32 cellGcmGetFlipStatus(void)
+       if (getenv("FLIP_DBG") && n++ < 24)
+           fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
+                   s_flip_status, 10); }
++    ftl_poll(s_flip_status == CELL_GCM_FLIP_STATUS_DONE);   /* FRAME_TL */
++    /* GAME_SAMPLE=1: the D3D12 backend's stack sampler on this (the frame
++     * loop's) thread; the hook is set once the backend renders. */
++    { static int gs = 0;
++      if (!gs && g_rsx_game_sample_hook) { gs = 1; g_rsx_game_sample_hook(); } }
+     return s_flip_status;
+ }
+ 
+@@ -785,7 +969,7 @@ void ppu_gcm_pump(void)
+ 
+ /* Back-compat: the old direct entry points now just mark a tick pending (so any
+  * caller other than the ticker still works) -- delivery stays on the main thread. */
+-void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
++void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); ftl_tick(); }
+ /* Only deliver a flip completion when a flip is actually outstanding.
+  *
+  * Ticking unconditionally at 60 Hz fires the guest's flip handler even when
+@@ -1283,6 +1467,7 @@ int cellGcm_take_flip_pending_synced(void)
+     u32 get = vm_read32(GCM_CONTROL_GUEST_ADDR + 4);
+     if (get != put) return 0;   /* frame not fully drained yet */
+     s_flip_pending = 0;
++    ftl_present();   /* FRAME_TL */
+     return 1;
+ }
+ 
+@@ -1873,6 +2058,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+             }
++            ftl_walk();   /* FRAME_TL */
+             /* ...unless the FIFO is badly backlogged. One flip per drain is
+              * right while `get` is keeping up with `put`; when it is megabytes
+              * behind it is a deadlock, because the title's ring can only be
+@@ -2547,6 +2733,7 @@ u32 cellGcm_display_buffer_count(void)
+ 
+ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+ {
++    ftl_request();   /* FRAME_TL */
+     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
+      * which answers "did it ever flip?" and not "is it still flipping, and how
+      * fast?" -- the question that matters when a title stops appearing on
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index d7ad6b9..b886d04 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -687,20 +687,23 @@ static int perf_on(void)
+     return v;
+ }
+ 
+-/* DRAW_SAMPLE=1 (diagnostic, off by default): a stack sampler for the drawing
+- * thread. Every ~1 ms a sampler thread suspends it, walks its stack and
+- * resumes it, then counts the sample by: the module the thread was in (exe,
+- * ntdll, D3D12, NVIDIA, other), whether it ran since the previous sample (thread
+- * cycle time moved), and the first two exe frames on the stack -- so time in
+- * ntdll or the driver is charged to the exe code that called it. Every
+- * DRAW_SAMPLE_SEC seconds (default 10) the counts are appended to
+- * DRAW_SAMPLE_OUT (default draw_samples.txt) as exe RVAs; tools\ds_sym.py names
+- * them. The `threads` dumps (40 per run, top address only) could not say where
+- * the thread's ntdll/kernel quarter comes from.
++/* DRAW_SAMPLE=1 / GAME_SAMPLE=1 (diagnostic, off by default): a stack sampler
++ * for the drawing thread and/or the game's main thread (the one polling the
++ * flip status, func_006507DC, which also flushes the FIFO). Every 0.5-1.5 ms
++ * (at random, so it cannot lock onto the game's own 1 ms timer waits) one
++ * sampler thread suspends each sampled thread, walks its stack and resumes it,
++ * then counts the sample by: the module the thread was in (exe, ntdll, an
++ * ntdll wait stub, D3D12, NVIDIA, other), whether it ran since the previous
++ * sample (thread cycle time moved), and the first two exe frames on the stack
++ * -- so time in ntdll or the driver is charged to the exe code that called it.
++ * Every DRAW_SAMPLE_SEC seconds (default 10) the counts are appended to
++ * DRAW_SAMPLE_OUT (default draw_samples.txt) / GAME_SAMPLE_OUT (default
++ * game_samples.txt) as exe RVAs; tools\ds_sym.py names them.
+  * The walk runs while the thread is suspended, so it takes no locks: unwind
+  * tables are found from a module list made before (and refreshed between)
+- * windows, and RtlVirtualUnwind only reads memory. Costs the drawing thread
+- * a suspend/resume per sample (~1-2%). */
++ * windows, RtlVirtualUnwind only reads memory, and the walk never reads
++ * outside the thread's own stack. Costs each sampled thread a suspend/resume
++ * per sample (~1 ms of every 25 on the drawing thread, jstars-notes §36). */
+ #include <psapi.h>
+ typedef struct { u64 base, end; const RUNTIME_FUNCTION* rf; u32 nrf; int cls; } DsMod;
+ enum { DS_EXE, DS_NTDLL, DS_WAIT, DS_D3D12, DS_NV, DS_OTHER, DS_NCLS };
+@@ -711,9 +714,13 @@ static DsMod s_ds_mod[256];
+ static int   s_ds_nmod = 0;
+ typedef struct { u32 key_cls, e1, e2, n; } DsEnt;   /* key_cls: cls | ran << 4 */
+ #define DS_HASH 16384u
+-static DsEnt s_ds_tab[DS_HASH];
+-static u32   s_ds_total = 0, s_ds_lost = 0;
+-static u64   s_ds_stack_lo = 0, s_ds_stack_hi = 0;   /* the drawing thread's stack */
++typedef struct {
++    HANDLE th; u64 stack_lo, stack_hi; FILE* f; ULONG64 last_cyc;
++    DsEnt tab[DS_HASH]; u32 total, lost;
++} DsInst;
++enum { DS_DRAW, DS_GAME, DS_NINST };
++static DsInst* s_ds_inst[DS_NINST];
++static volatile LONG s_ds_running = 0;
+ 
+ static void ds_load_modules(void)
+ {
+@@ -767,16 +774,16 @@ static const RUNTIME_FUNCTION* ds_lookup(const DsMod* m, u64 pc)
+     return NULL;
+ }
+ 
+-static void ds_count(u32 key_cls, u32 e1, u32 e2)
++static void ds_count(DsInst* in, u32 key_cls, u32 e1, u32 e2)
+ {
+     u32 h = (key_cls * 0x9E3779B1u) ^ (e1 * 0x85EBCA77u) ^ (e2 * 0xC2B2AE3Du);
+     for (u32 i = 0; i < 64; i++) {
+-        DsEnt* e = &s_ds_tab[(h + i) & (DS_HASH - 1)];
++        DsEnt* e = &in->tab[(h + i) & (DS_HASH - 1)];
+         if (e->n && (e->key_cls != key_cls || e->e1 != e1 || e->e2 != e2)) continue;
+         e->key_cls = key_cls; e->e1 = e1; e->e2 = e2; e->n++;
+         return;
+     }
+-    s_ds_lost++;
++    in->lost++;
+ }
+ 
+ static int ds_cmp(const void* a, const void* b)
+@@ -785,46 +792,75 @@ static int ds_cmp(const void* a, const void* b)
+     return x < y ? 1 : x > y ? -1 : 0;
+ }
+ 
+-static void ds_flush(FILE* f, int win, double secs)
++static void ds_flush(DsInst* in, int win, double secs)
+ {
+     static DsEnt srt[DS_HASH];
+     u32 m = 0, by[DS_NCLS][2] = { { 0 } };
+     for (u32 i = 0; i < DS_HASH; i++)
+-        if (s_ds_tab[i].n) {
+-            srt[m++] = s_ds_tab[i];
+-            by[s_ds_tab[i].key_cls & 15][s_ds_tab[i].key_cls >> 4] += s_ds_tab[i].n;
++        if (in->tab[i].n) {
++            srt[m++] = in->tab[i];
++            by[in->tab[i].key_cls & 15][in->tab[i].key_cls >> 4] += in->tab[i].n;
+         }
+     qsort(srt, m, sizeof srt[0], ds_cmp);
+-    fprintf(f, "[DS] window %d: %u samples in %.1f s (%u lost)", win, s_ds_total, secs, s_ds_lost);
++    fprintf(in->f, "[DS] window %d: %u samples in %.1f s (%u lost)", win, in->total, secs, in->lost);
+     for (int c = 0; c < DS_NCLS; c++)
+-        fprintf(f, " | %s ran %u idle %u", s_ds_cls_name[c], by[c][1], by[c][0]);
+-    fputc(10, f);
++        fprintf(in->f, " | %s ran %u idle %u", s_ds_cls_name[c], by[c][1], by[c][0]);
++    fputc(10, in->f);
+     for (u32 i = 0; i < m && i < 400; i++)
+-        fprintf(f, "%u %s %s 0x%X 0x%X%c", srt[i].n, s_ds_cls_name[srt[i].key_cls & 15],
++        fprintf(in->f, "%u %s %s 0x%X 0x%X%c", srt[i].n, s_ds_cls_name[srt[i].key_cls & 15],
+                 (srt[i].key_cls >> 4) ? "ran" : "idle", srt[i].e1, srt[i].e2, 10);
+-    fflush(f);
+-    memset(s_ds_tab, 0, sizeof s_ds_tab);
+-    s_ds_total = s_ds_lost = 0;
++    fflush(in->f);
++    memset(in->tab, 0, sizeof in->tab);
++    in->total = in->lost = 0;
++}
++
++static void ds_sample(DsInst* in)
++{
++    if (SuspendThread(in->th) == (DWORD)-1) return;
++    CONTEXT c; memset(&c, 0, sizeof c);
++    c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
++    u32 cls = DS_OTHER, e1 = 0, e2 = 0;
++    if (GetThreadContext(in->th, &c)) {
++        const DsMod* m0 = ds_mod_of(c.Rip);
++        cls = m0 ? (u32)m0->cls : DS_OTHER;
++        if (cls == DS_NTDLL)
++            for (int i = 0; i < 8; i++)
++                if (s_ds_wait[i] && c.Rip >= s_ds_wait[i] && c.Rip < s_ds_wait[i] + 32) cls = DS_WAIT;
++        for (int d = 0; d < 32 && c.Rip && !e2; d++) {
++            const DsMod* m = d ? ds_mod_of(c.Rip) : m0;
++            if (!m) break;                              /* unknown code: stop */
++            if (m->cls == DS_EXE) {
++                if (!e1) e1 = (u32)(c.Rip - m->base); else e2 = (u32)(c.Rip - m->base);
++            }
++            if (c.Rsp < in->stack_lo || c.Rsp + 8 > in->stack_hi) break;
++            const RUNTIME_FUNCTION* rf = ds_lookup(m, c.Rip);
++            if (!rf) { c.Rip = *(const u64*)c.Rsp; c.Rsp += 8; }   /* leaf */
++            else {
++                void* hd = NULL; DWORD64 ef = 0;
++                RtlVirtualUnwind(UNW_FLAG_NHANDLER, m->base, c.Rip, (PRUNTIME_FUNCTION)rf,
++                                 &c, &hd, &ef, NULL);
++            }
++            /* return addresses point after the call: -1 keeps them inside it */
++            if (c.Rip) c.Rip -= 1;
++        }
++    }
++    ResumeThread(in->th);
++    ULONG64 cyc = 0; QueryThreadCycleTime(in->th, &cyc);
++    const u32 ran = cyc != in->last_cyc; in->last_cyc = cyc;
++    ds_count(in, cls | (ran << 4), e1, e2);
++    in->total++;
+ }
+ 
+ static DWORD WINAPI ds_thread(LPVOID arg)
+ {
+-    HANDLE th = (HANDLE)arg;
+-    const char* o = getenv("DRAW_SAMPLE_OUT");
+-    FILE* f = fopen(o && *o ? o : "draw_samples.txt", "a");
+-    if (!f) return 0;
++    (void)arg;
+     double win_s = 10.0;
+     { const char* e = getenv("DRAW_SAMPLE_SEC"); if (e && atof(e) > 0) win_s = atof(e); }
+     HANDLE tm = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+     if (!tm) tm = CreateWaitableTimerW(NULL, FALSE, NULL);
+     u32 rng = GetCurrentThreadId() * 2654435761u;
+     ds_load_modules();
+-    const DsMod* exe = NULL;
+-    for (int i = 0; i < s_ds_nmod; i++) if (s_ds_mod[i].cls == DS_EXE) exe = &s_ds_mod[i];
+-    ULONG64 last_cyc = 0; QueryThreadCycleTime(th, &last_cyc);
+     double t0 = perf_now(); int win = 0;
+-    fprintf(f, "[DS] drawing-thread sampler start, %d modules, exe base 0x%llX%c",
+-            s_ds_nmod, exe ? (unsigned long long)exe->base : 0ull, 10);
+     for (;;) {
+         /* 0.5-1.5 ms apart, at random: a fixed period would lock onto the
+          * game's own 1 ms timer waits and over- or under-count them. */
+@@ -832,66 +868,61 @@ static DWORD WINAPI ds_thread(LPVOID arg)
+         LARGE_INTEGER due; due.QuadPart = -(5000 + (LONGLONG)(rng >> 8) % 10000);
+         if (tm && SetWaitableTimer(tm, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(tm, INFINITE);
+         else Sleep(1);
+-        if (SuspendThread(th) == (DWORD)-1) break;
+-        CONTEXT c; memset(&c, 0, sizeof c);
+-        c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+-        u32 cls = DS_OTHER, e1 = 0, e2 = 0;
+-        if (GetThreadContext(th, &c)) {
+-            const DsMod* m0 = ds_mod_of(c.Rip);
+-            cls = m0 ? (u32)m0->cls : DS_OTHER;
+-            if (cls == DS_NTDLL)
+-                for (int i = 0; i < 8; i++)
+-                    if (s_ds_wait[i] && c.Rip >= s_ds_wait[i] && c.Rip < s_ds_wait[i] + 32) cls = DS_WAIT;
+-            for (int d = 0; d < 32 && c.Rip && !e2; d++) {
+-                const DsMod* m = d ? ds_mod_of(c.Rip) : m0;
+-                if (!m) break;                              /* unknown code: stop */
+-                if (m->cls == DS_EXE) {
+-                    if (!e1) e1 = (u32)(c.Rip - m->base); else e2 = (u32)(c.Rip - m->base);
+-                }
+-                if (c.Rsp < s_ds_stack_lo || c.Rsp + 8 > s_ds_stack_hi) break;
+-                const RUNTIME_FUNCTION* rf = ds_lookup(m, c.Rip);
+-                if (!rf) { c.Rip = *(const u64*)c.Rsp; c.Rsp += 8; }   /* leaf */
+-                else {
+-                    void* hd = NULL; DWORD64 ef = 0;
+-                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, m->base, c.Rip, (PRUNTIME_FUNCTION)rf,
+-                                     &c, &hd, &ef, NULL);
+-                }
+-                /* return addresses point after the call: -1 keeps them inside it */
+-                if (c.Rip) c.Rip -= 1;
+-            }
+-        }
+-        ResumeThread(th);
+-        ULONG64 cyc = 0; QueryThreadCycleTime(th, &cyc);
+-        const u32 ran = cyc != last_cyc; last_cyc = cyc;
+-        ds_count(cls | (ran << 4), e1, e2);
+-        s_ds_total++;
++        for (int i = 0; i < DS_NINST; i++) if (s_ds_inst[i]) ds_sample(s_ds_inst[i]);
+         const double t = perf_now();
+-        if (t - t0 >= win_s) { ds_flush(f, win++, t - t0); t0 = t; ds_load_modules(); }
++        if (t - t0 >= win_s) {
++            for (int i = 0; i < DS_NINST; i++) if (s_ds_inst[i]) ds_flush(s_ds_inst[i], win, t - t0);
++            win++; t0 = t; ds_load_modules();
++        }
+     }
+-    fclose(f);
+     return 0;
+ }
+ 
++/* Start sampling the calling thread as instance `which` (once). */
++static void ds_add_current(int which, const char* out_env, const char* out_def)
++{
++    if (s_ds_inst[which]) return;
++    DsInst* in = (DsInst*)calloc(1, sizeof *in);
++    if (!in) return;
++    {   /* this thread's whole stack reservation: the walk never reads outside it */
++        const NT_TIB* tib = (const NT_TIB*)NtCurrentTeb();
++        MEMORY_BASIC_INFORMATION mb;
++        in->stack_hi = (u64)tib->StackBase;
++        if (VirtualQuery((const u8*)tib->StackBase - 1, &mb, sizeof mb))
++            in->stack_lo = (u64)mb.AllocationBase;
++    }
++    in->th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
++                        FALSE, GetCurrentThreadId());
++    const char* o = getenv(out_env);
++    in->f = fopen(o && *o ? o : out_def, "a");
++    if (!in->th || !in->f) { fprintf(stderr, "[DS] %s: cannot sample this thread%c", out_def, 10); return; }
++    fprintf(in->f, "[DS] sampler start (tid %lu), exe base 0x%llX%c", GetCurrentThreadId(),
++            (unsigned long long)(u64)GetModuleHandleA(NULL), 10);
++    fflush(in->f);
++    MemoryBarrier();
++    s_ds_inst[which] = in;
++    if (InterlockedCompareExchange(&s_ds_running, 1, 0) == 0) {
++        HANDLE h = CreateThread(NULL, 0, ds_thread, NULL, 0, NULL);
++        if (h) { SetThreadPriority(h, THREAD_PRIORITY_HIGHEST); CloseHandle(h); }
++    }
++    fprintf(stderr, "[DS] sampling tid %lu into %s%c", GetCurrentThreadId(), o && *o ? o : out_def, 10);
++}
++
++/* GAME_SAMPLE=1: called once by cellGcmGetFlipStatus on the game's main thread. */
++static void ds_game_hook(void)
++{
++    const char* e = getenv("GAME_SAMPLE");
++    if (e && *e && *e != '0') ds_add_current(DS_GAME, "GAME_SAMPLE_OUT", "game_samples.txt");
++}
++
+ static void ds_start_once(void)
+ {
+     static int st = -1;
+     if (st >= 0) return;
++    { extern void (*g_rsx_game_sample_hook)(void); g_rsx_game_sample_hook = ds_game_hook; }
+     const char* e = getenv("DRAW_SAMPLE");
+     st = (e && *e && *e != '0') ? 1 : 0;
+-    if (!st) return;
+-    {   /* this thread's whole stack reservation: the walk never reads outside it */
+-        const NT_TIB* tib = (const NT_TIB*)NtCurrentTeb();
+-        MEMORY_BASIC_INFORMATION mb;
+-        s_ds_stack_hi = (u64)tib->StackBase;
+-        if (VirtualQuery((const u8*)tib->StackBase - 1, &mb, sizeof mb))
+-            s_ds_stack_lo = (u64)mb.AllocationBase;
+-    }
+-    HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+-                           FALSE, GetCurrentThreadId());
+-    if (!th) { fprintf(stderr, "[DS] OpenThread failed%c", 10); return; }
+-    HANDLE h = CreateThread(NULL, 0, ds_thread, th, 0, NULL);
+-    if (h) { SetThreadPriority(h, THREAD_PRIORITY_HIGHEST); CloseHandle(h); }
+-    fprintf(stderr, "[DS] sampling the drawing thread (tid %lu)%c", GetCurrentThreadId(), 10);
++    if (st) ds_add_current(DS_DRAW, "DRAW_SAMPLE_OUT", "draw_samples.txt");
+ }
+ 
+ /* STRIP_INDEXED=1 (opt-in): native strips as an INDEXED draw with D3D's

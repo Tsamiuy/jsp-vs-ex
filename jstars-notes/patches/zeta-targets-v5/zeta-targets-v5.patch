@@ -1,0 +1,249 @@
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 9b38894..53d4ef8 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -510,6 +510,19 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->depth_dirty = 1;
+         return 0;
+     }
++    if (method == NV4097_SET_POLY_OFFSET_FILL_ENABLE) {
++        state->poly_offset_fill = data ? 1 : 0;
++        state->depth_dirty = 1;
++        return 0;
++    }
++    if (method == NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR ||
++        method == NV4097_SET_POLYGON_OFFSET_BIAS) {
++        float f; memcpy(&f, &data, sizeof f);
++        if (method == NV4097_SET_POLYGON_OFFSET_BIAS) state->poly_offset_bias = f;
++        else                                          state->poly_offset_scale = f;
++        state->depth_dirty = 1;
++        return 0;
++    }
+ 
+     /* Stencil */
+     if (method == NV4097_SET_STENCIL_TEST_ENABLE) {
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 159c342..96df5eb 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -182,6 +182,9 @@ extern "C" {
+ 
+ /* Depth / stencil */
+ #define NV4097_SET_DEPTH_TEST_ENABLE            0x00000A74
++#define NV4097_SET_POLY_OFFSET_FILL_ENABLE      0x00000A68
++#define NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR  0x00000A78
++#define NV4097_SET_POLYGON_OFFSET_BIAS          0x00000A7C
+ #define NV4097_SET_DEPTH_FUNC                   0x00000A6C
+ #define NV4097_SET_DEPTH_MASK                   0x00000A70
+ #define NV4097_SET_STENCIL_TEST_ENABLE          0x00000328
+@@ -276,6 +279,10 @@ typedef struct rsx_state {
+     int depth_test_enable;
+     u32 depth_func;
+     int depth_mask;
++    /* glPolygonOffset for filled primitives: enable, factor (scale), units
++     * (bias). Shadow casters use it against self-shadowing acne. */
++    int poly_offset_fill;
++    float poly_offset_scale, poly_offset_bias;
+ 
+     /* Stencil */
+     int stencil_test_enable;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1256cde..ad539a5 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -130,6 +130,7 @@ typedef struct {
+     int tex_zt[RSX_TEX_UNITS];      /* pre-pass: DepthRT index sampled by unit, -1 = none */
+     u32 zstate;         /* guest depth state at record time (rsx_zstate_pack) */
+     u32 zt_off;         /* ZETA_TARGETS: the colour op's zeta offset, 0 = shared depth */
++    float poff_scale, poff_bias;   /* guest polygon offset (fill), 0/0 when off */
+     u32 zclr;           /* clear op: RSX Z/S flags (bits 0-1), 0x100 = also colour */
+     float zcd;          /* clear op: depth value */
+     u32 zcs;            /* clear op: stencil value */
+@@ -2364,6 +2365,7 @@ typedef struct {
+     rsx_fp_shadow_desc shadow[16];
+     u16 remap[16];
+     u32 zonly_state;    /* depth-only op: its rsx_zstate_pack (PSO depth state) */
++    float poff_scale, poff_bias;   /* guest polygon offset for that depth state */
+ } DrZInfo;
+ 
+ /* An A8R8G8B8 view of a zeta surface with an ADDRESS zfunc is a depth
+@@ -2372,12 +2374,71 @@ typedef struct {
+  * .x ~ 1 everywhere and every character went black (FINDINGS §29).
+  * ZPASS_ARGB_BITCAST=1 restores the byte bitcast. (ZPASS_ARGB_CMP is now the
+  * default and has no effect.) */
++/* v4: an A8R8G8B8 view of a zeta is a byte bitcast again, as in v1 and as
++ * RPCS3 treats it; only DEPTH24_D8/DEPTH16 views compare. J-Stars' fog pass
++ * (fp 0x0FC9ED81, rsxcap_skin frame_01 op305) binds the scene zeta 0x0E960000
++ * at t0 as A8R8G8B8 with remap 0xAA93 and zfunc 4, floors the bytes and
++ * rebuilds the depth with dot(rgb, (1/256, 1/65536, 1/2^24)) -- a comparison
++ * result there blacked out the whole frame (ZETA_TARGETS=1 alone, FINDINGS
++ * §31). v1's black silhouettes with the bitcast came from the shadow lookups
++ * having no coordinates (TEX8/TEX9, fixed in v3), not from the bitcast.
++ * ZPASS_ARGB_CMP=1 = v2/v3 (compare when zfunc is set). */
++/* Units a fragment program reads with TXP (projective lookups). J-Stars reads
++ * the same kind of view -- a zeta as A8R8G8B8 with zfunc set -- two ways: the
++ * fog pass with TEX, rebuilding depth from the bytes; the materials with TXP
++ * shadow taps, summing .x as comparison results (fp 0x0FBFFFC1 and others,
++ * rsxcap_skin). So: A8R8G8B8 + zfunc + TXP = comparison, + TEX = bitcast.
++ * ZPASS_ARGB_TXP=0 = v4 (always bitcast). Walk as rsx_fp_texture_units. */
++static u32 fp_txp_units(u32 fp_addr)
++{
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    if (!fp_addr || !vm_base) return 0;
++    const u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
++    if (off == 0xFFFFFFFFu) return 0;
++    const u8* uc = vm_base + off;
++    u32 units = 0;
++    for (u32 o = 0; o + 16 <= FP_MAX_BYTES;) {
++        const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
++        const u32 w2 = rsx_fp_read_word(uc + o + 8), w3 = rsx_fp_read_word(uc + o + 12);
++        if (!(w2 & (1u << 31)) && ((w0 >> 24) & 63u) == 0x18u)      /* TXP */
++            units |= 1u << ((w0 >> 17) & 15u);
++        o += 16;
++        if (!(w2 & (1u << 31)) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2))
++            o += 16;                                                   /* inline constant */
++        if (w0 & 1u) break;                                            /* END */
++    }
++    return units;
++}
++static int zargb_txp(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("ZPASS_ARGB_TXP"); on = e ? atoi(e) : 1; }
++    return on;
++}
++
+ static int zargb_cmp(void)
+ {
+     static int on = -1;
+-    if (on < 0) on = getenv("ZPASS_ARGB_BITCAST") ? 0 : 1;
++    if (on < 0) on = getenv("ZPASS_ARGB_CMP") ? 1 : 0;
++    return on;
++}
++
++/* ZPASS_CMP_OFF=1: never hand a DepthRT to a DEPTH24_D8/DEPTH16 unit (it gets
++ * the old null view, i.e. "lit"). Isolates the comparison path when judging
++ * the hard black cast shadows on the ground (zeta v4 README). */
++static int zcmp_off(void)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("ZPASS_CMP_OFF") ? 1 : 0;
+     return on;
+ }
++static int zunit_handoff_ok(u32 fmt, int zt)
++{
++    const u32 b = fmt & 0x9Fu;
++    if (zcmp_off() && b >= 0x90 && b <= 0x93) return 0;
++    return dt_handoff_ok(zt);
++}
+ 
+ /* Comparison descriptor for a unit read as DEPTH24_D8 (fmt is the format byte
+  * to use). The decompiler only emits matching nearest/linear min+mag filters on
+@@ -2409,14 +2470,16 @@ static void dr_z_info(const D3D12DrawRecord* dr, DrZInfo* zi)
+ {
+     memset(zi, 0, sizeof *zi);
+     if (!zpass_on() && !zeta_targets_on()) return;
++    const u32 txp = fp_txp_units(dr->fp_addr);
+     for (int u = 0; u < RSX_TEX_UNITS && u < 16; u++) {
+-        if (!dr->tex[u].set || !dt_handoff_ok(dt_find(dr->tex[u].raw))) continue;
++        if (!dr->tex[u].set || !zunit_handoff_ok(dr->tex[u].fmt, dt_find(dr->tex[u].raw))) continue;
+         const u32 base = dr->tex[u].fmt & 0x9Fu;
+         if (base >= 0x90 && base <= 0x93) {
+             rsx_fp_shadow_desc sd;
+             zcmp_desc(dr, u, dr->tex[u].fmt, &sd);
+             if (sd.enabled == 1) { zi->shadow[u] = sd; zi->shadow_mask |= 1u << u; }
+-        } else if (base == 0x85 && zargb_cmp() && ((dr->tex[u].addr >> 28) & 15u)) {
++        } else if (base == 0x85 && ((dr->tex[u].addr >> 28) & 15u) &&
++                   (zargb_cmp() || (zargb_txp() && ((txp >> u) & 1u)))) {
+             /* A8R8G8B8 view + zfunc: compared like DEPTH24_D8 (see zargb_cmp). */
+             rsx_fp_shadow_desc sd;
+             zcmp_desc(dr, u, 0x90u | (dr->tex[u].fmt & 0x60u), &sd);
+@@ -2448,6 +2511,10 @@ static void dr_z_info(const D3D12DrawRecord* dr, DrZInfo* zi)
+             zi->zonly_state = gfunc ? zs : ((zs & ~0x70u) | (3u << 4));
+         }
+     }
++    /* The guest polygon offset goes with its depth state (casters' bias
++     * against self-shadowing; ZPASS_NO_POLYOFFSET=1 = none, as before). */
++    { static int npo = -1; if (npo < 0) npo = getenv("ZPASS_NO_POLYOFFSET") ? 1 : 0;
++      if (zi->zonly_state && !npo) { zi->poff_scale = dr->poff_scale; zi->poff_bias = dr->poff_bias; } }
+     if (!zi->shadow_mask && !zi->bitcast_mask && !zi->zonly_state) return;
+     u64 k = 1469598103934665603ULL;
+     const u8* p = (const u8*)zi + sizeof zi->key;   /* everything after key */
+@@ -3045,6 +3112,12 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+               pd.DepthStencilState.DepthFunc = (D3D12_COMPARISON_FUNC)(((zs >> 4) & 7u) + 1u);
+               pd.DepthStencilState.DepthWriteMask = (zs & 2u) ? D3D12_DEPTH_WRITE_MASK_ALL
+                                                                : D3D12_DEPTH_WRITE_MASK_ZERO;
++              /* glPolygonOffset(factor, units) == D3D slope-scaled bias +
++               * integer bias in units of the depth format's resolution. */
++              if (zi->poff_scale != 0.0f || zi->poff_bias != 0.0f) {
++                  pd.RasterizerState.DepthBias = (INT)zi->poff_bias;
++                  pd.RasterizerState.SlopeScaledDepthBias = zi->poff_scale;
++              }
+           }
+       } }
+     pd.SampleDesc.Count = 1;
+@@ -5207,7 +5280,7 @@ static void render_frame(void)
+              * that depth (.r); dr_z_info tells the FP how to use it. */
+             if (dr->tex[_u].set && (zpass_on() || zeta_targets_on())) {
+                 int zt = dt_find(dr->tex[_u].raw);
+-                if (zt >= 0 && dt_handoff_ok(zt)) {
++                if (zt >= 0 && zunit_handoff_ok(dr->tex[_u].fmt, zt)) {
+                     dr->tex_zt[_u] = zt;
+                     srv_write(wslot, s_zrt[zt].snap, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+                               D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+@@ -6523,6 +6596,10 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+               dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+               dr->zstate = rsx_zstate_pack(s_d3d.current_rsx_state);
+               dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
++              if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
++                  dr->poff_scale = s_d3d.current_rsx_state->poly_offset_scale;
++                  dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
++              }
+               dr->rt_fmt = zs->surface_format;
+               dr->cc[0] = depth; dr->cc[1] = (float)stencil; dr->cc[2] = (float)(flags & 3u);
+           }
+@@ -6567,6 +6644,10 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             memcpy(dr->cc, cc, sizeof(cc));
+             dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
++            if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
++                dr->poff_scale = s_d3d.current_rsx_state->poly_offset_scale;
++                dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
++            }
+             if (dr->zt_off && (flags & 3u)) {   /* colour + depth in one clear */
+                 dr->zclr = 0x100u | (flags & 3u); dr->zcd = depth; dr->zcs = stencil;
+             }
+@@ -8008,6 +8089,10 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+                 dr->zstate = rsx_zstate_pack(s_d3d.current_rsx_state);
+                 dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
++                if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
++                    dr->poff_scale = s_d3d.current_rsx_state->poly_offset_scale;
++                    dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
++                }
+                 dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+                 if (s_d3d.current_rsx_state) {
+                     dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+@@ -8130,6 +8215,10 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+             dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+             dr->zstate = rsx_zstate_pack(s_d3d.current_rsx_state);
+             dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
++            if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
++                dr->poff_scale = s_d3d.current_rsx_state->poly_offset_scale;
++                dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
++            }
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+             if (s_d3d.current_rsx_state) {
+                 dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+@@ -8309,6 +8398,10 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+         dr->zstate = rsx_zstate_pack(s_d3d.current_rsx_state);
+         dr->zt_off = rsx_color_zeta(s_d3d.current_rsx_state);
++        if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->poly_offset_fill) {
++            dr->poff_scale = s_d3d.current_rsx_state->poly_offset_scale;
++            dr->poff_bias  = s_d3d.current_rsx_state->poly_offset_bias;
++        }
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
+         if (s_d3d.current_rsx_state) {
+             dr->vp_x = s_d3d.current_rsx_state->viewport_x;

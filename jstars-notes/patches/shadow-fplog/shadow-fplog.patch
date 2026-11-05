@@ -1,0 +1,50 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index cf88a6c..afe7aee 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7937,6 +7937,7 @@ static void render_frame(void)
+             int cur_czt = -1;                      /* DepthRT behind the colour target, -1 = shared */
+             u32 zn_draw[MAX_DEPTH_RTS] = {0}, zn_skip[MAX_DEPTH_RTS] = {0};
+             u32 zn_clear[MAX_DEPTH_RTS] = {0}, zn_verts[MAX_DEPTH_RTS] = {0};
++            u32 zn_cdraw[MAX_DEPTH_RTS] = {0};     /* ZPASS_FPLOG: colour draws depth-bound to it */
+             float zlast_clear[MAX_DEPTH_RTS] = {0};
+             float vp_last_w = 0, vp_last_h = 0;    /* for DRAWARGS */
+             float dvp_x = 0, dvp_y = 0, dvp_w = 0, dvp_h = 0;  /* per-draw, for DRAWARGS */
+@@ -8260,6 +8261,37 @@ static void render_frame(void)
+                 /* Per-draw textures: bind this draw's t0-t3 SRV window.
+                  * Any sampled offscreen RT transitions to PSR first (never
+                  * one of the currently-bound colour targets). */
++                /* ZPASS_FPLOG=<fp hex>[,<n>]: for the first n draws (default 120) of that
++                 * fragment program, log the flip, batch draw index, the scene DepthRT
++                 * bound behind the colour target, and for every unit it samples a
++                 * zeta through: the zeta, whether the DepthRT is dirty (written since
++                 * its last sampling copy, so this draw refreshes the copy), and how
++                 * many caster draws / clears / depth-bound colour draws hit it so far
++                 * in this batch. For fp 0x9CA80C1 (the screen-space shadow pass:
++                 * shadow maps on units 7/8 and the scene depth on 15, read as byte
++                 * bitcasts), to tell whether it reads a complete scene depth and
++                 * this frame's maps when the tree shadows blink (SHADOWS_ENV.md). */
++                if (!zdraw) {
++                    static int fl_on = -1; static u32 fl_fp = 0; static long fl_n = 0;
++                    if (fl_on < 0) { const char* e = getenv("ZPASS_FPLOG"); fl_on = e ? 1 : 0;
++                        if (e) { char* c; fl_fp = (u32)strtoul(e, &c, 16); fl_n = (*c == ',') ? atol(c + 1) : 120; } }
++                    if (cur_czt >= 0) zn_cdraw[cur_czt]++;
++                    if (fl_on && fl_n > 0 && dr->fp_addr == fl_fp) {
++                        extern unsigned int cellGcm_flip_request_count(void);
++                        char line[512]; int ln = 0;
++                        fl_n--;
++                        ln += snprintf(line + ln, sizeof line - ln, "[ZFPLOG] flip=%u d=%u fp=0x%X czt=%s0x%08X",
++                                       cellGcm_flip_request_count(), (unsigned)d, dr->fp_addr,
++                                       cur_czt >= 0 ? "" : "none ", cur_czt >= 0 ? s_zrt[cur_czt].off : 0u);
++                        for (int _u = 0; _u < RSX_TEX_UNITS && ln < (int)sizeof line - 96; _u++) {
++                            const int z = dr->tex_zt[_u];
++                            if (z < 0) continue;
++                            ln += snprintf(line + ln, sizeof line - ln, " | u%d z=0x%08X dirty=%d cast=%u clr=%u cdraw=%u",
++                                           _u, s_zrt[z].off, s_zrt[z].dirty, zn_draw[z], zn_clear[z], zn_cdraw[z]);
++                        }
++                        fprintf(stderr, "%s%c", line, 10);
++                    }
++                }
+                 for (int _u = 0; _u < RSX_TEX_UNITS; _u++) {
+                     int rt = dr->tex_rt[_u];
+                     if (rt >= 0 && rt != cur_rt &&

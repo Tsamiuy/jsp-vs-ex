@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in the port does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach game files, EBOOTs, ISOs, firmware, keys or screenshots of copyrighted game content. Logs only.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, in order.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game version and region
+      description: "For example US BLUS31519, with or without the game update."
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Port build or commit
+      description: "The commit (`git rev-parse --short HEAD`) or release you ran."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: "Windows version, GPU and driver version. On Linux: the Proton or Wine version and the GPU driver."
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: "The lines around the problem. Remove your user name and folder paths first. If you installed with the installer, Start menu > Make a support bundle (JSP Fan Revival) collects the logs with your user name removed: drag the zip from your Desktop into the next box (open it first and look)."
+      render: text
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Support bundle (installer only)
+      description: "Drag jsp-support-<time>.zip here. Never attach game files, EBOOTs, saves or keys."

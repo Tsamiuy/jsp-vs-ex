@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Repository checks (files, wording, Python syntax)
+        if: github.event_name != 'pull_request'
+        run: python3 tools/ci/repo_checks.py
+
+      - name: Repository checks and commit identities
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/ci/repo_checks.py --commits "$BASE..$HEAD"
+
+      - name: Shell scripts parse
+        # .gitattributes keeps *.sh stored and checked out with LF.
+        run: |
+          bad=0
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f" || { echo "$f: syntax error"; bad=1; }
+          done
+          exit $bad
+
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in (git ls-files '*.ps1')) {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            foreach ($e in $errs) { Write-Output "${f}:$($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
+          }
+          if ($bad) { exit 1 }
+
+  launcher:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compile the launcher with the C# compiler that ships with Windows
+        # Same flags as launcher/build_launcher.bat; the exe goes to the runner's temp folder.
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
+          $out = Join-Path $env:RUNNER_TEMP 'launcher-build'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          & $csc /nologo /target:winexe /optimize+ /r:System.Windows.Forms.dll /r:System.Drawing.dll "/out:$out\J-Stars Launcher.exe" launcher\JStarsLauncher.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path "$out\J-Stars Launcher.exe")) { exit 1 }
+
+  toolkit:
+    # The patched toolkit as a Windows builder makes it: submodule at the pin, toolkit/ps3recomp-local.patch applied
+    # by tools/toolkit/apply_toolkit.py (Git for Windows' default line-ending conversion stays on, as on a player's PC).
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: The toolkit patch applies to the pinned ps3recomp
+        run: python tools/toolkit/apply_toolkit.py --check
+
+      - name: Build the patched toolkit folder
+        shell: pwsh
+        run: |
+          python tools/toolkit/apply_toolkit.py --out "$env:RUNNER_TEMP\ps3recomp"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path "$env:RUNNER_TEMP\ps3recomp\.toolkit-stamp")) { exit 1 }

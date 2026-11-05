@@ -1,0 +1,57 @@
+From 9465b8790c1fb4bfdacb4146620d901ff13ed4b0 Mon Sep 17 00:00:00 2001
+From: Tsamiuy <332672980+Tsamiuy@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 22:43:02 +0200
+Subject: [PATCH] d3d12: title-bar FPS counts the game's flips, batches shown
+ beside it (TITLE_FPS_BATCHES=1 = old)
+
+---
+ libs/video/rsx_d3d12_backend.c | 27 ++++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c3a15e7..6a77175 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -8226,17 +8226,34 @@ skip_dump_consider: ;
+         static ULONGLONG s_tt0 = 0;
+         static u64 s_tframes = 0;
+         s_tframes++;
++        /* FPS counts the game's flips (its real frames). Counting batches
++         * (render_frame calls) also counted mid-frame flushes and offscreen
++         * batches: with VPULL a heavy frame is 2 batches, so the title showed
++         * 30-40 while the game ran in slow motion (jstars-notes CPU_PROFILE
++         * §17, §20). The batch rate is shown next to it. TITLE_FPS_BATCHES=1
++         * restores the old title. */
++        static int s_tbatch = -1;
++        if (s_tbatch < 0) s_tbatch = getenv("TITLE_FPS_BATCHES") ? 1 : 0;
++        extern u32 cellGcm_flip_request_count(void);
++        static u32 s_tflip0 = 0;
+         ULONGLONG tnow = GetTickCount64();
+-        if (s_tt0 == 0) s_tt0 = tnow;
++        if (s_tt0 == 0) { s_tt0 = tnow; s_tflip0 = cellGcm_flip_request_count(); }
+         if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
+             extern char g_rsx_title_base[128];
+             char tb[256];
+-            snprintf(tb, sizeof(tb), "%s | FPS: %.2f | draws: %u | %ux%u",
+-                     g_rsx_title_base,
+-                     s_tframes * 1000.0 / (double)(tnow - s_tt0),
+-                     s_dbg_last_draws, s_d3d.width, s_d3d.height);
++            const double secs = (double)(tnow - s_tt0) / 1000.0;
++            const u32 flips = cellGcm_flip_request_count();
++            if (s_tbatch)
++                snprintf(tb, sizeof(tb), "%s | FPS: %.2f | draws: %u | %ux%u",
++                         g_rsx_title_base, s_tframes / secs,
++                         s_dbg_last_draws, s_d3d.width, s_d3d.height);
++            else
++                snprintf(tb, sizeof(tb), "%s | FPS: %.2f (batches %.1f) | draws: %u | %ux%u",
++                         g_rsx_title_base, (double)(u32)(flips - s_tflip0) / secs,
++                         s_tframes / secs, s_dbg_last_draws, s_d3d.width, s_d3d.height);
+             SetWindowTextA(s_d3d.hwnd, tb);
+             s_tframes = 0;
++            s_tflip0 = flips;
+             s_tt0 = tnow;
+         }
+     }
+-- 
+2.56.0.windows.2
+

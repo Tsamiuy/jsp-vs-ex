@@ -1,0 +1,239 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -9631,6 +9631,141 @@
+     s_d3d.merge_prev_draw = 0;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * fan-join (jstars-notes STAGE_TEXTURES.md §13, white sky flash). RSX
++ * assembles every DRAW_ARRAYS / DRAW_INDEX_ARRAY batch inside one BEGIN/END
++ * as ONE primitive stream. The TRIANGLES merge below and the native indexed
++ * strip already rely on that; non-indexed strips/fans and indexed fans did
++ * not: each batch was expanded as a primitive of its own. J-Stars' "Lens
++ * Godray" sun-shaft pass is a 42-vertex TRIANGLE_FAN from the sun's screen
++ * position to 41 points around the screen edge (func_005567AC), and the
++ * game's draw emitter splits a draw into batches (the indexed emitter
++ * func_00657248 cuts the first batch at a 128-byte index-buffer boundary),
++ * so the fan arrived as two or more batches: the second one became a fan
++ * centred on a screen-edge point and the wedges around the split were never
++ * drawn -- the raw sun-colour sky mask leaked through them (white sky).
++ * Here a batch that continues the previous FAN/STRIP batch of the same
++ * BEGIN/END (same epoch and fragment program, first == previous end) is
++ * expanded against the STREAM: fan triangles keep the stream's first vertex
++ * as centre, strip triangles keep the stream's parity, and the triangles are
++ * appended to the previous record. FAN_JOIN=0 restores the per-batch fans.
++ * FAN_LOG=1 prints every fan batch; FAN_LOG=<hex colour offset> prints every
++ * batch drawn into that colour target (e.g. FAN_LOG=0D7A0000). */
++static struct { int valid; int indexed; u32 prim, start, end, epoch, fp; int rec; } s_sf;
++
++static int fan_join_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FAN_JOIN"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++
++/* Does batch [first, ...) of `prim` continue the stream the previous record holds? */
++static int sf_continues(int indexed, u32 prim, u32 first)
++{
++    const rsx_state* st = s_d3d.current_rsx_state;
++    if (!fan_join_on() || !st || !s_sf.valid || s_d3d.draw_count <= 0) return 0;
++    if (s_sf.indexed != indexed || s_sf.prim != prim || s_sf.end != first) return 0;
++    if (s_sf.rec != (int)s_d3d.draw_count - 1) return 0;
++    if (s_sf.epoch != st->begin_epoch || s_sf.fp != st->shader_program) return 0;
++    if (indexed && st->restart_enable) return 0;
++    const D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
++    if (!pv->is_vp || pv->topology != RSX_TOPOLOGY_TRIANGLES) return 0;
++    return 1;
++}
++
++static u32 sf_vidx(const rsx_state* st, int indexed, u32 pos)
++{
++    return indexed ? read_guest_index(st, pos) : pos;
++}
++
++/* Expand batch [first, first+count) of the stream that starts at s_sf.start
++ * into a triangle list (one triangle per vertex, like the hardware) and fetch
++ * it into vp_vb. Returns the vertices written. */
++static u32 upload_sf_cont_vp(const rsx_state* state, int indexed, u32 prim, u32 first, u32 count)
++{
++    extern uint8_t* vm_base;
++    static u32 list[3 * 256 + 16];
++    if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
++    if (!state->vertex_attribs[0].enabled) return 0;
++    if (count == 0 || count > 256) return 0;
++    const u32 start = s_sf.start;
++    u32 n = 0;
++    for (u32 v = first; v < first + count; v++) {
++        if (v < start + 2) continue;          /* no triangle ends at this vertex yet */
++        if (prim == RSX_PRIMITIVE_TRIANGLE_FAN) {
++            list[n++] = sf_vidx(state, indexed, start);
++            list[n++] = sf_vidx(state, indexed, v - 1);
++            list[n++] = sf_vidx(state, indexed, v);
++        } else {                              /* strip: same parity rule as upload_strip_vp */
++            const u32 t = v - start - 2;
++            u32 i1 = v - 1, i2 = v;
++            if (t & 1u) { u32 tmp = i1; i1 = i2; i2 = tmp; }
++            list[n++] = sf_vidx(state, indexed, v - 2);
++            list[n++] = sf_vidx(state, indexed, i1);
++            list[n++] = sf_vidx(state, indexed, i2);
++        }
++    }
++    if (!n) return 0;
++    u32 maxv = (MAX_VP_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    if (n > maxv) n = maxv - (maxv % 3u);
++    if (!n) return 0;
++    VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
++        + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    if (vf_legacy()) {
++        for (u32 i = 0; i < n; i++) read_vp_vertex(state, list[i], &out[i * 16]);
++    } else {
++        vfa_fetch_list(state, list, n, out);
++    }
++    s_d3d.vp_vb_offset += n * VP_VERT_STRIDE;
++    return n;
++}
++
++/* Append the continuation's triangles to the previous record when they landed
++ * right behind it in vp_vb. */
++static int sf_append(u32 rec, u32 emitted, u32 first, u32 count)
++{
++    if (s_d3d.draw_count <= 0) return 0;
++    D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
++    if (pv->vb_byte_offset + pv->vertex_count * VP_VERT_STRIDE != rec) return 0;
++    pv->vertex_count += emitted;
++    s_sf.end = first + count;
++    return 1;
++}
++
++/* After a new record: a FAN (or non-indexed STRIP) batch starts a stream, or
++ * carries one on when it continued the stream but could not be appended. */
++static void sf_anchor(int indexed, u32 prim, u32 first, u32 count, int cont)
++{
++    const rsx_state* st = s_d3d.current_rsx_state;
++    if (!st || s_d3d.draw_count <= 0 ||
++        !(prim == RSX_PRIMITIVE_TRIANGLE_FAN || (!indexed && prim == RSX_PRIMITIVE_TRIANGLE_STRIP))) {
++        s_sf.valid = 0; return; }
++    if (!cont) s_sf.start = first;
++    s_sf.valid = 1; s_sf.indexed = indexed; s_sf.prim = prim; s_sf.end = first + count;
++    s_sf.epoch = st->begin_epoch; s_sf.fp = st->shader_program; s_sf.rec = (int)s_d3d.draw_count - 1;
++}
++
++static void sf_log(int indexed, u32 prim, u32 first, u32 count, int how, u32 emitted)
++{
++    static int mode = -1; static u32 want = 0; static int n = 0;
++    if (mode < 0) { const char* e = getenv("FAN_LOG"); mode = 0;
++        if (e && *e) { want = (u32)strtoul(e, NULL, 16); mode = (want == 1u) ? 1 : 2; } }
++    if (!mode) return;
++    const u32 rt = current_rt_off(NULL, NULL, NULL);
++    if (mode == 1 && prim != RSX_PRIMITIVE_TRIANGLE_FAN) return;
++    if (mode == 2 && rt != want) return;
++    if (n >= 600 && (n % 200) != 0) { n++; return; }
++    n++;
++    const rsx_state* st = s_d3d.current_rsx_state;
++    fprintf(stderr, "[FANLOG] f=%llu %s prim=%u first=%u count=%u epoch=%u rt=0x%08X fp=0x%08X %s emitted=%u rec=%d n=%u\n",
++            (unsigned long long)s_d3d.frame_count, indexed ? "indexed" : "arrays", prim, first, count,
++            st ? st->begin_epoch : 0u, rt, st ? st->shader_program : 0u,
++            how == 1 ? "JOINED" : how == 2 ? "cont-newrec" : "new",
++            emitted, s_d3d.draw_count - 1,
++            s_d3d.draw_count > 0 ? s_d3d.draws[s_d3d.draw_count - 1].vertex_count : 0u);
++}
++
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
+     /* lum-rt-drawlog (jstars-notes COLOR_EXPOSURE.md Round 10): LUM_RT=0E590000 logs every draw the FIFO hands
+@@ -9658,6 +9793,8 @@
+     if (rsx_no_color_target()) return;
+     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
+     if (count == 0 || count > MAX_VERTICES) return;
++    if (primitive != RSX_PRIMITIVE_TRIANGLE_STRIP && primitive != RSX_PRIMITIVE_TRIANGLE_FAN)
++        s_sf.valid = 0;   /* fan-join: any other primitive ends the stream */
+ 
+     /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
+      * dbgfont draws all text as quads. Prefer the real vertex-program path
+@@ -9782,11 +9919,22 @@
+          || primitive == RSX_PRIMITIVE_TRIANGLE_FAN) &&
+         s_d3d.vp_vb_mapped && s_d3d.vp_root_sig &&
+         s_d3d.current_rsx_state && s_d3d.current_rsx_state->vp_ucode_bytes >= 16) {
+-        vp_flush_if_full(count, s_d3d.merge_prev_draw && s_d3d.merge_first_end == first);
++        /* fan-join: a STRIP/FAN batch continuing the previous batch's stream
++         * (same BEGIN/END) is expanded against the stream, not on its own. */
++        int sfc = sf_continues(0, primitive, first);
++        vp_flush_if_full(count, (s_d3d.merge_prev_draw && s_d3d.merge_first_end == first) || sfc);
++        if (sfc) sfc = sf_continues(0, primitive, first);   /* a mid-frame flush drops the anchor */
+         u32 rec = s_d3d.vp_vb_offset;
+-        u32 emitted = (primitive == RSX_PRIMITIVE_TRIANGLES)
++        u32 emitted = sfc
++            ? VF_TIMED(upload_sf_cont_vp(s_d3d.current_rsx_state, 0, primitive, first, count))
++            : (primitive == RSX_PRIMITIVE_TRIANGLES)
+             ? VF_TIMED(upload_tris_vp(s_d3d.current_rsx_state, first, count))
+             : VF_TIMED(upload_strip_vp(s_d3d.current_rsx_state, first, count, primitive == RSX_PRIMITIVE_TRIANGLE_FAN));
++        if (sfc && emitted && sf_append(rec, emitted, first, count)) {
++            sf_log(0, primitive, first, count, 1, emitted);
++            return;
++        }
++        sf_log(0, primitive, first, count, sfc ? 2 : 0, emitted);
+         /* RSX splits one primitive stream across several DRAW_ARRAYS entries
+          * inside a single BEGIN/END (each carries at most 256 vertices), and the
+          * hardware concatenates them before assembling primitives. Recording a
+@@ -9882,10 +10030,12 @@
+             /* Anchor for merging the next DRAW_ARRAYS batch of this stream. */
+             s_d3d.merge_prev_draw  = (primitive == RSX_PRIMITIVE_TRIANGLES);
+             s_d3d.merge_first_end  = first + count;
++            sf_anchor(0, primitive, first, count, sfc);   /* fan-join anchor */
+         }
+         return;
+     }
+     s_d3d.merge_prev_draw = 0;   /* any other primitive breaks the stream */
++    s_sf.valid = 0;
+ 
+     u32 topo = (u32)rsx_primitive_topology(primitive);
+     if (topo == RSX_TOPOLOGY_UNSUPPORTED) {
+@@ -9941,15 +10091,17 @@
+     if (!s_d3d.pipeline_ready) return;
+     if (count == 0 || count > MAX_VP_VERTICES) return;
+     if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;
++    if (primitive != RSX_PRIMITIVE_TRIANGLE_FAN) s_sf.valid = 0;   /* fan-join: only indexed fans join here */
+ 
+     /* Expand through the VP path (indices resolved CPU-side): QUADS -> two
+      * triangles per quad, TRIANGLES straight through, STRIP/FAN -> triangle
+      * list. Other primitives are skipped rather than drawn wrong. */
+     u32 emitted = 0;
+     int six_new = 0;   /* STRIP_INDEXED: the record created below is indexed */
+-    vp_flush_if_full(count, s_d3d.merge_prev_draw &&
++    int sfc = (primitive == RSX_PRIMITIVE_TRIANGLE_FAN) ? sf_continues(1, primitive, first) : 0;   /* fan-join */
++    vp_flush_if_full(count, (s_d3d.merge_prev_draw &&
+                             (s_d3d.merge_first_end == first ||
+-                             primitive == RSX_PRIMITIVE_TRIANGLE_STRIP));
++                             primitive == RSX_PRIMITIVE_TRIANGLE_STRIP)) || sfc);
+     u32 rec = s_d3d.vp_vb_offset;
+     if (primitive == RSX_PRIMITIVE_QUADS)             emitted = VF_TIMED(upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count));
+     else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = VF_TIMED(upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count));
+@@ -10002,7 +10154,18 @@
+             return;
+         }
+     }
+-    else if (primitive == RSX_PRIMITIVE_TRIANGLE_FAN)   emitted = VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 1));
++    else if (primitive == RSX_PRIMITIVE_TRIANGLE_FAN) {
++        /* fan-join: an index batch continuing the previous fan batch of this
++         * BEGIN/END keeps the stream's first vertex as the fan centre. */
++        if (sfc) sfc = sf_continues(1, primitive, first);   /* a mid-frame flush drops the anchor */
++        emitted = sfc ? VF_TIMED(upload_sf_cont_vp(s_d3d.current_rsx_state, 1, primitive, first, count))
++                      : VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 1));
++        if (sfc && emitted && sf_append(rec, emitted, first, count)) {
++            sf_log(1, primitive, first, count, 1, emitted);
++            return;
++        }
++        sf_log(1, primitive, first, count, sfc ? 2 : 0, emitted);
++    }
+     else {
+         static int _skip = 0;
+         if (_skip++ < 3)
+@@ -10101,6 +10264,7 @@
+         s_d3d.merge_prev_draw = (primitive == RSX_PRIMITIVE_TRIANGLES ||
+                                  primitive == RSX_PRIMITIVE_TRIANGLE_STRIP);
+         s_d3d.merge_first_end = first + count;
++        sf_anchor(1, primitive, first, count, sfc);   /* fan-join anchor (indexed fans only) */
+     }
+ }
+ 

@@ -1,0 +1,57 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 567ccb7..836e408 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -822,6 +822,34 @@ static u32 gcm_io2ea(u32 io)
+     return ((u32)ea_page << 20) | (io & 0xFFFFFu);
+ }
+ 
++/* Diagnostic: how far the walker is behind the guest, as the number of flip
++ * words (0xFEADxxxx, both the lv1 form and GCM_FLIP_MARKER) and command bytes
++ * queued between get and put. Walks the commands, following JUMPs; bounded.
++ * Used by VP_CODE (jstars-notes VFX.md: are the beam's draws decoded frames
++ * after the guest wrote them, or does the guest itself draw old buffers?). */
++void cellGcm_fifo_queued(int* flips, u32* bytes);
++void cellGcm_fifo_queued(int* flips, u32* bytes)
++{
++    const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
++    u32 off = s_fifo_getoff, nb = 0; int nf = 0;
++    for (int steps = 0; off != put && steps < 400000; steps++) {
++        const u32 ea = gcm_io2ea(off);
++        if (!ea) break;
++        const u32 w = vm_read32(ea);
++        if ((w & 0xFFFF0000u) == 0xFEAD0000u) { nf++; off += 4; nb += 4; continue; }
++        if ((w >> 29) == 1u) {                       /* JUMP */
++            const u32 tgt = w & 0x1FFFFFFCu;
++            if (tgt == off) break;
++            off = tgt; continue;
++        }
++        if ((w & 3u) == 2u || w == 0x00020000u) { off += 4; nb += 4; continue; }   /* CALL / RETURN */
++        const u32 cnt = (w >> 18) & 0x7FFu;
++        off += 4 + cnt * 4; nb += 4 + cnt * 4;
++    }
++    if (flips) *flips = nf;
++    if (bytes) *bytes = nb;
++}
++
+ /* RSX get pointer (IO offset) + one-deep CALL return slot. The FIFO-wrap
+  * recycle path teleports these when it resets a ring without a JUMP command. */
+ /* Milliseconds on a monotonic clock, for the runtime's own timeouts and rate
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index f44f169..985e1e1 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -10433,7 +10433,12 @@ static void vp_code_dbg(const char* call, u32 primitive, u32 first, u32 count, i
+      * job's PUTs: how many flips after the draw the vertices arrive says how
+      * far behind the real RSX must run (jstars-notes VFX.md). */
+     { extern unsigned long long ps3_ms_now(void); extern u32 cellGcm_flip_request_count(void);
+-      fprintf(stderr, "[VPCODE] #%d ms=%llu flip=%u%c", nprinted, ps3_ms_now(), cellGcm_flip_request_count(), 10); }
++      extern void cellGcm_fifo_queued(int* flips, u32* bytes);
++      int qf = 0; u32 qb = 0; cellGcm_fifo_queued(&qf, &qb);
++      /* queued_flips: complete frames the guest has already put after this
++       * draw. 0-1 = the walker keeps up; 2 = it is two frames behind. */
++      fprintf(stderr, "[VPCODE] #%d ms=%llu flip=%u queued_flips=%d queued_bytes=%u%c", nprinted, ps3_ms_now(),
++              cellGcm_flip_request_count(), qf, qb, 10); }
+     fprintf(stderr, "[VPCODE] #%d f=%llu %s prim=%u first=%u count=%u fp=0x%X code=0x%08X tex0=0x%X divider_op=0x%08X"
+                     " vp_start=%u base_off=0x%X base_idx=%u%c", nprinted, (unsigned long long)s_d3d.frame_count,
+             call, primitive, first, count, fp, code, s_d3d.cur_texs[0].raw, st->frequency_divider_op,

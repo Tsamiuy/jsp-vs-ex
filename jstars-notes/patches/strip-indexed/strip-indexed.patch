@@ -1,0 +1,265 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index adaa856..bf5170a 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -164,6 +164,11 @@ typedef struct {
+      * legacy replay pass skips them. */
+     int   is_clear;
+     float cc[4];
++    /* STRIP_INDEXED: an indexed strip record draws ix_count indices from the
++     * strip index buffer at ix_start (base vertex = vb_byte_offset / 256).
++     * Valid only while ix_gen == s_six.gen, so a slot reused by any other
++     * path (none of which sets these) can never be taken for one. */
++    u32 ix_start, ix_count, ix_gen;
+ } D3D12DrawRecord;
+ 
+ /* MENU_A2C=1 (opt-in): alpha-to-coverage as an alpha test. RSX foliage cards
+@@ -617,6 +622,35 @@ static int perf_on(void)
+     if (v < 0) { const char* e = getenv("PERF"); v = e ? atoi(e) : 0; }
+     return v;
+ }
++
++/* STRIP_INDEXED=1 (opt-in): native strips as an INDEXED draw with D3D's
++ * strip cut (0xFFFFFFFF) in place of RSX primitive restart.
++ *
++ * The native path writes one 256-byte vertex per strip index plus 2-3
++ * repeated vertices at every restart join (degenerate triangles keep the
++ * winding). J-Stars' strips are mostly 3-index pieces + restart, so that is
++ * ~6 vertices per triangle, ~870k per fight frame. Here each DISTINCT guest
++ * vertex of a record is fetched once, the index buffer carries the strip with
++ * a cut at every restart, and the GPU restarts the strip itself. A cut
++ * resets the winding exactly as an RSX restart does, so the triangles drawn
++ * are the same ones the padded strip drew, minus its degenerate joins.
++ * The vertex count drops to the record's distinct vertices; every PSO that
++ * draws VP records gets IBStripCutValue 0xFFFFFFFF (ignored by the
++ * non-indexed draws). */
++#define SIX_CAP (MAX_VP_VERTICES * 2u)           /* u32 indices per parity half */
++static struct {
++    int on;                    /* -1 = undecided */
++    ID3D12Resource* ib;
++    u32* mapped;               /* both halves */
++    u32  off;                  /* entries used in the current batch */
++    u32  gen;                  /* bumped at every batch reset */
++    u32  tag;                  /* bumped at every new record (dedup map key) */
++} s_six = { -1, NULL, NULL, 0, 1, 1 };
++static int strip_ix_on(void)
++{
++    if (s_six.on < 0) { const char* e = getenv("STRIP_INDEXED"); s_six.on = (e && *e && *e != '0') ? 1 : 0; }
++    return s_six.on;
++}
+ /* The rest of the present thread's time, which [PERF] lumps into "guest"
+  * (= window - render_frame):
+  *   s_perf_present  swap-chain Present (vsync), after render_frame's timer;
+@@ -1369,6 +1403,23 @@ static int init_d3d12(u32 width, u32 height)
+         else
+             fprintf(stderr, "[VPVB] ALLOCATION FAILED -- no VP geometry will render%c", 10);
+ 
++        if (strip_ix_on()) {
++            u64 keep = bd.Width;
++            bd.Width = (u64)SIX_CAP * sizeof(u32) * 2;   /* x2 parity, like vp_vb */
++            if (SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp,
++                    D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                    &IID_ID3D12Resource, (void**)&s_six.ib)) &&
++                SUCCEEDED(s_six.ib->lpVtbl->Map(s_six.ib, 0, &nr, (void**)&s_six.mapped))) {
++                fprintf(stderr, "[STRIPIX] strip index buffer: %llu MB, x2 parity%c",
++                        (unsigned long long)(bd.Width >> 20), 10);
++            } else {
++                fprintf(stderr, "[STRIPIX] index buffer allocation failed -- STRIP_INDEXED off%c", 10);
++                if (s_six.ib) { s_six.ib->lpVtbl->Release(s_six.ib); s_six.ib = NULL; }
++                s_six.mapped = NULL; s_six.on = 0;
++            }
++            bd.Width = keep;
++        }
++
+         bd.Width = (u64)VP_CB_STRIDE * MAX_DRAWS * 2;   /* per-draw constant slots, x2 parity */
+         /* A failure here is silent and catastrophic: vp_record_cb returns early,
+          * every draw loses its constants, and the whole scene transforms by
+@@ -1980,6 +2031,7 @@ static void compile_vp(void)
+     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+     pd.SampleMask = UINT_MAX;
+     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    if (strip_ix_on()) pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+     pd.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+     /* Depth test ON (LESS_EQUAL, matching the guest's rsxtiny_DepthTestFunc 515 /
+@@ -3078,6 +3130,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+     pd.SampleMask = UINT_MAX;
+     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    if (strip_ix_on()) pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+     pd.NumRenderTargets = (UINT)nrt;
+     for (int _r = 0; _r < nrt; _r++) {
+         pd.RTVFormats[_r] = rtfmt;
+@@ -5642,6 +5695,14 @@ static void render_frame(void)
+             vbv.SizeInBytes    = MAX_VP_VERTICES * 256;
+             vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
+             s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
++            if (s_six.ib) {   /* STRIP_INDEXED: only indexed strip records use it */
++                D3D12_INDEX_BUFFER_VIEW ibv;
++                ibv.BufferLocation = s_six.ib->lpVtbl->GetGPUVirtualAddress(s_six.ib)
++                                   + (u64)s_d3d.vp_parity * SIX_CAP * sizeof(u32);
++                ibv.SizeInBytes = SIX_CAP * (UINT)sizeof(u32);
++                ibv.Format = DXGI_FORMAT_R32_UINT;
++                s_d3d.cmd_list->lpVtbl->IASetIndexBuffer(s_d3d.cmd_list, &ibv);
++            }
+             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
+             int cur_rt = -1;                       /* target A: -1 = backbuffer */
+@@ -5994,6 +6055,11 @@ static void render_frame(void)
+                     if (!ls || ls->op + 1 != d || ls->off != s_d3d.off_rt[cur_rt].off)
+                         cap_snap_rt(cur_rt, d, 0);
+                 }
++                if (s_six.ib && dr->ix_gen == s_six.gen && dr->ix_count &&
++                    dr->topology == RSX_TOPOLOGY_TRIANGLE_STRIP)
++                    s_d3d.cmd_list->lpVtbl->DrawIndexedInstanced(s_d3d.cmd_list,
++                        dr->ix_count, 1, dr->ix_start, (INT)(dr->vb_byte_offset / 256), 0);
++                else
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                     dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
+                 if (cap_snap) cap_snap_rt(cur_rt, d, 1);
+@@ -6197,6 +6263,7 @@ static void render_frame(void)
+     s_d3d.vb_offset  = 0; /* reset for next frame */
+     s_d3d.vp_vb_offset = 0;
+     s_d3d.draw_count = 0;
++    s_six.off = 0; s_six.gen++;           /* STRIP_INDEXED records end with the batch */
+     s_vs_batch++;          /* recorded draws consumed: their VS slots may go */
+     s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
+ 
+@@ -6804,6 +6871,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+     s_d3d.draw_count   = 0;
+     s_d3d.vb_offset    = 0;
+     s_d3d.vp_vb_offset = 0;
++    s_six.off = 0; s_six.gen++;
+     s_vs_batch++;
+ }
+ 
+@@ -8197,6 +8265,75 @@ static u32 upload_strip_vp_native(const rsx_state* state, u32 first, u32 count,
+  * only split when it really does not fit, since splitting it would break the
+  * stream. VP_NO_MIDFLUSH=1 restores the old clipping. */
+ #define VP_FLUSH_MARGIN 65536u   /* vertices kept free at a stream boundary */
++/* STRIP_INDEXED upload: one call = one FIFO index batch of a strip record.
++ * `t0` = the record's vertex count so far (0 = new record). Distinct guest
++ * vertices of the record are listed once (dedup map keyed by record tag and
++ * guest index) and fetched through the normal list fetch; each index becomes
++ * the record-relative vertex number, a restart becomes the cut 0xFFFFFFFF.
++ * Returns the vertices added; s_six_added / s_six_start describe the
++ * indices. */
++static u32 s_six_added, s_six_start;
++static u32 upload_strip_vp_native_ix(const rsx_state* state, u32 first, u32 count, u32 t0)
++{
++    extern uint8_t* vm_base;
++    s_six_added = 0; s_six_start = s_six.off;
++    s_req_verts += count; s_req_draws++;
++    if (!state || !vm_base || !s_d3d.vp_vb_mapped || !s_six.mapped) return 0;
++    if (!state->vertex_attribs[0].enabled) return 0;
++    if (t0 == 0) s_six.tag++;
++    const u32 maxv = (MAX_VP_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
++    const u32 ixroom = SIX_CAP - s_six.off;
++    VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
++        + (u64)s_d3d.vp_parity * MAX_VP_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
++    u32* ixo = s_six.mapped + (u64)s_d3d.vp_parity * SIX_CAP + s_six.off;
++    /* Same index and restart rules as upload_strip_vp_native. */
++    const int idx16 = (((state->index_array_dma >> 4) & 0xF) == 1);
++    const int restart = state->restart_enable && !(idx16 && state->restart_index > 0xFFFFu);
++    const u32 ridx = state->restart_index;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    const u8* ib = vm_base + cellGcmResolveLocated((state->index_array_dma & 0xF) == 0,
++                                                   state->index_array_offset);
++    static u32* s_vl = NULL; static u32 s_vl_cap = 0;
++    if (count > s_vl_cap) {
++        u32 cap = s_vl_cap ? s_vl_cap : 4096u;
++        while (cap < count) cap *= 2u;
++        u32* nv = (u32*)realloc(s_vl, (size_t)cap * sizeof(u32));
++        if (!nv) return 0;
++        s_vl = nv; s_vl_cap = cap;
++    }
++    /* Dedup map: guest index -> record-relative vertex, valid for one tag. A
++     * full probe run just appends the vertex again, which is still correct. */
++    enum { DM = 1u << 16, PROBE = 8 };
++    static u32 dm_tag[DM], dm_vi[DM], dm_loc[DM];
++    u32 nv = 0, ni = 0;
++    for (u32 k = 0; k < count; k++) {
++        u32 v;
++        if (idx16) { const u8* q = ib + (u64)(first + k) * 2; v = ((u32)q[0] << 8) | q[1]; }
++        else { const u8* q = ib + (u64)(first + k) * 4;
++               v = ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3]; }
++        if (ni + 1 > ixroom) { s_drop_draws++; break; }
++        if (restart && v == ridx) { ixo[ni++] = 0xFFFFFFFFu; continue; }
++        u32 h = (v * 2654435761u) >> 16, loc = 0xFFFFFFFFu, freeslot = 0xFFFFFFFFu;
++        for (u32 pz = 0; pz < PROBE; pz++) {
++            const u32 s = (h + pz) & (DM - 1);
++            if (dm_tag[s] != s_six.tag) { if (freeslot == 0xFFFFFFFFu) freeslot = s; continue; }
++            if (dm_vi[s] == v) { loc = dm_loc[s]; break; }
++        }
++        if (loc == 0xFFFFFFFFu) {
++            if (nv + 1 > maxv) { s_drop_draws++; break; }
++            loc = t0 + nv;
++            s_vl[nv++] = v;
++            if (freeslot != 0xFFFFFFFFu) { dm_tag[freeslot] = s_six.tag; dm_vi[freeslot] = v; dm_loc[freeslot] = loc; }
++        }
++        ixo[ni++] = loc;
++    }
++    if (nv) vfa_fetch_list(state, s_vl, nv, out);
++    s_six_added = ni;
++    s_six.off += ni;
++    s_d3d.vp_vb_offset += nv * VP_VERT_STRIDE;
++    return nv;
++}
++
+ static void vp_flush_if_full(u32 count, int cont)
+ {
+     static int off = -1;
+@@ -8206,6 +8343,7 @@ static void vp_flush_if_full(u32 count, int cont)
+     if (need > MAX_VP_VERTICES) need = MAX_VP_VERTICES;
+     u64 room = ((u64)MAX_VP_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     int full = room < need || s_d3d.draw_count >= MAX_DRAWS - 1;
++    if (s_six.mapped && SIX_CAP - s_six.off < count + 1) full = 1;   /* STRIP_INDEXED */
+     if (!full && (cont || (room >= VP_FLUSH_MARGIN && s_d3d.draw_count < MAX_DRAWS - 64)))
+         return;
+     { static int _n = 0; if (_n++ < 8)
+@@ -8519,6 +8657,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+      * triangles per quad, TRIANGLES straight through, STRIP/FAN -> triangle
+      * list. Other primitives are skipped rather than drawn wrong. */
+     u32 emitted = 0;
++    int six_new = 0;   /* STRIP_INDEXED: the record created below is indexed */
+     vp_flush_if_full(count, s_d3d.merge_prev_draw &&
+                             (s_d3d.merge_first_end == first ||
+                              primitive == RSX_PRIMITIVE_TRIANGLE_STRIP));
+@@ -8533,6 +8672,28 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+      * costs 3x the vertices. STRIP_EXPAND=1 selects the expansion. */
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && getenv("STRIP_EXPAND"))
+         emitted = VF_TIMED(upload_strip_vp_indexed(s_d3d.current_rsx_state, first, count, 0));
++    else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP && strip_ix_on() && s_six.mapped && !vf_legacy()) {
++        /* STRIP_INDEXED: continue the previous record when it is the same
++         * BEGIN/END stream and both its vertices and its indices end exactly
++         * where this call starts. */
++        const rsx_state* st = s_d3d.current_rsx_state;
++        D3D12DrawRecord* pv = s_d3d.draw_count > 0 ? &s_d3d.draws[s_d3d.draw_count - 1] : NULL;
++        int cont = pv && s_d3d.merge_prev_draw &&
++                   pv->is_vp && pv->topology == RSX_TOPOLOGY_TRIANGLE_STRIP &&
++                   pv->ix_gen == s_six.gen && pv->ix_count &&
++                   pv->fp_addr == (st ? st->shader_program : 0) &&
++                   pv->begin_epoch == (st ? st->begin_epoch : 0) &&
++                   pv->vb_byte_offset + pv->vertex_count * VP_VERT_STRIDE == rec &&
++                   pv->ix_start + pv->ix_count == s_six.off;
++        emitted = VF_TIMED(upload_strip_vp_native_ix(st, first, count, cont ? pv->vertex_count : 0));
++        if (cont) {
++            pv->vertex_count += emitted;
++            pv->ix_count += s_six_added;
++            s_d3d.merge_first_end = first + count;
++            return;
++        }
++        six_new = 1;
++    }
+     else if (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP) {
+         /* Native strip; a batch continuing the previous one's stream appends
+          * to its record (see upload_strip_vp_native). */
+@@ -8583,6 +8744,8 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         dr->vertex_count   = emitted;
+         dr->topology       = (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP)
+                              ? RSX_TOPOLOGY_TRIANGLE_STRIP : RSX_TOPOLOGY_TRIANGLES;
++        dr->ix_gen = 0;
++        if (six_new) { dr->ix_gen = s_six.gen; dr->ix_start = s_six_start; dr->ix_count = s_six_added; }
+         dr->textured       = s_d3d.tex_bound;
+         dr->is_vp          = 1;
+         dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;

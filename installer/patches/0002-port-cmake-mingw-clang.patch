@@ -1,0 +1,16 @@
+Build with the bundled llvm-mingw. Applied by installer/tools/assemble_payload.py to the payload's copy of the port
+(port/CMakeLists.txt); the checked-out repository is not edited. Only active when CMake sees MinGW (the bundled toolchain).
+--- a/port/CMakeLists.txt
++++ b/port/CMakeLists.txt
+@@ -324,3 +324,11 @@
+ # Install
+ # ---------------------------------------------------------------------------
+ install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
++
++# Build with the bundled llvm-mingw: the two things clang needs that the MSVC build did not.
++if(MINGW)
++    # ppu_loader.cpp uses MSVC structured exception handling (__try/__except).
++    set_source_files_properties("${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp" PROPERTIES COMPILE_OPTIONS "-fms-extensions")
++    # clang/lld ignore #pragma comment(lib, ...): name the libraries the toolkit's pragmas ask for.
++    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 xinput1_4 setupapi hid d3d12 dxgi d3dcompiler bcrypt)
++endif()

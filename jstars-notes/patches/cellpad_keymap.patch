@@ -1,0 +1,77 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 69b770a..ac6bba7 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -139,6 +139,20 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+ int (*g_pad_arrows_dpad)(void) = 0;
+ 
+ #ifdef _WIN32
++/* PAD_KEY_<NAME>=<Windows virtual-key code> replaces one keyboard key, e.g.
++ * PAD_KEY_CROSS=0x5A (Z). Names: LSTICK_UP/DOWN/LEFT/RIGHT (the arrows),
++ * DPAD_UP/DOWN/LEFT/RIGHT (I/K/J/L with PAD_KEYS_SPLIT=1), CROSS, CIRCLE,
++ * SQUARE, TRIANGLE, L1, R1, L2, R2, L3, R3, START, SELECT. The launcher
++ * writes them; unset or invalid = the default key. */
++static int pad_key_from_env(const char* name, int def)
++{
++    char var[40];
++    snprintf(var, sizeof var, "PAD_KEY_%s", name);
++    const char* e = getenv(var);
++    long v = e ? strtol(e, NULL, 0) : 0;
++    return (v > 0 && v < 256) ? (int)v : def;
++}
++
+ static int pad_host_window_focused(void)
+ {
+     HWND fg = GetForegroundWindow();
+@@ -165,23 +179,39 @@ static void pad_poll_keyboard(void)
+         return;
+     }
+ 
+-    static const struct { int vk; u16 btn; } map[] = {
+-        { VK_UP,     CELL_PAD_CTRL_UP },      { VK_DOWN,  CELL_PAD_CTRL_DOWN },
+-        { VK_LEFT,   CELL_PAD_CTRL_LEFT },    { VK_RIGHT, CELL_PAD_CTRL_RIGHT },
+-        { 'Z',       CELL_PAD_CTRL_CROSS },   { 'X',      CELL_PAD_CTRL_CIRCLE },
+-        { 'A',       CELL_PAD_CTRL_SQUARE },  { 'S',      CELL_PAD_CTRL_TRIANGLE },
+-        { 'Q',       CELL_PAD_CTRL_L1 },      { 'W',      CELL_PAD_CTRL_R1 },
+-        { '1',       CELL_PAD_CTRL_L2 },      { '2',      CELL_PAD_CTRL_R2 },
+-        { '3',       CELL_PAD_CTRL_L3 },      { '4',      CELL_PAD_CTRL_R3 },
+-        { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
++    static struct { const char* name; int vk; u16 btn; } map[] = {
++        { "LSTICK_UP",   VK_UP,     CELL_PAD_CTRL_UP },
++        { "LSTICK_DOWN", VK_DOWN,   CELL_PAD_CTRL_DOWN },
++        { "LSTICK_LEFT", VK_LEFT,   CELL_PAD_CTRL_LEFT },
++        { "LSTICK_RIGHT",VK_RIGHT,  CELL_PAD_CTRL_RIGHT },
++        { "CROSS",       'Z',       CELL_PAD_CTRL_CROSS },
++        { "CIRCLE",      'X',       CELL_PAD_CTRL_CIRCLE },
++        { "SQUARE",      'A',       CELL_PAD_CTRL_SQUARE },
++        { "TRIANGLE",    'S',       CELL_PAD_CTRL_TRIANGLE },
++        { "L1",          'Q',       CELL_PAD_CTRL_L1 },
++        { "R1",          'W',       CELL_PAD_CTRL_R1 },
++        { "L2",          '1',       CELL_PAD_CTRL_L2 },
++        { "R2",          '2',       CELL_PAD_CTRL_R2 },
++        { "L3",          '3',       CELL_PAD_CTRL_L3 },
++        { "R3",          '4',       CELL_PAD_CTRL_R3 },
++        { "START",       VK_RETURN, CELL_PAD_CTRL_START },
++        { "SELECT",      VK_TAB,    CELL_PAD_CTRL_SELECT },
+     };
+ 
+     static int split = -1;
+     if (split < 0) { const char* e = getenv("PAD_KEYS_SPLIT"); split = (e && e[0] == '1') ? 1 : 0; }
+-    static const struct { int vk; u16 btn; } dpad_keys[] = {
+-        { 'I', CELL_PAD_CTRL_UP },   { 'K', CELL_PAD_CTRL_DOWN },
+-        { 'J', CELL_PAD_CTRL_LEFT }, { 'L', CELL_PAD_CTRL_RIGHT },
++    static struct { const char* name; int vk; u16 btn; } dpad_keys[] = {
++        { "DPAD_UP",   'I', CELL_PAD_CTRL_UP },   { "DPAD_DOWN",  'K', CELL_PAD_CTRL_DOWN },
++        { "DPAD_LEFT", 'J', CELL_PAD_CTRL_LEFT }, { "DPAD_RIGHT", 'L', CELL_PAD_CTRL_RIGHT },
+     };
++    static int keys_read = 0;
++    if (!keys_read) {
++        keys_read = 1;
++        for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
++            map[i].vk = pad_key_from_env(map[i].name, map[i].vk);
++        for (unsigned i = 0; i < sizeof dpad_keys / sizeof dpad_keys[0]; i++)
++            dpad_keys[i].vk = pad_key_from_env(dpad_keys[i].name, dpad_keys[i].vk);
++    }
+     const u16 dpad = CELL_PAD_CTRL_UP | CELL_PAD_CTRL_DOWN | CELL_PAD_CTRL_LEFT | CELL_PAD_CTRL_RIGHT;
+     u16 btns = 0, stick = 0;
+     /* While the on-screen-keyboard text panel is up, the keyboard types the

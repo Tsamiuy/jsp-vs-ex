@@ -1,0 +1,63 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 3058272..7dfdd14 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -144,8 +144,16 @@ static int s_flip_gate_present = 0;
+ void cellGcm_flip_gate_present(int on) { s_flip_gate_present = on; }
+ void cellGcm_flip_presented(u32 n)   /* only forward: a release may have moved it past n */
+ { if ((s32)(n - s_flip_presented) > 0) s_flip_presented = n; }
++/* PRESENT_GATE_MODE: "catchup" (default) or "lag" (v3, PRESENT_GATE_LAG). */
++static int gcm_present_gate_catchup(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("PRESENT_GATE_MODE"); v = (e && !strcmp(e, "lag")) ? 0 : 1; }
++    return v;
++}
+ static int gcm_flip_present_blocked(void)
+ {
++    if (gcm_present_gate_catchup()) return 0;   /* gcm_flip_catchup_blocked() decides */
+     static int lag = -1;
+     if (lag < 0) { const char* e = getenv("PRESENT_GATE_LAG"); lag = e ? atoi(e) : 1; if (lag < 0) lag = 0; }
+     if (!s_flip_gate_present || (s32)(s_flip_ppu_requests - s_flip_presented) <= lag) return 0;
+@@ -1028,10 +1036,40 @@ void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); ftl_tick();
+  * and its handler runs code that puts the status back to WAITING, so the
+  * poll never saw DONE and the game never rendered another frame. On hardware
+  * the callback IS the flip interrupt -- no flip, no callback. */
++/* Present gate, "catchup" mode (default since v4, jstars-notes CPU_PROFILE
++ * §41e): a flip completes only on a tick at which the walker has consumed
++ * everything the title flushed (get == put) and every flip it decoded has
++ * been presented. That is exactly what the old loop guaranteed by firing the
++ * tick only between drains -- the reason it never showed the run-ahead
++ * glitches -- without its cost: the vblank itself (which the title also
++ * waits on) now stays on time. v3's "N-1 presented" rule could not hold for
++ * J-Stars, whose flip markers reach the walker up to 3 requests late (§41c):
++ * every flip waited out the release valve. */
++static int gcm_flip_catchup_blocked(void)
++{
++    static unsigned long long since = 0; static int lim = -1, held = 0;
++    if (!s_flip_gate_present || !gcm_present_gate_catchup()) return 0;
++    const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
++    if (s_fifo_getoff == put && (s32)(s_flip_request_count - s_flip_presented) <= 0) { held = 0; return 0; }
++    { extern unsigned long long ps3_ms_now(void);
++      if (lim < 0) { const char* e = getenv("PRESENT_GATE_MS"); lim = e ? atoi(e) : 100; }
++      const unsigned long long now = ps3_ms_now();
++      if (!held) { held = 1; since = now; }
++      else if (now - since >= (unsigned long long)lim) {
++          static int n = 0;
++          if (n++ < 40) fprintf(stderr, "[cellGcmSys] present gate (catchup): get 0x%X put 0x%X, flips requested %u"
++                                " decoded %u presented %u, held %d ms, releasing%c", s_fifo_getoff, put,
++                                s_flip_ppu_requests, s_flip_request_count, s_flip_presented, lim, 10);
++          held = 0;
++          return 0;
++      }
++      return 1; }
++}
++
+ void cellGcmTickFlip(void)
+ {
+     if (s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && !gcm_flip_at_word_blocked() &&
+-        !gcm_flip_present_blocked())
++        !gcm_flip_present_blocked() && !gcm_flip_catchup_blocked())
+         GCM_PENDING_SET(2);
+ }
+ 

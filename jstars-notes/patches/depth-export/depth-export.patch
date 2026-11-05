@@ -1,0 +1,90 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 5ae9138..d38d25d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -96,7 +96,8 @@ typedef struct {
+     int is_vp;          /* 1 = real VP path: vb_byte_offset indexes vp_vb (float4) */
+     /* VP path per-draw shader/texture state, captured at draw_arrays time. */
+     u32 fp_addr;        /* SET_SHADER_PROGRAM value (guest FP ucode location)   */
+-    int fp_exp32;       /* SET_SHADER_CONTROL 32-bit-exports bit at draw time   */
++    int fp_exp32;       /* SET_SHADER_CONTROL at draw time: bit 0 = 32-bit exports
++                         * (0x40), bit 1 = depth export (0xE, FP_DEPTH_EXPORT) */
+     u32 alpha_ctl;      /* alpha test: enable<<16 | (func&0xFF)<<8 | ref */
+     u32 begin_epoch;    /* SET_BEGIN_END generation, for batch concatenation */
+     u32 cull;           /* packed face culling: bit0 enable, bit1 cull FRONT
+@@ -182,6 +183,27 @@ typedef struct {
+  * transparent texels (DXT1 punch-through: black, alpha 0) showed as black
+  * rims. With one sample, coverage is "alpha >= 0.5"; that is what this adds
+  * when the game's own alpha test is off. */
++/* The draw record's fp_exp32 from SET_SHADER_CONTROL: bit 0 = 32-bit colour
++ * exports (0x40), bit 1 = depth export (any of 0xE). The depth bits were never
++ * passed to the decompiler, so a program whose depth export is its cut-out
++ * kept the card's own depth: J-Stars' tree and grass cards write r1.z = 10
++ * (out of range, so the depth test fails) where the leaf texture is
++ * transparent and the fragment's own z elsewhere, and drew as whole black or
++ * green cards (jstars-notes STAGE_TEXTURES.md §12, FINDINGS §62).
++ * FP_DEPTH_EXPORT=0 leaves the depth bits out, as before. */
++static int rsx_fp_exp_bits(const rsx_state* st)
++{
++    static int zx = -1;
++    if (zx < 0) { const char* e = getenv("FP_DEPTH_EXPORT"); zx = e ? atoi(e) : 1; }
++    if (!st) return 1;
++    return ((st->shader_control & 0x40) ? 1 : 0) | ((zx && (st->shader_control & 0xE)) ? 2 : 0);
++}
++/* SET_SHADER_CONTROL bits for the decompiler from fp_exp32. */
++static u32 fp_ctrl_bits(int exp32)
++{
++    return ((exp32 & 1) ? 0x40u : 0u) | ((exp32 & 2) ? 0x2u : 0u);
++}
++
+ static u32 rsx_a2c_alpha(const rsx_state* st, u32 alpha_ctl)
+ {
+     static int on = -1;
+@@ -1854,7 +1876,7 @@ static void cap_write_fp(const char* path, const D3D12DrawRecord* r)
+     u32 nconst = 0;
+     int n = rsx_fp_decompile_buffered_ex(vm_base + off, FP_MAX_BYTES,
+                                          getenv("FP_CTRL_AUTO") ? RSX_FP_CTRL_AUTO
+-                                                                : (r->fp_exp32 ? 0x40u : 0u), 0u,
++                                                                : fp_ctrl_bits(r->fp_exp32), 0u,
+                                          hlsl, sizeof(hlsl), &nconst);
+     FILE* f = fopen(path, "w");
+     if (!f) return;
+@@ -3490,7 +3512,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+      * bits (0xE) stay off, as before. FP_CTRL_AUTO=1 restores the heuristic. */
+     static int fp_auto = -1;
+     if (fp_auto < 0) fp_auto = getenv("FP_CTRL_AUTO") ? 1 : 0;
+-    const u32 fp_ctrl = fp_auto ? RSX_FP_CTRL_AUTO : (exp32 ? 0x40u : 0u);
++    const u32 fp_ctrl = fp_auto ? RSX_FP_CTRL_AUTO : fp_ctrl_bits(exp32);
+     /* Texture gamma: the units' sRGB-decode lane masks (see dr_gamma_key). */
+     u8 gmask[16];
+     for (int u = 0; u < 16; u++) gmask[u] = (u8)((gamma >> (4 * u)) & 0xFu);
+@@ -9660,8 +9682,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 dr->textured       = s_d3d.tex_bound;
+                 dr->is_vp          = 1;
+                 dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
+-                dr->fp_exp32 = s_d3d.current_rsx_state ?
+-                    ((s_d3d.current_rsx_state->shader_control & 0x40) != 0) : 1;
++                dr->fp_exp32 = rsx_fp_exp_bits(s_d3d.current_rsx_state);
+                 dr->cull = rsx_cull_key(s_d3d.current_rsx_state);
+         dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
+             dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
+@@ -9798,8 +9819,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+             dr->textured       = s_d3d.tex_bound;
+             dr->is_vp          = 1;
+             dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
+-            dr->fp_exp32 = s_d3d.current_rsx_state ?
+-                ((s_d3d.current_rsx_state->shader_control & 0x40) != 0) : 1;
++            dr->fp_exp32 = rsx_fp_exp_bits(s_d3d.current_rsx_state);
+             dr->cull = rsx_cull_key(s_d3d.current_rsx_state);
+         dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
+             dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
+@@ -10018,8 +10038,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         dr->textured       = s_d3d.tex_bound;
+         dr->is_vp          = 1;
+         dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
+-        dr->fp_exp32 = s_d3d.current_rsx_state ?
+-            ((s_d3d.current_rsx_state->shader_control & 0x40) != 0) : 1;
++        dr->fp_exp32 = rsx_fp_exp_bits(s_d3d.current_rsx_state);
+         dr->cull = rsx_cull_key(s_d3d.current_rsx_state);
+         dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
+         dr->cmask = 0xF;
