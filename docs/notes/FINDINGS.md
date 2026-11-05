@@ -2986,6 +2986,8 @@ SPU_DMATRACE_N=3000`) to see whether its inputs are empty or its output computat
   and the player block and moved the name tags off the fighters. ui3 at UI_SCALE=0.7: clusters intact.
   Note: the tours' fight_hud screen match fails when the HUD is scaled (the TIME label moves).
 
+- Victory Burst banner (2026-11-04, the maintainer's screenshot): each row (star, "Friendship Burst!" text, name bar; 720p y 555-630, x 640-1240) sat across the bottom-left and bottom-right areas, so at UI_SCALE < 1 the star went to the corner, the bar and name to the map's corner and the text stayed. Fix: a frame whose HUD has the text piece (centre x 0.15..0.35, 0.3..0.45 wide, 0.055..0.078 high, on screen, after the name tags) keeps the bottom at full size, also the next frame (the fight HUD is hidden during the burst). Name tags have the same width but are 0.078-0.098 high and also come off screen; a first wider rule caught them (vb7). Tests vbuib5, vb8 (installer-work): 2 bursts each, banner whole, banner flag on 3.5 s per burst only, normal HUD at 70%. UI_SCALE_DBG=1 prints "burst banner on/off".
+
 ## 2-player split screen (2026-10-29, the AI assistant)
 - Test harness: cellPad PAD_FILE2 (virtual port-1 pad, 9ccebda); tour_2p.sh joins P2 (Cross, START) and P1 START on
   character select; the 2P stage select does not match the "stage" ref, so it just presses START. Use
@@ -3239,3 +3241,83 @@ The pause menu is data-driven: pointing its pack entry at a longer table adds a 
 - Smoke rim: that alpha blur is the main part of it. FX_NOBLUR=1 narrows it a lot (sq1). The maintainer's RPCS3 screenshot shows the rim too.
 - FX_FULL=1 doubles those layers' scale (RES_SCALE 3: 3840x2160). Unscaled sampling constants are unaffected because everything uses normalized coordinates; none of the layer programs read the pixel position. The write-back to guest memory skips these targets.
 - Glow, reading corrected: lumflag-trace-5 had a bug (it read the pass name inline; the name is a pointer at +8). Fixed, it shows pe::luminance executing every frame, with draw commands (fn 0x8BBE50) running: 422 logged drawcmd lines (gl2). Frame captures (gl1, 6 frames) show 0x0E590000 cleared and never drawn, but the first group of 0x0DC20000 draws straight after that clear is alpha-only with vertex colour, which fits being those luminance draws (inferred from order and count, not matched one by one). So the idea that the glow never draws came from looking only at 0x0E590000. The bloom chain 0DC2 -> 0DA4 -> 0D65..0D89 -> added to the scene also runs; in frame_03 0D89 peaks at 14 of 255. Whether it is as strong as on RPCS3 is not known: needs one skill compared side by side. The trace patch was taken out again (.pre-lumtrace restored).
+
+## Battle setup table and 6 fighters (2026-11-05)
+
+The maintainer asked whether a match can hold 6 fighters. The battle setup table at 0x009540E4 (0x2C a slot) has exactly 6
+slots: 0 P1, 1 P1's partner, 2 the opponent, 3 the opponent's partner, 4 team 1's Support, 5 team 2's Support; the next
+words are another table (a character order list). Fields: +0x00 controller (0 the player, 2 CPU), +0x04 0 (1 in an
+unused partner slot), +0x08 1 takes part / 2 not, +0x0C character, +0x10 team (0/1), +0x14 2, +0x18 COM level,
++0x20 -1. Test tools in jstars_game.cpp: SIX_PROBE=1 dumps it, FORCE_SLOTS="slot:id[:ctl[:stars]],..." writes slots on
+the character select. Forcing slots 1 and 3 gave a normal 2 against 2 (six2v2), and a playable character (id 1, Ace)
+in a Support slot loads as that team's Support ("Blue Team Support" intro). A 3rd fighter per team has no slot;
+it needs the game code that reads this table, and every per-fighter array behind it, widened.
+
+3v1 by the table (six3v1): slot 2 given team 0 (+0x10 = 0) made a 3 against 1 that loads and fights (Luckyman, Hancock
+and Hiei against Ryotsu), so the team is the slot's +0x10, not its place. The 4 fighter slots are the limit; the 2
+Support slots (4, 5) are the only other character slots. The pick screen's bar has 4 boxes plus a Support box per
+team. Writing a 3rd member into heap copies of the team list during that screen changed nothing (six5).
+Code that reads the table (toc1 run, SIX_PROBE lists TOC entries near it): r2-0x3194 holds 0x009540E8 (table + 4)
+and r2-0x31D0 holds 0x009540A4 (table - 0x40); every reader is in recompiled/ppu_recomp_008.cpp, func_00183528 ..
+func_00186DDC (0x00183528-0x00186E00). The ones read so far walk all 6 slots alike (ctr = 6, step 0x2C), e.g.
+func_00184D68, func_00184DB0, and func_00186394 copies the 6 slots out with a special case for slot index 5. Where a
+slot becomes a fighter or a Support is not found yet: next, the battle code that consumes the copy.
+Later the same night: the table readers are only called directly from the menu module (0x00173758, 0x00182000-
+0x00199D44: character select, VS screen, saving the last picks; func_00186394 copies the 6 slots out through memcpy
+0x0071802C into a save stream), not from battle code, so the battle reads its own copy. SIX_ICALL=1 logs indirect calls
+into 0x00183528-0x00186E00 while a match loads: none (sixcall). The maintainer's 1v3 from the menu (team change on P2) plays;
+its first two intros were black on the maintainer's PC, not here (six1v3, forced 1v3: intros drawn) - likely first-time
+pipelines on that run. Next lead: find the battle's copy (search memory at the fight's start for the 6 character ids
+with any stride, outside 0x009540E4) and the code that reads its slots 4-5.
+11-05 day: new tools. SIX_WATCH=<hex guest address> puts a hardware data breakpoint on that guest word in every game
+thread (re-armed every 0.5 s through the match load) and logs each host instruction that touches it as an offset into
+JStarsRecomp.exe; build with build_pdb.bat and run build-pdb\JStarsRecomp.exe (a local test script, not in this repository), then name it with
+VS' llvm-symbolizer --obj=build-pdb\JStarsRecomp.exe 0x140000000+offset (outer frame = func_XXXXXXXX). Watching slot
+4's character (0x009541A0): only menu code reads it (func_001855B4, func_00184D68, func_0018AA08 in ppu_recomp_008),
+all while leaving the character select; nothing reads it during the load or the fight. func_001855B4 copies the 6
+slots to the stack and sends them as an event (func_003DBDD0 / func_003DC200: listener = obj->vtable[0x40](),
+then listener->vtable[0x1C/0x20](data)); one listener is func_0019B124, a character-select display object that
+keeps 0x130 bytes (the 6 slots + extra) at +0x30. The battle must take its fighters from another object filled from
+this data; not found yet. SIX_ICALL also logs any indirect call whose r3-r6 points at the slot data.
+Plan note (the maintainer 11-05): if the Support slots are turned into fighters for 3v3, Support-only characters (ids 200+) must not be selectable there; only playable fighters (ids 0-41 range).
+Watch on slot 0's character (0x009540F0) with callers (SIX_WATCH now also lists up to 8 calling frames): the last
+reads before the match are func_001855B4 (the event above, from func_00187008 <- func_001894A4) and
+func_00188C08 -> func_0018AA08. func_0018AA08(obj, slot, src) copies one 0x2C slot into obj + mode*0x108 + slot*0x2C
++ 0xC (mode from func_00155274()+0xC): a per-game-mode store of the last 6 picks (likely save data). Nothing reads
+the table, or the character-select display's copy (0x48FAD920+0x30, written by func_0019B124), after the select is
+left. So the battle's fighters do not come from these reads; the next approach is the other end: find the battle
+function that creates a fighter (it runs once per fighter while loading) and see what it is given.
+
+### Where the battle builds its fighters (11-05, the map for 3v3 work)
+
+- Battle world: *(TOC - 0x7A90) (func_00030A14), 0x48E90CE0 in these runs. Team lists at +0x34 + team*0x18: unit
+  indices, -1 = none, 4 checked (func_00031968 walks 4); team 0 = 0 2 4, team 1 = 1 3 5 in a 2v2 + Supports.
+  Then +0x10 of the list = 3 (members incl. Support?).
+- Units: 6 records of 0x94 bytes at +0x60 + index*0x94 (index 6 is a "BTLR" block, so 6 is the room). Unit +0x00
+  halfword = character, +0x08 = role (1 leader, 2 partner, 3 Support), +0x0C = team, +0x1C = index.
+- Filled when the select is left: func_0018AFA4 (menu) -> func_00031888 -> memcpy func_006FB480.
+- Role read by (in order): func_002ED264 -> func_0003101C / func_00030BD8; func_00151B34 -> func_000CEE0C
+  (resource loading?); func_0005BAD4 -> func_000C74D8; func_000FD780 -> func_000EBBC8; then the builder.
+- Battle builder: func_000EDFDC -> func_000ED344 loops teams and their units; fighters via func_0005AEE0, Supports via
+  func_0005AB70; both -> func_0005A9B0 -> func_000C6610 -> factory -> func_0008A540 (health object, class
+  0x00875198, 0x230 bytes; ctor func_0008A2CC). Six health objects are made (4 fighters + 2 Supports). The builder
+  checks character > 199 (Support-only ids).
+- 3v3 tries: SIX_3V3=1 (switch role 3 -> 2 at the next pad poll) and SIX_3V3=2 (debug registers 1/2 on both Support
+  role words, switched the instant the game writes them) both leave the match stuck on "Now loading" (six3v3,
+  six3v3b, six3v3c). Something in loading expects units 4/5 to be Supports; next: find what waits (the readers above).
+- Tools: SIX_WATCH (data breakpoint with callers; build_pdb.bat + llvm-symbolizer), SIX_ICALL, SIX_PROBE,
+  FORCE_SLOTS, SIX_3V3, all in jstars_game.cpp, a local test script (six_test.ps1, not in this repository).
+- Stuck 3v3 load (SIX_STACKS=25 dumps every thread's host stack; sixstack): no thread is blocked on a lock. The
+  main thread keeps running its loop (func_00010354 -> func_002FE540 -> func_00642C3C -> func_003F7E2C ->
+  cellPadGetData), the workers sit idle in sys_event_queue_receive / sys_lwcond_wait. So the loading scene keeps
+  waiting for a state that never comes. The unit records look the same as a normal load apart from the roles
+  (SIX_LOADDUMP, sixload_ok vs sixload_bad). func_000CEE0C (loader, from func_00151B34) counts the units whose role
+  is not 3 over both teams' 4-entry lists and works with 3 minus that count: it is sized for at most 4 fighters,
+  probably memory set aside per fighter (4 fighters + 2 smaller Supports). Next: what func_000CEE0C sets up per
+  fighter, and whether more can be given.
+- func_000CEE0C right after the count: for each fighter place left empty (3 - count down to 0) it calls
+  func_0043D1D8(loader +0x68, 0x10 + n), and for Supports the same from 0x14 (1 - Supports). So the loader has
+  numbered resource places 0x10-0x13 for 4 fighters and 0x14-0x15 for 2 Supports. Six fighters would need the two
+  Support places loaded as fighter places (fighter-sized memory and fighter files) - the likely reason the load
+  never finishes. Next if resumed: func_0043D1D8 / func_0043D42C (the loader object at +0x68) and how a place's kind
+  and size are set; then whether places 0x14-0x15 can take a fighter.
