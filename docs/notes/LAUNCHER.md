@@ -193,3 +193,5 @@ Rebuilt; `--screenshots` check shows the slider at 100 % and left the settings f
 2026-11-02: Display page has Edge smoothing (AA_MODE in play_settings.txt: off, fxaa, fxaa2; default fxaa). Window 80 units taller to fit it.
 2026-11-02: Edge smoothing also offers SMAA (AA_MODE=smaa).
 2026-11-02: Display page has Full-size smoke and effects (FX_FULL in play_settings.txt, default on).
+
+2026-11-04: Display tab has "FPS counter (bottom left)" (FPS_COUNTER=1 in play_settings.txt); the window is 24 px taller for it.
