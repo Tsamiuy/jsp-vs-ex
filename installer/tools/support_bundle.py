@@ -13,7 +13,7 @@ What goes in (text only: .log .txt .ini .cmd), every file through firstrun.scrub
 What never goes in: the EBOOT, disc files, saves (hdd0, .sav), lift output (.c/.h), shader caches, binaries, environment dumps.
 A total cap (CAP_BYTES, uncompressed) applies: over it, the oldest lines of the largest logs go first and facts.txt says what was cut.
 
-Idea credit: Killzone 3's installer has a similar support package; no code is copied from it.
+Idea credit: the installer of undecuple's Killzone 3 port (Project Helghast) has a similar support package; no code is copied from it.
 """
 import argparse
 import ctypes

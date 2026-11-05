@@ -25,9 +25,24 @@ patched video library uses them for the "SMAA" edge smoothing option. Keep the h
 ## rpcs3_locate
 
 `installer/tools/rpcs3_locate.py` and its test `installer/tools/test_rpcs3_locate.py` are a helper shared between several unofficial ports of PS3 games,
-under the same MIT licence, vendored byte for byte unchanged from the shared copy of 2026-11-03 (sha256 of the module
+among them undecuple's Project Pyrrhus (see below), under the same MIT licence, vendored byte for byte unchanged from the shared copy of 2026-11-03 (sha256 of the module
 5f98c82632f1e8d6837171080afd62057db2431a1153554f429678d5c0003703). It only reads an RPCS3 install's configuration and game folders; its one write is the
 save copy that the installer asks the player to confirm. `installer/tools/rpcs3_wizard.py` is this repository's glue around it.
+
+## Project Pyrrhus and Project Helghast
+
+Parts of the installer and the tools started from two other unofficial PS3 ports by undecuple, both under the MIT licence
+(Copyright (c) 2026 undecuple): [Project Pyrrhus](https://github.com/undecuple/project-pyrrhus) (Killzone 2) and
+[Project Helghast](https://github.com/undecuple/project-helghast) (Killzone 3), from which Project Pyrrhus's installer was
+made.
+
+- From Project Pyrrhus's installer: the layout of `installer/jsp.iss`, `installer/launcher/launcher.c`,
+  `installer/tools/firstrun.py`, `assemble_payload.py`, `assemble_portable.py`, `fetch_toolchain.py`, `installer_art.py`
+  and `llvm-mingw.cmake`. The game-specific parts are this repository's.
+- From Project Helghast: `tools/features.py`. Also the approach of the pinned Inno Setup step in
+  `.github/workflows/installer.yml` and of `installer/tools/support_bundle.py`, with no code copied for these two.
+
+Each of these files names its source in a comment.
 
 ## RPCS3
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Installer artwork for J-Stars Victory VS-EX: Fan Revival, in the fan site's NFO look.
 
-Image sizes per Inno DPI, own ICO writer, --check by bytes (layout adapted from the maintainer's installer for another PS3 port).
+Image sizes per Inno DPI, own ICO writer, --check by bytes (layout adapted from the installer of Project Pyrrhus, undecuple's Killzone 2 port).
 Everything comes from tools/site/ascii_logo.py's cells
 (the compact banner star with the J) drawn in IBM Plex Mono Bold (SIL OFL 1.1; the font file is not in the repository: put
 IBMPlexMono-Bold.ttf in build/installer/fonts/) and the site palette (red band at the top, black base,

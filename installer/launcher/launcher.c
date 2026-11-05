@@ -1,6 +1,6 @@
 /* jsp-launcher.exe: starts the port that the installer built. Small stand-in used only by the installer's shortcuts; it does
  * not replace launcher/JStarsLauncher.cs, which stays the settings window for a hand-built tree. Layout after the
- * maintainer's installer for another PS3 port (same MIT licence), and jstars/play.ps1 and tools/boost/boost.ps1 (their
+ * launcher of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence), and jstars/play.ps1 and tools/boost/boost.ps1 (their
  * environment variables, log files and the CPU boost), without the ISO mount: the disc is a folder here (PS3_VFS_ROOT).
  *
  * From the Windows test in issue #49:
@@ -17,7 +17,7 @@
  *
  * Settings (play_settings.txt, KEY=VALUE) come from the first of these that applies, highest rule first, and the launcher writes one
  * line naming the rule that won to game\run\launcher_log.txt ("settings: install folder (play_settings.txt)"). Order idea from the
- * maintainer's installer for another PS3 port; the names are this project's:
+ * launcher of undecuple's Killzone 2 port (Project Pyrrhus); the names are this project's:
  *   1. a one-run flag:      jsp-launcher.exe --settings <file>     (that file only, this start only)
  *   2. a marker file:       <install folder>\settings_here.txt    (then only <install folder>\play_settings.txt, never AppData)
  *   3. the install folder:  <install folder>\play_settings.txt
