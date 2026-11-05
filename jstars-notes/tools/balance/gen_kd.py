@@ -1,6 +1,7 @@
 # Local script: it reads the notes in the layout of the maintainer's working folder (jstars-notes/Balance/NNN_name.md). In this repository the
 # same notes are docs/character-details/ and docs/balance/, so point B at those (and change the file pattern) before running it here.
-# Writes jstars-notes/Balance/Knockdowns.md: every fighter's hits whose reaction number knocks down (attack slot +0x39).
+# Writes jstars-notes/Balance/Knockdowns.md: every fighter's hits whose reaction number knocks down (attack slot +0x39). It then also adds the same rows
+# to each fighter's page as a "## Knockdowns" section (replaced on a rerun).
 import struct, glob, os, re, collections
 # KD_DUMPS: the folder holding the fighters' unpacked battle data (cast\battle_NNN\*param_attack*, cast_bullet\battle_NNN.bin).
 S = os.environ.get('KD_DUMPS', 'dumps')

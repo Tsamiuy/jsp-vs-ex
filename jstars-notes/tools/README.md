@@ -55,5 +55,5 @@ identical to the copy in the game's memory (see `docs/balance/README.md`).
 
 ## Knockdown table
 
-`balance/gen_kd.py` writes `docs/balance/Knockdowns.md` (every fighter's hits whose reaction number knocks down) from the fighters' unpacked
+`balance/gen_kd.py` writes `docs/balance/Knockdowns.md` (every fighter's hits whose reaction number knocks down) and the "Knockdowns" section of each fighter's page in `docs/character-details/` from the fighters' unpacked
 battle data. The data folder is `KD_DUMPS`; it is not in this repository. The script is written for the layout of the maintainer's working folder, see the note at its top.
