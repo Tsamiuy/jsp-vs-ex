@@ -120,6 +120,65 @@ The input is the last press before the hit, so a combo's later hits may show the
 
 Actions with a Stamina cost that landed a hit: 29: 50, 88: 300, 90: 400, 91: 100.
 
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md). "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in this page's own damage list. Build-up is the "Gauge" value in the tables above; it drains by itself and applies to hits only, not to projectiles. Rows with an empty Move are not tied to an input yet.
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 2 |  | 0 | 4 | knocked down, big bounce | 250 | 50 |
+| 2 |  | 6 | 6 | knocked away (dmg_blow) | 40 | 8 |
+| 3 |  | 0 | 21 | launched, then down | 50 | 30 |
+| 3 |  | 2 | 21 | launched, then down | 50 | 30 |
+| 4 |  | 0 | 6 | knocked away (dmg_blow) | 250 | 400 |
+| 4 |  | 6 | 6 | knocked away (dmg_blow) | 45 | 8 |
+| 6 |  | 0 | 6 | knocked away (dmg_blow) | 300 | 500 |
+| 6 |  | 5 | 6 | knocked away (dmg_blow) | 50 | 5 |
+| 7 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 300 | 500 |
+| 14 |  | 2 | 6 | knocked away (dmg_blow) | 200 | 200 |
+| 14 |  | 3 | 3 | lifted off the feet; lands and goes down unless hit again | 85 | 125 |
+| 15 |  | 1 | 3 | lifted off the feet; lands and goes down unless hit again | 25 | 50 |
+| 15 |  | 2 | 4 | knocked down, big bounce | 25 | 50 |
+| 16 |  | 0 | 4 | knocked down, big bounce | 25 | 50 |
+| 16 |  | 1 | 4 | knocked down, big bounce | 25 | 50 |
+| 16 |  | 2 | 4 | knocked down, big bounce | 25 | 50 |
+| 16 |  | 3 | 6 | knocked away (dmg_blow) | 150 | 300 |
+| 18 |  | 0 | 6 | knocked away (dmg_blow) | 200 | 100 |
+| 18 |  | 1 | 10 | knocked down, rolling bounce | 150 | 10 |
+| 19 |  | 0 | 6 | knocked away (dmg_blow) | 200 | 100 |
+| 24 |  | 0 | 4 | knocked down, big bounce | 300 | 500 |
+| 25 |  | 0 | 6 | knocked away (dmg_blow) | 300 | 500 |
+| 26 |  | 0 | 6 | knocked away (dmg_blow) | 300 | 500 |
+| 28 |  | 4 | 6 | knocked away (dmg_blow) | 100 | 5 |
+| 31 |  | 4 | 6 | knocked away (dmg_blow) | 100 | 5 |
+| 32 |  | 4 | 6 | knocked away (dmg_blow) | 100 | 5 |
+| 33 |  | 0 | 6 | knocked away (dmg_blow) | 50 | 50 |
+| 33 |  | 4 | 6 | knocked away (dmg_blow) | 100 | 5 |
+| 34 |  | 0 | 4 | knocked down, big bounce | 300 | 100 |
+| 38 |  | 0 | 4 | knocked down, big bounce | 250 | 50 |
+| 38 |  | 6 | 6 | knocked away (dmg_blow) | 40 | 8 |
+| 39 |  | 0 | 21 | launched, then down | 50 | 30 |
+| 39 |  | 2 | 21 | launched, then down | 50 | 30 |
+| 40 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 250 | 450 |
+| 40 |  | 6 | 6 | knocked away (dmg_blow) | 45 | 8 |
+| 43 |  | 2 | 6 | knocked away (dmg_blow) | 200 | 250 |
+| 43 |  | 3 | 3 | lifted off the feet; lands and goes down unless hit again | 85 | 125 |
+| 44 |  | 0 | 4 | knocked down, big bounce | 100 | 200 |
+| 44 |  | 1 | 4 | knocked down, big bounce | 100 | 200 |
+| 44 |  | 2 | 17 | big knock away (dmg_conspicuous_blow) | 100 | 200 |
+| 45 |  | 0 | 10 | knocked down, rolling bounce | 200 | 100 |
+| 45 |  | 1 | 10 | knocked down, rolling bounce | 150 | 10 |
+| 46 |  | 0 | 11 | shocked, then down (dmg_shock) | 1000 | 800 |
+| 47 |  | 0 | 4 | knocked down, big bounce | 1300 | 800 |
+| 49 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 250 | 20 |
+| 50 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 250 | 20 |
+| 52 |  | 0 | 6 | knocked away (dmg_blow) | 100 | 10 |
+| 53 |  | 0 | 6 | knocked away (dmg_blow) | 20 | 0 |
+| 55 |  | 0 | 4 | knocked down, big bounce | 300 | 500 |
+| 56 |  | 6 | 6 | knocked away (dmg_blow) | 40 | 8 |
+| 57 |  | 3 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 2 |
+| 57 |  | 6 | 6 | knocked away (dmg_blow) | 40 | 8 |
+
 ## Skill table (the game's own list)
 
 Names and inputs as the pause menu's Skill table gives them. Which attack row each one uses is not linked yet.

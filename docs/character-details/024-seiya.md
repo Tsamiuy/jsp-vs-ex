@@ -120,6 +120,74 @@ The input is the last press before the hit, so a combo's later hits may show the
 
 Actions with a Stamina cost that landed a hit: 29: 50, 89: 500, 131: 50.
 
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md). "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in this page's own damage list. Build-up is the "Gauge" value in the tables above; it drains by itself and applies to hits only, not to projectiles. Rows with an empty Move are not tied to an input yet.
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 2 |  | 0 | 10 | knocked down, rolling bounce | 200 | 30 |
+| 3 |  | 1 | 4 | knocked down, big bounce | 80 | 45 |
+| 4 |  | 0 | 6 | knocked away (dmg_blow) | 270 | 100 |
+| 5 |  | 1 | 4 | knocked down, big bounce | 130 | 10 |
+| 6 |  | 1 | 21 | launched, then down | 150 | 25 |
+| 8 |  | 0 | 4 | knocked down, big bounce | 160 | 0 |
+| 14 |  | 0 | 6 | knocked away (dmg_blow) | 350 | 150 |
+| 16 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 440 | 120 |
+| 19 |  | 0 | 9 | knocked down, big bounce | 100 | 10 |
+| 20 |  | 0 | 9 | knocked down, big bounce | 50 | 10 |
+| 21 |  | 0 | 21 | launched, then down | 200 | 20 |
+| 22 |  | 0 | 9 | knocked down, big bounce | 250 | 20 |
+| 23 |  | 0 | 4 | knocked down, big bounce | 150 | 20 |
+| 23 |  | 1 | 9 | knocked down, big bounce | 170 | 20 |
+| 26 |  | 0 | 4 | knocked down, big bounce | 70 | 30 |
+| 26 |  | 3 | 4 | knocked down, big bounce | 70 | 30 |
+| 26 |  | 8 | 6 | knocked away (dmg_blow) | 140 | 140 |
+| 27 |  | 8 | 6 | knocked away (dmg_blow) | 140 | 140 |
+| 28 |  | 0 | 5 | spun away (dmg_blow_spin) | 70 | 30 |
+| 28 |  | 1 | 5 | spun away (dmg_blow_spin) | 70 | 70 |
+| 28 |  | 7 | 3 | lifted off the feet; lands and goes down unless hit again | 70 | 70 |
+| 28 |  | 8 | 6 | knocked away (dmg_blow) | 140 | 140 |
+| 29 |  | 6 | 6 | knocked away (dmg_blow) | 70 | 70 |
+| 29 |  | 8 | 6 | knocked away (dmg_blow) | 140 | 140 |
+| 32 |  | 0 | 14 | falls (dmg_seiya_fall), then down | 20 | 0 |
+| 32 |  | 7 | 14 | falls (dmg_seiya_fall), then down | 15 | 0 |
+| 33 |  | 0 | 14 | falls (dmg_seiya_fall), then down | 300 | 100 |
+| 33 |  | 1 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 2 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 3 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 4 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 5 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 6 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 7 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 8 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 33 |  | 9 | 14 | falls (dmg_seiya_fall), then down | 450 | 0 |
+| 34 |  | 0 | 14 | falls (dmg_seiya_fall), then down | 75 | 30 |
+| 35 |  | 0 | 14 | falls (dmg_seiya_fall), then down | 300 | 0 |
+| 35 |  | 1 | 14 | falls (dmg_seiya_fall), then down | 30 | 0 |
+| 37 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 250 | 250 |
+| 41 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 250 | 500 |
+| 42 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 43 |  | 1 | 14 | falls (dmg_seiya_fall), then down | 30 | 0 |
+| 43 |  | 2 | 14 | falls (dmg_seiya_fall), then down | 30 | 0 |
+| 43 |  | 3 | 14 | falls (dmg_seiya_fall), then down | 30 | 0 |
+| 43 |  | 4 | 14 | falls (dmg_seiya_fall), then down | 30 | 0 |
+| 43 |  | 5 | 14 | falls (dmg_seiya_fall), then down | 30 | 0 |
+| 44 |  | 0 | 6 | knocked away (dmg_blow) | 100 | 1000 |
+| 45 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 46 |  | 5 | 17 | big knock away (dmg_conspicuous_blow) | 20 | 0 |
+| 47 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 48 |  | 0 | 5 | spun away (dmg_blow_spin) | 500 | 70 |
+| 48 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 49 |  | 0 | 14 | falls (dmg_seiya_fall), then down | 250 | 0 |
+| 49 |  | 8 | 3 | lifted off the feet; lands and goes down unless hit again | 140 | 140 |
+| 52 |  | 0 | 14 | falls (dmg_seiya_fall), then down | 20 | 0 |
+
+| Projectile row | Number | What it does | Damage |
+|---|---|---|---|
+| 0 | 11 | shocked, then down (dmg_shock) | 1300 |
+| 10 | 4 | knocked down, big bounce | 400 |
+
 ## Skill table (the game's own list)
 
 Names and inputs as the pause menu's Skill table gives them. Which attack row each one uses is not linked yet.

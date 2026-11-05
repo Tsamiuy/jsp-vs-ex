@@ -120,6 +120,52 @@ The input is the last press before the hit, so a combo's later hits may show the
 
 Actions with a Stamina cost that landed a hit: 29: 50, 88: 200, 89: 500, 90: 500.
 
+## Knockdowns
+
+Hits that knock the target down, from the attack data (2026-11-03). The number is the hit's reaction (attack slot +0x39, projectile row +0xAF); build-up is its "too many hits" number (the target goes down at 150). What each number does and the get-up are in [Knockdowns.md](../balance/Knockdowns.md). "Hit" is the attack slot, counting slots that deal no damage, so it can be higher than the position in this page's own damage list. Build-up is the "Gauge" value in the tables above; it drains by itself and applies to hits only, not to projectiles. Rows with an empty Move are not tied to an input yet.
+
+| Row | Move | Hit | Number | What it does | Damage | Build-up |
+|---|---|---|---|---|---|---|
+| 1 |  | 1 | 21 | launched, then down | 80 | 10 |
+| 2 |  | 3 | 10 | knocked down, rolling bounce | 40 | 15 |
+| 3 |  | 0 | 12 | pierced, then down (dmg_penetration) | 250 | 400 |
+| 3 |  | 1 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 0 |
+| 3 |  | 2 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 0 |
+| 4 |  | 0 | 6 | knocked away (dmg_blow) | 300 | 0 |
+| 7 |  | 0 | 6 | knocked away (dmg_blow) | 300 | 0 |
+| 14 |  | 0 | 10 | knocked down, rolling bounce | 320 | 400 |
+| 15 |  | 0 | 12 | pierced, then down (dmg_penetration) | 240 | 400 |
+| 16 |  | 0 | 21 | launched, then down | 100 | 300 |
+| 16 |  | 1 | 21 | launched, then down | 100 | 0 |
+| 18 |  | 0 | 12 | pierced, then down (dmg_penetration) | 100 | 50 |
+| 22 |  | 0 | 21 | launched, then down | 40 | 20 |
+| 22 |  | 1 | 21 | launched, then down | 40 | 0 |
+| 24 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 300 | 300 |
+| 27 |  | 3 | 10 | knocked down, rolling bounce | 100 | 0 |
+| 28 |  | 4 | 10 | knocked down, rolling bounce | 40 | 40 |
+| 32 |  | 0 | 6 | knocked away (dmg_blow) | 400 | 40 |
+| 32 |  | 8 | 17 | big knock away (dmg_conspicuous_blow) | 50 | 0 |
+| 33 |  | 0 | 4 | knocked down, big bounce | 25 | 20 |
+| 34 |  | 0 | 6 | knocked away (dmg_blow) | 200 | 40 |
+| 34 |  | 8 | 17 | big knock away (dmg_conspicuous_blow) | 50 | 0 |
+| 36 |  | 0 | 4 | knocked down, big bounce | 1000 | 400 |
+| 39 |  | 0 | 19 | knocked away (dmg_kizuna1_hit_blow) | 250 | 500 |
+| 40 |  | 0 | 20 | big bounce (dmg_conspicuous_bound 2) | 250 | 350 |
+| 42 |  | 3 | 10 | knocked down, rolling bounce | 60 | 10 |
+| 44 |  | 0 | 6 | knocked away (dmg_blow) | 90 | 0 |
+| 45 |  | 0 | 4 | knocked down, big bounce | 50 | 20 |
+| 46 |  | 0 | 6 | knocked away (dmg_blow) | 100 | 40 |
+| 46 |  | 8 | 17 | big knock away (dmg_conspicuous_blow) | 50 | 0 |
+| 47 |  | 0 | 17 | big knock away (dmg_conspicuous_blow) | 100 | 100 |
+| 48 |  | 3 | 3 | lifted off the feet; lands and goes down unless hit again | 80 | 125 |
+| 49 |  | 0 | 3 | lifted off the feet; lands and goes down unless hit again | 1000 | 9999 |
+| 50 |  | 0 | 4 | knocked down, big bounce | 700 | 200 |
+| 55 |  | 3 | 10 | knocked down, rolling bounce | 100 | 0 |
+| 58 |  | 0 | 4 | knocked down, big bounce | 750 | 400 |
+| 59 |  | 0 | 12 | pierced, then down (dmg_penetration) | 250 | 400 |
+| 59 |  | 1 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 0 |
+| 59 |  | 2 | 3 | lifted off the feet; lands and goes down unless hit again | 100 | 0 |
+
 ## Skill table (the game's own list)
 
 Names and inputs as the pause menu's Skill table gives them. Which attack row each one uses is not linked yet.
