@@ -59,7 +59,7 @@ exit /b 0
 FORBIDDEN = {".elf", ".bin", ".sfo", ".psarc", ".edat", ".self", ".sprx"}
 PORT_FILES = ("CMakeLists.txt", "config.toml", "main.cpp", "stubs.cpp", "jstars_fiber.cpp", "jstars_debug.cpp",
               "jstars_game.cpp", "jstars_sysutil.cpp", "exit_label_dark.inc", "exit_label_light.inc")
-NOTICE_V18 = """J-Stars Victory VS EX: Fan Revival
+NOTICE_V18 = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
 This program contacts no server: no update check, no crash report, no telemetry.
@@ -71,7 +71,7 @@ Python (PSF licence, toolchain/python/LICENSE.txt) is the Windows embeddable pac
 (LLVM: Apache-2.0 with LLVM exception; MinGW-w64 and winpthreads: see licenses/llvm-mingw/), CMake (BSD-3-Clause) and Ninja
 (Apache-2.0); their licence texts are in licenses/. Nothing from Microsoft is needed or included.
 """
-NOTICE = """J-Stars Victory VS EX: Fan Revival
+NOTICE = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
 This program contacts no server: no update check, no crash report, no telemetry.
