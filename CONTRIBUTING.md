@@ -29,3 +29,20 @@ only a guess, and keep game data out of them.
 `docs/FEATURES.md` is generated: edit `docs/features.tsv` (its format is at the top of `tools/features.py`), then run
 `python3 tools/features.py`. A ROADMAP line that covers a row links to it as `FEATURES.md#<id>` and carries the
 marker for its status; `python3 tools/features.py --check` (also run by CI) reports any mismatch.
+
+## Releases
+
+The version number lives in `installer/VERSION`; the two CMake `project(... VERSION ...)` lines follow it (those folders are
+built on the player's PC and cannot read a file outside themselves), and `CHANGELOG.md` has the notes. Add a line under
+`## [Unreleased]` in `CHANGELOG.md` with each change a player would notice. `python3 tools/release.py --check` (also run by
+CI) reports any version that disagrees. To release, either way:
+
+- On GitHub: run the `prepare-release` workflow (Actions tab) with the new version (`X.Y.Z`, or `major`, `minor`, `patch`).
+  It opens a `release/vX.Y.Z` pull request whose body is the notes. CI does not start on a pull request opened by a
+  workflow: close and reopen it, then merge.
+- Locally: `python3 tools/release.py bump X.Y.Z` (or `major|minor|patch`) writes the version everywhere and turns Unreleased
+  into `## [X.Y.Z] - date`; commit it and open a pull request as usual.
+
+Merging a change to `installer/VERSION` into `main` starts the `release` workflow: it tags `vX.Y.Z`, builds the installer
+and creates a **draft** GitHub release with the files and the notes (`python3 tools/release.py notes X.Y.Z`). Look at the
+draft and publish it by hand. Do not push the tag yourself; the workflow skips a version whose tag exists.
