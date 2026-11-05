@@ -16,7 +16,7 @@ Thanks for looking. This is a small work-in-progress fan project. Keep changes s
 2. Describe what the change does and why.
 3. Add a short note on how you tested it: what you built or ran, and on which Windows version.
    If you did not test it, say so.
-4. One topic per pull request. Changes reach `main` only through a pull request that the maintainer has
+4. One topic per pull request. Changes reach `main` only through a pull request that a maintainer has
    read and merged, after CI is green. AI coding agents follow [AGENTS.md](AGENTS.md).
 
 ## Notes and patches

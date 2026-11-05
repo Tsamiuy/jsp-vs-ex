@@ -1,5 +1,5 @@
 ; J-Stars Victory VS-EX: Fan Revival: installer (Inno Setup 6.7).
-; Layout (PARAM.SFO reader, per-user install, portable task) adapted by hand from the maintainer's installer for another PS3
+; Layout (PARAM.SFO reader, per-user install, portable task) adapted by hand from the installer of undecuple's Killzone 2 PS3
 ; port (same MIT licence), without its update page, RPCS3 import, ISO reading, version check, crash report or any online
 ; piece: this installer and the program it installs contact no server and send nothing anywhere.
 ;
@@ -78,7 +78,7 @@ Source: "{#Payload}\tools\rpcs3_*.py"; Flags: dontcopy
 
 [Tasks]
 Name: "desktopicon"; Description: "A shortcut on the desktop"; Flags: unchecked
-; ENHANCEMENT: portable task (layout from the maintainer's installer for another PS3 port): saves and settings in the install folder, not in
+; ENHANCEMENT: portable task (layout from the installer of Project Pyrrhus, undecuple's Killzone 2 port): saves and settings in the install folder, not in
 ; %APPDATA%\JSP Fan Revival. Off by default; silent installs use /TASKS=portable.
 Name: "portable"; Description: "&Portable: saves and settings in the install folder (else in %APPDATA%)"; Flags: unchecked
 
@@ -907,7 +907,7 @@ end;
 
 { Uninstall keeps saves and installed game data unless asked (/REMOVEDATA=1, or the box below). A portable install keeps
   them in the install folder (hdd0, play_settings.txt): the ini that says so is read before it is deleted.
-  Layout adapted from the maintainer's installer for another PS3 port. }
+  Layout adapted from the installer of undecuple's Killzone 2 port (Project Pyrrhus). }
 var
   WasPortable: Boolean;
 

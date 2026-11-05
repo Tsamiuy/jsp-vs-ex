@@ -5,7 +5,7 @@ Two trees (--tree): "v15" (default) is this repository's earlier port (jstars/po
 "v18" is installer/port, the glue for the ps3recomp v0.18.0 toolkit, with installer/port/patches applied to the exported toolkit
 (installer/tools/export_toolkit.py). v18 stays opt-in until its open issues (sound, fight speed, fight graphics) are fixed. firstrun.py reads <payload>/tree.txt to know which recipe to run.
 
-Layout adapted from the maintainer's installer for another PS3 port (same MIT licence). The payload holds only code that
+Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). The payload holds only code that
 is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
 applied (tools/toolkit/apply_toolkit.py, run here when the installer is built, so the player needs no Git), the embeddable
 Windows Python, firstrun.py + jsp_spu.py, the launcher, icons, NOTICE and licence texts. Never any game file, lifted code or
