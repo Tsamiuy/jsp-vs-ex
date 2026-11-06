@@ -18,10 +18,17 @@ translated ahead of time to native x64. Unofficial fan project.
 
 ## Status
 
-> **Work in progress, not a release.** As of the notes' last entries (2026-10-30) the game lifts and builds on Windows
-> (Direct3D 12) and runs through the opening movie, the title screen and the menus; fights run at about 29 frames per
-> second on the maps that were tested, with sound. These runs were made on one Windows machine. Dated table:
-> [docs/notes/STATUS.md](docs/notes/STATUS.md). What the port adds: [docs/FEATURES.md](docs/FEATURES.md).
+> **Work in progress, not a release.** The default build (the v15 tree) lifts and builds on Windows (Direct3D 12) and
+> runs through the opening movie, the title screen, the menus and fights, with sound, at about 29 frames per second on
+> the maps that were tested. It has a launcher and a Training mode. These runs were made on one Windows machine.
+>
+> An opt-in newer tree (v18, `--tree v18` in the installer, ps3recomp v0.18.0) also boots and plays fights with sound,
+> but it is not the default: it is slower (16 to 22 frames per second in the tests so far) and
+> has known problems, such as washed-out lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
+> Moving it to a newer toolkit version is in progress.
+>
+> Dated table (top refreshed 2026-10-30, for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md). What the port
+> adds: [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Requirements
 
@@ -41,7 +48,8 @@ the decrypted file, see RPCS3 and its documentation.
 
 ## Known problems
 
-- Online and Cross-Save upload need PSN and do nothing (Cross-Save is now "Exit Game").
+- Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The v18 tree has
+  an experimental Online Battle over a psnr server, off unless turned on: see [installer/README.md](installer/README.md).
 - A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `toolkit/ps3recomp-local.patch`, see
   [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine; the notes build from a local checkout
   with the same changes. The installer applies the same patch for you.
