@@ -1,0 +1,68 @@
+name: Play-test report
+description: Tell us how a build played on your PC
+labels: [playtest]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach game files, EBOOTs, ISOs, firmware, keys or screenshots of copyrighted game content. Logs only.
+        Do not write personal data (name, email, address, folder paths) in this form.
+  - type: input
+    id: build
+    attributes:
+      label: Build or installer version
+      description: "The text in VERSION.txt next to the game, or the version shown by the setup program."
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: "For example Windows 11 23H2. On Linux: the Proton or Wine version."
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+    validations:
+      required: true
+  - type: input
+    id: input
+    attributes:
+      label: How you played
+      description: "Keyboard, controller (which one), or both."
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: "Modes, characters, stages, how long you played."
+    validations:
+      required: true
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What went wrong
+      description: "What you saw, and what you did just before. Write \"nothing\" if nothing did."
+    validations:
+      required: true
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Support bundle (installer only, optional)
+      description: "Start menu > Make a support bundle (JSP Fan Revival) collects the logs with your user name removed: drag the zip from your Desktop here (open it first and look). Never attach game files, EBOOTs, saves or keys."
+  - type: checkboxes
+    id: listing
+    attributes:
+      label: Listing
+      options:
+        - label: List me as a play tester in CONTRIBUTORS.md (your GitHub name only)
+          required: false

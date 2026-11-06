@@ -21,9 +21,30 @@ Keep the list to names or handles you are happy to have public.
 1. Send a pull request (see `CONTRIBUTING.md` if present on `main`).
 2. In the same pull request, add one line under "Contributors" below: your name or handle, and what you did in a few words.
 3. Do not add an email address. Do not add anyone else without their consent.
+4. Play testers are listed by sending a Play-test report (issue form) with the box "List me as a play tester" ticked.
+   The Activity section below is generated from merged pull requests; do not edit it by hand.
 
 ## Contributors
 
-- [undecuple](https://github.com/undecuple): the Windows installer (bundled compiler, portable zip, launcher, support bundle), the
-  "EX" title logo, the banner and logo art, the roadmap, CI and the issue forms, and the public-readiness review (README, NOTICE,
-  licence, community files, wording, removal of personal details, `.recomp.json`).
+- [undecuple](https://github.com/undecuple): the Windows installer (bundled compiler, portable zip, launcher, RPCS3 page and save
+  import, music option, support bundle) and the workflow that builds it, the "EX" title logo, the banner and logo art, the project
+  name with a hyphen, the roadmap and the features page, the layout page, CI and the issue forms, reviews of pull requests, the
+  save-format findings in #30, and the public-readiness review (README, NOTICE, licence, community files, wording, removal of
+  personal details, `.recomp.json`).
+
+## Activity (generated)
+
+Updated by the contributors workflow from merged pull requests in this repository (it started on 2026-11-04; earlier work is in the lines above). Do not edit by hand.
+
+<!-- contributors:start -->
+- [Tsamiuy](https://github.com/Tsamiuy): 15 merged pull requests, most recent #29, #28, #27
+- [undecuple](https://github.com/undecuple): 5 merged pull requests, most recent #19, #24, #16
+<!-- contributors:end -->
+
+## Play testers
+
+People who sent a play-test report and agreed to be listed.
+
+<!-- playtesters:start -->
+- None yet.
+<!-- playtesters:end -->

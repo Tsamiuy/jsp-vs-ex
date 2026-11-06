@@ -71,6 +71,8 @@
 /tools/*
 !/tools/features.py
 !/tools/test_features.py
+!/tools/contributors.py
+!/tools/test_contributors.py
 !/tools/release.py
 !/tools/test_release.py
 !/tools/site/
