@@ -1,0 +1,26 @@
+Patch 3001: AUDIO_NBLOCK=16|32 opens a bigger cellAudio ring than the title asked for (opt-in).
+
+GetPortConfig reports the bigger nBlock, so a writer that keeps its lead modulo nBlock can be given a deeper lead against late
+ticks of its sound server. J-Stars' CRI driver keeps 5 blocks (26.7 ms) ahead of an 8-block ring; its server ticks come 22-50 ms
+apart now and then on the host, and each miss costs about 4 silent blocks (crackling). The port's host sets AUDIO_NBLOCK=16 and
+raises CRI's lead to 12 (CRI_LEAD, installer/port/jsp/jsp_hle.cpp), as the v0.15 port does. Only for titles that read nBlock back.
+Unset (the default) changes nothing.
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -806,6 +806,14 @@
+         return CELL_AUDIO_ERROR_PARAM;
+     if (nblk != CELL_AUDIO_BLOCK_8 && nblk != CELL_AUDIO_BLOCK_16 && nblk != CELL_AUDIO_BLOCK_32)
+         return CELL_AUDIO_ERROR_PARAM;
++    /* AUDIO_NBLOCK=16|32 (opt-in): open a bigger ring than the title asked for
++     * and report it from GetPortConfig, so a writer that keeps its lead modulo
++     * nBlock can be given a deeper lead against late ticks of its sound
++     * server. Only for titles that read nBlock back instead of assuming it. */
++    { const char* e = getenv("AUDIO_NBLOCK"); u64 want = e ? (u64)atoi(e) : 0;
++      if ((want == CELL_AUDIO_BLOCK_16 || want == CELL_AUDIO_BLOCK_32) && want > nblk) {
++          printf("[cellAudio] AUDIO_NBLOCK: nBlock %llu -> %llu\n", (unsigned long long)nblk, (unsigned long long)want);
++          nblk = want; } }
+ 
+     mutex_lock(&s_audio_mutex);
+ 

@@ -5,7 +5,7 @@ Two trees (--tree): "v15" (default) is this repository's earlier port (jstars/po
 "v18" is installer/port, the glue for the ps3recomp v0.18.0 toolkit, with installer/port/patches applied to the exported toolkit
 (installer/tools/export_toolkit.py). v18 stays opt-in until its open issues (sound, fight speed, fight graphics) are fixed. firstrun.py reads <payload>/tree.txt to know which recipe to run.
 
-Layout adapted from the maintainer's installer for another PS3 port (same MIT licence). The payload holds only code that
+Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). The payload holds only code that
 is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
 applied (tools/toolkit/apply_toolkit.py, run here when the installer is built, so the player needs no Git), the embeddable
 Windows Python, firstrun.py + jsp_spu.py, the launcher, icons, NOTICE and licence texts. Never any game file, lifted code or
@@ -62,7 +62,8 @@ PORT_FILES = ("CMakeLists.txt", "config.toml", "main.cpp", "stubs.cpp", "jstars_
 NOTICE_V18 = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
-This program contacts no server: no update check, no crash report, no telemetry.
+This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
+(experimental), which is off unless you turn it on and give a psnr server (see the installer README).
 
 The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
 Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.18.0 with this project's patches).

@@ -12,7 +12,7 @@
   "targets": ["Windows"],
   "toolchain": ["ps3recomp"],
   "approach": "Static recompilation of the PPU code and the SPU jobs with ps3recomp, HLE system libraries, Direct3D 12 RSX backend",
-  "maintainers": [{"name": "Tsamiuy", "link": "https://github.com/Tsamiuy"}],
+  "maintainers": [{"name": "Tsamiuy", "link": "https://github.com/Tsamiuy"}, {"name": "undecuple", "link": "https://github.com/undecuple"}],
   "links": [
     {"label": "Repository", "url": "https://github.com/Tsamiuy/jsp-vs-ex"},
     {"label": "Status notes", "url": "https://github.com/Tsamiuy/jsp-vs-ex/blob/main/docs/notes/STATUS.md"},
@@ -20,5 +20,5 @@
   ],
   "help": ["Testing on other Windows machines", "The glow layer around effects", "Output resolution above 1280x720"],
   "tags": ["spu", "d3d12"],
-  "notes": "Work in progress, not a finished or released port. Needs your own copy of the game; no game data is stored in this repository. As of the notes (2026-10-27) the game lifts and builds on Windows (Direct3D 12, 1280x720) and runs through the opening movie, the title screen and the menus; fights run at about 29 frames per second on the maps that were tested, with sound. Online and Cross-Save upload need PSN and do nothing. Developed with AI agent assistance under the maintainer's direction."
+  "notes": "Work in progress, not a finished or released port. Needs your own copy of the game; no game data is stored in this repository. As of the notes (2026-10-27) the game lifts and builds on Windows (Direct3D 12, 1280x720) and runs through the opening movie, the title screen and the menus; fights run at about 29 frames per second on the maps that were tested, with sound. Online and Cross-Save upload need PSN and do nothing. Developed with AI agent assistance under the maintainers' direction."
 }

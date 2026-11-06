@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Features page: docs/features.tsv -> docs/FEATURES.md (generated; never hand-edited), and its links with ROADMAP.md.
 
-Adapted from Project Helghast's tools/features.py (MIT, https://github.com/undecuple/project-helghast): the TSV, the
+Adapted from tools/features.py of undecuple's Project Helghast (MIT, https://github.com/undecuple/project-helghast): the TSV, the
 page and the staleness check come from there; the id column and the ROADMAP checks are new here.
 
     python3 tools/features.py            # regenerate docs/FEATURES.md

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fetch the pinned release toolchain (installer/tools/toolchain.json) into a local cache: download, check SHA-256, unpack.
-Standard library only, Python 3.8+. Layout adapted from the maintainer's installer for another PS3 port (same MIT licence).
+Standard library only, Python 3.8+. Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence).
 Run it on the machine that builds the installer (it needs the network); nothing is downloaded by setup or by the player's
 PC. assemble_payload.py --toolchain-cache CACHE then copies the trees into the payload.
 

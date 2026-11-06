@@ -1,0 +1,64 @@
+Patch 2031: B32: build each vertex on the stack, then one copy to the write-combined upload heap; word-at-a-time FP code hash. Battle 15-20 -> 42-50 flips/s, 178 -> 22 ms per FIFO tick (boot209_wc vs boot208_prof)
+
+Source: the maintainer's other port, toolkit f8971ed.
+
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 2c3a26d1..bd969a25 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -254,7 +254,7 @@ typedef struct {
+     int nrt;                /* bound colour target count (PSO key)       */
+     u32 rtfmt;              /* DXGI format of the colour targets (PSO key) */
+     u32 ctrl;               /* SHADER_CONTROL export bits (PSO key)       */
+-    u32 ucode_hash;         /* FNV-1a of the FP ucode: apps re-patch inline
++    u32 ucode_hash;         /* hash of the FP ucode: apps re-patch inline
+                              * constants per frame (wave's stamp position/
+                              * amplitude) -- address-only keying served the
+                              * stale compile forever. */
+@@ -6882,8 +6882,12 @@ static void read_vp_vertex_fast(const rsx_state* state, u32 vi, VPSlot* out16)
+ {
+     if (!s_vf.on) { read_vp_vertex(state, vi, out16); return; }
+     if (s_vs_on > 0) s_vs.conv++;
+-    memcpy(out16, s_vf.tmpl, sizeof s_vf.tmpl);
+-    for (int k = 0; k < s_vf.n; k++) rsx_fetch_attrib(state, s_vf.idx[k], vi, out16[s_vf.idx[k]].v);
++    /* Built on the stack: out16 is the upload heap (write-combined), where the
++     * fetch's component-by-component writes each pay for a partial flush. */
++    VPSlot tmp[16];
++    memcpy(tmp, s_vf.tmpl, sizeof tmp);
++    for (int k = 0; k < s_vf.n; k++) rsx_fetch_attrib(state, s_vf.idx[k], vi, tmp[s_vf.idx[k]].v);
++    memcpy(out16, tmp, sizeof tmp);
+ }
+ 
+ /* Per-draw vertex cache for the paths that expand one guest vertex into
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index e23e328c..ba5b4fad 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -1617,7 +1617,7 @@ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_ou
+     return n;
+ }
+ 
+-/* FNV-1a over a program's INSTRUCTION words only, skipping the inline constant
++/* A hash of a program's INSTRUCTION words only, skipping the inline constant
+  * slots. With constants hoisted into fp_k[] the compiled shader does not depend
+  * on their values, so including them in the pipeline key made it change every
+  * time the title re-patched a constant -- which is exactly what thrashed the
+@@ -1632,7 +1632,16 @@ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes)
+         u32 w1 = rsx_fp_read_word(ucode + off + 4);
+         u32 w2 = rsx_fp_read_word(ucode + off + 8);
+         u32 w3 = rsx_fp_read_word(ucode + off + 12);
+-        for (u32 i = 0; i < 16; i++) { h ^= ucode[off + i]; h *= 16777619u; }
++        /* Word-at-a-time (murmur3 mix): this runs for every draw, and bytewise
++         * FNV over the program was 10% of that port's window thread. The value is
++         * only a key within this run. */
++        const u32 ws[4] = { w0, w1, w2, w3 };
++        for (int i = 0; i < 4; i++) {
++            u32 k = ws[i] * 0xCC9E2D51u;
++            k = (k << 15) | (k >> 17);
++            h ^= k * 0x1B873593u;
++            h = ((h << 13) | (h >> 19)) * 5u + 0xE6546B64u;
++        }
+         off += 16;
+         int is_branch = (w2 & FP_BRANCH) != 0;
+         int has_k = !is_branch &&

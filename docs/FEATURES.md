@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 9 available, 2 in progress, 15 planned.
+Port features: 11 available, 2 in progress, 15 planned.
 
 ## 1. What the port adds
 
@@ -17,6 +17,7 @@ Port features: 9 available, 2 in progress, 15 planned.
 | <a id="split-screen-layout"></a>Split-screen layout | Larger views and a solo-style HUD in 2-player split screen | planned | - | Parked in the notes |
 | <a id="brightness-glare"></a>Brightness and glare | Brightness and glare options | planned | - | Parked in the notes |
 | <a id="dlss"></a>DLSS | DLSS upscaling | planned | - | Parked in the notes |
+| <a id="fps-counter"></a>FPS counter | The game's own frames per second, bottom left, fading in with the title screen | available | off | FPS_COUNTER=1 or the launcher's “FPS counter (bottom left)” box |
 
 ### Input and launcher
 
@@ -33,8 +34,9 @@ Port features: 9 available, 2 in progress, 15 planned.
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
 | <a id="exit-game"></a>Exit Game | In Options, the PSN-only Cross-Save entry is now Exit Game, with a Yes/No box | available | on | EXIT_OPTION=0 turns it off |
-| <a id="training-mode"></a>Training Mode | Free Battle offers Free Battle or Training: the game's own character select, partner slots locked, a 0-star computer fighter stands still, nobody is KO'd and health refills 1.5 s after the last hit, unlimited time, no J-Points | available | opt-in (menu choice) | Scripted keyboard runs pass. Not tested yet: KOs in a normal Free Battle right after Training, a human Player 2, a mouse click on the Training box. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
+| <a id="training-mode"></a>Training Mode | Free Battle offers Free Battle or Training: the game's own character select, partner slots locked, a 0-star computer fighter stands still, nobody is KO'd and health refills 1 s after the combo number has gone away, unlimited time, no J-Points | available | opt-in (menu choice) | Scripted keyboard runs pass. Not tested yet: KOs in a normal Free Battle right after Training, a human Player 2, a mouse click on the Training box. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
 | <a id="training-options"></a>Training options | Infinite Stamina, infinite support, unlimited Victory Burst | planned | off |  |
+| <a id="hide-hud"></a>Hide HUD in Training | A “Hide HUD” row in the Training settings hides every HUD draw of the fight, name tags included, for screenshots; the HUD shows again while the pause menu is open | available | off | Scripted keyboard run passes. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
 | <a id="training-2p"></a>Two players in Training | Two local players in Training | planned | off |  |
 | <a id="ko-count"></a>KO count | KO count up to 5 as a match option in every mode except Training | planned | off |  |
 | <a id="match-sizes"></a>1v1 and 3v3 matches | 1v1 and 3v3 beside the usual 2v2 (3v3 only if the engine allows it) | planned | off |  |

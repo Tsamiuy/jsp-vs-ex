@@ -1,0 +1,313 @@
+Patch 2032: B33: strips and fans continue across DRAW words of one BEGIN/END, primitive restart in all strip paths (arrays, indexed list, expansion); floor holes gone (boot216 vs STRIP_CONT=0 boot217). Log base offset/index if set.
+
+Source: the maintainer's other port, toolkit 16c7bd4.
+
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index daf2014e..623731c5 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -488,6 +488,16 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     /* NV4097_SET_FREQUENCY_DIVIDER_OPERATION: per-attribute modulo/divide mask
+      * for the frequency divisor (instancing). Captured for read_vp_vertex. */
+     if (method == 0x00001FC0) { state->frequency_divider_op = data; return 0; }
++    if (method == 0x00001DAC) { state->restart_index_enable = data; return 0; }
++    if (method == 0x00001DB0) { state->restart_index = data; return 0; }
++    /* NV4097_SET_VERTEX_DATA_BASE_OFFSET / BASE_INDEX: nothing applies them yet;
++     * say so if a title sets one. */
++    if (method == 0x00001738 || method == 0x0000173C) {
++        static int n = 0;
++        if (data && n < 8) { n++; fprintf(stderr, "[RSX] base %s = 0x%X (not applied)\n",
++                                          method == 0x1738 ? "offset" : "index", data); }
++        return 0;
++    }
+ 
+     /* NV4097_SET_CONTEXT_DMA_SEMAPHORE (0x01A4) picks where the semaphore
+      * offset points. CELL_GCM_CONTEXT_DMA_MEMORY_HOST_BUFFER (0xFEED0001) is
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 867fa0a7..04084d54 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -340,6 +340,10 @@ typedef struct rsx_state {
+      * vertex / freq, advances once per instance). Instancing needs both. */
+     u32 frequency_divider_op;
+ 
++    /* NV4097_SET_RESTART_INDEX_ENABLE / _INDEX (0x1DAC, 0x1DB0): primitive restart. */
++    u32 restart_index_enable;
++    u32 restart_index;
++
+     /* Current draw state */
+     u32 primitive_type;
+     int in_begin_end;  /* between BEGIN_END(type) and BEGIN_END(0) */
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index bd969a25..ec6b8c74 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7183,33 +7183,87 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
+  * non-indexed 4-vertex strip (prim 6); without this it fell to the fixed-
+  * function fallback with is_vp=0 (no vertex-program transform -> the quad
+  * collapsed to a line) and textured=0 (the Y/U/V planes never sampled). */
+-static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan)
++/* RSX concatenates the DRAW_ARRAYS / DRAW_INDEX_ARRAY words of one BEGIN/END
++ * before assembling primitives, and one word carries at most 256 entries, so a
++ * longer strip always arrives as several calls with contiguous ranges. Starting a
++ * new strip per call lost the two joining triangles at each boundary, and a strip
++ * split at an odd position came out wound the wrong way and was culled (that port's floor
++ * holes, boot210 vs boot215). A call therefore resumes the previous one: it re-reads
++ * up to two earlier entries and keeps the triangle count for the parity. A restart
++ * marker ends the strip; the marker is never fetched as a vertex (it read past the
++ * arrays) and the next strip's parity starts over. STRIP_CONT=0, RESTART_OFF=1: old. */
++typedef struct { u32 epoch, end, pos, tris, hub; int fan, valid; } StripCont;
++static StripCont s_sc_arrays, s_sc_indexed;
++static u32 strip_cont_prefix(const StripCont* sc, const rsx_state* st, u32 first, int fan, u32 pre[2], int* cont)
+ {
+-    extern uint8_t* vm_base;
+-    if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+-    if (!state->vertex_attribs[0].enabled) return 0;
+-    if (count < 3) return 0;
+-    u32 tris = count - 2;
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+-    if (tris * 3 > maxv) tris = maxv / 3;
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("STRIP_CONT"); on = (e && *e == '0') ? 0 : 1; }
++    *cont = on && sc->valid && sc->epoch == st->begin_epoch && sc->end == first && sc->fan == fan;
++    if (!*cont || sc->pos == 0) return 0;
++    if (sc->pos == 1) { pre[0] = first - 1; return 1; }
++    pre[0] = fan ? sc->hub : first - 2;
++    pre[1] = first - 1;
++    return 2;
++}
++static void strip_cont_save(StripCont* sc, const rsx_state* st, u32 end, u32 pos, u32 tris, u32 hub, int fan)
++{
++    sc->valid = 1; sc->epoch = st->begin_epoch; sc->end = end;
++    sc->pos = pos; sc->tris = tris; sc->hub = hub; sc->fan = fan;
++}
++static int strip_restart_on(const rsx_state* st)
++{
++    static int off = -1;
++    if (off < 0) off = getenv("RESTART_OFF") ? 1 : 0;
++    /* A 16-bit index can't match a value above 0xFFFF (rsx_dsp_restart_index_enabled). */
++    return !off && st->restart_index_enable &&
++           (((st->index_array_dma >> 4) & 0xF) != 1 || st->restart_index <= 0xFFFFu);
++}
++static u32 read_guest_index(const rsx_state* st, u32 k);
++/* A strip or fan expanded to a triangle list; `indexed`: entries go through the
++ * guest index array. Returns the vertices written. */
++static u32 strip_expand(const rsx_state* st, StripCont* sc, u32 first, u32 count, int fan, int indexed)
++{
++    u32 pre[2]; int cont;
++    const u32 npre = strip_cont_prefix(sc, st, first, fan, pre, &cont);
++    const u32 total = count + npre;
++    const int restart = indexed && strip_restart_on(st);
++    const u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+         + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    u32 o = 0;
++    u32 o = 0, pos = 0, t = cont ? sc->tris : 0, hub = cont ? sc->hub : first;
++    u32 hub_v = 0, v2 = 0, v1 = 0;
+     vc_begin_draw();
+-    for (u32 t = 0; t < tris; t++) {
+-        u32 i0 = fan ? 0 : t;
+-        /* strip winding alternates per triangle to keep facing consistent */
+-        u32 i1 = t + 1, i2 = t + 2;
+-        if (!fan && (t & 1)) { u32 tmp = i1; i1 = i2; i2 = tmp; }
+-        read_vp_vertex_cached(state, first + i0, &out[o*16]); o++;
+-        read_vp_vertex_cached(state, first + i1, &out[o*16]); o++;
+-        read_vp_vertex_cached(state, first + i2, &out[o*16]); o++;
+-    }
+-    atlas_vtx_dump("strip", state, first, o, out);
++    for (u32 k = 0; k < total; k++) {
++        const u32 kk = k < npre ? pre[k] : first + (k - npre);
++        const u32 v = indexed ? read_guest_index(st, kk) : kk;
++        if (restart && v == st->restart_index) { pos = 0; t = 0; continue; }
++        if (pos == 0) { hub_v = v; if (k >= npre) hub = kk; }
++        if (pos >= 2) {
++            if (o + 3 <= maxv) {
++                u32 x = fan ? hub_v : v2, y = v1, z = v;
++                /* strip winding alternates per triangle to keep facing consistent */
++                if (!fan && (t & 1)) { const u32 tmp = y; y = z; z = tmp; }
++                read_vp_vertex_cached(st, x, &out[o*16]); o++;
++                read_vp_vertex_cached(st, y, &out[o*16]); o++;
++                read_vp_vertex_cached(st, z, &out[o*16]); o++;
++            }
++            t++;
++        }
++        v2 = v1; v1 = v; pos++;
++    }
++    strip_cont_save(sc, st, first + count, pos, t, hub, fan);
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+     return o;
+ }
+ 
++static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan)
++{
++    extern uint8_t* vm_base;
++    if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
++    if (!state->vertex_attribs[0].enabled) return 0;
++    return strip_expand(state, &s_sc_arrays, first, count, fan, 0);
++}
++
+ /* Fetch index k from the guest index array (SET_INDEX_ARRAY_ADDRESS/_DMA:
+  * dma [3:0] = location (0 local, 1 main), [7:4] = type (0 u32, 1 u16)).
+  * Indices are big-endian in guest memory. */
+@@ -7362,8 +7416,9 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
+  * into list INDICES (odd strip triangles swap two, as upload_strip_vp_indexed
+  * does) instead of 256-byte vertex copies. that port battle: 19k indexed strip
+  * draws/s wrote 12.2M expanded vertices/s for 2.6M distinct ones, 70% of the
+- * window thread (VTX_STATS, boot166_vs). Each call is its own run (no
+- * continuation across batches, as the expansion path). STRIP_IX=0: expand. */
++ * window thread (VTX_STATS, boot166_vs). Each call is its own run of vertices;
++ * the strip itself continues across calls (StripCont). STRIP_IX=0: expand. */
++static int s_strip_ix_handled;   /* the call was taken, even with no triangle in it */
+ static int strip_ix_on(void)
+ {
+     static int on = -1;
+@@ -7372,12 +7427,16 @@ static int strip_ix_on(void)
+ }
+ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int fan)
+ {
++    s_strip_ix_handled = 0;
+     if (state) vf_prepare(state);
+     extern uint8_t* vm_base;
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+     if (!state || !vm_base || !s_d3d.vp_vb_mapped || !s_d3d.vp_ib_mapped) return 0;
+-    if (!state->vertex_attribs[0].enabled || count < 3) return 0;
+-    const u32 tris = count - 2;
++    if (!state->vertex_attribs[0].enabled) return 0;
++    u32 pre[2]; int cont;
++    const u32 npre = strip_cont_prefix(&s_sc_indexed, state, first, fan, pre, &cont);
++    const u32 total = count + npre;
++    const u32 tris = total > 2 ? total - 2 : 0;
+     if (s_d3d.vp_ib_offset + tris * 3 > VP_MAX_INDICES) return 0;
+     if (!s_ix_stamp) {
+         s_ix_stamp = (u32*)calloc(1u << 20, sizeof(u32));
+@@ -7385,10 +7444,10 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
+         if (!s_ix_stamp || !s_ix_slot) return 0;
+     }
+     static u32* slots = NULL; static u32 slots_cap = 0;
+-    if (count > slots_cap) {
+-        u32* ns = (u32*)realloc(slots, count * sizeof(u32));
++    if (total > slots_cap) {
++        u32* ns = (u32*)realloc(slots, total * sizeof(u32));
+         if (!ns) return 0;
+-        slots = ns; slots_cap = count;
++        slots = ns; slots_cap = total;
+     }
+     if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
+     s_ix_vbase  = s_d3d.vp_vb_offset / VP_VERT_STRIDE;
+@@ -7399,12 +7458,14 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
+     const int local = ((state->index_array_dma & 0xF) == 0);
+     const u8* ip = vm_base + cellGcmResolveLocated(local, state->index_array_offset);
+     const int sixteen = (((state->index_array_dma >> 4) & 0xF) == 1);
+-    u32 n = 0;
+-    for (u32 k = 0; k < count; k++) {
+-        const u32 kk = first + k;
++    const int restart_en = strip_restart_on(state);
++    u32 n = 0, cuts = 0;
++    for (u32 k = 0; k < total; k++) {
++        const u32 kk = k < npre ? pre[k] : first + (k - npre);
+         const u32 ix = sixteen ? (((u32)ip[kk * 2] << 8) | ip[kk * 2 + 1])
+                                : (((u32)ip[kk * 4] << 24) | ((u32)ip[kk * 4 + 1] << 16) |
+                                   ((u32)ip[kk * 4 + 2] << 8) | ip[kk * 4 + 3]);
++        if (restart_en && ix == state->restart_index) { slots[k] = 0xFFFFFFFFu; cuts++; continue; }
+         if (ix >= (1u << 20) || s_ix_vbase + n >= MAX_VERTICES) {
+             s_ix_run_valid = 0;   /* nothing published: the expansion takes it */
+             if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
+@@ -7418,18 +7479,38 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
+         }
+         slots[k] = s_ix_slot[ix];
+     }
+-    for (u32 t = 0; t < tris; t++) {
+-        u32 i0 = fan ? 0 : t, i1 = t + 1, i2 = t + 2;
+-        if (!fan && (t & 1)) { const u32 tmp = i1; i1 = i2; i2 = tmp; }
+-        ib[t * 3 + 0] = slots[i0];
+-        ib[t * 3 + 1] = slots[i1];
+-        ib[t * 3 + 2] = slots[i2];
++    { static int rl = -1; if (rl < 0) rl = getenv("RESTART_LOG") ? 16 : 0;
++      if (rl > 0 && cuts) { rl--; fprintf(stderr, "[RESTART] strip count=%u cuts=%u index=0x%X sixteen=%d%c",
++                                          count, cuts, state->restart_index, sixteen, 10); } }
++    /* pos: vertices so far in this strip; t: its triangles so far, for the parity.
++     * seg0 is a position in slots[] here, seg0_abs the same vertex in the index
++     * array (a fan's hub, for the next call). */
++    u32 out = 0, pos = 0, seg0 = 0, t = cont ? s_sc_indexed.tris : 0;
++    u32 seg0_abs = cont ? s_sc_indexed.hub : first;
++    for (u32 k = 0; k < total; k++) {
++        if (slots[k] == 0xFFFFFFFFu) { pos = 0; t = 0; continue; }
++        if (pos == 0) {
++            seg0 = k;
++            if (k >= npre) seg0_abs = first + (k - npre);
++        }
++        if (pos >= 2) {
++            u32 i0 = fan ? seg0 : k - 2, i1 = k - 1, i2 = k;
++            if (!fan && (t & 1)) { const u32 tmp = i1; i1 = i2; i2 = tmp; }
++            ib[out + 0] = slots[i0];
++            ib[out + 1] = slots[i1];
++            ib[out + 2] = slots[i2];
++            out += 3;
++            t++;
++        }
++        pos++;
+     }
++    strip_cont_save(&s_sc_indexed, state, first + count, pos, t, seg0_abs, fan);
+     s_d3d.vp_vb_offset += n * VP_VERT_STRIDE;
+     s_ix_nverts = n;
+-    s_d3d.vp_ib_offset += tris * 3;
++    s_d3d.vp_ib_offset += out;
+     s_ix_run_valid = 0;   /* a list batch must not extend a strip's run */
+-    return tris * 3;
++    s_strip_ix_handled = 1;
++    return out;
+ }
+ 
+ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+@@ -7657,39 +7738,7 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
+     extern uint8_t* vm_base;
+     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+     if (!state->vertex_attribs[0].enabled) return 0;
+-    if (count < 3) return 0;
+-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+-    VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
+-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+-    /* (J-Stars: the characters are indexed strips with a restart
+-     * index; without the cut the sentinel is fetched as a vertex and the
+-     * strip fans out to garbage). Restart rule as in the RSX dispatch layer
+-     * (rsx_dsp_restart_index_enabled): a 16-bit index buffer ignores a
+-     * sentinel that does not fit in 16 bits. */
+-    const int idx_u32 = (((state->index_array_dma >> 4) & 0xF) != 1);
+-    const int rs_on = state->restart_index_enable &&
+-                      (idx_u32 || state->restart_index <= 0xFFFFu);
+-    const u32 rs_idx = state->restart_index;
+-    u32 o = 0, n = 0, p0 = 0, p1 = 0, seg0 = 0;
+-    vc_begin_draw();
+-    for (u32 k = 0; k < count; k++) {
+-        const u32 ix = read_guest_index(state, first + k);
+-        if (rs_on && ix == rs_idx) { static int _nr = 0; if (PS3_LOG_FIRST(_nr, 4)) fprintf(stderr, "[STRIPRS] restart 0x%X at %u of %u (u32=%d)%c", ix, k, count, idx_u32, 10); n = 0; continue; }
+-        if (n == 0) { seg0 = p0 = ix; n = 1; continue; }
+-        if (n == 1) { p1 = ix; n = 2; continue; }
+-        if (o + 3 > maxv) break;
+-        const u32 t = n - 2;
+-        u32 a = fan ? seg0 : p0, b = p1, c = ix;
+-        if (!fan && (t & 1)) { u32 tmp = b; b = c; c = tmp; }
+-        read_vp_vertex_cached(state, a, &out[o*16]); o++;
+-        read_vp_vertex_cached(state, b, &out[o*16]); o++;
+-        read_vp_vertex_cached(state, c, &out[o*16]); o++;
+-        if (!fan) p0 = p1;
+-        p1 = ix;
+-        n++;
+-    }
+-    s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+-    return o;
++    return strip_expand(state, &s_sc_indexed, first, count, fan, 1);
+ }
+ 
+ /* J-Stars: a frame that does not fit the per-frame vertex buffer (or the draw
+@@ -8013,7 +8062,8 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         ix_on() && strip_ix_on()) {
+         emitted = upload_strip_vp_ix(s_d3d.current_rsx_state, first, count,
+                                      primitive == RSX_PRIMITIVE_TRIANGLE_FAN);
+-        ix_used = emitted != 0;
++        ix_used = s_strip_ix_handled;
++        if (ix_used && !emitted) { vs_end(vs_t0, 0); return; }   /* a word with no whole triangle */
+     }
+     if (ix_used) { /* the indexed run took it */ }
+     else if (primitive == RSX_PRIMITIVE_QUADS)        emitted = upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count);

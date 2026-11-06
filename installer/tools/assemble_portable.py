@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack the installer payload into the portable zip: jsp-<version>-portable.zip.
 
-Layout adapted from the maintainer's installer for another PS3 port (same MIT licence): one top folder, sorted entries,
+Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence): one top folder, sorted entries,
 fixed dates, Deflate 9, so the same payload gives the same bytes with the same zlib (ASSUMPTION: another zlib build may
 compress differently; the listed SHA-256 of each file stays the same). Same payload as the installer (assemble_payload.py:
 port sources, patched toolkit, bundled Windows Python, launcher, licences), plus three files written here (support-bundle.cmd and support_bundle.py come with the payload):
@@ -57,7 +57,8 @@ exit /b %RC%
 README = """J-Stars Victory VS-EX: Fan Revival, portable
 ============================================
 An unofficial fan project. Nothing of the game is included or downloaded: the port is built on your PC from your own copy.
-This program contacts no server: no update check, no crash report, no telemetry.
+This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
+(experimental, v18 tree only), which is off unless you turn it on and give a psnr server (see the installer README).
 
 1. Unpack the whole zip to a folder you can write to (not Program Files). Keep the folders as they are.
 2. Double-click run.cmd. It asks for:

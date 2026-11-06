@@ -3,14 +3,17 @@
 People who have worked on this project. Add yourself in the pull request that makes your first change.
 Keep the list to names or handles you are happy to have public.
 
-## Maintainer
+## Maintainers
 
 - [Tsamiuy](https://github.com/Tsamiuy): owner of this repository and of the port.
+- [undecuple](https://github.com/undecuple): maintainer; what they have done is under Contributors below.
 
 ## Built on
 
 - [ps3recomp](https://github.com/sp00nznet/ps3recomp) by Ned Heller (sp00nznet) and contributors, MIT. The port is built with this
   toolkit and parts of `jstars/port/` started from its project template. Licence details are in `NOTICE.md`.
+- [Project Pyrrhus](https://github.com/undecuple/project-pyrrhus) (Killzone 2) and [Project Helghast](https://github.com/undecuple/project-helghast)
+  (Killzone 3) by undecuple, MIT. The installer, the launcher and `tools/features.py` started from them. Details are in `NOTICE.md`.
 - [RPCS3](https://rpcs3.net) is used for reference runs and its `dev_flash` files are read at run time. No RPCS3 code is included here.
 
 ## How to be listed

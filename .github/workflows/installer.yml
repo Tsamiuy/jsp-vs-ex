@@ -3,10 +3,20 @@ name: installer
 # Builds jsp-setup.exe (and, if asked, the portable zip) on a Windows runner, the same steps as "Building the installer"
 # in installer/README.md. Started by hand only (Actions tab, "Run workflow"). The package holds no game data: it builds
 # the game on the player's PC from their own copy. The files are kept as a workflow artifact for a few days, visible to
-# whoever can see this repository.
+# whoever can see this repository. release.yml also calls it (workflow_call) to build a release's files.
 
 on:
   workflow_dispatch:
+    inputs:
+      portable:
+        description: Also build the portable zip
+        type: boolean
+        default: false
+      keep_days:
+        description: Days to keep the files (1-90)
+        type: number
+        default: 7
+  workflow_call:
     inputs:
       portable:
         description: Also build the portable zip
@@ -69,7 +79,8 @@ jobs:
           Copy-Item (Join-Path $dl 'plex\ibm-plex-mono\fonts\complete\ttf\IBMPlexMono-Bold.ttf') build\installer\fonts\
 
       - name: Inno Setup (pinned)
-        # Always the pinned version, the same approach as the Killzone 3 port's release workflow. ISCC.exe carries no
+        # Always the pinned version, the same approach as the release workflow of
+        # undecuple's Killzone 3 port (Project Helghast). ISCC.exe carries no
         # version resource (it reads 0.0.0.0); the uninstaller (unins000.exe) next to it does, padded with spaces.
         shell: pwsh
         run: |

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """First-run build step of the installer: builds this repository's J-Stars port on the player's PC.
 
-Layout (checks, then resumable steps with markers) adapted from the maintainer's installer for another PS3 port (same MIT
+Layout (checks, then resumable steps with markers) adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT
 licence). The build recipe is this repository's: docs/notes/SETUP.md and jstars/port/build.bat (ps3recomp v0.15 with
 toolkit/ps3recomp-local.patch applied when the installer is built, ppu_loader + ppu_lifter, SPU jobs). The compiler is the bundled
 llvm-mingw with CMake and Ninja (toolchain/, hash-pinned in installer/tools/toolchain.json; nothing from Microsoft is needed). Nothing is downloaded and no server is contacted; no game file is ever part of the payload.

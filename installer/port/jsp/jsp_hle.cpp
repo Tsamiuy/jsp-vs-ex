@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
+#include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -40,14 +42,19 @@ void l10n_ucs2_to_utf8(ppu_context* ctx)
 
 /* cellNetCtlGetState (0x8B3EBA69). v0.18.0 answers an offline GetState with CELL_NET_CTL_ERROR_NOT_INITIALIZED
  * (its LittleBigPlanet workaround). A console with no network, after cellNetCtlInit, returns CELL_OK and
- * state = Disconnected (0); J-Stars polls it every frame after the opening movie. Report the hardware result. */
+ * state = Disconnected (0); J-Stars polls it every frame after the opening movie. Report the hardware result.
+ * Online (PS3_NET_ONLINE, the runtime's switch) the console has its IP: IPObtained (3). The game's net manager
+ * (func_004561CC @0x004561CC) stores state > 1 as "connected", and Online Battle raises "You have lost connection
+ * to PSN" (error 0x2A, @0x004812EC) when it reads 0 there during an online session. */
+extern "C" int ps3_netctl_online(void);   /* libs/network/cellNetCtl.c */
 void netctl_get_state(ppu_context* ctx)
 {
     const uint32_t state_ea = (uint32_t)ctx->gpr[3];
     if (!state_ea) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80130106u; return; }  /* INVALID_ADDR */
-    vm_write32(state_ea, 0);   /* CELL_NET_CTL_STATE_Disconnected */
+    const int online = ps3_netctl_online();
+    vm_write32(state_ea, online ? 3u : 0u);   /* CELL_NET_CTL_STATE_IPObtained : CELL_NET_CTL_STATE_Disconnected */
     static int n = 0;
-    if (n++ < 3) std::printf("[jsp-net] cellNetCtlGetState -> CELL_OK, Disconnected\n");
+    if (n++ < 3) std::printf("[jsp-net] cellNetCtlGetState -> CELL_OK, %s\n", online ? "IPObtained" : "Disconnected");
     ctx->gpr[3] = CELL_OK;
 }
 
@@ -60,6 +67,59 @@ void sysutil_get_bgm_status2(ppu_context* ctx)
     if (!st) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x8002B102u; return; }  /* CELL_SYSUTIL_ERROR_VALUE */
     for (int i = 0; i < 8; i++) vm_write8(st + i, 0);
     ctx->gpr[3] = CELL_OK;
+}
+
+/* cellAudioGetPortConfig (0x74A66AF0), the toolkit's answer plus CRI_LEAD=<n>: how many blocks CRI's cellAudio output
+ * driver keeps ahead of the read index (driver object +0x2008, 5 from its 60 Hz server rate). Its server ticks come
+ * 22-50 ms apart now and then on the host, longer than 5 blocks (26.7 ms), and each miss is about 4 blocks of silence
+ * (crackling). After the v0.15 port's edit of the lifted driver (func_006A5BA4, the call returning to 0x006A5BD8, object
+ * in r30); capped at nBlock - 1, so it wants AUDIO_NBLOCK=16. CRI_LEAD=0 keeps CRI's own lead. */
+extern "C" int32_t cellAudioGetPortConfig(uint32_t portNum, void* config);   /* config: a guest address */
+void audio_get_port_config(ppu_context* ctx)
+{
+    const uint32_t cfg = (uint32_t)ctx->gpr[4];
+    const int32_t r = cellAudioGetPortConfig((uint32_t)ctx->gpr[3], (void*)(uintptr_t)cfg);
+    ctx->gpr[3] = (uint64_t)(int64_t)r;
+    static int lead = -1;
+    if (lead < 0) { const char* e = std::getenv("CRI_LEAD"); lead = e ? std::atoi(e) : 0; }
+    if (r != CELL_OK || lead <= 0 || (uint32_t)ctx->lr != 0x006A5BD8u || !cfg) return;
+    const uint32_t nb = (uint32_t)vm_read64(cfg + 16);
+    uint32_t l = (uint32_t)lead;
+    if (nb && l > nb - 1) l = nb - 1;
+    vm_write32((uint32_t)ctx->gpr[30] + 0x2008, l);
+    static int n = 0;
+    if (n++ == 0) std::printf("[cri-lead] lead %u blocks of %u (CRI_LEAD=%d)\n", l, nb, lead);
+}
+
+/* cellGameDataCheck (0xDB9819F3), held after a successful game-data check until file streaming goes quiet: at least
+ * JSTARS_DATACHECK_MS (default 1000), then until no cellFsRead for 750 ms, at most 15 s. J-Stars re-binds every CPK
+ * right after this check; on hardware the boot logo (game/logo/logo_US_v.pak, streamed from game.cpk) has finished by
+ * then. Here the check is instant, the re-bind lands mid-stream, CRI's next block load finds no binder (a loose-file
+ * cellFsOpen("game/logo/logo_US_v.pak") that fails) and the boot stays on "Now loading" (or the skipped block's chunk
+ * parser overruns memory). Same fix as the v0.15 port. JSTARS_DATACHECK_MS=0: no hold. */
+extern "C" int32_t cellGameDataCheck(uint32_t type, const char* dirName, void* size);
+extern "C" volatile unsigned long long g_ppu_fs_last_read_ms;   /* ppu_fs.cpp, steady-clock ms */
+void game_data_check(ppu_context* ctx)
+{
+    const uint32_t type = (uint32_t)ctx->gpr[3];
+    const int32_t rc = cellGameDataCheck(type, (const char*)(uintptr_t)(uint32_t)ctx->gpr[4],
+                                         (void*)(uintptr_t)(uint32_t)ctx->gpr[5]);
+    ctx->gpr[3] = (uint64_t)(int64_t)rc;
+    if (rc != CELL_OK || type == 1u /* CELL_GAME_GAMETYPE_DISC */) return;
+    static int min_ms = -1;
+    if (min_ms < 0) { const char* e = std::getenv("JSTARS_DATACHECK_MS"); min_ms = e ? std::atoi(e) : 1000; }
+    if (min_ms <= 0) return;
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+    std::this_thread::sleep_for(milliseconds(min_ms));
+    for (;;) {
+        const unsigned long long now = (unsigned long long)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        if (now - g_ppu_fs_last_read_ms >= 750) break;
+        if (steady_clock::now() - t0 > seconds(15)) { std::fprintf(stderr, "[jsp] DataCheck: file I/O never went quiet\n"); break; }
+        std::this_thread::sleep_for(milliseconds(50));
+    }
+    std::fprintf(stderr, "[jsp] DataCheck held %lld ms for file I/O to settle\n",
+                 (long long)duration_cast<milliseconds>(steady_clock::now() - t0).count());
 }
 
 /* JSP_THREADDUMP_MS=<ms>: every <ms> print "[jsp-diag]" and each guest thread's last direct call site (lr), r3 and
@@ -264,4 +324,6 @@ extern "C" void jsp_register_hle_overrides(void)
     ps3_hle_register_ctx(0xA9A76FB8u, "UCS2toUTF8", l10n_ucs2_to_utf8);
     ps3_hle_register_ctx(0x8B3EBA69u, "cellNetCtlGetState", netctl_get_state);
     ps3_hle_register_ctx(0x6CFD856Fu, "cellSysutilGetBgmPlaybackStatus2", sysutil_get_bgm_status2);
+    ps3_hle_register_ctx(0x74A66AF0u, "cellAudioGetPortConfig", audio_get_port_config);
+    ps3_hle_register_ctx(0xDB9819F3u, "cellGameDataCheck", game_data_check);
 }

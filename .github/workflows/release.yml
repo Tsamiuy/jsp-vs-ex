@@ -1,0 +1,95 @@
+name: release
+
+# Step 2 of a release: when installer/VERSION changes on main (the merged "Release X.Y.Z" pull request from
+# prepare-release.yml, or a version change you pushed yourself), or when started by hand on main, this checks the version
+# numbers, creates and pushes the tag vX.Y.Z (unless it exists), builds the installer through installer.yml and creates a
+# DRAFT GitHub release with the files and the CHANGELOG notes. Publishing the draft is done by hand.
+#
+# Tags pushed with GITHUB_TOKEN start no other workflow, so everything runs here, in one workflow, not on a tag trigger.
+# Do not push the tag by hand first: a version whose tag already exists is skipped.
+
+on:
+  push:
+    branches: [main]
+    paths: [installer/VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      build: ${{ steps.tag.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Version numbers agree
+        run: |
+          python3 tools/test_release.py
+          python3 tools/release.py --check
+
+      - name: Create the tag unless it exists
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < installer/VERSION)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" > /dev/null 2>&1; then
+            echo "Tag v$version exists: nothing to release."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Needs a CHANGELOG section for this version (release.py notes fails without one).
+          python3 tools/release.py notes "$version" > /dev/null
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$version" -f sha="$GITHUB_SHA" > /dev/null
+          echo "Tagged v$version at $GITHUB_SHA."
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: tag
+    if: needs.tag.outputs.build == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/installer.yml
+    with:
+      portable: true
+      keep_days: 30
+
+  draft:
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # create the draft release
+      actions: read     # download this run's artifact
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Downloads the jsp-installer-<sha> artifact of this run (the GitHub CLI, so no extra action is needed).
+          gh run download "$GITHUB_RUN_ID" --name "jsp-installer-$GITHUB_SHA" --dir files
+          python3 tools/release.py notes "$VERSION" > notes.md
+          ls -l files
+          gh release create "v$VERSION" --draft --verify-tag --title "v$VERSION" --notes-file notes.md files/*

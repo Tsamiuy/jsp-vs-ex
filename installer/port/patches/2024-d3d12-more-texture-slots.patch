@@ -1,0 +1,23 @@
+Patch 2024: 1024 texture slots instead of 192 (J-Stars fights re-created about 50 textures a frame).
+
+A texture that finds no slot of its own takes the least recently used one, and when that slot's size or format differs its
+resource is released and a new one created. A J-Stars fight cycles through more than 192 textures, so slots were evicted and
+re-created all the time: about 4,500 CreateCommittedResource calls per 5 s in the fight, and the drawing thread spent about a
+quarter of its time creating and freeing GPU memory (CreateAllocation, DestroyAllocation2, FreeGpuVirtualAddress in a thread
+sample). With 1024 slots the fight creates 0-20 textures per 5 s.
+
+Tested (US disc, Free Battle, same scripted route): game flips per second over the same 100 s of the fight 10.3-10.6 before
+(three runs), 12.1 with this patch; menus unchanged.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -217,7 +217,7 @@
+  * so every draw past the fourth got slot -1 from vp_upload_tex_slot ("out of
+  * slots") and drew UNTEXTURED. That reads as a correctly-lit but solid black
+  * object, which is indistinguishable from a missing texture upload. */
+-#define VP_TEX_SLOTS 192
++#define VP_TEX_SLOTS 1024
+ /* Guest texture uploads are staged in one persistently mapped upload buffer,
+  * a part per frame in flight, reset when that frame's command allocator is
+  * (the GPU has finished its copies by then). A committed upload buffer per

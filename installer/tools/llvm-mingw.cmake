@@ -1,6 +1,6 @@
 # Toolchain file for the Windows x64 exe with llvm-mingw (clang + lld + libc++/libunwind, MinGW-w64 UCRT). firstrun.py passes it
-# with -DLLVM_MINGW_ROOT=<payload>\toolchain\llvm-mingw, so the player needs no Visual Studio. Layout adapted from the maintainer's
-# installer for another PS3 port (same MIT licence). Works with a Windows-hosted llvm-mingw and with a Linux-hosted one (cross,
+# with -DLLVM_MINGW_ROOT=<payload>\toolchain\llvm-mingw, so the player needs no Visual Studio. Layout adapted from the installer
+# of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). Works with a Windows-hosted llvm-mingw and with a Linux-hosted one (cross,
 # same flags). A Linux cross build of this port with it produced the exe; that exe has not been run on Windows.
 #
 #   cmake -S port -B build/x -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-mingw.cmake -DLLVM_MINGW_ROOT=DIR

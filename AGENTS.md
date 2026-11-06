@@ -17,7 +17,7 @@ Codex, Copilot, Cursor and the like) and to the people who run them. The same ru
    (Python 3 and git only). CI runs the same checks on every pull request (`.github/workflows/ci.yml`).
 4. **Open the pull request and wait for CI.** All checks must be green. If one fails, push a fix to the same
    branch; do not open a new pull request for the same change.
-5. **The maintainer merges.** Ask for a review and stop. Do not merge your own pull request, even when you have
+5. **A maintainer merges.** Ask for a review and stop. Do not merge your own pull request, even when you have
    the rights to, and do not ask to merge before CI has finished.
 6. If `main` moved and the pull request conflicts, rebase the branch on `main` and push it again. A pull request
    with no conflict does not need a rebase.

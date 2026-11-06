@@ -1,0 +1,33 @@
+Patch 2036: fit: drop that port's duplicate restart-index fields and handlers (already in patch 2008)
+
+Source: fit for J-Stars.
+
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 623731c5..a0e67ffb 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -488,8 +488,6 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+     /* NV4097_SET_FREQUENCY_DIVIDER_OPERATION: per-attribute modulo/divide mask
+      * for the frequency divisor (instancing). Captured for read_vp_vertex. */
+     if (method == 0x00001FC0) { state->frequency_divider_op = data; return 0; }
+-    if (method == 0x00001DAC) { state->restart_index_enable = data; return 0; }
+-    if (method == 0x00001DB0) { state->restart_index = data; return 0; }
+     /* NV4097_SET_VERTEX_DATA_BASE_OFFSET / BASE_INDEX: nothing applies them yet;
+      * say so if a title sets one. */
+     if (method == 0x00001738 || method == 0x0000173C) {
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 04084d54..867fa0a7 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -340,10 +340,6 @@ typedef struct rsx_state {
+      * vertex / freq, advances once per instance). Instancing needs both. */
+     u32 frequency_divider_op;
+ 
+-    /* NV4097_SET_RESTART_INDEX_ENABLE / _INDEX (0x1DAC, 0x1DB0): primitive restart. */
+-    u32 restart_index_enable;
+-    u32 restart_index;
+-
+     /* Current draw state */
+     u32 primitive_type;
+     int in_begin_end;  /* between BEGIN_END(type) and BEGIN_END(0) */
