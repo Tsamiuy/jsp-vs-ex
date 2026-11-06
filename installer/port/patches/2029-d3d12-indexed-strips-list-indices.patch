@@ -1,0 +1,103 @@
+Patch 2029: B32 step 1: indexed strips/fans upload each vertex once + list indices (STRIP_IX=0 old). Battle 12 -> 25-31 guest flips/s (boot167_six vs boot166_vs)
+
+Source: the maintainer's other port, toolkit 91b28d2.
+
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 627ebc88..92bc6711 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7327,6 +7327,80 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
+     return count;
+ }
+ 
++/* Indexed TRIANGLE_STRIP / TRIANGLE_FAN through the same buffers as
++ * upload_tris_vp_ix: every distinct vertex converted once, the strip turned
++ * into list INDICES (odd strip triangles swap two, as upload_strip_vp_indexed
++ * does) instead of 256-byte vertex copies. that port battle: 19k indexed strip
++ * draws/s wrote 12.2M expanded vertices/s for 2.6M distinct ones, 70% of the
++ * window thread (VTX_STATS, boot166_vs). Each call is its own run (no
++ * continuation across batches, as the expansion path). STRIP_IX=0: expand. */
++static int strip_ix_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("STRIP_IX"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int fan)
++{
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    if (!state || !vm_base || !s_d3d.vp_vb_mapped || !s_d3d.vp_ib_mapped) return 0;
++    if (!state->vertex_attribs[0].enabled || count < 3) return 0;
++    const u32 tris = count - 2;
++    if (s_d3d.vp_ib_offset + tris * 3 > VP_MAX_INDICES) return 0;
++    if (!s_ix_stamp) {
++        s_ix_stamp = (u32*)calloc(1u << 20, sizeof(u32));
++        s_ix_slot  = (u32*)malloc((1u << 20) * sizeof(u32));
++        if (!s_ix_stamp || !s_ix_slot) return 0;
++    }
++    static u32* slots = NULL; static u32 slots_cap = 0;
++    if (count > slots_cap) {
++        u32* ns = (u32*)realloc(slots, count * sizeof(u32));
++        if (!ns) return 0;
++        slots = ns; slots_cap = count;
++    }
++    if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
++    s_ix_vbase  = s_d3d.vp_vb_offset / VP_VERT_STRIDE;
++    s_ix_nverts = 0;
++    vp_attrs_dbg(state);
++    VPSlot* vb = (VPSlot*)((u8*)s_d3d.vp_vb_mapped + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE);
++    u32* ib = (u32*)s_d3d.vp_ib_mapped + (u64)s_d3d.vp_parity * VP_MAX_INDICES + s_d3d.vp_ib_offset;
++    const int local = ((state->index_array_dma & 0xF) == 0);
++    const u8* ip = vm_base + cellGcmResolveLocated(local, state->index_array_offset);
++    const int sixteen = (((state->index_array_dma >> 4) & 0xF) == 1);
++    u32 n = 0;
++    for (u32 k = 0; k < count; k++) {
++        const u32 kk = first + k;
++        const u32 ix = sixteen ? (((u32)ip[kk * 2] << 8) | ip[kk * 2 + 1])
++                               : (((u32)ip[kk * 4] << 24) | ((u32)ip[kk * 4 + 1] << 16) |
++                                  ((u32)ip[kk * 4 + 2] << 8) | ip[kk * 4 + 3]);
++        if (ix >= (1u << 20) || s_ix_vbase + n >= MAX_VERTICES) {
++            s_ix_run_valid = 0;   /* nothing published: the expansion takes it */
++            if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
++            return 0;
++        }
++        if (s_ix_stamp[ix] != s_ix_gen) {
++            s_ix_stamp[ix] = s_ix_gen;
++            s_ix_slot[ix] = n;
++            read_vp_vertex(state, ix, &vb[(u64)(s_ix_vbase + n) * 16]);
++            n++;
++        }
++        slots[k] = s_ix_slot[ix];
++    }
++    for (u32 t = 0; t < tris; t++) {
++        u32 i0 = fan ? 0 : t, i1 = t + 1, i2 = t + 2;
++        if (!fan && (t & 1)) { const u32 tmp = i1; i1 = i2; i2 = tmp; }
++        ib[t * 3 + 0] = slots[i0];
++        ib[t * 3 + 1] = slots[i1];
++        ib[t * 3 + 2] = slots[i2];
++    }
++    s_d3d.vp_vb_offset += n * VP_VERT_STRIDE;
++    s_ix_nverts = n;
++    s_d3d.vp_ib_offset += tris * 3;
++    s_ix_run_valid = 0;   /* a list batch must not extend a strip's run */
++    return tris * 3;
++}
++
+ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+ {
+     extern uint8_t* vm_base;
+@@ -7904,6 +7978,12 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+         emitted = upload_tris_vp_ix(s_d3d.current_rsx_state, first, count, ix_cont);
+         ix_used = emitted != 0;
+     }
++    if (!ix_used && (primitive == RSX_PRIMITIVE_TRIANGLE_STRIP || primitive == RSX_PRIMITIVE_TRIANGLE_FAN) &&
++        ix_on() && strip_ix_on()) {
++        emitted = upload_strip_vp_ix(s_d3d.current_rsx_state, first, count,
++                                     primitive == RSX_PRIMITIVE_TRIANGLE_FAN);
++        ix_used = emitted != 0;
++    }
+     if (ix_used) { /* the indexed run took it */ }
+     else if (primitive == RSX_PRIMITIVE_QUADS)        emitted = upload_quads_vp_indexed(s_d3d.current_rsx_state, first, count);
+     else if (primitive == RSX_PRIMITIVE_TRIANGLES)    emitted = upload_tris_vp_indexed(s_d3d.current_rsx_state, first, count);
