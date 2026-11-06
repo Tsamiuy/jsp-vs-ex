@@ -1,0 +1,197 @@
+Patch 2038: Shader and pipeline disk caches (shader_cache.bin, pso_cache.bin): pipeline time over a battle 5.74 s off, 3.22 s on reuse; long ticks 7 -> 1 (boot273-275). SHADER_CACHE=0, PSO_CACHE=0 off
+
+Source: the maintainer's other port, toolkit 51a4e57, a lock added for patch 2005.
+
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index e3ddda63..567e6250 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2078,6 +2078,157 @@ static void compile_vp(void)
+ /* Hash + compile the CURRENT rsx_state vertex program into the VS cache;
+  * returns the cache slot (or -1). Called at draw-record time so each draw
+  * carries the VP that was loaded when it was submitted. */
++/* Compiled guest shaders and pipelines, kept across runs in shader_cache.bin and
++ * pso_cache.bin (current folder). A pipeline miss cost 20-60 ms on the window thread
++ * (boot270: 73 misses, 1.69 s, 5.8 fps on the first big fight; 13-15 fps at each
++ * later batch), nearly all of a hit's first effects. A shader's key is its whole
++ * HLSL text and a pipeline's is its bytecode and state, so a changed translator or a
++ * test switch that edits the text just compiles anew. A new driver refuses the old
++ * pipeline blobs and they are replaced.
++ * Record: u32 'DSC1', u32 size, u64 key, then the data. A torn last record ends the
++ * load, later records replace earlier ones. SHADER_CACHE=0, PSO_CACHE=0: off. */
++#define SC_SLOTS 8192u
++typedef struct { u64 key; u8* data; u32 size; } SCSlot;
++typedef struct {
++    const char* file; const char* env;
++    FILE* out; int on; u32 n;
++    SCSlot slot[SC_SLOTS];
++} SCache;
++static SCache s_sc_shader = { "shader_cache.bin", "SHADER_CACHE", NULL, -1 };
++static SCache s_sc_pso    = { "pso_cache.bin", "PSO_CACHE", NULL, -1 };
++static u64 sc_hash(u64 h, const void* p, size_t n)
++{
++    const u8* b = (const u8*)p;
++    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
++    return h;
++}
++static SCSlot* sc_find(SCache* c, u64 key)
++{
++    u32 i = (u32)(key ^ (key >> 32)) & (SC_SLOTS - 1u);
++    while (c->slot[i].key && c->slot[i].key != key) i = (i + 1u) & (SC_SLOTS - 1u);
++    return &c->slot[i];
++}
++static void sc_set(SCache* c, SCSlot* sl, u64 key, u8* data, u32 size)
++{
++    if (sl->key) free(sl->data); else c->n++;
++    sl->key = key; sl->data = data; sl->size = size;
++}
++static void sc_open(SCache* c)
++{
++    const char* e = getenv(c->env);
++    c->on = (e && e[0] == '0') ? 0 : 1;
++    if (!c->on) return;
++    FILE* in = fopen(c->file, "rb");
++    const int existed = in != NULL;
++    long good = 0;
++    if (in) {
++        struct { u32 magic, size; u64 key; } h;
++        while (fread(&h, sizeof h, 1, in) == 1 && h.magic == 0x31435344u &&
++               h.size && h.size < (1u << 24) && c->n < SC_SLOTS / 2u) {
++            u8* data = (u8*)malloc(h.size);
++            if (!data) break;
++            if (fread(data, 1, h.size, in) != h.size) { free(data); break; }
++            sc_set(c, sc_find(c, h.key), h.key, data, h.size);
++            good = ftell(in);
++        }
++        fclose(in);
++    }
++    /* Later records go after the last whole one. */
++    c->out = fopen(c->file, existed ? "r+b" : "wb");
++    if (c->out) fseek(c->out, good, SEEK_SET);
++    fprintf(stderr, "[SHADERCACHE] %s: %u loaded, %ld bytes%c", c->file, c->n, good, 10);
++}
++static void sc_store(SCache* c, SCSlot* sl, u64 key, const void* data, u32 size)
++{
++    if (!sl->key && c->n >= SC_SLOTS / 2u) return;
++    u8* copy = (u8*)malloc(size);
++    if (copy) { memcpy(copy, data, size); sc_set(c, sl, key, copy, size); }
++    if (c->out) {
++        struct { u32 magic, size; u64 key; } h = { 0x31435344u, size, key };
++        fwrite(&h, sizeof h, 1, c->out);
++        fwrite(data, 1, size, c->out);
++        fflush(c->out);
++    }
++}
++/* One lock for both caches: patch 2005 builds pipelines on worker threads, and the slot tables and the files are
++ * shared. Compiles and pipeline creation run outside it. */
++static SRWLOCK s_sc_lock = SRWLOCK_INIT;
++static int sc_ready(SCache* c)
++{
++    AcquireSRWLockExclusive(&s_sc_lock);
++    if (c->on < 0) sc_open(c);
++    const int on = c->on;
++    ReleaseSRWLockExclusive(&s_sc_lock);
++    return on;
++}
++/* A copy of the cached bytes for key into a new blob (0 if none). */
++static int sc_lookup_blob(SCache* c, u64 key, ID3DBlob** out)
++{
++    int hit = 0;
++    AcquireSRWLockExclusive(&s_sc_lock);
++    SCSlot* sl = sc_find(c, key);
++    if (sl->key && SUCCEEDED(D3DCreateBlob(sl->size, out))) {
++        memcpy((*out)->lpVtbl->GetBufferPointer(*out), sl->data, sl->size);
++        hit = 1;
++    }
++    ReleaseSRWLockExclusive(&s_sc_lock);
++    return hit;
++}
++static void sc_store_locked(SCache* c, u64 key, const void* data, u32 size)
++{
++    AcquireSRWLockExclusive(&s_sc_lock);
++    SCSlot* sl = sc_find(c, key);
++    if (!sl->key) sc_store(c, sl, key, data, size);   /* another worker may have stored it meanwhile */
++    ReleaseSRWLockExclusive(&s_sc_lock);
++}
++/* D3DCompile with main as the entry point and no flags, as the guest paths call it. */
++static HRESULT sc_compile(const char* hlsl, const char* name, const char* target, ID3DBlob** out, ID3DBlob** err)
++{
++    SCache* c = &s_sc_shader;
++    const size_t n = strlen(hlsl);
++    if (!sc_ready(c)) return D3DCompile(hlsl, n, name, NULL, NULL, "main", target, 0, 0, out, err);
++    const u64 key = sc_hash(sc_hash(14695981039346656037ull, hlsl, n), target, strlen(target)) | 1u;
++    if (sc_lookup_blob(c, key, out)) return S_OK;
++    HRESULT hr = D3DCompile(hlsl, n, name, NULL, NULL, "main", target, 0, 0, out, err);
++    if (SUCCEEDED(hr) && *out)
++        sc_store_locked(c, key, (*out)->lpVtbl->GetBufferPointer(*out), (u32)(*out)->lpVtbl->GetBufferSize(*out));
++    return hr;
++}
++/* CreateGraphicsPipelineState from the blob of an earlier run. */
++static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out)
++{
++    SCache* c = &s_sc_pso;
++    if (!sc_ready(c)) return s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, pd, &IID_ID3D12PipelineState, (void**)out);
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC st = *pd;
++    st.pRootSignature = NULL;
++    st.VS.pShaderBytecode = st.PS.pShaderBytecode = NULL;
++    st.InputLayout.pInputElementDescs = NULL;
++    u64 key = sc_hash(14695981039346656037ull, pd->VS.pShaderBytecode, pd->VS.BytecodeLength);
++    key = sc_hash(key, pd->PS.pShaderBytecode, pd->PS.BytecodeLength);
++    key = sc_hash(key, &st, sizeof st) | 1u;
++    ID3DBlob* cached = NULL;
++    if (sc_lookup_blob(c, key, &cached)) {
++        D3D12_GRAPHICS_PIPELINE_STATE_DESC cd = *pd;
++        cd.CachedPSO.pCachedBlob = cached->lpVtbl->GetBufferPointer(cached);
++        cd.CachedPSO.CachedBlobSizeInBytes = cached->lpVtbl->GetBufferSize(cached);
++        HRESULT hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, &cd, &IID_ID3D12PipelineState, (void**)out);
++        cached->lpVtbl->Release(cached);
++        if (SUCCEEDED(hr)) return hr;   /* a blob the driver refuses is replaced below */
++    }
++    HRESULT hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, pd, &IID_ID3D12PipelineState, (void**)out);
++    if (SUCCEEDED(hr)) {
++        ID3DBlob* blob = NULL;
++        if (SUCCEEDED((*out)->lpVtbl->GetCachedBlob(*out, &blob)) && blob) {
++            AcquireSRWLockExclusive(&s_sc_lock);
++            SCSlot* sl = sc_find(c, key);
++            sc_store(c, sl, key, blob->lpVtbl->GetBufferPointer(blob), (u32)blob->lpVtbl->GetBufferSize(blob));
++            ReleaseSRWLockExclusive(&s_sc_lock);
++            blob->lpVtbl->Release(blob);
++        }
++    }
++    return hr;
++}
++
+ static u32 vp_hash_ucode(const u8* p, u32 n)
+ {
+     u32 h = 2166136261u;
+@@ -2174,8 +2325,7 @@ static int vp_get_vs(const rsx_state* st)
+         }
+     }
+     ID3DBlob* vb = NULL; ID3DBlob* e = NULL;
+-    HRESULT hr = D3DCompile(hlsl, strlen(hlsl), "guest_vp2", NULL, NULL,
+-                            "main", "vs_5_0", 0, 0, &vb, &e);
++    HRESULT hr = sc_compile(hlsl, "guest_vp2", "vs_5_0", &vb, &e);
+     if (e) e->lpVtbl->Release(e);
+     if (FAILED(hr) || !vb) {
+         static int _e=0; if (PS3_LOG_FIRST(_e, 4)) printf("[VP] per-draw VS compile FAIL (hash=0x%08X)\n", hash);
+@@ -2752,8 +2902,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+     }
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+-    hr = D3DCompile(hlsl, strlen(hlsl), "guest_fp", NULL, NULL,
+-                            "main", "ps_5_0", 0, 0, &pb, &e);
++    hr = sc_compile(hlsl, "guest_fp", "ps_5_0", &pb, &e);
+     if (FAILED(hr) || !pb) {
+         static int _e2=0; if (PS3_LOG_FIRST(_e2, 16))
+             printf("[FP] PS compile FAIL (fp=0x%08X): %s\n", fp_addr,
+@@ -2869,8 +3018,7 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
+     pd.SampleDesc.Count = 1;
+ 
+     ID3D12PipelineState* pso = NULL; HRESULT hr;
+-    hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
+-        s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso);
++    hr = sc_pipeline(&pd, &pso);   /* pso_cache.bin when on (51a4e57) */
+     *ppso = pso;
+     return hr;
+ }
