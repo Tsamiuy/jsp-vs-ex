@@ -67,6 +67,28 @@ void sysutil_get_bgm_status2(ppu_context* ctx)
     ctx->gpr[3] = CELL_OK;
 }
 
+/* cellAudioGetPortConfig (0x74A66AF0), the toolkit's answer plus CRI_LEAD=<n>: how many blocks CRI's cellAudio output
+ * driver keeps ahead of the read index (driver object +0x2008, 5 from its 60 Hz server rate). Its server ticks come
+ * 22-50 ms apart now and then on the host, longer than 5 blocks (26.7 ms), and each miss is about 4 blocks of silence
+ * (crackling). After the v0.15 port's edit of the lifted driver (func_006A5BA4, the call returning to 0x006A5BD8, object
+ * in r30); capped at nBlock - 1, so it wants AUDIO_NBLOCK=16. CRI_LEAD=0 keeps CRI's own lead. */
+extern "C" int32_t cellAudioGetPortConfig(uint32_t portNum, void* config);   /* config: a guest address */
+void audio_get_port_config(ppu_context* ctx)
+{
+    const uint32_t cfg = (uint32_t)ctx->gpr[4];
+    const int32_t r = cellAudioGetPortConfig((uint32_t)ctx->gpr[3], (void*)(uintptr_t)cfg);
+    ctx->gpr[3] = (uint64_t)(int64_t)r;
+    static int lead = -1;
+    if (lead < 0) { const char* e = std::getenv("CRI_LEAD"); lead = e ? std::atoi(e) : 0; }
+    if (r != CELL_OK || lead <= 0 || (uint32_t)ctx->lr != 0x006A5BD8u || !cfg) return;
+    const uint32_t nb = (uint32_t)vm_read64(cfg + 16);
+    uint32_t l = (uint32_t)lead;
+    if (nb && l > nb - 1) l = nb - 1;
+    vm_write32((uint32_t)ctx->gpr[30] + 0x2008, l);
+    static int n = 0;
+    if (n++ == 0) std::printf("[cri-lead] lead %u blocks of %u (CRI_LEAD=%d)\n", l, nb, lead);
+}
+
 /* JSP_THREADDUMP_MS=<ms>: every <ms> print "[jsp-diag]" and each guest thread's last direct call site (lr), r3 and
  * sp (runtime ppu_report_guest_lrs, ppu_loader.cpp). Diagnostic for what each thread does after the opening movie;
  * pair with BCTRL_RING=1 for indirect call targets. Off unless the variable is set. */
@@ -269,4 +291,5 @@ extern "C" void jsp_register_hle_overrides(void)
     ps3_hle_register_ctx(0xA9A76FB8u, "UCS2toUTF8", l10n_ucs2_to_utf8);
     ps3_hle_register_ctx(0x8B3EBA69u, "cellNetCtlGetState", netctl_get_state);
     ps3_hle_register_ctx(0x6CFD856Fu, "cellSysutilGetBgmPlaybackStatus2", sysutil_get_bgm_status2);
+    ps3_hle_register_ctx(0x74A66AF0u, "cellAudioGetPortConfig", audio_get_port_config);
 }

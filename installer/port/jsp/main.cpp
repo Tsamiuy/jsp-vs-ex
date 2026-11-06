@@ -490,6 +490,14 @@ int main(int argc, char** argv)
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
+    /* from jsp-vs-ex jstars/port/main.cpp: sound with a 16-block cellAudio ring (the game asks for 8) and CRI
+     * keeping 12 blocks (64 ms) ahead instead of 5, which rides out the late ticks of its sound server (v0.15:
+     * 12% of blocks silent -> 0%). Set in the environment to override; CRI_LEAD=0 keeps CRI's own lead. */
+    if (!getenv("AUDIO_NBLOCK")) _putenv("AUDIO_NBLOCK=16");
+    if (!getenv("CRI_LEAD")) _putenv("CRI_LEAD=12");
+#else
+    setenv("AUDIO_NBLOCK", "16", 0);
+    setenv("CRI_LEAD", "12", 0);
 #endif
 
     printf("=== jsp (J-Stars Victory VS+, ps3recomp v0.18.0) ===\n");

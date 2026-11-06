@@ -1,0 +1,34 @@
+Patch 1003: "JOBCRT Ver14" jobs get the job context's low 28 bits too (J-Stars had no sound at all).
+
+The job context word at +0x14 is sizeJobDescriptor:4 plus 28 bits that v0.18.0 fills only for a "JOBCRT Ver13" crt. J-Stars'
+SPU jobs carry "JOBCRT Ver14" (CRI's AtomDecoder and AsrVoice sound jobs and the game's own jobs). That crt checks the same bits
+before main and STOPs with 0x3FFF when they are 0, so the sound decoder never ran and every cellAudio block was silent. Ver14 jobs
+now get the LS address of their descriptor there, as jm2 leaves it (the fix the v0.15 port made, SPURS_CTX_PAD); the game's jobs
+ignore the field. SPURS_CTX_PAD=0 turns it off for an A/B.
+
+Tested (US disc, title and menus, 240 s each): before 100.0% silent blocks in every window; with it 0.0% silent once the sound
+starts; with SPURS_CTX_PAD=0 silent again.
+
+diff --git a/runtime/spu/spurs_job.c b/runtime/spu/spurs_job.c
+--- a/runtime/spu/spurs_job.c
++++ b/runtime/spu/spurs_job.c
+@@ -274,8 +274,18 @@
+         ls32(ls, 0x1CC, JOB_DMA_TAG);
+         memset(ls + 0x210, 0, 0x10);
+     }
++    /* A "JOBCRT Ver14" crt (J-Stars: CRI's AtomDecoder and AsrVoice sound
++     * jobs, and the game's own jobs) checks the same low 28 bits before main
++     * and STOPs with 0x3FFF when they are 0: the sound decoder never ran and
++     * the game was silent. Give those jobs the LS address of their descriptor,
++     * as jm2 leaves it; the game's jobs ignore the field. SPURS_CTX_PAD=0 turns
++     * this off (A/B). */
++    uint32_t crt14_pad = 0;
++    { static int pad = -1;
++      if (pad < 0) { const char* e = getenv("SPURS_CTX_PAD"); pad = (e && *e == '0') ? 0 : 1; }
++      if (pad && !jm_iface && memcmp(ls + 0x30, "JOBCRT Ver14", 12) == 0) crt14_pad = desc_ls & 0x0FFFFFFFu; }
+     ls32(ls, ctx_ls + JC_SIZE_JOB_DESC,
+-         ((dsz == 64 ? 0u : (dsz / 128u) & 0xFu) << 28) | jm_iface);
++         ((dsz == 64 ? 0u : (dsz / 128u) & 0xFu) << 28) | jm_iface | crt14_pad);
+     ls16(ls, ctx_ls + JC_NUM_IO_BUFFER,    (uint16_t)n_dma);
+     ls16(ls, ctx_ls + JC_NUM_CACHE_BUFFER, (uint16_t)n_cache);
+     ls32(ls, ctx_ls + JC_O_BUFFER, out_ls);
