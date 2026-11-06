@@ -9,6 +9,7 @@
 !/Play J-Stars.bat
 !/Test Fight.bat
 !/CONTRIBUTORS.md
+!/CHANGELOG.md
 !/AGENTS.md
 !/.recomp.json
 !/.gitattributes
@@ -70,6 +71,8 @@
 /tools/*
 !/tools/features.py
 !/tools/test_features.py
+!/tools/release.py
+!/tools/test_release.py
 !/tools/site/
 /tools/site/*
 !/tools/site/*.py

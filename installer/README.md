@@ -97,6 +97,7 @@ python installer\tools\assemble_portable.py
 The results are `build\installer\out\jsp-setup.exe` and `build\installer\out\jsp-<version>-portable.zip` (with a `.sha256`
 file). Give `/DPayload` and `/O` as full paths as above: ISCC resolves a relative `/DPayload` from the script's folder and
 fails with "Invalid file handle". `fetch_toolchain.py --check --strict` validates the pins without a download.
+`<version>` is the text in `installer/VERSION`; change it only with `python3 tools/release.py bump` (see CONTRIBUTING.md, Releases).
 The FFmpeg entry is GitHub's zip of the n9.0.1 tag: GitHub does not promise the same bytes forever, so a hash mismatch there
 most likely means it was re-packed (check the tag, then refill). Its majors (avcodec 63, avutil 61) must match the RPCS3 DLLs
 players have; firstrun.py's check M1 warns when they do not.

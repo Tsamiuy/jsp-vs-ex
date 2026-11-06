@@ -1,0 +1,48 @@
+name: prepare-release
+
+# Step 1 of a release, started by hand (Actions tab, "Run workflow"): runs tools/release.py bump, commits the result on
+# the branch release/vX.Y.Z and opens a pull request whose body is that version's release notes. Merging the pull request
+# to main is step 2: release.yml then tags the version and drafts the GitHub release.
+#
+# Pull requests opened with GITHUB_TOKEN do not start other workflows, so ci does not run on this one by itself: close and
+# reopen the pull request (or push to its branch with your own account) to run CI before merging.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: New version as X.Y.Z, or major, minor or patch
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The token is kept (unlike the other workflows) because this job pushes the release branch.
+          persist-credentials: true
+
+      - name: Bump, commit, push and open the pull request
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tools/release.py --check
+          python3 tools/release.py bump "$INPUT_VERSION"
+          version=$(tr -d '[:space:]' < installer/VERSION)
+          python3 tools/release.py notes "$version" > "$RUNNER_TEMP/notes.md"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "release/v$version"
+          git add installer/VERSION installer/port/jsp/CMakeLists.txt jstars/port/CMakeLists.txt CHANGELOG.md
+          git commit -m "Release $version"
+          git push origin "release/v$version"
+          gh pr create --base main --head "release/v$version" --title "Release $version" --body-file "$RUNNER_TEMP/notes.md"
