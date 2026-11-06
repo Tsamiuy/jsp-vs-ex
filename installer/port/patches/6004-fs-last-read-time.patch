@@ -1,0 +1,32 @@
+Patch 6004: cellFsRead records the time of the last read (g_ppu_fs_last_read_ms).
+
+Steady-clock milliseconds of the last cellFsRead, so a host can wait until file streaming goes quiet. The J-Stars
+host holds its game-data check until then (jsp_hle.cpp game_data_check), the same fix as the v0.15 port: without it
+the CPK re-bind after the check lands mid-way through the boot-logo stream, and the boot stays on "Now loading" or
+the skipped block corrupts memory. No behaviour change on its own.
+
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index f73907c2..b22c176a 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -24,6 +24,11 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <errno.h>
++#include <chrono>
++
++/* Steady-clock milliseconds of the last cellFsRead, for a host that waits until file
++ * streaming goes quiet (J-Stars holds its game-data check until then). */
++extern "C" { volatile unsigned long long g_ppu_fs_last_read_ms = 0; }
+ #include <mutex>
+ #include <atomic>
+ #include <sys/stat.h>
+@@ -519,6 +524,8 @@ static void cellFsRead(ppu_context* ctx)
+      * the end of the log and look identical to reads that never happen.
+      * FS_READ_ALL=1 logs every read; otherwise a per-fd first-read line plus a
+      * periodic summary is enough to tell the two apart. */
++    g_ppu_fs_last_read_ms = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
+     { static uint64_t tot=0; static int _n=0;
+       static uint64_t per_fd[64]; static uint32_t cnt_fd[64];
+       tot+=n;

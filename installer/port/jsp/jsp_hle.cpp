@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
+#include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -87,6 +89,37 @@ void audio_get_port_config(ppu_context* ctx)
     vm_write32((uint32_t)ctx->gpr[30] + 0x2008, l);
     static int n = 0;
     if (n++ == 0) std::printf("[cri-lead] lead %u blocks of %u (CRI_LEAD=%d)\n", l, nb, lead);
+}
+
+/* cellGameDataCheck (0xDB9819F3), held after a successful game-data check until file streaming goes quiet: at least
+ * JSTARS_DATACHECK_MS (default 1000), then until no cellFsRead for 750 ms, at most 15 s. J-Stars re-binds every CPK
+ * right after this check; on hardware the boot logo (game/logo/logo_US_v.pak, streamed from game.cpk) has finished by
+ * then. Here the check is instant, the re-bind lands mid-stream, CRI's next block load finds no binder (a loose-file
+ * cellFsOpen("game/logo/logo_US_v.pak") that fails) and the boot stays on "Now loading" (or the skipped block's chunk
+ * parser overruns memory). Same fix as the v0.15 port. JSTARS_DATACHECK_MS=0: no hold. */
+extern "C" int32_t cellGameDataCheck(uint32_t type, const char* dirName, void* size);
+extern "C" volatile unsigned long long g_ppu_fs_last_read_ms;   /* ppu_fs.cpp, steady-clock ms */
+void game_data_check(ppu_context* ctx)
+{
+    const uint32_t type = (uint32_t)ctx->gpr[3];
+    const int32_t rc = cellGameDataCheck(type, (const char*)(uintptr_t)(uint32_t)ctx->gpr[4],
+                                         (void*)(uintptr_t)(uint32_t)ctx->gpr[5]);
+    ctx->gpr[3] = (uint64_t)(int64_t)rc;
+    if (rc != CELL_OK || type == 1u /* CELL_GAME_GAMETYPE_DISC */) return;
+    static int min_ms = -1;
+    if (min_ms < 0) { const char* e = std::getenv("JSTARS_DATACHECK_MS"); min_ms = e ? std::atoi(e) : 1000; }
+    if (min_ms <= 0) return;
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+    std::this_thread::sleep_for(milliseconds(min_ms));
+    for (;;) {
+        const unsigned long long now = (unsigned long long)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        if (now - g_ppu_fs_last_read_ms >= 750) break;
+        if (steady_clock::now() - t0 > seconds(15)) { std::fprintf(stderr, "[jsp] DataCheck: file I/O never went quiet\n"); break; }
+        std::this_thread::sleep_for(milliseconds(50));
+    }
+    std::fprintf(stderr, "[jsp] DataCheck held %lld ms for file I/O to settle\n",
+                 (long long)duration_cast<milliseconds>(steady_clock::now() - t0).count());
 }
 
 /* JSP_THREADDUMP_MS=<ms>: every <ms> print "[jsp-diag]" and each guest thread's last direct call site (lr), r3 and
@@ -292,4 +325,5 @@ extern "C" void jsp_register_hle_overrides(void)
     ps3_hle_register_ctx(0x8B3EBA69u, "cellNetCtlGetState", netctl_get_state);
     ps3_hle_register_ctx(0x6CFD856Fu, "cellSysutilGetBgmPlaybackStatus2", sysutil_get_bgm_status2);
     ps3_hle_register_ctx(0x74A66AF0u, "cellAudioGetPortConfig", audio_get_port_config);
+    ps3_hle_register_ctx(0xDB9819F3u, "cellGameDataCheck", game_data_check);
 }
