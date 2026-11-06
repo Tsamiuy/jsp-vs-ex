@@ -82,6 +82,19 @@ message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 # imported one arrives without SDL2, pthreads, the Metal frameworks or the
 # Winsock/XInput imports -- the link then fails on every platform for a
 # different reason. add_subdirectory hands all of that over with the target.
+#
+# From jsp-vs-ex jstars/port/CMakeLists.txt (JSTARS_AVX2): JSP_AVX2 (default ON) builds for AVX2+FMA CPUs
+# (Intel Haswell 2013+, AMD Excavator/Zen) on x86-64. The SPU float helpers have an AVX2 path (spu_helpers.h) that
+# a plain x86-64 build never enables, and fmaf (PPU vmaddfp, SPU fma) becomes one instruction instead of a library
+# call. -ffp-contract=off everywhere: with FMA available clang would otherwise fuse a*b+c, and a lifted PPC
+# fmuls+fadds pair must stay two roundings. -DJSP_AVX2=OFF builds for any x86-64 as before.
+option(JSP_AVX2 "Build for AVX2+FMA CPUs (faster SPU/VMX float maths)" ON)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND NOT MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
+    if(JSP_AVX2)
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mavx2> $<$<COMPILE_LANGUAGE:C,CXX>:-mfma>)
+    endif()
+endif()
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
 

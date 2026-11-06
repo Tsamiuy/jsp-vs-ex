@@ -1,0 +1,156 @@
+Patch 2025: per-draw fragment program hash, size and texture-unit mask from one memoised walk (SHADER_HASH_MEMO=0 off).
+
+Every draw walked its fragment program three times (rsx_fp_program_size, rsx_fp_code_hash with a serial multiply per byte,
+rsx_fp_texture_units for the shadow descriptors): about 12% of the drawing thread in a J-Stars fight. The three answers depend
+only on the instruction blocks rsx_fp_code_hash visits, so one walk copies those blocks into a 64-bit key and a small per-thread
+table returns the stored answers when the same blocks come back (a hit compares the blocks byte for byte, so the result is
+exact). Keyed by content, not address: J-Stars copies each draw's program into a ring. After the v0.15 port's
+SHADER_HASH_MEMO.
+
+Tested (US disc, Free Battle, same scripted route, same build): game flips per second over the same 100 s of the fight 13.1
+with it, 11.8 with SHADER_HASH_MEMO=0.
+
+diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
+--- a/libs/video/rsx_fp_decompiler.h
++++ b/libs/video/rsx_fp_decompiler.h
+@@ -255,4 +255,8 @@
+ /* Kept from this tree (see the .c) -- used by rsx_d3d12_backend.c. */
+ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_out);
+ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes);
++/* rsx_fp_code_hash's value from a per-thread memo keyed on the hashed instruction blocks (exact: a hit compares the
++ * blocks byte for byte), plus the program size and rsx_fp_texture_units' mask for the same bytes.
++ * SHADER_HASH_MEMO=0 computes all three every call. */
++u32 rsx_fp_code_hash_memo(const u8* ucode, u32 max_bytes, u32* size_out, u32* units_out);
+ #endif /* PS3RECOMP_RSX_FP_DECOMPILER_H */
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -1645,6 +1645,79 @@
+     return h;
+ }
+ 
++/* The draw path asks for a program's code hash, size and texture-unit mask on every draw (about 1,100 a frame in a
++ * J-Stars fight), and each is a walk over the microcode (the hash a serial multiply per byte). All three depend only
++ * on the instruction blocks rsx_fp_code_hash visits, so: walk the program the same way, copy those blocks out and
++ * fold them into a 64-bit key, then look the key up in a small per-thread table whose entries keep the blocks they
++ * were computed from. A hit needs the same block count and identical blocks (memcmp), i.e. exactly the bytes the
++ * full functions would read, so the answers are the same. Keyed by content, not address: J-Stars copies every
++ * draw's program into a ring. The inline constants are skipped, as rsx_fp_code_hash skips them; the texture-unit
++ * mask does not depend on them either. SHADER_HASH_MEMO=0 computes everything every call. */
++#define FPM_SETS 256u
++#define FPM_WAYS 4u
++typedef struct { u64 key; u32 nblk, hash, size, units, cap; u8* blk; } FpMemoEntry;
++typedef struct { FpMemoEntry e[FPM_SETS][FPM_WAYS]; u8 rr[FPM_SETS]; u8 scratch[65536]; } FpMemo;
++static _Thread_local FpMemo* t_fpm;
++
++u32 rsx_fp_code_hash_memo(const u8* ucode, u32 max_bytes, u32* size_out, u32* units_out)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SHADER_HASH_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++    FpMemo* m = t_fpm;
++    if (on && !m && ucode) m = t_fpm = (FpMemo*)calloc(1, sizeof(FpMemo));
++    if (!on || !m || !ucode || max_bytes > sizeof m->scratch) {
++        if (size_out) *size_out = rsx_fp_program_size(ucode, max_bytes);
++        if (units_out) *units_out = rsx_fp_texture_units(ucode, max_bytes);
++        return rsx_fp_code_hash(ucode, max_bytes);
++    }
++    /* The walk of rsx_fp_code_hash, copying instead of hashing. */
++    u64 k = 0x9E3779B97F4A7C15ull;
++    u32 off = 0, n = 0;
++    while (off + 16 <= max_bytes) {
++        const u32 w0 = rsx_fp_read_word(ucode + off + 0);
++        const u32 w1 = rsx_fp_read_word(ucode + off + 4);
++        const u32 w2 = rsx_fp_read_word(ucode + off + 8);
++        const u32 w3 = rsx_fp_read_word(ucode + off + 12);
++        u64 a, b;
++        memcpy(&a, ucode + off, 8); memcpy(&b, ucode + off + 8, 8);
++        memcpy(m->scratch + (size_t)n * 16u, ucode + off, 16);
++        k = ((k << 23) | (k >> 41)) ^ a ^ (b * 0xC2B2AE3D27D4EB4Full);
++        n++;
++        off += 16;
++        const int is_branch = (w2 & FP_BRANCH) != 0;
++        const int has_k = !is_branch &&
++            ((((w1 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST) ||
++             (((w2 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST) ||
++             (((w3 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_CONST));
++        if (has_k) off += 16;
++        if (w0 & FP_END) break;
++    }
++    k ^= (u64)n * 0x9E3779B97F4A7C15ull;
++    const u32 set = (u32)(k ^ (k >> 29) ^ (k >> 47)) & (FPM_SETS - 1u);
++    FpMemoEntry* e = m->e[set];
++    for (u32 w = 0; w < FPM_WAYS; w++)
++        if (e[w].blk && e[w].key == k && e[w].nblk == n &&
++            memcmp(e[w].blk, m->scratch, (size_t)n * 16u) == 0) {
++            if (size_out) *size_out = e[w].size;
++            if (units_out) *units_out = e[w].units;
++            return e[w].hash;
++        }
++    const u32 h = rsx_fp_code_hash(ucode, max_bytes);
++    const u32 size = rsx_fp_program_size(ucode, max_bytes);
++    const u32 units = rsx_fp_texture_units(ucode, max_bytes);
++    if (size_out) *size_out = size;
++    if (units_out) *units_out = units;
++    FpMemoEntry* v = &e[m->rr[set]++ % FPM_WAYS];
++    if (v->cap < n * 16u || !v->blk) {
++        u8* nb = (u8*)realloc(v->blk, n ? (size_t)n * 16u : 16u);
++        if (!nb) return h;
++        v->blk = nb; v->cap = n ? n * 16u : 16u;
++    }
++    memcpy(v->blk, m->scratch, (size_t)n * 16u);
++    v->key = k; v->nblk = n; v->hash = h; v->size = size; v->units = units;
++    return h;
++}
++
+ /* Scale texel-space coordinates to the 0..1 range HLSL sampling expects.
+  *
+  * An RSX texture whose format carries RSX_TEX_FMT_UNNORM (0x40) is addressed in
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2343,14 +2343,13 @@
+  * so the pipeline key can compare them: enabled (2 bits) | func<<2 | linear<<5 | unnormalized<<6. */
+ static int off_rt_find(u32 off);
+ static int off_ds_find(u32 off);
+-static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16])
++static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 units)
+ {
+     extern uint8_t* vm_base;
+     memset(sh, 0, 16);
+     static int en = -1;
+     if (en < 0) { const char* e = getenv("RSX_SHADOW_CMP"); en = e ? atoi(e) : 1; }
+     if (!en || !dr || !vm_base) return;
+-    u32 units = rsx_fp_texture_units(vm_base + off, 0x10000);
+     static u32 s_units_seen[64]; static int s_units_n;
+     for (u32 u = 0; u < 16 && u < VP_TEX_UNITS; u++) {
+         if (!(units & (1u << u))) continue;
+@@ -2836,7 +2835,10 @@
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+     u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
+     if (off == 0xFFFFFFFFu) return NULL;
+-    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig);
++    /* Code hash, size and texture-unit mask in one memoised walk (SHADER_HASH_MEMO=0: three full walks). */
++    u32 fpm_size = 0, fpm_units = 0;
++    const u32 fpm_hash = rsx_fp_code_hash_memo(vm_base + off, 0x10000, &fpm_size, &fpm_units);
++    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig, fpm_units);
+ 
+     /* Content hash: inline constants are patched in place per frame (wave's
+      * stamp), so identity is the BYTES, not the address. */
+@@ -2845,7 +2847,7 @@
+      * so hashing them made the pipeline key move every draw. */
+     u32 uhash;
+     {
+-        u32 usz = rsx_fp_program_size(vm_base + off, 0x10000);
++        u32 usz = fpm_size;
+         if (usz == 0) usz = 64;
+         s_perf_pso_hashbytes += (int)usz;
+         static int consts_inline = -1;
+@@ -2856,7 +2858,7 @@
+             const u8* up = vm_base + off;
+             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
+         } else {
+-            uhash = rsx_fp_code_hash(vm_base + off, 0x10000);
++            uhash = fpm_hash;
+         }
+     }
+ 

@@ -1,0 +1,136 @@
+Patch 2028: bigger shader caches without index shifting, evicted objects released only after the GPU is done with them.
+
+The per-draw vertex shader cache held 128 entries and the guest-FP pipeline cache 256, both evicting the oldest by moving the
+whole table down. A J-Stars fight needs more than that (pipelines reached 326-391 in two fights), so:
+- the vertex shader eviction moved every entry down one slot under vs_idx values already recorded for this frame and stored in
+  pipeline entries, so a draw could be recorded with another program's slot;
+- both evictions released a shader blob or pipeline that a draw recorded earlier in the frame, or a command list still on the
+  GPU, could still use;
+- pipelines were rebuilt (D3DCompile and the driver compiler, 11% of the drawing thread in a fight sample).
+Now: 1024 vertex shaders and 4096 pipelines; a full vertex shader cache reuses slots in turn without moving them (pipeline
+entries built on a reused slot stop matching); evicted objects wait in a list and are released after render_frame has
+drained the GPU two frames later; the pipeline lookup tries the last index found for the same program hash first.
+
+Tested (US disc, Free Battle, scripted route): a fight with 326 pipelines and no eviction message; game flips per second over
+150 s of the fight 15.9 (15.5 before); pictures as before. A second run was lost to the menu route. Not tested: a session long
+enough to fill 4096 pipelines.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -236,7 +236,7 @@
+     ID3DBlob* vs;
+     int uses_c03;
+ } VPVSEntry;
+-#define VP_VS_CACHE 128 /* wave uses 5+ distinct VPs; at 4 the cache
++#define VP_VS_CACHE 1024 /* wave uses 5+ distinct VPs; at 4 the cache
+                          * thrashed every frame and eviction shifted slots
+                          * under recorded vs_idx values -- the display mesh
+                          * drew with the WRONG vertex program (sub-rect +
+@@ -273,7 +273,7 @@
+  * single frame, so the FIFO evicted entries that were needed again immediately
+  * and ~17 shaders were recompiled EVERY frame -- about half the frame's CPU
+  * time. Entries are small (a PSO pointer plus key fields). */
+-#define VP_FP_CACHE 256
++#define VP_FP_CACHE 4096   /* 256 was too few for a J-Stars fight: it kept evicting and recompiling (patch 2028) */
+ 
+ /* ---------------------------------------------------------------------------
+  * Internal state
+@@ -1438,6 +1438,34 @@
+     return 0;
+ }
+ 
++/* Pipelines and shader blobs evicted from the caches are not released at once: a draw recorded earlier in the same
++ * frame, or a command list still on the GPU, can use them. They wait here and go once render_frame has drained the
++ * GPU two frames later (patch 2028). */
++typedef struct { IUnknown* obj; u64 frame; } D3DGrave;
++static D3DGrave s_grave[512];
++static int s_grave_n = 0;
++static void grave_add(IUnknown* o, u64 frame)
++{
++    if (!o) return;
++    if (s_grave_n == (int)(sizeof s_grave / sizeof s_grave[0])) {   /* full: the oldest has surely finished by now */
++        s_grave[0].obj->lpVtbl->Release(s_grave[0].obj);
++        memmove(&s_grave[0], &s_grave[1], sizeof(D3DGrave) * (size_t)(s_grave_n - 1));
++        s_grave_n--;
++    }
++    s_grave[s_grave_n].obj = o; s_grave[s_grave_n].frame = frame; s_grave_n++;
++}
++static void grave_sweep(u64 frame_now)
++{
++    int k = 0;
++    for (int i = 0; i < s_grave_n; i++) {
++        if (s_grave[i].frame + 2 <= frame_now) s_grave[i].obj->lpVtbl->Release(s_grave[i].obj);
++        else s_grave[k++] = s_grave[i];
++    }
++    s_grave_n = k;
++}
++/* Last cache index per program hash, tried before the scan (the scan stays as the fallback). */
++static int s_fp_hint[4096];
++
+ /* ---------------------------------------------------------------------------
+  * Frame sync helpers
+  * -----------------------------------------------------------------------*/
+@@ -2046,10 +2074,13 @@
+     }
+     int slot;
+     if (s_d3d.vp_vs_n < VP_VS_CACHE) slot = s_d3d.vp_vs_n++;
+-    else {  /* evict slot 0 */
+-        if (s_d3d.vp_vs[0].vs) s_d3d.vp_vs[0].vs->lpVtbl->Release(s_d3d.vp_vs[0].vs);
+-        memmove(&s_d3d.vp_vs[0], &s_d3d.vp_vs[1], sizeof(VPVSEntry)*(VP_VS_CACHE-1));
+-        slot = VP_VS_CACHE - 1;
++    else {  /* full: reuse a slot in turn; no shifting (recorded vs_idx values stay valid), released later */
++        static int next = 0;
++        slot = next; next = (next + 1) % VP_VS_CACHE;
++        grave_add((IUnknown*)s_d3d.vp_vs[slot].vs, s_d3d.frame_count);
++        s_d3d.vp_vs[slot].vs = NULL;
++        for (int i = 0; i < s_d3d.vp_fp_n; i++) if (s_d3d.vp_fp[i].vs_idx == slot) s_d3d.vp_fp[i].ucode_hash ^= 0x5A5A5A5Au;   /* never matches again */
++        static int said = 0; if (!said) { said = 1; fprintf(stderr, "[VPVS] vertex shader cache full (%d), reusing slots%c", VP_VS_CACHE, 10); }
+     }
+     s_d3d.vp_vs[slot].hash = hash;
+     s_d3d.vp_vs[slot].vs   = vb;
+@@ -2870,7 +2901,9 @@
+      * War HD uploads its fragment programs into a ring every frame: keyed on the
+      * address, every draw of every frame missed and went through a full
+      * decompile + D3DCompile (179 draws -> seconds per frame on its menu). */
+-    for (int i = 0; i < s_d3d.vp_fp_n; i++)
++    for (int ii = -1; ii < s_d3d.vp_fp_n; ii++) {
++        const int i = ii < 0 ? s_fp_hint[uhash & 4095u] : ii;
++        if (ii < 0 && (i < 0 || i >= s_d3d.vp_fp_n)) continue;
+         if (s_d3d.vp_fp[i].ucode_hash != uhash) continue;   /* cheap reject first */
+         else if (s_d3d.vp_fp[i].vs_idx == vs_idx &&
+             s_d3d.vp_fp[i].vs_hash == vs_hash && s_d3d.vp_fp[i].gen == s_d3d.vp_gen &&
+@@ -2879,8 +2912,11 @@
+             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+             s_d3d.vp_fp[i].cull == cull &&
+             s_d3d.vp_fp[i].cube_mask == cube_mask && s_d3d.vp_fp[i].zs == zs &&
+-            !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16))
++            !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16)) {
++            s_fp_hint[uhash & 4095u] = i;
+             return s_d3d.vp_fp[i].pso;
++        }
++    }
+     s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
+     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
+      * entry for the same program. "the cache misses" is not actionable; "it
+@@ -2962,9 +2998,11 @@
+ 
+     /* insert (evict oldest when full) */
+     if (s_d3d.vp_fp_n >= VP_FP_CACHE) {
+-        if (s_d3d.vp_fp[0].pso) s_d3d.vp_fp[0].pso->lpVtbl->Release(s_d3d.vp_fp[0].pso);
++        grave_add((IUnknown*)s_d3d.vp_fp[0].pso, s_d3d.frame_count);   /* released once the GPU is done with it */
+         memmove(&s_d3d.vp_fp[0], &s_d3d.vp_fp[1], sizeof(VPFPEntry) * (VP_FP_CACHE - 1));
+         s_d3d.vp_fp_n = VP_FP_CACHE - 1;
++        memset(s_fp_hint, 0xFF, sizeof s_fp_hint);   /* indexes moved */
++        static int said = 0; if (!said) { said = 1; fprintf(stderr, "[VPFP] pipeline cache full (%d), evicting%c", VP_FP_CACHE, 10); }
+     }
+     s_d3d.vp_fp[s_d3d.vp_fp_n].fp_addr = fp_addr;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].vs_idx  = vs_idx;
+@@ -4832,6 +4870,7 @@
+      * polygons). These workloads are a few draws/frame, so full serialisation
+      * costs little. */
+     wait_for_gpu();
++    grave_sweep(s_d3d.frame_count);
+     rdoc_frame_begin(s_d3d.draw_count);
+ 
+     /* Compile the real vertex program once its microcode is captured, and keep
