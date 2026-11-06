@@ -37,8 +37,8 @@ Keep the list to names or handles you are happy to have public.
 Updated by the contributors workflow from merged pull requests in this repository (it started on 2026-11-04; earlier work is in the lines above). Do not edit by hand.
 
 <!-- contributors:start -->
-- [Tsamiuy](https://github.com/Tsamiuy): 15 merged pull requests, most recent #29, #28, #27
-- [undecuple](https://github.com/undecuple): 5 merged pull requests, most recent #19, #24, #16
+- [Tsamiuy](https://github.com/Tsamiuy): 21 merged pull requests, most recent #42, #41, #40
+- [undecuple](https://github.com/undecuple): 11 merged pull requests, most recent #33, #32, #35
 <!-- contributors:end -->
 
 ## Play testers
