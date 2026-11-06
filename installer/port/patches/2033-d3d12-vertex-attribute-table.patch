@@ -1,0 +1,121 @@
+Patch 2033: VF_FAST=2 (default): per-draw vertex attribute table with a 1 MB page cache instead of rsx_fetch_attrib per vertex. No-input battle 42-45 flips/s vs 33-40 (boot266-269). VF_FAST=1 old path
+
+Source: the maintainer's other port, toolkit 2d79d23.
+
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index ec6b8c74..1db656b5 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6868,15 +6868,93 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+  * Same values as read_vp_vertex (rsx_fetch_attrib gives a disabled or
+  * stride-0 attribute its constant). VF_FAST=0: the full fetch. */
+ static struct { int n; int idx[16]; VPSlot tmpl[16]; int on; } s_vf = { 0, {0}, {{{0}}}, -1 };
++/* B32 step 3: rsx_fetch_attrib repeats per vertex what holds for the whole draw
++ * (the array's address and format, the frequency test, two getenv guards) and was
++ * 30% of the window thread. VF_FAST=2 (default) decides those per draw. Mappings
++ * move in 1 MB pages, so the page's address is kept. An attribute with a frequency
++ * divider takes the full fetch. VF_FAST=1: rsx_fetch_attrib per array attribute. */
++typedef struct {
++    u32 off, stride, n, type, loc, page, plain;
++    const u8* page_ptr;
++} VFAttr;
++static VFAttr s_vfa[16];
+ static void vf_prepare(const rsx_state* state)
+ {
+-    if (s_vf.on < 0) { const char* e = getenv("VF_FAST"); s_vf.on = (e && *e == '0') ? 0 : 1; }
++    extern uint8_t* vm_base;
++    if (s_vf.on < 0) {
++        const char* e = getenv("VF_FAST");
++        s_vf.on = e ? atoi(e) : 2;
++        if (s_vf.on == 2 && (getenv("VP_NOFREQ") || getenv("VTX_W1") || getenv("VTX_TYPEDBG"))) s_vf.on = 1;
++    }
+     s_vf.n = 0;
+     for (int i = 0; i < 16; i++) {
+         const rsx_vertex_attrib* a = &state->vertex_attribs[i];
+-        if (a->enabled && a->stride) { s_vf.idx[s_vf.n++] = i; memset(s_vf.tmpl[i].v, 0, sizeof s_vf.tmpl[i].v); }
++        if (a->enabled && a->stride) {
++            VFAttr* v = &s_vfa[s_vf.n];
++            s_vf.idx[s_vf.n++] = i;
++            memset(s_vf.tmpl[i].v, 0, sizeof s_vf.tmpl[i].v);
++            v->off = a->offset & 0x7FFFFFFFu;
++            v->stride = a->stride;
++            v->n = a->size ? a->size : 4; if (v->n > 4) v->n = 4;
++            v->type = a->type;
++            v->loc = (a->offset & 0x80000000u) ? 0u : 1u;
++            /* rsx_vertex_freq_plain: this file can't include rsx_vertex_formats.h (its names clash with dxgiformat.h). */
++            v->plain = (a->frequency == 0 || (a->frequency == 1 && !((state->frequency_divider_op >> i) & 1u))) ? 1u : 0u;
++            v->page = 0xFFFFFFFFu;
++            v->page_ptr = NULL;
++        }
+         else rsx_fetch_attrib(state, i, 0, s_vf.tmpl[i].v);
+     }
++    (void)vm_base;
++}
++static inline void vf_decode(VFAttr* v, u32 vi, float* out)
++{
++    extern uint8_t* vm_base;
++    extern u32 cellGcmResolveLocated(int, u32);
++    const u32 off = v->off + vi * v->stride;
++    const u32 pg = off >> 20;
++    if (pg != v->page) {
++        v->page = pg;
++        v->page_ptr = vm_base + cellGcmResolveLocated((int)v->loc, pg << 20);
++    }
++    const u8* p = v->page_ptr + (off & 0xFFFFFu);
++    const u32 n = v->n;
++    switch (v->type) {
++    case 3: /* half float */
++        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_half_be(p + k * 2);
++        break;
++    case 4: /* u8 normalized */
++        for (u32 k = 0; k < n; k++) out[k] = p[k] * (1.0f / 255.0f);
++        break;
++    case 1: /* s16 normalized */
++        for (u32 k = 0; k < n; k++) out[k] = (float)(s16)((p[k*2] << 8) | p[k*2+1]) / 32767.0f;
++        break;
++    case 5: /* s16 integer */
++        for (u32 k = 0; k < n; k++) out[k] = (float)(s16)((p[k*2] << 8) | p[k*2+1]);
++        break;
++    case 6: { /* CMP, as rsx_fetch_attrib */
++        const u32 w = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
++        s32 x = (s32)(w & 0x7FF);         if (x & 0x400) x -= 0x800;
++        s32 y = (s32)((w >> 11) & 0x7FF); if (y & 0x400) y -= 0x800;
++        s32 z = (s32)((w >> 22) & 0x3FF); if (z & 0x200) z -= 0x400;
++        out[0] = (float)x / 1023.0f;
++        out[1] = (float)y / 1023.0f;
++        out[2] = (float)z / 511.0f;
++        out[3] = 1.0f;
++        return; }
++    case 7: /* u8 unnormalized */
++        for (u32 k = 0; k < n; k++) out[k] = (float)p[k];
++        break;
++    default: /* float32, and unknown types as rsx_fetch_attrib reads them */
++        for (u32 k = 0; k < n; k++) {
++            u32 w; memcpy(&w, p + k * 4, 4);
++            w = ((w >> 24) & 0xFFu) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);
++            memcpy(&out[k], &w, 4);
++        }
++        break;
++    }
++    /* An array with fewer than 4 components fills the rest with (0,0,0,1). */
++    for (u32 k = n; k < 4; k++) out[k] = (k == 3) ? 1.0f : 0.0f;
+ }
+ static void read_vp_vertex_fast(const rsx_state* state, u32 vi, VPSlot* out16)
+ {
+@@ -6886,7 +6964,14 @@ static void read_vp_vertex_fast(const rsx_state* state, u32 vi, VPSlot* out16)
+      * fetch's component-by-component writes each pay for a partial flush. */
+     VPSlot tmp[16];
+     memcpy(tmp, s_vf.tmpl, sizeof tmp);
+-    for (int k = 0; k < s_vf.n; k++) rsx_fetch_attrib(state, s_vf.idx[k], vi, tmp[s_vf.idx[k]].v);
++    if (s_vf.on == 2) {
++        for (int k = 0; k < s_vf.n; k++) {
++            if (s_vfa[k].plain) vf_decode(&s_vfa[k], vi, tmp[s_vf.idx[k]].v);
++            else rsx_fetch_attrib(state, s_vf.idx[k], vi, tmp[s_vf.idx[k]].v);
++        }
++    } else {
++        for (int k = 0; k < s_vf.n; k++) rsx_fetch_attrib(state, s_vf.idx[k], vi, tmp[s_vf.idx[k]].v);
++    }
+     memcpy(out16, tmp, sizeof tmp);
+ }
+ 
