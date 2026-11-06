@@ -1,0 +1,54 @@
+Patch 2035: d3d12: branch-free 16-bit index pass in upload_vpull (VPULL_FAST16); FP_SHOW on MRT programs
+
+Source: the maintainer's other port, toolkit a1e4795.
+
+- upload_vpull: the common case (16-bit indices, no restart, no strip prefix)
+  reads indices and their range in a straight loop; the general loop re-tested
+  width, restart and prefix per index. Render thread upload_vpull exclusive in
+  battle: 22% in the maintainer's burst profile, 6.5% in px1 (with SRV_SKIP and the
+  AVX2 builds). VPULL_FAST16=0 off.
+- FP_SHOW=<expr> also replaces '_out.t0 = ' in multiple-render-target programs
+  (that port's unit materials write t0-t3).
+
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 0fc92dac..84ae0484 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2638,11 +2638,13 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+     { const char* sh = getenv("FP_SHOW");
+       const char* only = getenv("FP_TEX_FP");
+       if (sh && (!only || (u32)strtoul(only, NULL, 16) == fp_addr)) {
+-          char* rp = strstr(hlsl, "_po.c0 = ");
++          /* MRT programs (that port units) write "_out.t0 = ..." instead. */
++          const int mrt = strstr(hlsl, "_po.c0 = ") == NULL;
++          char* rp = strstr(hlsl, mrt ? "_out.t0 = " : "_po.c0 = ");
+           if (rp) { char* semi = strchr(rp, ';');
+             if (semi) {
+                 char rep[256];
+-                snprintf(rep, sizeof rep, "_po.c0 = float4((%s).xyz, 1.0)", sh);
++                snprintf(rep, sizeof rep, "%s = float4((%s).xyz, 1.0)", mrt ? "_out.t0" : "_po.c0", sh);
+                 size_t newlen = strlen(rep), tail = strlen(semi) + 1;
+                 if ((size_t)(rp - hlsl) + newlen + tail < sizeof(hlsl)) {
+                     memmove(rp + newlen, semi, tail);
+@@ -7865,6 +7867,20 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     const int restart_en = strip && strip_restart_on(st);
+     u32* raw = s_vpull.raw;
+     u32 vmin = 0xFFFFFFFFu, vmax = 0;
++    /* The common case (16-bit indices, no restart, no strip prefix) as a
++     * branch-free loop: same raw[] and range as the general loop below, which
++     * re-tests width, restart and prefix for every index. VPULL_FAST16=0: off. */
++    static int f16 = -1;
++    if (f16 < 0) { const char* ev = getenv("VPULL_FAST16"); f16 = (ev && *ev == '0') ? 0 : 1; }
++    if (f16 && sixteen && !restart_en && npre == 0) {
++        const u8* p16 = ip + (u64)first * 2u;
++        for (u32 k = 0; k < total; k++) {
++            const u32 ix = ((u32)p16[2u * k] << 8) | p16[2u * k + 1u];
++            raw[k] = ix;
++            vmin = ix < vmin ? ix : vmin;
++            vmax = ix > vmax ? ix : vmax;
++        }
++    } else
+     for (u32 k = 0; k < total; k++) {
+         const u32 kk = k < npre ? pre[k] : first + (k - npre);
+         const u32 ix = sixteen ? (((u32)ip[kk * 2] << 8) | ip[kk * 2 + 1])
