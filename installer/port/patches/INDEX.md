@@ -6,8 +6,10 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 |---|---|---|---|---|---|---|
 | 0004 | fix | the HLE fast path stores the caller's TOC in its ABI slot, as the import stub would. | ppu_hle.cpp | hle_top_note |  | J-Stars |
 | 0005 | fix | cellFiber keeps the guest CellFiberPpu state word, so an SPU job can signal a PPU fiber. | cellFiber.c | pick_runnable, fiber_finish_locked, cellFiberPpuCreateFiber, cellFiberPpuRunFibers, cellFiberPpuWaitSignal, cellFiberPpuSendSignal ... |  | J-Stars |
+| 0006 | fix | a thread that loops on a sub-millisecond sys_event_queue_receive really waits its timeout | sys_event.c | sys_event_queue_cancel_by_id, sys_event_queue_receive, event_queue_push | EVQ_SUBMS_WAIT | J-Stars |
 | 1002 | fix | a job chain parked on its guard stays parked until the next cellSpursJobGuardNotify. | cellSpurs.c | cellSpursJobGuardNotify, cellSpursJobGuardReset, jg_wait, jc_signal_done, jc_execute, jc_thread ... |  | J-Stars |
 | 1003 | fix | "JOBCRT Ver14" jobs get the job context's low 28 bits too (J-Stars had no sound at all). | spurs_job.c | spu_run_spurs_job | SPURS_CTX_PAD | J-Stars |
+| 1004 | fix | a job-chain walker at a closed guard sleeps on a condition variable that cellSpursJobGuardNotify | cellSpurs.c | cellSpursJobGuardNotify, jg_wait | SPURS_GUARD_EVENT | J-Stars |
 | 2001 | fix | expose the default GCM context and the title's context slot, and dump the last jump/call words on a bad branch. | cellGcmSys.c | gcm_fifo_dump_around, cellGcmInitDefaultFifoMode |  | J-Stars |
 | 2002 | fix | run the recorded batch without presenting when the per-frame vertex buffer or draw records would overflow. | rsx_d3d12_backend.c | upload_quad_strip_vp_indexed, d3d12_draw_arrays, d3d12_draw_indexed | VP_NO_MIDFLUSH | J-Stars |
 | 2003 | fix | mid-frame flush without a CPU stall, failed fragment-program pipelines are cached, per-second [RSXFPS] line. | rsx_d3d12_backend.c | vp_get_fp_pso, ds_convert, vp_flush_if_full | VP_MIDFLUSH_WAIT | J-Stars |
@@ -52,9 +54,14 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2050 | fix | a vertex range already copied into the vertex-pulling ring in this batch is reused, not copied again | rsx_d3d12_backend.c | render_frame, d3d12_clear, vpull_layout_multi, vp_get_vs_pull, upload_vpull, vpull_report | VPULL_REUSE, VPULL_DUP | candidate |
 | 2051 | fix | an uploaded vertex-program word is compared as one 32-bit value, not with a memcmp call. | rsx_commands.c | rsx_vp_ucode_word |  | candidate |
 | 2053 | fix | a draw whose vertex constants are unchanged since the previous draw of the batch shares that draw's | rsx_d3d12_backend.c | vp_record_cb, render_frame, d3d12_draw_arrays, d3d12_draw_indexed | VCB_SHARE | candidate |
+| 2054 | fix | the texture-slot scan starts at the slot last seen holding the texture (TEX_HINT=0 off). | rsx_d3d12_backend.c | dds_off_match, vp_upload_tex_slot | TEX_HINT | J-Stars |
+| 2055 | fix | the disk shader and pipeline caches hold 16384 entries each (were 4096), and a full cache says so once. | rsx_d3d12_backend.c | compile_vp, sc_open |  | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 6001 | fix | export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.) | ppu_loader.cpp | ppu_resv_register |  | J-Stars |
 | 6002 | fix | g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.) | ppu_hle.cpp | ps3_hle_call |  | J-Stars |
 | 6003 | fix | PAD_SCRIPT takes an optional hold length, "<t>:<mask>:<polls>". (Upstream candidate.) | cellPad.c |  |  | J-Stars |
 | 6004 | fix | cellFsRead records the time of the last read (g_ppu_fs_last_read_ms). | ppu_fs.cpp | cellFsRead |  | J-Stars |
 | 6005 | fix | FRAME_TL=1, a per-flip timeline in the log (diagnostic, off by default). | cellGcmSys.c | ppu_gcm_pump, gcm_rsx_process_fifo_unlocked, gcm_flip_into_fifo | FRAME_TL | candidate |
+| 6006 | fix | cellFsRead, Write, Lseek and Fstat hold the FILE*'s own stdio lock across their steps | ppu_fs.cpp | FS_STAT64, cellFsRead, cellFsWrite, cellFsLseek, cellFsFstat | FS_STREAM_LOCK | J-Stars |
+| 6007 | fix | PAD_SCRIPT events "+N:mask" (N clock units after the previous event fired) and "~N:mask" (once the | cellPad.c, ppu_fs.cpp |  |  | J-Stars |
+| 6008 | fix | PAD_SCRIPT "^N:mask" fires N clock units after a save-data load or save finishes, and "*N:mask" | cellPad.c, cellSaveData.c | savedata_execute_run |  | J-Stars |

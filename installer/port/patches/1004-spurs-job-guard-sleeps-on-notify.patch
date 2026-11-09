@@ -1,0 +1,77 @@
+Patch 1004: a job-chain walker at a closed guard sleeps on a condition variable that cellSpursJobGuardNotify
+wakes, instead of a Sleep(1) poll (SPURS_GUARD_EVENT=0 off).
+
+J-Stars runs ~20 guarded chains. Each polled every millisecond while the game had no work for it: about 8 s of CPU per
+chain thread over a profile window, ~14,000 wake-ups a second, all competing with the drawing thread. A notify now also
+starts the lap at once instead of up to 1 ms later. Each sleep is capped at 50 ms so a release by a path that does not
+wake (Initialize, Reset, shutdown) is still seen. Ported from the v15 backend (CPU_PROFILE sec 26).
+
+Tested together (US disc, bench.ps1, same build, A/B alternating, switches 1004/0006/2054 on vs off): demo 26.67 / 27.22 vs 24.02 / 22.62 flips/s, Free Battle 25.10 / 28.98 vs 23.72 / 22.87; the flip-to-done time per frame fell from 13.8-17.7 ms to 7.9-9.5 ms (bench\exp\2026-11-07_2235-v15on1 .. 2339-v15off2).
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 03ea65be..37fc269a 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -2808,6 +2808,21 @@ static struct {
+     int active;
+ } s_jobguards[MAX_JOBGUARDS];
+ 
++/* SPURS_GUARD_EVENT (default on, SPURS_GUARD_EVENT=0 = the old Sleep(1) poll): a walker waiting at a closed guard
++ * sleeps on a condition variable that cellSpursJobGuardNotify wakes, instead of waking every millisecond to look.
++ * J-Stars runs ~20 chains; their polls were ~14,000 wake-ups a second and 0.6 of a core of kernel time, and a notify
++ * now starts the lap at once instead of up to 1 ms later. */
++#ifdef _WIN32
++static SRWLOCK s_jg_lock = SRWLOCK_INIT;
++static CONDITION_VARIABLE s_jg_cv = CONDITION_VARIABLE_INIT;
++#endif
++static int jg_event_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("SPURS_GUARD_EVENT"); v = (e && *e == '0') ? 0 : 1; }
++    return v;
++}
++
+ static int jg_find(u32 ea)
+ {
+     for (int i = 0; i < MAX_JOBGUARDS; i++)
+@@ -2864,7 +2879,13 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
+      * OBSERVED zero, which threw away any notify that arrived while the job
+      * was still running -- the title notified 6 times and the chain completed
+      * 2 laps, so the thread waiting on the other 4 completions never woke. */
++#ifdef _WIN32
++    if (jg_event_on()) AcquireSRWLockExclusive(&s_jg_lock);
++#endif
+     _InterlockedIncrement((volatile long*)&s_jobguards[i].pending);
++#ifdef _WIN32
++    if (jg_event_on()) { ReleaseSRWLockExclusive(&s_jg_lock); WakeAllConditionVariable(&s_jg_cv); }
++#endif
+     { u32 remaining = (s_jobguards[i].pending >= s_jobguards[i].reset)
+                     ? 0u : s_jobguards[i].reset - s_jobguards[i].pending;
+       s_jobguards[i].count = remaining;
+@@ -2905,6 +2926,26 @@ static int jg_wait(u32 ea, int slot)
+ {
+     int i = jg_find(ea);
+     if (i < 0) return 1;
++#ifdef _WIN32
++    if (jg_event_on()) {
++        AcquireSRWLockExclusive(&s_jg_lock);
++        for (;;) {
++            if (s_jobchains[slot].shutdown) { ReleaseSRWLockExclusive(&s_jg_lock); return 0; }
++            if (s_jobguards[i].pending >= s_jobguards[i].reset) {
++                /* as below: consume exactly one release worth of credits */
++                _InterlockedExchangeAdd((volatile long*)&s_jobguards[i].pending, -(long)s_jobguards[i].reset);
++                if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
++                s_jobguards[i].count = s_jobguards[i].reset;
++                ReleaseSRWLockExclusive(&s_jg_lock);
++                vm_write32(ea, s_jobguards[i].count);
++                return 1;
++            }
++            /* 50 ms cap per sleep: a release by a path that does not wake (Initialize, Reset, shutdown) is still
++             * seen soon. */
++            SleepConditionVariableSRW(&s_jg_cv, &s_jg_lock, 50, 0);
++        }
++    }
++#endif
+     for (;;) {
+         if (s_jobchains[slot].shutdown) return 0;
+         if (s_jobguards[i].pending >= s_jobguards[i].reset) {

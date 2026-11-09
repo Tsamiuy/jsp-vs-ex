@@ -1,0 +1,87 @@
+Patch 6007: PAD_SCRIPT events "+N:mask" (N clock units after the previous event fired) and "~N:mask" (once the
+previous event has fired, at least 1 s has passed and no file has been read for N ms).
+
+Fixed-time routes need long safety gaps for loading screens, so a scripted Free Battle took about 8 minutes to reach
+the fight. With "+" and "~" a route follows the game however long each screen takes. Every event now also waits for
+the one before it; absolute events keep their meaning. ppu_fs_idle_ms() reports the time since the last guest read.
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index de883127..ba6faf24 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -26,6 +26,7 @@
+  * frame rate, and a wall-clock schedule then presses START on the logos; a
+  * flip schedule replays the same screens however slow the run is. */
+ extern u32 cellGcm_flip_request_count(void);
++extern unsigned long long ppu_fs_idle_ms(void);   /* 6007 */
+ static double pad_clock(unsigned long long t0_ms)
+ {
+     static int flips = -1;
+@@ -994,7 +995,10 @@ skip_inject: ;
+      * LEFT 0x0080, RIGHT 0x0020, CROSS 0x4000, CIRCLE 0x2000, TRIANGLE 0x1000.
+      * Legit input simulation on the same footing as PAD_AUTOPRESS/PAD_STICK. */
+     { static int s_sc = -1;
+-      static struct { double t; unsigned mask; int hold; } ev[256]; static int n_ev = 0;
++      /* 6007: kind 0 = at clock t; 1 = "+t", t after the previous event fired; 2 = "~t", once the previous event
++       * has fired and no file has been read for t ms. Every event also waits for the one before it, so a route
++       * written with "+" and "~" follows the game however long its loading screens take. */
++      static struct { double t; unsigned mask; int hold; int kind; } ev[256]; static int n_ev = 0;
+       static unsigned long long t0 = 0;   /* not ULONGLONG: this builds on POSIX too */
+       if (s_sc < 0) {
+           s_sc = 0;
+@@ -1003,12 +1007,14 @@ skip_inject: ;
+               s_sc = 1; t0 = GetTickCount64();
+               const char* p = e;
+               while (*p && n_ev < 256) {
++                  int kind = 0;
++                  if (*p == '+') { kind = 1; p++; } else if (*p == '~') { kind = 2; p++; }
+                   double t = strtod(p, (char**)&p);
+                   if (*p == ':') p++;
+                   unsigned m = (unsigned)strtoul(p, (char**)&p, 0);
+                   int hold = 40;   /* J-Stars 6003: optional ":<polls>" after the mask */
+                   if (*p == ':') { p++; hold = (int)strtol(p, (char**)&p, 0); if (hold < 1) hold = 1; }
+-                  ev[n_ev].t = t; ev[n_ev].mask = m; ev[n_ev].hold = hold; n_ev++;
++                  ev[n_ev].t = t; ev[n_ev].mask = m; ev[n_ev].hold = hold; ev[n_ev].kind = kind; n_ev++;
+                   while (*p == ',' || *p == ' ') p++;
+               }
+               printf("[cellPad] PAD_SCRIPT: %d event(s)%s\n", n_ev,
+@@ -1024,8 +1030,19 @@ skip_inject: ;
+            * hold it for a fixed number of polls, which is what a real press
+            * looks like regardless of poll rate. */
+           static int fired[256], held[256];
++          static double fired_at[256]; static unsigned long long fired_ms[256];
+           for (int i = 0; i < n_ev; i++) {
+-              if (!fired[i] && now >= ev[i].t) { fired[i] = 1; held[i] = ev[i].hold; }
++              if (!fired[i]) {
++                  const int prev_ok = (i == 0) || fired[i - 1];
++                  int go = 0;
++                  if (ev[i].kind == 0) go = now >= ev[i].t && (i == 0 || fired[i - 1] || ev[i - 1].kind == 0);
++                  else if (ev[i].kind == 1) go = prev_ok && now >= (i ? fired_at[i - 1] : 0.0) + ev[i].t;
++                  else go = prev_ok && held[i ? i - 1 : 0] <= 0 && (!i || GetTickCount64() - fired_ms[i - 1] >= 1000) &&
++                            (double)ppu_fs_idle_ms() >= ev[i].t;   /* 1 s first: a load starts a moment after its press */
++                  if (go) { fired[i] = 1; fired_at[i] = now; fired_ms[i] = GetTickCount64(); held[i] = ev[i].hold;
++                            if (ev[i].kind) printf("[cellPad] PAD_SCRIPT #%d (%c%.0f) fired at %.0f%c", i,
++                                                   ev[i].kind == 1 ? '+' : '~', ev[i].t, now, 10); }
++              }
+               if (held[i] > 0) {
+                   held[i]--;
+                   data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(ev[i].mask & 0xFF);
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index dba84d4a..db4d4e45 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -29,6 +29,14 @@
+ /* Steady-clock milliseconds of the last cellFsRead, for a host that waits until file
+  * streaming goes quiet (J-Stars holds its game-data check until then). */
+ extern "C" { volatile unsigned long long g_ppu_fs_last_read_ms = 0; }
++/* Milliseconds since the last guest file read (6007: PAD_SCRIPT "~N" events wait for loading to finish). */
++extern "C" unsigned long long ppu_fs_idle_ms(void)
++{
++    const unsigned long long now = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++    const unsigned long long last = g_ppu_fs_last_read_ms;
++    return now > last ? now - last : 0;
++}
+ #include <mutex>
+ #include <atomic>
+ #include <sys/stat.h>
