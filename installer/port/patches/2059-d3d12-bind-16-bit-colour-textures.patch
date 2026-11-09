@@ -1,0 +1,31 @@
+Patch 2059: render_frame binds the 16-bit colour texture formats that patch 2020 records (A1R5G5B5, A4R4G4B4, R5G6B5,
+R5G5B5A1, D1R5G5B5, D8R8G8B8) (TEX16_BIND=0 off).
+
+The record path took them, but render_frame's format list did not, so such a unit stayed a NULL SRV and sampled zero.
+J-Stars' character shaders read small A4R4G4B4 lighting ramps (128x32, 32x32) and got black, so skin and hair came out
+far too dark once patch 2056 let those shaders compile. The fight HUD's team flames (same formats) appear again too.
+
+Tested (US disc, quick route, intro cards every 4 s, TEX_BINDDBG=300): NULL SRV units 0 (before: 300 in the first
+intro cards, all fmt 0x83/0xA3); faces lit and coloured (bench/exp/2026-11-08_1857-tex16bind, bench/faces_2059.png).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 61851cc6..1a383cc6 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6155,10 +6155,15 @@ static void render_frame(void)
+                 u32 _bf = dr->tex[_u].fmt & 0x9F;
+                 /* The formats d3d12_bind_texture records. A half-float one
+                  * that is not a render target found above is guest data too. */
++                /* 2059 (TEX16_BIND=0 off): also the 16-bit colour formats patch 2020 records. Without them such a unit
++                 * stayed a NULL SRV and sampled zero: J-Stars' character shaders read their A4R4G4B4 lighting ramps
++                 * (128x32, 32x32 on units 1-3) as black, so skin and hair came out far too dark. */
++                static int t16b = -1; if (t16b < 0) { const char* e = getenv("TEX16_BIND"); t16b = (e && *e == '0') ? 0 : 1; }
++                const int t16 = t16b && (_bf == 0x82 || _bf == 0x83 || _bf == 0x84 || _bf == 0x97 || _bf == 0x9D || _bf == 0x9E);
+                 if (dr->tex[_u].off &&
+                     (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
+                      (_bf >= 0x86 && _bf <= 0x88) || _bf == 0x9A ||
+-                     _bf == 0x94 || _bf == 0x95 || _bf == 0x9C || _bf == 0x9F)) {
++                     _bf == 0x94 || _bf == 0x95 || _bf == 0x9C || _bf == 0x9F || t16)) {
+                     double _tt = perf_on() ? perf_now() : 0.0;
+                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
+                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,

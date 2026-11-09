@@ -1,0 +1,38 @@
+Patch 2058: render_frame fills each draw's fp_k[] from the fragment program as it is in memory when the frame is
+replayed, the same bytes vp_get_fp_pso compiles and keys the pipeline on (FPK_REPLAY=0 off).
+
+vp_record_cb read them when the draw was recorded, and J-Stars' character programs are not in place yet at that point
+(0x0F500981: 1 constant of zeros at record, 34 at replay; 8 of 41 programs differed). With patch 2056 the skin and
+hair read zeros and came out near black. The literal constants of the old path were read at compile time, so they
+were right.
+
+Tested (US disc, quick Free Battle route, intro cards every 4 s): skin and hair shaded like the RPCS3 reference again
+(Luffy, Toriko, Goku, Naruto, Gintoki), floor unchanged (bench/exp/2026-11-08_1506-chars_replay; constants compared
+with the FPK_CMP probe in 2026-11-08_1502-fpkcmp).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 45a066ad..61851cc6 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6670,6 +6670,21 @@ static void render_frame(void)
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
+                     s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb)
+                     + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->vcb_slot) * VP_CB_STRIDE);
++                /* FPK_REPLAY (default on, =0 off; patch 2058): fill fp_k[] from the program as it is in memory now,
++                 * the same bytes vp_get_fp_pso compiled and keyed the pipeline on. At record time J-Stars' character
++                 * programs were not in place yet (0x0F500981: 1 constant of zeros at record, 34 at replay), so with
++                 * patch 2056 the skin and hair read zeros and came out near black. */
++                { static int rp = -1; if (rp < 0) { const char* e = getenv("FPK_REPLAY"); rp = (e && *e == '0') ? 0 : 1; }
++                  if (rp && s_d3d.vp_fpcb_mapped && dr->fp_addr && dr->cb_slot < MAX_DRAWS) {
++                      extern uint8_t* vm_base;
++                      extern u32 cellGcmResolveLocated(int, u32);
++                      const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
++                      if (vm_base && foff != 0xFFFFFFFFu) {
++                          float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
++                              + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
++                          rsx_fp_extract_consts(vm_base + foff, 0x10000, &ts[20], 64);
++                      }
++                  } }
+                 if (s_d3d.vp_fpcb)
+                     s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
+                         s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)

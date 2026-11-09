@@ -1,0 +1,61 @@
+Patch 2056: every fragment program is decompiled through the buffered path and reads its constants from fp_k[] in
+the per-draw b1 slot, which render_frame already fills from the draw's own ucode (FP_KBUF=0 off).
+
+The plain decompile baked constants into the shader as literals, while the pipeline key (fpm_hash) leaves them out.
+A program shared by several draws kept the first draw's values, and the shader text changed with every value (the
+unused lanes hold leftover bytes), so shader_cache.bin never stopped growing and fights compiled shaders every few
+seconds. Programs with more than 64 constants keep the literal path.
+
+Tested (US disc, bench.ps1 quick Free Battle route, HITCH=50): shader cache misses per Free Battle 557 / 585 / 81 /
+108 over four runs (before: 300-1200 each run, never settling); 100-400 ms hitches 38 / 17 / 21 / 22 (before ~35-48);
+Free Battle 28.5-29.5 flips/s, demo 27.8 / 28.2. Pictures: the dojo floor has more contrast, reflections and shadows;
+reviewed by eye: the look improves, character shadows look a bit off (to fix later) (bench/exp/2026-11-08_1203-kbuf1 .. 1244-kbuf4).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 0235d3b8..2058dd62 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2756,8 +2756,16 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+                      shd[u].unnormalized = (sh[u] >> 6) & 1; any_sh = 1; }
+     }
+     u32 nconst = 0;
+-    int n = any_sh ? rsx_fp_decompile_buffered_shadow_ex(vm_base + off, 0x10000, fp_ctrl, cube_mask, shd, hlsl, sizeof(hlsl), &nconst)
+-                   : rsx_fp_decompile(vm_base + off, 0x10000, fp_ctrl, hlsl, sizeof(hlsl));
++    /* FP_KBUF (default on, FP_KBUF=0 off; patch 2056): every program goes through the buffered decompile, and its
++     * constants are read from fp_k[] in the per-draw b1 slot, which render_frame fills from the draw's own ucode
++     * (rsx_fp_extract_consts, the same order the decompiler numbers them). The plain decompile baked the values in
++     * as literals, while the pipeline key (fpm_hash) leaves the constants out: a program reused by another draw kept
++     * the first draw's values, and the shader text changed with every value (unused lanes hold leftover bytes), so
++     * shader_cache.bin never stopped growing and fights built shaders every few seconds (HITCH=50: 30-50 frames of
++     * 100-400 ms per Free Battle). */
++    static int kbuf = -1; if (kbuf < 0) { const char* e = getenv("FP_KBUF"); kbuf = (e && *e == '0') ? 0 : 1; }
++    int n = (any_sh || kbuf) ? rsx_fp_decompile_buffered_shadow_ex(vm_base + off, 0x10000, fp_ctrl, cube_mask, shd, hlsl, sizeof(hlsl), &nconst)
++                             : rsx_fp_decompile(vm_base + off, 0x10000, fp_ctrl, hlsl, sizeof(hlsl));
+     if (any_sh) { static int _l = 0; if (PS3_LOG_FIRST(_l, 24)) {
+         fprintf(stderr, "[SHADOW] fp=0x%08X units:", fp_addr);
+         for (int u = 0; u < 16; u++) if (sh[u]) fprintf(stderr, " t%d(en=%d func=%d lin=%d un=%d)", u, sh[u] & 3, (sh[u] >> 2) & 7, (sh[u] >> 5) & 1, (sh[u] >> 6) & 1);
+@@ -2769,6 +2777,24 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+        * in the order rsx_fp_extract_consts walks them. RSX_FP_INLINE_K=0 off. */
+       static int ik = -1; if (ik < 0) { const char* e = getenv("RSX_FP_INLINE_K"); ik = (e && *e == '0') ? 0 : 1; }
+       char* cb = ik ? strstr(hlsl, "cbuffer PSConstants : register(b1) {") : NULL;
++      char* cbe0 = cb ? strstr(cb, "};\n") : NULL;
++      if (cb && cbe0 && kbuf && nconst <= 64) {
++          /* 2056: declare b1 as render_frame fills it and read the constants from there. */
++          static const char decl[] =
++              "cbuffer RSXFragment : register(b1) {\n"
++              "    float4 rsx_texscale[4];\n"
++              "    float4 rsx_alphatest;\n"
++              "    float4 fp_k[64];\n"
++              "};\n"
++              "static const float4 fp_alpha = float4(0.0, 0.0, 0.0, 0.0);\n";
++          const size_t old_len = (size_t)(cbe0 + 3 - cb), new_len = sizeof decl - 1, used = strlen(hlsl);
++          if (used - old_len + new_len + 1 < sizeof hlsl) {
++              memmove(cb + new_len, cb + old_len, used - (size_t)(cb + old_len - hlsl) + 1);
++              memcpy(cb, decl, new_len);
++              hlsl_replace_all(hlsl, sizeof hlsl, "fp_constants[", "fp_k[");
++              cb = NULL;   /* done: skip the literal inlining below */
++          }
++      }
+       if (cb) {
+           char* cbe = strstr(cb, "};\n");
+           static float kv[256 * 4];

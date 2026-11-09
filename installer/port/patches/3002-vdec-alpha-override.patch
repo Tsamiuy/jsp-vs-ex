@@ -1,0 +1,26 @@
+Patch 3002: VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's).
+
+J-Stars asks for ARGB pictures with alpha 0 and then draws them as opaque art, so its opening movie came out invisible.
+The port's host sets VDEC_ALPHA=255 unless it is set (installer/port/jsp/main.cpp), as the v0.15 port does. Unset (the
+default) changes nothing.
+
+Tested (US disc, attract demo with the decoder on, bench/exp/2026-11-09_0106-movie3, VDEC_PICLOG=1): pictures are
+stored 1280x720 ARGB with alpha 255. Together with 3003 and 2062 the opening movie plays (bench/exp/2026-11-09_0110-movie5).
+
+diff --git a/libs/codec/cellVdec.c b/libs/codec/cellVdec.c
+index 7e222c92..90094409 100644
+--- a/libs/codec/cellVdec.c
++++ b/libs/codec/cellVdec.c
+@@ -585,6 +585,12 @@ s32 cellVdecGetPicItem(CellVdecHandle handle, const CellVdecPicItem** picItem)
+  * that only pace playback on PICOUT/GetPicture run as they should. */
+ static s32 vdec_take_picture(VdecSlot* v, u32 dst, u32 type, u32 matrix, u8 alpha)
+ {
++    /* VDEC_ALPHA=<0-255>: override the alpha the title asks for (from v0.15). J-Stars asks for ARGB with
++     * alpha 0 and then draws the frame as if it were opaque art, so its movie came out invisible. Unset or
++     * negative keeps the title's value. */
++    { static int fa = -2;
++      if (fa == -2) { const char* e = getenv("VDEC_ALPHA"); fa = e ? atoi(e) : -1; }
++      if (fa >= 0) alpha = (u8)fa; }
+     if (!v->qCount)
+         return (s32)CELL_VDEC_ERROR_EMPTY;
+     VdecPic* q = &v->queue[v->qHead];

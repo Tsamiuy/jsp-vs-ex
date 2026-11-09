@@ -1,0 +1,46 @@
+Patch 2062: a display-sized texture with data in guest memory, that is not a display buffer, is not swapped for the frame
+copy (SCREEN_TEX_DATA=1 restores the old rule).
+
+SCREEN_AS_TEX binds the copy of the rendered frame for any display-sized texture that is not an offscreen target, because
+the frame's pixels never reach guest memory here. A picture the title wrote itself (CPU art, a decoded movie frame) does
+have data there. J-Stars' boot logos showed white and its opening movie (1280x720 ARGB written by cellVdec) black. The
+check samples one byte in 997 of the first 256 KB; a display buffer address keeps the old rule.
+
+Tested (US disc, attract demo with the decoder on, bench/exp/2026-11-09_0110-movie5): the Spike Chunsoft and CRIWARE
+logos show at 12-16 s, the opening movie plays from about 30 s, then the title screen; the frame copy is still bound for
+other display-sized reads (SCREENTEX lines in the log).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 7c961097..28c88e00 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5185,6 +5185,21 @@ static u32 draw_filter_tex(const char* e)
+     return (u32)strtoul(e, NULL, 16);
+ }
+ 
++/* 2062 (SCREEN_TEX_DATA=1 restores the old rule): a display-sized texture that is not one of the guest's display
++ * buffers and has data in guest memory is the title's own picture (CPU-written art or a decoded movie frame), not a
++ * read of the rendered frame, whose pixels never reach guest memory here. J-Stars' boot logos and its opening movie
++ * (1280x720 ARGB, written by cellVdec) were swapped for the frame copy and showed white, then black. */
++static int screen_tex_is_data(u32 raw, u32 off, u32 bytes)
++{
++    static int old = -1; if (old < 0) old = getenv("SCREEN_TEX_DATA") ? 1 : 0;
++    extern int cellGcmOffsetIsDisplay(u32 offset);
++    extern uint8_t* vm_base;
++    if (old || !off || !vm_base || cellGcmOffsetIsDisplay(raw)) return 0;
++    for (u32 i = 0; i < bytes && i < 0x40000u; i += 997)
++        if (vm_base[off + i]) return 1;
++    return 0;
++}
++
+ /* Copy the current backbuffer into s_screen_copy. Called mid-frame the moment
+  * the reduced-viewport passes finish -- this title renders its reflection into
+  * the TOP-LEFT REGION of the render target and the main scene then overwrites
+@@ -6134,6 +6149,7 @@ static void render_frame(void)
+             if (dr->tex[_u].set && s_screen_copy &&
+                 dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height &&
+                 !(((dr->tex[_u].fmt & 0x9F) >= 0x86 && (dr->tex[_u].fmt & 0x9F) <= 0x88) && !stdxt) &&
++                !screen_tex_is_data(dr->tex[_u].raw, dr->tex[_u].off, dr->tex[_u].w * dr->tex[_u].h * 4u) &&
+                 off_rt_find(dr->tex[_u].raw) < 0) {   /* a display-sized offscreen RT is its own producer */
+                 static int en = -1;
+                 if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }

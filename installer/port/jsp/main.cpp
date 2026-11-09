@@ -537,9 +537,12 @@ int main(int argc, char** argv)
      * 12% of blocks silent -> 0%). Set in the environment to override; CRI_LEAD=0 keeps CRI's own lead. */
     if (!getenv("AUDIO_NBLOCK")) _putenv("AUDIO_NBLOCK=16");
     if (!getenv("CRI_LEAD")) _putenv("CRI_LEAD=12");
+    /* the opening movie: J-Stars asks the decoder for alpha 0 (cellVdec VDEC_ALPHA; =-1 keeps the game's 0) */
+    if (!getenv("VDEC_ALPHA")) _putenv("VDEC_ALPHA=255");
 #else
     setenv("AUDIO_NBLOCK", "16", 0);
     setenv("CRI_LEAD", "12", 0);
+    setenv("VDEC_ALPHA", "255", 0);
 #endif
 
     printf("=== jsp (J-Stars Victory VS+, ps3recomp v0.19.0) ===\n");

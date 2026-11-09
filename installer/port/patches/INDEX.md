@@ -56,7 +56,16 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2053 | fix | a draw whose vertex constants are unchanged since the previous draw of the batch shares that draw's | rsx_d3d12_backend.c | vp_record_cb, render_frame, d3d12_draw_arrays, d3d12_draw_indexed | VCB_SHARE | candidate |
 | 2054 | fix | the texture-slot scan starts at the slot last seen holding the texture (TEX_HINT=0 off). | rsx_d3d12_backend.c | dds_off_match, vp_upload_tex_slot | TEX_HINT | J-Stars |
 | 2055 | fix | the disk shader and pipeline caches hold 16384 entries each (were 4096), and a full cache says so once. | rsx_d3d12_backend.c | compile_vp, sc_open |  | J-Stars |
+| 2056 | fix | every fragment program is decompiled through the buffered path and reads its constants from fp_k[] in | rsx_d3d12_backend.c | vp_fp_compile_blob | FP_KBUF | J-Stars |
+| 2057 | fix | a new fragment program is decompiled where the draw meets it, then its shader compile and pipeline | rsx_d3d12_backend.c | vp_shadow_pack, vp_fp_compile_blob, vp_fp_worker, vp_get_fp_pso, render_frame | PSO_ASYNC, PSO_ASYNC_THREADS | J-Stars |
+| 2058 | fix | render_frame fills each draw's fp_k[] from the fragment program as it is in memory when the frame is | rsx_d3d12_backend.c | render_frame | FPK_REPLAY | J-Stars |
+| 2059 | fix | render_frame binds the 16-bit colour texture formats that patch 2020 records (A1R5G5B5, A4R4G4B4, R5G6B5, | rsx_d3d12_backend.c | render_frame | TEX16_BIND | J-Stars |
+| 2060 | fix | render_frame's "display-sized texture = a read of the rendered frame" rule skips DXT textures | rsx_d3d12_backend.c | render_frame | SCREEN_TEX_DXT | J-Stars |
+| 2061 | fix | guest fragment programs do the RSX alpha test (ALPHA_TEST=0 off). | rsx_d3d12_backend.c | vp_fp_compile_blob | ALPHA_TEST | J-Stars |
+| 2062 | fix | a display-sized texture with data in guest memory, that is not a display buffer, is not swapped for the frame | rsx_d3d12_backend.c | draw_filter_tex, render_frame | SCREEN_TEX_DATA | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
+| 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
+| 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
 | 6001 | fix | export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.) | ppu_loader.cpp | ppu_resv_register |  | J-Stars |
 | 6002 | fix | g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.) | ppu_hle.cpp | ps3_hle_call |  | J-Stars |
 | 6003 | fix | PAD_SCRIPT takes an optional hold length, "<t>:<mask>:<polls>". (Upstream candidate.) | cellPad.c |  |  | J-Stars |
@@ -65,3 +74,4 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 6006 | fix | cellFsRead, Write, Lseek and Fstat hold the FILE*'s own stdio lock across their steps | ppu_fs.cpp | FS_STAT64, cellFsRead, cellFsWrite, cellFsLseek, cellFsFstat | FS_STREAM_LOCK | J-Stars |
 | 6007 | fix | PAD_SCRIPT events "+N:mask" (N clock units after the previous event fired) and "~N:mask" (once the | cellPad.c, ppu_fs.cpp |  |  | J-Stars |
 | 6008 | fix | PAD_SCRIPT "^N:mask" fires N clock units after a save-data load or save finishes, and "*N:mask" | cellPad.c, cellSaveData.c | savedata_execute_run |  | J-Stars |
+| 6009 | fix | a thread polling with back-to-back tiny sys_timer_usleep calls really sleeps (USLEEP_SPIN=1 off). | sys_timer.c | sys_timer_usleep | USLEEP_SPIN, USLEEP_AFTER_US, USLEEP_REAL_US, USLEEP_GAP_US | J-Stars |

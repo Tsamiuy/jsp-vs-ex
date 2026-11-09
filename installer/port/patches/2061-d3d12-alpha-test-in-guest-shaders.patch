@@ -1,0 +1,43 @@
+Patch 2061: guest fragment programs do the RSX alpha test (ALPHA_TEST=0 off).
+
+The decompiler leaves the alpha test out, so cut-out art was drawn as solid quads: J-Stars' title screen showed grey
+panels where the red halftone background sits behind the characters, and leaf cards cast square shadows. The test reads
+rsx_alphatest from the per-draw b1 slot (x enable, y ref/255, z func - 0x200), which render_frame already fills, so one
+compiled program serves every alpha state. MRT programs test _out.t0, single-target ones _o. Only programs on the
+per-draw constant path (patch 2056) get it, as that path declares rsx_alphatest. The same feature as the v15 port's
+ALPHA_TEST.
+
+Tested (US disc, bench.ps1 quick route): title screen red background shows; tree leaves cast proper shadows (checked
+by eye); Free Battle 29.48 / 29.91 (bench/fix/2026-11-08_2352-alphatest, 2026-11-09_0009-alphatest2).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 05d5f66f..7c961097 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2794,6 +2794,26 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+               memcpy(cb, decl, new_len);
+               hlsl_replace_all(hlsl, sizeof hlsl, "fp_constants[", "fp_k[");
+               cb = NULL;   /* done: skip the literal inlining below */
++              /* ALPHA_TEST (default on, =0 off; patch 2061, as v15's ALPHA_TEST): the RSX alpha test, which the
++               * decompiler leaves out. render_frame already fills rsx_alphatest per draw (x enable, y ref/255,
++               * z func - 0x200), so one compiled program serves every alpha state. Without it J-Stars drew the
++               * cut-out parts of its title-screen art and leaf cards as solid quads. */
++              { static int at = -1; if (at < 0) { const char* e = getenv("ALPHA_TEST"); at = (e && *e == '0') ? 0 : 1; }
++                /* MRT programs return _out (alpha from _out.t0), single-target ones return _o. */
++                char* ret = NULL; int single = 0;
++                for (char* q = strstr(hlsl, "    return _out;"); q; q = strstr(q + 1, "    return _out;")) ret = q;
++                if (!ret) { for (char* q = strstr(hlsl, "    return (_o == _o)"); q; q = strstr(q + 1, "    return (_o == _o)")) ret = q; single = ret != NULL; }
++                char test[512];
++                snprintf(test, sizeof test,
++                    "    if (rsx_alphatest.x > 0.5) { const float _aa = %s.a, _ar = rsx_alphatest.y; const int _af = (int)rsx_alphatest.z;\n"
++                    "      const bool _ap = _af == 1 ? _aa < _ar : _af == 2 ? _aa == _ar : _af == 3 ? _aa <= _ar : _af == 4 ? _aa > _ar :\n"
++                    "                       _af == 5 ? _aa != _ar : _af == 6 ? _aa >= _ar : _af == 7;\n"
++                    "      if (!_ap) discard; }\n", single ? "_o" : "_out.t0");
++                const size_t used2 = strlen(hlsl), tl = strlen(test);
++                if (at && ret && used2 + tl + 1 < sizeof hlsl) {
++                    memmove(ret + tl, ret, used2 - (size_t)(ret - hlsl) + 1);
++                    memcpy(ret, test, tl);
++                } }
+           }
+       }
+       if (cb) {

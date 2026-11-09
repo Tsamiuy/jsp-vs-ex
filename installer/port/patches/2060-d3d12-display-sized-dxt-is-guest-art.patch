@@ -1,0 +1,30 @@
+Patch 2060: render_frame's "display-sized texture = a read of the rendered frame" rule skips DXT textures
+(SCREEN_TEX_DXT=1 restores the old rule).
+
+A display-sized texture that is not an offscreen render target was swapped for the copy of the last frame (made for
+water reflections). The RSX cannot write compressed data, so a DXT one is always guest art: J-Stars' battle loading
+screen (TIPS) is a 1280x720 DXT1 image, and it showed the previous frame, a white fade, so the screen stayed white. The
+same fix as the v15 port's loading-tips patch.
+
+Tested (US disc, bench.ps1 with the quick route): TIPS page, artwork and "Now loading" show on the loading screen;
+demo 29.70 / 29.90, Free Battle 29.71 (bench/fix/2026-11-08_2325-dxtscreen; SCREEN_AS_TEX=0 confirmation in
+2026-11-08_2321-noscreentex).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1a383cc6..05d5f66f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6107,8 +6107,13 @@ static void render_frame(void)
+                 }
+             }
+             /* Display-sized sampler source -> the rendered frame. */
++            /* 2060 (SCREEN_TEX_DXT=1 restores the old rule): a DXT texture can never be a rendered frame, so a
++             * display-sized one is guest art. J-Stars' battle loading screen (TIPS) is a 1280x720 DXT1 image; it was
++             * swapped for the frame copy and the screen came out white. */
++            static int stdxt = -1; if (stdxt < 0) stdxt = getenv("SCREEN_TEX_DXT") ? 1 : 0;
+             if (dr->tex[_u].set && s_screen_copy &&
+                 dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height &&
++                !(((dr->tex[_u].fmt & 0x9F) >= 0x86 && (dr->tex[_u].fmt & 0x9F) <= 0x88) && !stdxt) &&
+                 off_rt_find(dr->tex[_u].raw) < 0) {   /* a display-sized offscreen RT is its own producer */
+                 static int en = -1;
+                 if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }

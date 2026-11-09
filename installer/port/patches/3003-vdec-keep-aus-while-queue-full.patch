@@ -1,0 +1,160 @@
+Patch 3003: cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY).
+
+libvdec decodes on its own thread and sends AUDONE when it takes an AU, so a title that got BUSY waits for the next
+AUDONE before it tries again. Here decoding is synchronous, so after a BUSY no AUDONE ever came: J-Stars' opening movie
+stopped after 18 AUs, the screen stayed black and the title screen never came (the idle drain then emptied the queue).
+Now up to 16 AUs are kept (the title leaves AU memory alone until its AUDONE) and decoded when GetPicture or
+GetPictureExt makes room, with their AUDONE and PICOUT then; EndSeq decodes every kept AU first. BUSY only when that
+list is full too. The same feature as the v0.15 port's VDEC_DEFER.
+
+Tested (US disc, attract demo with the decoder on): before, black from 30 s to the end of the run
+(bench/exp/2026-11-09_0046-movie1); after, the movie runs through to the title screen at about 140 s and the demo
+fights follow (bench/exp/2026-11-09_0057-movie2, 28.95 f/s over the demo).
+
+diff --git a/libs/codec/cellVdec.c b/libs/codec/cellVdec.c
+index 90094409..c27924a9 100644
+--- a/libs/codec/cellVdec.c
++++ b/libs/codec/cellVdec.c
+@@ -48,6 +48,7 @@ static u64 vdec_now_ms(void)
+ #define VDEC_QUEUE   32   /* decoded pictures waiting for GetPicture */
+ #define VDEC_BUSY_AT 16   /* refuse new AUs past this many (EndSeq can add more) */
+ #define VDEC_AU_RING 64   /* AUs remembered for pictures that come out late */
++#define VDEC_PEND    16   /* VDEC_DEFER: AUs kept while the picture queue is full */
+ 
+ /* A decoded picture waiting for the title (decoder path only). */
+ typedef struct {
+@@ -80,9 +81,13 @@ typedef struct {
+     u32 picsDecoded;    /* pictures the decoder has given back, this sequence */
+     u64 lastAuMs;       /* when the last AU arrived (idle drain) */
+     int idleDrained;    /* the idle drain already ran since that AU */
++    /* VDEC_DEFER: AUs waiting for room in the picture queue (decoded by GetPicture). */
++    CellVdecAuInfo pend[VDEC_PEND];
++    u32 pHead, pCount;
+ } VdecSlot;
+ 
+ static VdecSlot s_vdec[MAX_VDEC];
++static void vdec_run_pending(CellVdecHandle handle, int all);   /* VDEC_DEFER */
+ 
+ /* The handle the guest sees is the slot index plus one, never 0: some
+  * titles treat a 0 handle as "no decoder open".
+@@ -117,6 +122,7 @@ static void vdec_queue_clear(VdecSlot* v)
+     for (u32 i = 0; i < v->qCount; i++)
+         free(v->queue[(v->qHead + i) % VDEC_QUEUE].yuv);
+     v->qHead = v->qCount = 0;
++    v->pHead = v->pCount = 0;
+ }
+ 
+ /* vdec_ff_emit_fn: queue a decoded picture under the item of the AU it was
+@@ -206,7 +212,7 @@ static void* vdec_idle_thread(void* arg)
+             VdecSlot* v = &s_vdec[h];
+             int drained = 0;
+             if (v->in_use && v->ff && v->seqStarted && !v->idleDrained &&
+-                v->qCount == 0 && v->picsDecoded < v->auCount && v->lastAuMs &&
++                v->qCount == 0 && v->pCount == 0 && v->picsDecoded < v->auCount && v->lastAuMs &&
+                 vdec_now_ms() - v->lastAuMs >= idle_ms) {
+                 v->idleDrained = 1;
+                 vdec_ff_drain(v->ff, vdec_on_picture, v);
+@@ -374,6 +380,7 @@ s32 cellVdecEndSeq(CellVdecHandle handle)
+ 
+     /* Pictures the decoder still holds for reordering come out now, each
+      * with its PICOUT, before SEQDONE. */
++    vdec_run_pending(handle, 1);   /* VDEC_DEFER: every kept AU first */
+     VDEC_LOCK();
+     s_vdec[handle].seqStarted = 0;
+     const int ff = s_vdec[handle].ff != NULL;
+@@ -389,6 +396,40 @@ s32 cellVdecEndSeq(CellVdecHandle handle)
+     return CELL_OK;
+ }
+ 
++/* Decode one AU with its AUDONE and PICOUTs (decoder path). */
++static void vdec_decode_one(CellVdecHandle handle, const CellVdecAuInfo* aup)
++{
++    VdecSlot* v = &s_vdec[handle];
++    const CellVdecAuInfo au = *aup;
++    VDEC_LOCK();
++    v->auCount++;
++    v->aus[v->auCount % VDEC_AU_RING] = au;
++    v->newPics = 0;
++    if (au.size)   /* an empty packet would mean end of stream to FFmpeg */
++        vdec_ff_decode(v->ff, vm_ptr8(au.startAddr), au.size, v->auCount,
++                       vdec_on_picture, v);
++    v->lastAuMs = vdec_now_ms();
++    v->idleDrained = 0;
++    VDEC_UNLOCK();
++    vdec_notify(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
++    vdec_notify_new_pics(handle);
++}
++
++/* VDEC_DEFER: decode the kept AUs while the picture queue has room (all of them when `all`, for EndSeq). */
++static void vdec_run_pending(CellVdecHandle handle, int all)
++{
++    VdecSlot* v = &s_vdec[handle];
++    for (;;) {
++        VDEC_LOCK();
++        if (!v->ff || !v->pCount || (!all && v->qCount >= VDEC_BUSY_AT)) { VDEC_UNLOCK(); return; }
++        const CellVdecAuInfo au = v->pend[v->pHead];
++        v->pHead = (v->pHead + 1) % VDEC_PEND;
++        v->pCount--;
++        VDEC_UNLOCK();
++        vdec_decode_one(handle, &au);
++    }
++}
++
+ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auInfo)
+ {
+     (void)mode;
+@@ -423,22 +464,28 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
+                  (unsigned long long)au.pts); }
+ 
+     if (v->ff) {
++        /* VDEC_DEFER (default on, =0 old; from v0.15): libvdec decodes on its own thread and sends AUDONE when it
++         * takes an AU, so a title that got BUSY waits for the next AUDONE before it tries again. Here decoding is
++         * synchronous, so after a BUSY no AUDONE ever came: J-Stars' opening movie stopped after 18 AUs (the
++         * screen stayed black and the title never came). Now an AU that arrives while the picture queue is full
++         * is kept (the title leaves its memory alone until AUDONE) and decoded when GetPicture makes room, with
++         * its AUDONE and PICOUT then. BUSY only when that list is full too. */
++        static int defer = -1;
++        if (defer < 0) { const char* e = getenv("VDEC_DEFER"); defer = (e && *e == '0') ? 0 : 1; }
+         VDEC_LOCK();
++        if (defer && (v->pCount || v->qCount >= VDEC_BUSY_AT)) {
++            if (v->pCount >= VDEC_PEND) { VDEC_UNLOCK(); return (s32)CELL_VDEC_ERROR_BUSY; }
++            v->pend[(v->pHead + v->pCount) % VDEC_PEND] = au;
++            v->pCount++;
++            VDEC_UNLOCK();
++            return CELL_OK;
++        }
+         if (v->qCount >= VDEC_BUSY_AT) {
+             VDEC_UNLOCK();
+             return (s32)CELL_VDEC_ERROR_BUSY;  /* title must take pictures */
+         }
+-        v->auCount++;
+-        v->aus[v->auCount % VDEC_AU_RING] = au;
+-        v->newPics = 0;
+-        if (au.size)   /* an empty packet would mean end of stream to FFmpeg */
+-            vdec_ff_decode(v->ff, vm_ptr8(au.startAddr), au.size, v->auCount,
+-                           vdec_on_picture, v);
+-        v->lastAuMs = vdec_now_ms();
+-        v->idleDrained = 0;
+         VDEC_UNLOCK();
+-        vdec_notify(handle, CELL_VDEC_MSG_TYPE_AUDONE, CELL_OK);
+-        vdec_notify_new_pics(handle);
++        vdec_decode_one(handle, &au);
+         return CELL_OK;
+     }
+ 
+@@ -624,6 +671,7 @@ s32 cellVdecGetPicture(CellVdecHandle handle, const void* format, void* outBuff)
+         s32 rc = vdec_take_picture(v, dst, vm_read32(fmt_ea + 0),
+                                    vm_read32(fmt_ea + 4), vm_read8(fmt_ea + 8));
+         VDEC_UNLOCK();
++        vdec_run_pending(handle, 0);   /* VDEC_DEFER: room now */
+         return rc;
+     }
+     if (!v->hasPic)
+@@ -677,6 +725,7 @@ s32 cellVdecGetPictureExt(CellVdecHandle handle, const void* format,
+     s32 rc = vdec_take_picture(&s_vdec[handle], dst, vm_read32(fmt_ea + 0),
+                                vm_read32(fmt_ea + 4), vm_read8(fmt_ea + 0xC));
+     VDEC_UNLOCK();
++    vdec_run_pending(handle, 0);   /* VDEC_DEFER: room now */
+     return rc;
+ }
+ 

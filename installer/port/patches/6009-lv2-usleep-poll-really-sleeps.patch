@@ -1,0 +1,63 @@
+Patch 6009: a thread polling with back-to-back tiny sys_timer_usleep calls really sleeps (USLEEP_SPIN=1 off).
+
+Sub-millisecond usleep busy-waits to a QPC deadline (SwitchToThread in the loop), which keeps short pacing waits
+precise. J-Stars' main thread idles in menus by polling usleep about 3,000 times a second, so a menu kept 1.2 cores
+busy, most of it kernel time. After 64 back-to-back calls (each starting within USLEEP_GAP_US, default 500 us, of the
+previous one ending) for longer than USLEEP_AFTER_US (default 5000), the call sleeps its time (at least
+USLEEP_REAL_US, default 100) on a high-resolution waitable timer instead. Short bursts, as in a fight, still spin.
+The recipe comes from another title's port (its menus went from 110% of a core to about 20%).
+
+Tested (US disc, bench.ps1, main menu idle route, CPU sampled 120-180 s): main menu 124% of a core (85% kernel) ->
+43% (30% kernel); demo 29.70 / 29.68, Free Battle 29.99 (fix: 29.10 median, 29.88)
+(bench/exp/2026-11-08_2219-usleep_clean, 2026-11-08_2232-menucpu_clean, bench/fix/2026-11-08_2114-menucpu).
+
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index 3a022815..e0f89974 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -268,12 +268,45 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         ensure_qpc_init();
+         LARGE_INTEGER qpc_start, qpc_now;
+         QueryPerformanceCounter(&qpc_start);
++        /* USLEEP_SPIN=1 restores the pure spin (patch 6009). A thread that polls with back-to-back tiny sleeps
++         * (64 in a row, each starting within USLEEP_GAP_US, default 500 us, of the previous one ending) for longer than USLEEP_AFTER_US
++         * (default 5000) is idling, not pacing: it really sleeps its time (at least USLEEP_REAL_US, default 100) on a high-resolution
++         * timer instead of spinning a core at 100% in kernel time. Short bursts, as in a fight, still spin.
++         * The same fix took another title's menus from 110% of a core to about 20%. */
++        static int us_cfg = -1; static int64_t us_after_q, us_real_us, us_gap_q;
++        if (us_cfg < 0) {
++            const char* e = getenv("USLEEP_SPIN"); us_cfg = (e && *e == '1') ? 0 : 1;
++            const char* a = getenv("USLEEP_AFTER_US"); const char* r = getenv("USLEEP_REAL_US");
++            us_after_q = (int64_t)(a ? atoll(a) : 5000) * s_qpc_freq.QuadPart / 1000000;
++            us_real_us = r ? atoll(r) : 100;
++            { const char* g = getenv("USLEEP_GAP_US"); us_gap_q = (int64_t)(g ? atoll(g) : 500) * s_qpc_freq.QuadPart / 1000000; }
++        }
++        static __declspec(thread) int64_t t_last_end, t_streak_start; static __declspec(thread) int t_streak;
++        static __declspec(thread) HANDLE t_timer;
++        if (us_cfg) {
++            if (t_last_end && qpc_start.QuadPart - t_last_end <= us_gap_q) {
++                if (++t_streak == 1) t_streak_start = qpc_start.QuadPart;
++            } else { t_streak = 0; }
++            if (t_streak >= 64 && qpc_start.QuadPart - t_streak_start >= us_after_q) {
++                if (!t_timer) t_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
++                LARGE_INTEGER due; due.QuadPart = -(LONGLONG)(((int64_t)usec > us_real_us ? (int64_t)usec : us_real_us) * 10);
++                if (t_timer && SetWaitableTimerEx(t_timer, &due, 0, NULL, NULL, NULL, 0))
++                    WaitForSingleObject(t_timer, 5);
++                else
++                    Sleep(1);
++                QueryPerformanceCounter(&qpc_now);
++                t_last_end = qpc_now.QuadPart;
++                goto usleep_done;
++            }
++        }
+         const int64_t qpc_deadline = qpc_start.QuadPart +
+             (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
+         do {
+             SwitchToThread();
+             QueryPerformanceCounter(&qpc_now);
+         } while (qpc_now.QuadPart < qpc_deadline);
++        t_last_end = qpc_now.QuadPart;
++        usleep_done: ;
+     }
+ #else
+     if (usec > 0) {
