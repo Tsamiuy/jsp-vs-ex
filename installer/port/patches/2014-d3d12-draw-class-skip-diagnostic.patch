@@ -3,9 +3,10 @@ submission; DRAW_CLASS_STATS=1 logs how many draws of the frame are VP, have a f
 topology.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c051fa01..824ae0ea 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -4913,6 +4913,35 @@
+@@ -5027,6 +5027,35 @@ static void render_frame(void)
        if (lim < 0) { const char* e = getenv("DRAW_LIMIT"); lim = e ? atoi(e) : 0; }
        if (lim > 0 && s_d3d.draw_count > (u32)lim) s_d3d.draw_count = (u32)lim; }
  

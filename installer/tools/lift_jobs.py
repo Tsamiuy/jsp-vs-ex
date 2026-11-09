@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Find, lift and register every JOBCRT SPURS job embedded in the game's EBOOT (ps3recomp v0.18.0 tools).
+"""Find, lift and register every JOBCRT SPURS job embedded in the game's EBOOT (ps3recomp v0.19.0 tools).
 
 After this repository's v0.15 jstars/spu_jobs/scan_jobcrt.py and lift_all_jobs.py (Tsamiuy, MIT): same scan, sizing and fingerprint,
-moved to the v0.18.0 tools. Run by installer/tools/firstrun.py on the player's PC; the lifted code is made from the player's own
+moved to the v0.19.0 tools. Run by installer/tools/firstrun.py on the player's PC; the lifted code is made from the player's own
 EBOOT and stays in the install folder.
 
     python lift_jobs.py --eboot EBOOT.elf --ps3recomp DIR --out DIR [-j 4]

@@ -4,13 +4,16 @@ TEXTURE_ADDRESS bits 20..22 select per-channel gamma (sRGB to linear on read). T
 plain UNORM and dark parts came out lifted (washed-out characters and stages). A texture with all three bits set is now read through the
 matching _SRGB view (BC1/BC2/BC3/RGBA8). RSX_TEX_GAMMA=0 turns it off; the first hits are logged as [tex-gamma].
 
+Re-fitted for v0.19.0: Re-cut onto v0.19.0's per-texture format table (vp_tex_dxgi): the sRGB read is applied to its answer.
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 91e4a1d4..66725f89 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -5346,6 +5346,17 @@
-                             (_bf == 0x87) ? DXGI_FORMAT_BC2_UNORM :
-                             (_bf == 0x88) ? DXGI_FORMAT_BC3_UNORM :
-                                             DXGI_FORMAT_R8_UNORM;
+@@ -5462,6 +5462,17 @@ static void render_frame(void)
+                         /* The upload's own format: an X16 font atlas bound
+                          * as R8 over an R16 resource sampled nothing. */
+                         DXGI_FORMAT sf = vp_tex_dxgi(dr->tex[_u].fmt);
 +                        /* TEXTURE_ADDRESS bits 20..22 = per-channel gamma (sRGB->linear on read, RGB only).
 +                         * Unhandled before: the texture was read as plain UNORM, so dark parts of gamma-flagged
 +                         * albedos came out lifted. RSX_TEX_GAMMA=0 restores the old read; log: [tex-gamma]. */

@@ -3,22 +3,25 @@ Patch 2017: shadow-map depth-compare descriptors in the D3D12 fragment path (for
 The draw's unit state goes through rsx_fp_shadow_desc_from_texture into rsx_fp_decompile_buffered_shadow_ex; the packed descriptors
 are part of the pipeline key. RSX_SHADOW_CMP=0 turns it off. [SHUNIT]/[SHADOW] log lines name the sampled units >= 4.
 
+Re-fitted for v0.19.0: Carries #618's unnormalized inputs next to the shadow bytes. A shadow-compare unit is left out of #618's coordinate scaling: the shadow helper divides an unnormalized coordinate by the size itself.
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 7f809dff..9eeb3eaa 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -265,6 +265,7 @@
-                              * and a 2D variant of the same program are different
-                              * pipelines and must not share a cache entry. */
+@@ -265,6 +265,7 @@ typedef struct {
+     u32 unnorm_mask;        /* unnormalized textures mask (PSO key) */
+     u32 unnorm_dim[16][3];  /* unnormalized dimensions for scaling */
      u64 zs;                 /* depth/stencil state, rsx_zs_key (PSO key) */
 +    u8 shadow[16];          /* packed shadow-compare descriptor per unit (PSO key) */
      ID3D12PipelineState* pso;
  } VPFPEntry;
  /* Guest-FP PSO cache. 16 entries thrashed badly: this title needs far more
-@@ -2336,7 +2337,40 @@
+@@ -2319,7 +2320,40 @@ static u32 dr_unnorm_units(const D3D12DrawRecord* dr, u32 dim[16][3])
  /* fragment program -> DXBC blob, split out of vp_get_fp_pso so that the
   * misses of one batch can be compiled on worker threads (D3DCompile was 23 of
   * the 27 ms per miss). Thread-safe: its own HLSL buffer, no D3D12 calls. */
--static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mask)
+-static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mask,
 +/* shadow-compare descriptors. The RSX compares a depth texture's texel with the lookup's r
 + * coordinate (SET_TEXTURE_ADDRESS func); without the descriptors the decompiler returns the raw
 + * depth and a shadow lookup becomes a depth value used as a light factor. Packed one byte per unit
@@ -52,11 +55,11 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
 +    }
 +}
 +
-+static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mask, const u8 sh[16])
++static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mask, const u8 sh[16],
+                                     u32 unnorm_mask, const u32 unnorm_dim[16][3])
  {
      extern uint8_t* vm_base;
-     HRESULT hr;
-@@ -2356,7 +2390,19 @@
+@@ -2340,8 +2374,23 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
      static int ctrl_auto = -1;
      if (ctrl_auto < 0) ctrl_auto = getenv("RSX_FP_CTRL_AUTO") ? 1 : 0;
      u32 fp_ctrl = ctrl_auto ? RSX_FP_CTRL_AUTO : ctrl;
@@ -75,45 +78,48 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
 +        for (int u = 0; u < 16; u++) if (sh[u]) fprintf(stderr, " t%d(en=%d func=%d lin=%d un=%d)", u, sh[u] & 3, (sh[u] >> 2) & 7, (sh[u] >> 5) & 1, (sh[u] >> 6) & 1);
 +        fprintf(stderr, " n=%d%c", n, 10); } }
      if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
-     /* FP_LIST=1: every program the title actually compiles, with its size. A
-      * fragment program that hangs the GPU shows up here as an implausible
-@@ -2692,6 +2738,7 @@
++    /* A shadow-compare unit divides an unnormalized coordinate by the size in its own helper (patch 2017), so
++     * #618's scaling skips it: dividing twice would sample the wrong texel. */
++    for (int u = 0; u < 16; u++) if (sh && (sh[u] & 3)) unnorm_mask &= ~(1u << u);
+     if (unnorm_mask) {
+         rsx_fp_apply_unnorm_scale(hlsl, sizeof(hlsl), unnorm_mask, (const u32 (*)[3])unnorm_dim, cube_mask, 0);
+     }
+@@ -2679,6 +2728,7 @@ static int s_fp_collect;
  typedef struct {
      u32 fp_addr, off, ctrl, cube, hash, blend, rtfmt, cmask, cull, vs_hash, gen;
      int vs_idx, nrt; u64 zs; ID3DBlob* vsb;
 +    u8 shadow[16];
+     u32 unnorm_mask, unnorm_dim[16][3];   /* #618: part of the program's identity */
      int status;                       /* 0 pending, 1 compile failed, 2 pipeline made (hr) */
      HRESULT hr; ID3D12PipelineState* pso;
- } FPJob;
-@@ -2704,7 +2751,8 @@
- {
+@@ -2693,6 +2743,7 @@ static int fpj_same(const FPJob* j, const FPJob* k)
      return j->hash == k->hash && j->ctrl == k->ctrl && j->cube == k->cube && j->vs_idx == k->vs_idx &&
             j->vs_hash == k->vs_hash && j->gen == k->gen && j->blend == k->blend && j->nrt == k->nrt &&
--           j->rtfmt == k->rtfmt && j->cmask == k->cmask && j->cull == k->cull && j->zs == k->zs;
-+           j->rtfmt == k->rtfmt && j->cmask == k->cmask && j->cull == k->cull && j->zs == k->zs &&
-+           !memcmp(j->shadow, k->shadow, 16);
+            j->rtfmt == k->rtfmt && j->cmask == k->cmask && j->cull == k->cull && j->zs == k->zs &&
++           !memcmp(j->shadow, k->shadow, 16) &&
+            j->unnorm_mask == k->unnorm_mask &&
+            (!j->unnorm_mask || memcmp(j->unnorm_dim, k->unnorm_dim, sizeof j->unnorm_dim) == 0);
  }
- static void vp_fp_jobs_reset(void)
- {
-@@ -2731,7 +2779,7 @@
+@@ -2721,7 +2772,7 @@ static DWORD WINAPI vp_fp_worker(LPVOID arg)
          LONG i = InterlockedIncrement(&s_fpj_next) - 1;
          if (i >= s_fpj_n) return 0;
          FPJob* j = &s_fpj[i];
--        ID3DBlob* pb = vp_fp_compile_blob(j->fp_addr, j->off, j->ctrl, j->cube);
-+        ID3DBlob* pb = vp_fp_compile_blob(j->fp_addr, j->off, j->ctrl, j->cube, j->shadow);
+-        ID3DBlob* pb = vp_fp_compile_blob(j->fp_addr, j->off, j->ctrl, j->cube, j->unnorm_mask,
++        ID3DBlob* pb = vp_fp_compile_blob(j->fp_addr, j->off, j->ctrl, j->cube, j->shadow, j->unnorm_mask,
+                                           (const u32 (*)[3])j->unnorm_dim);
          if (!pb) { j->status = 1; continue; }
          j->hr = vp_fp_make_pso(j->vsb, pb, j->blend, j->nrt, (DXGI_FORMAT)j->rtfmt, j->cmask, j->cull, j->zs, &j->pso);
-         pb->lpVtbl->Release(pb);
-@@ -2767,7 +2815,7 @@
+@@ -2758,7 +2809,8 @@ static void vp_fp_run_jobs(void)
  
  static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
                                            DXGI_FORMAT rtfmt, u32 ctrl, u32 cmask, u32 cull,
--                                          u32 cube_mask, u64 zs)
-+                                          u32 cube_mask, u64 zs, const D3D12DrawRecord* sdr)
+-                                          u32 cube_mask, u32 unnorm_mask, const u32 unnorm_dim[16][3], u64 zs)
++                                          u32 cube_mask, u32 unnorm_mask, const u32 unnorm_dim[16][3], u64 zs,
++                                          const D3D12DrawRecord* sdr)
  {
      if (nrt < 0) nrt = 0; if (nrt > 4) nrt = 4;   /* 0: a depth-only pass */
      if (rtfmt == 0) rtfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
-@@ -2788,6 +2836,7 @@
+@@ -2779,6 +2831,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
      extern u32 cellGcmResolveLocated(int local, u32 offset);
      u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
      if (off == 0xFFFFFFFFu) return NULL;
@@ -121,66 +127,67 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  
      /* Content hash: inline constants are patched in place per frame (wave's
       * stamp), so identity is the BYTES, not the address. */
-@@ -2827,7 +2876,8 @@
-             s_d3d.vp_fp[i].rtfmt == (u32)rtfmt && s_d3d.vp_fp[i].ctrl == ctrl &&
+@@ -2819,6 +2872,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
              s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
              s_d3d.vp_fp[i].cull == cull &&
--            s_d3d.vp_fp[i].cube_mask == cube_mask && s_d3d.vp_fp[i].zs == zs)
-+            s_d3d.vp_fp[i].cube_mask == cube_mask && s_d3d.vp_fp[i].zs == zs &&
-+            !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16))
+             s_d3d.vp_fp[i].cube_mask == cube_mask && s_d3d.vp_fp[i].zs == zs &&
++            !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16) &&
+             s_d3d.vp_fp[i].unnorm_mask == unnorm_mask &&
+             (!unnorm_mask || memcmp(s_d3d.vp_fp[i].unnorm_dim, unnorm_dim, sizeof(s_d3d.vp_fp[i].unnorm_dim)) == 0))
              return s_d3d.vp_fp[i].pso;
-     s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
-     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
-@@ -2877,14 +2927,15 @@
+@@ -2870,7 +2924,9 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
                      fp_addr, cube_mask, ns, 10); } } }
      HRESULT hr; ID3D12PipelineState* pso = NULL;
      FPJob key = { fp_addr, off, ctrl, cube_mask, uhash, blend, (u32)rtfmt, cmask, cull, vs_hash,
--                  (u32)s_d3d.vp_gen, vs_idx, nrt, zs, vsb, 0, 0, NULL };
+-                  (u32)s_d3d.vp_gen, vs_idx, nrt, zs, vsb, unnorm_mask, {{0}}, 0, 0, NULL };
 +                  (u32)s_d3d.vp_gen, vs_idx, nrt, zs, vsb };
 +    memcpy(key.shadow, shsig, 16);
++    key.unnorm_mask = unnorm_mask;
+     if (unnorm_mask) memcpy(key.unnorm_dim, unnorm_dim, sizeof key.unnorm_dim);
      if (s_fp_collect) { vp_fp_job_add(&key); return NULL; }
      FPJob* pj = vp_fp_find_done(&key);
-     if (pj) {
+@@ -2878,7 +2934,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
          if (pj->status == 1) return NULL;      /* compile failed: not cached, as before */
          pso = pj->pso; hr = pj->hr; pj->pso = NULL;
      } else {
--        ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask);
-+        ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, shsig);
+-        ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, unnorm_mask, unnorm_dim);
++        ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, shsig, unnorm_mask, unnorm_dim);
          if (!pb) return NULL;
          hr = vp_fp_make_pso(vsb, pb, blend, nrt, rtfmt, cmask, cull, zs, &pso);
          pb->lpVtbl->Release(pb);
-@@ -2926,6 +2977,7 @@
-     s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
-     s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
+@@ -2925,6 +2981,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     else
+         memset(s_d3d.vp_fp[s_d3d.vp_fp_n].unnorm_dim, 0, sizeof(s_d3d.vp_fp[s_d3d.vp_fp_n].unnorm_dim));
      s_d3d.vp_fp[s_d3d.vp_fp_n].zs      = zs;
 +    memcpy(s_d3d.vp_fp[s_d3d.vp_fp_n].shadow, shsig, 16);
      s_d3d.vp_fp[s_d3d.vp_fp_n].pso     = pso;
      s_d3d.vp_fp_n++;
      return pso;
-@@ -5090,7 +5142,7 @@
-             if (!dr->is_vp || dr->is_clear || !dr->fp_addr) continue;
+@@ -5206,7 +5263,7 @@ static void render_frame(void)
+             u32 unnorm_mask = dr_unnorm_units(dr, unnorm_dim);
              vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key, dr_num_rts(dr),
                            dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM,
--                          dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr), dr->zs_key);
-+                          dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr), dr->zs_key, dr);
+-                          dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr), unnorm_mask, unnorm_dim, dr->zs_key);
++                          dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr), unnorm_mask, unnorm_dim, dr->zs_key, dr);
          }
          s_fp_collect = 0;
          vp_fp_run_jobs();
-@@ -5292,7 +5344,7 @@
+@@ -5409,7 +5466,7 @@ static void render_frame(void)
                                         dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                    : DXGI_FORMAT_R8G8B8A8_UNORM,
                                         dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr),
--                                       dr->zs_key);
-+                                       dr->zs_key, dr);
+-                                       unnorm_mask, unnorm_dim, dr->zs_key);
++                                       unnorm_mask, unnorm_dim, dr->zs_key, dr);
          if (perf_on()) s_perf_pso += perf_now() - _ps0;
      }
  
-@@ -5674,7 +5726,7 @@
+@@ -5794,8 +5851,7 @@ static void render_frame(void)
                                                  dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                             : DXGI_FORMAT_R8G8B8A8_UNORM,
                                                  dr->fp_ctrl, dr->cmask, dr->cull,
--                                                dr_cube_mask(dr), dr->zs_key) : NULL;
-+                                                dr_cube_mask(dr), dr->zs_key, dr) : NULL;
+-                                                dr_cube_mask(dr),
+-                                                unnorm_mask, unnorm_dim, dr->zs_key) : NULL;
++                                                dr_cube_mask(dr), unnorm_mask, unnorm_dim, dr->zs_key, dr) : NULL;
                  s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
                                                           dpso ? dpso : vpso);
                  s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);

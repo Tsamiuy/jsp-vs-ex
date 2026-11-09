@@ -2,12 +2,11 @@ Patch 2037: fit: pass vs_idx into vp_fp_make_pso (patch 2005's split) for VPULL'
 
 Source: fit for J-Stars.
 
-
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 84ae0484..e3ddda63 100644
+index 2fc62442..a046ff19 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -2769,7 +2769,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+@@ -2761,7 +2761,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
  /* pipeline creation split out of vp_get_fp_pso so worker threads can run it
   * (ID3D12Device::CreateGraphicsPipelineState is free-threaded). */
  static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, DXGI_FORMAT rtfmt,
@@ -16,7 +15,7 @@ index 84ae0484..e3ddda63 100644
  {
      D3D12_INPUT_ELEMENT_DESC il[16];
      for (int _i = 0; _i < 16; _i++) {
-@@ -2786,7 +2786,7 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
+@@ -2778,7 +2778,7 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
      pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb);
      pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
      pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
@@ -25,18 +24,18 @@ index 84ae0484..e3ddda63 100644
          pd.InputLayout.NumElements = 0;
      pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
      /* Guest face culling. CULL_OFF=1 forces double-sided, the old
-@@ -2925,7 +2925,7 @@ static DWORD WINAPI vp_fp_worker(LPVOID arg)
-         FPJob* j = &s_fpj[i];
-         ID3DBlob* pb = vp_fp_compile_blob(j->fp_addr, j->off, j->ctrl, j->cube, j->shadow);
+@@ -2921,7 +2921,7 @@ static DWORD WINAPI vp_fp_worker(LPVOID arg)
+         ID3DBlob* pb = vp_fp_compile_blob(j->fp_addr, j->off, j->ctrl, j->cube, j->shadow, j->unnorm_mask,
+                                           (const u32 (*)[3])j->unnorm_dim);
          if (!pb) { j->status = 1; continue; }
 -        j->hr = vp_fp_make_pso(j->vsb, pb, j->blend, j->nrt, (DXGI_FORMAT)j->rtfmt, j->cmask, j->cull, j->zs, &j->pso);
 +        j->hr = vp_fp_make_pso(j->vsb, pb, j->blend, j->nrt, (DXGI_FORMAT)j->rtfmt, j->cmask, j->cull, j->zs, j->vs_idx, &j->pso);
          pb->lpVtbl->Release(pb);
          j->status = 2;
      }
-@@ -3089,7 +3089,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+@@ -3090,7 +3090,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
      } else {
-         ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, shsig);
+         ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, shsig, unnorm_mask, unnorm_dim);
          if (!pb) return NULL;
 -        hr = vp_fp_make_pso(vsb, pb, blend, nrt, rtfmt, cmask, cull, zs, &pso);
 +        hr = vp_fp_make_pso(vsb, pb, blend, nrt, rtfmt, cmask, cull, zs, vs_idx, &pso);

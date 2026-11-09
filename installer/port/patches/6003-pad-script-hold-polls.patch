@@ -4,9 +4,10 @@ PAD_SCRIPT holds every press for a fixed 40 polls. Menus that auto-repeat a held
 field sets the number of polls the press is held (default 40, unchanged). Test-input tooling only.
 
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 5f8a2fa2..de883127 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
-@@ -913,7 +913,7 @@
+@@ -994,7 +994,7 @@ skip_inject: ;
       * LEFT 0x0080, RIGHT 0x0020, CROSS 0x4000, CIRCLE 0x2000, TRIANGLE 0x1000.
       * Legit input simulation on the same footing as PAD_AUTOPRESS/PAD_STICK. */
      { static int s_sc = -1;
@@ -15,7 +16,7 @@ diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
        static unsigned long long t0 = 0;   /* not ULONGLONG: this builds on POSIX too */
        if (s_sc < 0) {
            s_sc = 0;
-@@ -925,7 +925,9 @@
+@@ -1006,7 +1006,9 @@ skip_inject: ;
                    double t = strtod(p, (char**)&p);
                    if (*p == ':') p++;
                    unsigned m = (unsigned)strtoul(p, (char**)&p, 0);
@@ -26,7 +27,7 @@ diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
                    while (*p == ',' || *p == ' ') p++;
                }
                printf("[cellPad] PAD_SCRIPT: %d event(s)%s\n", n_ev,
-@@ -942,7 +944,7 @@
+@@ -1023,7 +1025,7 @@ skip_inject: ;
             * looks like regardless of poll rate. */
            static int fired[256], held[256];
            for (int i = 0; i < n_ev; i++) {

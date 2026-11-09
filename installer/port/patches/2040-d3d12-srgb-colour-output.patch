@@ -1,7 +1,8 @@
 Patch 2040: d3d12: RSX sRGB colour output (SHADER_PACKER), the output half of that port d95db3c (SRGB_OUT=0 off)
 
-Source: output half of the maintainer's other port, toolkit d95db3c.
+Source: output half of that port's toolkit d95db3c.
 
+Re-fitted for v0.19.0: Cube-mask loop over all 16 units, as before.
 
 diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
 index a0e67ffb..320197c4 100644
@@ -16,7 +17,7 @@ index a0e67ffb..320197c4 100644
       * say so if a title sets one. */
      if (method == 0x00001738 || method == 0x0000173C) {
 diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
-index 867fa0a7..73bf09d8 100644
+index 867fa0a7..6126a86f 100644
 --- a/libs/video/rsx_commands.h
 +++ b/libs/video/rsx_commands.h
 @@ -258,6 +258,7 @@ typedef struct rsx_vertex_attrib {
@@ -28,10 +29,10 @@ index 867fa0a7..73bf09d8 100644
      u32 surface_color_pitch[RSX_MAX_RENDER_TARGETS];
      u32 surface_zeta_offset;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index a36336fa..40b76a13 100644
+index 9102ab7a..299d2bb2 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -88,6 +88,7 @@ typedef struct {
+@@ -89,6 +89,7 @@ typedef struct {
      /* VP path per-draw shader/texture state, captured at draw_arrays time. */
      u32 fp_addr;        /* SET_SHADER_PROGRAM value (guest FP ucode location)   */
      u32 fp_ctrl;        /* SET_SHADER_CONTROL export bits at draw time (FP_CTRL_BITS) */
@@ -39,19 +40,20 @@ index a36336fa..40b76a13 100644
      u32 alpha_ctl;      /* alpha test: enable<<16 | (func&0xFF)<<8 | ref */
      u32 begin_epoch;    /* SET_BEGIN_END generation, for batch concatenation */
      u32 cull;           /* packed face culling: bit0 enable, bit1 cull FRONT
-@@ -2622,9 +2623,10 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
+@@ -2591,9 +2592,10 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
       * image) all six faces decode as clean environment art. */
      static int en = -1;
      if (en < 0) { const char* e = getenv("RSX_CUBE_TEX"); en = e ? atoi(e) : 1; }
 -    if (!en) return 0;
 +    if (!en) return dr->srgb_out ? (1u << 29) : 0;
      u32 m = 0;
-     for (int u = 0; u < VP_TEX_UNITS; u++) if (dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
+-    for (int u = 0; u < 4; u++) if (dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
++    for (int u = 0; u < VP_TEX_UNITS; u++) if (dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
 +    if (dr->srgb_out) m |= 1u << 29;   /* sRGB colour output (rec_srgb_out): part of the pipeline key */
      return m;
  }
  
-@@ -2829,6 +2831,13 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+@@ -2821,6 +2823,13 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
              fprintf(stderr, "[CUBE] fp=0x%X compiled with cube units mask 0x%X%c",
                      fp_addr, cube_mask, 10); }
      }
@@ -65,7 +67,7 @@ index a36336fa..40b76a13 100644
      /* FP_IDCOLOR=1: give every fragment program a distinct flat colour derived
       * from its address. One frame then shows which program paints which surface,
       * instead of one run per candidate to test them by elimination. */
-@@ -4201,6 +4210,23 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+@@ -4222,6 +4231,23 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
  
  /* The SET_SHADER_CONTROL bits a guest FP's translation depends on. */
  #define FP_CTRL_BITS (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
@@ -89,7 +91,7 @@ index a36336fa..40b76a13 100644
  static u32 rec_fp_ctrl(void)
  {
      const rsx_state* st = s_d3d.current_rsx_state;
-@@ -8466,7 +8492,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8657,7 +8683,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                  dr->textured       = s_d3d.tex_bound;
                  dr->is_vp          = 1;
                  dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
@@ -98,7 +100,7 @@ index a36336fa..40b76a13 100644
                  dr->cull = rsx_cull_key(s_d3d.current_rsx_state); dr->zs_key = rsx_zs_key(s_d3d.current_rsx_state); dr->stencil_ref = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->stencil_ref : 0;
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
-@@ -8587,7 +8613,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8789,7 +8815,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
              dr->textured       = s_d3d.tex_bound;
              dr->is_vp          = 1;
              dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;
@@ -107,7 +109,7 @@ index a36336fa..40b76a13 100644
              dr->cull = rsx_cull_key(s_d3d.current_rsx_state); dr->zs_key = rsx_zs_key(s_d3d.current_rsx_state); dr->stencil_ref = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->stencil_ref : 0;
          dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
              dr->begin_epoch = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->begin_epoch : 0;
-@@ -8781,7 +8807,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8990,7 +9016,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
          dr->textured       = s_d3d.tex_bound;
          dr->is_vp          = 1;
          dr->fp_addr = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->shader_program : 0;

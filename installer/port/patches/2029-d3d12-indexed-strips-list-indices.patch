@@ -1,13 +1,12 @@
 Patch 2029: B32 step 1: indexed strips/fans upload each vertex once + list indices (STRIP_IX=0 old). Battle 12 -> 25-31 guest flips/s (boot167_six vs boot166_vs)
 
-Source: the maintainer's other port, toolkit 91b28d2.
-
+Source: that port's toolkit 91b28d2.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 627ebc88..92bc6711 100644
+index eb95b622..d3730cd4 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -7327,6 +7327,80 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
+@@ -7486,6 +7486,80 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
      return count;
  }
  
@@ -88,7 +87,7 @@ index 627ebc88..92bc6711 100644
  static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
  {
      extern uint8_t* vm_base;
-@@ -7904,6 +7978,12 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8110,6 +8184,12 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
          emitted = upload_tris_vp_ix(s_d3d.current_rsx_state, first, count, ix_cont);
          ix_used = emitted != 0;
      }

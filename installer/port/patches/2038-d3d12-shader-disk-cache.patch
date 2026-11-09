@@ -1,13 +1,12 @@
 Patch 2038: Shader and pipeline disk caches (shader_cache.bin, pso_cache.bin): pipeline time over a battle 5.74 s off, 3.22 s on reuse; long ticks 7 -> 1 (boot273-275). SHADER_CACHE=0, PSO_CACHE=0 off
 
-Source: the maintainer's other port, toolkit 51a4e57, a lock added for patch 2005.
-
+Source: that port's toolkit 51a4e57, a lock added for patch 2005.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index e3ddda63..567e6250 100644
+index a046ff19..e9f037f0 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -2078,6 +2078,157 @@ static void compile_vp(void)
+@@ -2047,6 +2047,157 @@ static void compile_vp(void)
  /* Hash + compile the CURRENT rsx_state vertex program into the VS cache;
   * returns the cache slot (or -1). Called at draw-record time so each draw
   * carries the VP that was loaded when it was submitted. */
@@ -165,7 +164,7 @@ index e3ddda63..567e6250 100644
  static u32 vp_hash_ucode(const u8* p, u32 n)
  {
      u32 h = 2166136261u;
-@@ -2174,8 +2325,7 @@ static int vp_get_vs(const rsx_state* st)
+@@ -2143,8 +2294,7 @@ static int vp_get_vs(const rsx_state* st)
          }
      }
      ID3DBlob* vb = NULL; ID3DBlob* e = NULL;
@@ -175,7 +174,7 @@ index e3ddda63..567e6250 100644
      if (e) e->lpVtbl->Release(e);
      if (FAILED(hr) || !vb) {
          static int _e=0; if (PS3_LOG_FIRST(_e, 4)) printf("[VP] per-draw VS compile FAIL (hash=0x%08X)\n", hash);
-@@ -2752,8 +2902,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+@@ -2744,8 +2894,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
          if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
      }
      ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
@@ -185,7 +184,7 @@ index e3ddda63..567e6250 100644
      if (FAILED(hr) || !pb) {
          static int _e2=0; if (PS3_LOG_FIRST(_e2, 16))
              printf("[FP] PS compile FAIL (fp=0x%08X): %s\n", fp_addr,
-@@ -2869,8 +3018,7 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
+@@ -2861,8 +3010,7 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
      pd.SampleDesc.Count = 1;
  
      ID3D12PipelineState* pso = NULL; HRESULT hr;

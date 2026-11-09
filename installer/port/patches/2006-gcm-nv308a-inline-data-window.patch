@@ -5,9 +5,10 @@ transfer; every later word of a longer cellGcmSetInlineTransfer was dropped. The
 0x0400-0x1FFC.
 
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 746af924..b98465f6 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
-@@ -1376,7 +1376,7 @@
+@@ -1595,7 +1595,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
          case 0x0308: s_gcm2d.size_out = data; return;
          case 0x030C: return;                /* SIZE_IN */
          }

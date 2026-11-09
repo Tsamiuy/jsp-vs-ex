@@ -5,9 +5,10 @@ back at the default context cellGcmInit built (no rewind). The runtime only zero
 went into its own segment and the FIFO walker lost sync.
 
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index f073f327..746af924 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
-@@ -1693,6 +1693,11 @@ static void gcm_fifo_dump_around(u32 getoff)
+@@ -1918,6 +1918,11 @@ static void gcm_fifo_dump_around(u32 getoff)
          fprintf(stderr, "[FIFOSTEP] io=%08X w=%08X  type=%u method=0x%04X count=%u\n",
                  s_tr_off[k], w, w >> 29, w & 0x1FFCu, (w >> 18) & 0x7FFu);
      }
@@ -19,10 +20,10 @@ diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
      for (int k = -20; k <= 2; k++) {
          u32 io = getoff + (u32)(k * 4);
          u32 ea = gcm_io2ea(io);
-@@ -4169,6 +4174,12 @@ void cellGcmInitDefaultFifoMode(s32 mode)
+@@ -4528,6 +4533,12 @@ void cellGcmInitDefaultFifoMode(s32 mode)
      s_default_fifo_mode = mode;
  }
-
+ 
 +/* The default context's EA and the title's gCellGcmCurrentContext slot, for a
 + * title that implements the libgcm repoint itself (the port's override of
 + * cellGcmSetDefaultCommandBuffer). 0 before cellGcmInit. */

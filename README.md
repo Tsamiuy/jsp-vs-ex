@@ -22,10 +22,9 @@ translated ahead of time to native x64. Unofficial fan project.
 > runs through the opening movie, the title screen, the menus and fights, with sound, at about 29 frames per second on
 > the maps that were tested. It has a launcher and a Training mode. These runs were made on one Windows machine.
 >
-> An opt-in newer tree (v18, `--tree v18` in the installer, ps3recomp v0.18.0) also boots and plays fights with sound,
+> An opt-in newer tree (v18, `--tree v18` in the installer, ps3recomp v0.19.0) also boots and plays fights with sound,
 > but it is not the default: it is slower (16 to 22 frames per second in the tests so far) and
 > has known problems, such as washed-out lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
-> Moving it to a newer toolkit version is in progress.
 >
 > Dated table (top refreshed 2026-10-30, for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md). What the port
 > adds: [docs/FEATURES.md](docs/FEATURES.md).

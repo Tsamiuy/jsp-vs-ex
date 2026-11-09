@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Export the pinned ps3recomp v0.18.0 toolkit and apply installer/port/patches to it (run when the installer is built).
+"""Export the pinned ps3recomp v0.19.0 toolkit and apply installer/port/patches to it (run when the installer is built).
 
     python installer/tools/export_toolkit.py --out DIR [--repo GIT_DIR] [--no-fetch]
 
 The toolkit is MIT-licensed and stays upstream: this script takes `git archive` of the pinned commit (line-ending conversion off, so a
 Windows checkout with core.autocrlf on gets the bytes the patches were made against) from a clone of
 https://github.com/sp00nznet/ps3recomp, and applies installer/port/patches/*.patch in name order. The default repository is the submodule
-third_party/ps3recomp; it may be at another commit (the v0.15 tree's pin), in which case the v0.18.0 tag is fetched into it first
+third_party/ps3recomp; it may be at another commit (the v0.15 tree's pin), in which case the v0.19.0 tag is fetched into it first
 (this needs the network once, on the machine that builds the installer, never on the player's PC). The result goes into the payload.
 
 Needs Python 3.8+ and Git on PATH; standard library only.
@@ -21,8 +21,8 @@ import sys
 import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-TAG = "v0.18.0"
-PIN = "4e8f3ca87a3e1d87bb83b8b7e9348fe2685cd514"   # ps3recomp v0.18.0, the commit installer/port/patches are made against
+TAG = "v0.19.0"
+PIN = "ae92407bb1d899e3d32143e360fe6e6d4d8fa1b5"   # ps3recomp v0.19.0, the commit installer/port/patches are made against
 PATCHES = ROOT / "installer" / "port" / "patches"
 
 

@@ -5,9 +5,10 @@ import stub is just ps3_hle_call(nid), so it never runs the glink stub's `std r2
 slot after the call and got whatever its frame held there. The fast path now writes the slot too.
 
 diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 5148b384..52d32df9 100644
 --- a/runtime/ppu/ppu_hle.cpp
 +++ b/runtime/ppu/ppu_hle.cpp
-@@ -254,8 +254,17 @@
+@@ -281,8 +281,17 @@ static void hle_top_note(uint32_t nid, const char* name, const ppu_context* ctx,
  extern "C" uint32_t ppu_prof_resolve_host(void* ra);
  extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
  {

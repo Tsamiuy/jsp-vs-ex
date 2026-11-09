@@ -32,8 +32,8 @@ Online Battle (experimental, `v18` only), which is off unless you turn it on and
 | `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`--tree v15`, the default: `jstars/port`; or `--tree v18`, opt-in until its open issues are fixed: `installer/port`), the patched toolkit (v18: `export_toolkit.py`; v15: `tools/toolkit/apply_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
 | `installer/tools/firstrun.py` | The build step that runs on the player's PC after setup copied the files. Preflight checks with named codes, then resumable steps whose markers hold an input fingerprint; a new log per run in `logs\firstrun-<time>.log` (the newest five are kept) |
 | `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them with the v0.15 tools (from `jstars/spu_jobs/`, arguments instead of fixed folders); used by the `v15` tree |
-| `installer/tools/lift_jobs.py` | The same for the v0.18.0 tools (the `v18` tree): scan, wrap, lift, `spu_workloads.c` |
-| `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.18.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
+| `installer/tools/lift_jobs.py` | The same for the v0.19.0 tools (the `v18` tree): scan, wrap, lift, `spu_workloads.c` |
+| `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.19.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
 | `installer/port/jsp/`, `installer/port/patches/` | The `v18` port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
 | `installer/port/test/` | Scripted pad routes for testing the installed `v18` game without a controller (see "Test routes" below) |
 | `installer/tools/installer_art.py` | Draws the wizard images and icons at build time (needs Pillow and the IBM Plex Mono Bold font file); nothing generated is committed |
@@ -89,7 +89,7 @@ python installer\tools\installer_art.py
 python installer\tools\installer_music.py
 build\installer\toolchain-cache\trees\llvm-mingw\bin\x86_64-w64-mingw32-clang.exe -O2 -mwindows -s -o build\installer\jsp-launcher.exe installer\launcher\launcher.c
 python installer\tools\assemble_payload.py
-rem (--tree v18 stages the v0.18.0 port in installer/port instead; --toolkit-repo and --no-fetch: see the script)
+rem (--tree v18 stages the v0.19.0 port in installer/port instead; --toolkit-repo and --no-fetch: see the script)
 ISCC.exe /DPayload=%CD%\build\installer\payload /O%CD%\build\installer\out %CD%\installer\jsp.iss
 python installer\tools\assemble_portable.py
 ```
@@ -102,7 +102,7 @@ The FFmpeg entry is GitHub's zip of the n9.0.1 tag: GitHub does not promise the 
 most likely means it was re-packed (check the tag, then refill). Its majors (avcodec 63, avutil 61) must match the RPCS3 DLLs
 players have; firstrun.py's check M1 warns when they do not.
 The `v18` toolkit is taken from the submodule
-`third_party/ps3recomp`: when that checkout is at another commit (the v0.15 pin), `assemble_payload.py` fetches the `v0.18.0` tag
+`third_party/ps3recomp`: when that checkout is at another commit (the v0.15 pin), `assemble_payload.py` fetches the `v0.19.0` tag
 into it once, on the machine that builds the installer; the player's PC needs no network.
 `assemble_payload.py` refuses to finish when the payload holds a file kind that the game ships (`.elf`, `.bin`, `.sfo`,
 `.psarc`, `.edat`, `.self`, `.sprx`), and `assemble_portable.py` refuses a payload that already holds first-run output.

@@ -4,111 +4,44 @@ The backend always called rsx_texture_layout with pitch 0, so rows of linear tex
 (DXT) linear textures also ignored the pitch. They now space their source rows by the pitch while the decoded rows stay packed.
 RSX_TEX_PITCH=0 restores pitch 0.
 
+Re-fitted for v0.19.0: v0.19.0 (#600) tracks the pitch register itself; what is left is the RSX_TEX_PITCH switch, the [TEXPITCH] log and the pitch for the mip chain.
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b2bda618..b5603288 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -114,7 +114,7 @@
-                          * one as 2D is what makes an environment-mapped chrome
-                          * surface come out with black patches and banding. */
-         int set;
--        u32 addr, filter, ctrl0, border;   /* TEXTURE_ADDRESS/FILTER/CONTROL0/BORDER_COLOR */
-+        u32 addr, filter, ctrl0, border, pitch;   /* TEXTURE_ADDRESS/FILTER/CONTROL0/BORDER_COLOR */
-     } tex[VP_TEX_UNITS];
-     int tex_rt[VP_TEX_UNITS];      /* pre-pass: OffRT index sampled by unit, -1 = none */
-     int tex_slot;       /* legacy single-slot path (atlas); -1 = none */
-@@ -374,7 +374,7 @@
-     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
-     /* VP path: latest texture bound per unit (t0-t3). */
-     struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set;
--             u32 addr, filter, ctrl0, border; } cur_texs[VP_TEX_UNITS];
-+             u32 addr, filter, ctrl0, border, pitch; } cur_texs[VP_TEX_UNITS];
-     /* Guest sampler states, one shader-visible descriptor each (samp_key[i]
-      * describes descriptor i; 0 and 1 are the defaults for units with none). */
-     ID3D12DescriptorHeap* samp_heap;
-@@ -3042,7 +3042,7 @@
-     return h;
- }
- 
--static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
-+static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 tpitch)
- {
-     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
-      * tried against the TDR and does not help, because PERF shows the upload
-@@ -3066,7 +3066,16 @@
+@@ -3094,7 +3094,16 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
       * layout.c owns them so the Metal backend can read a guest texture without
       * re-deriving any of it. Only the DXGI mapping below is ours. */
      rsx_tex_layout tl;
--    rsx_texture_layout(fmt, w, h, &tl);
+-    rsx_texture_layout_pitched(fmt, w, h, pitch_arg, &tl);
 +    /* the pitch register (TEXTURE_CONTROL3 [19:0]) spaces the rows of a LINEAR texture
 +     * (LN bit); the layout code ignored it for compressed ones. RSX_TEX_PITCH=0 passes 0 again. */
-+    static int s_tpitch_on = -1;
-+    if (s_tpitch_on < 0) { const char* e = getenv("RSX_TEX_PITCH"); s_tpitch_on = e ? atoi(e) : 1; }
-+    rsx_texture_layout_pitched(fmt, w, h, s_tpitch_on ? tpitch : 0u, &tl);
-+    if ((fmt & 0x20u) && tpitch) { static u32 seen[32]; static int ns = 0; u32 k = (fmt << 24) ^ (w << 8) ^ tpitch; int f = 0;
++    static int s_pitch_arg_on = -1;
++    if (s_pitch_arg_on < 0) { const char* e = getenv("RSX_TEX_PITCH"); s_pitch_arg_on = e ? atoi(e) : 1; }
++    rsx_texture_layout_pitched(fmt, w, h, s_pitch_arg_on ? pitch_arg : 0u, &tl);
++    if ((fmt & 0x20u) && pitch_arg) { static u32 seen[32]; static int ns = 0; u32 k = (fmt << 24) ^ (w << 8) ^ pitch_arg; int f = 0;
 +        for (int i = 0; i < ns; i++) if (seen[i] == k) f = 1;
 +        if (!f && ns < 32) { seen[ns++] = k;
-+            fprintf(stderr, "[TEXPITCH] linear fmt=0x%02X %ux%u pitch=%u natural=%u used_row=%u%c", fmt, w, h, tpitch,
++            fprintf(stderr, "[TEXPITCH] linear fmt=0x%02X %ux%u pitch=%u natural=%u used_row=%u%c", fmt, w, h, pitch_arg,
 +                    tl.compressed ? ((w + 3) / 4) * tl.block_bytes : w * tl.bytes_per_texel, tl.row_bytes, 10); } }
      int argb = (tl.fmt == RSX_TEXFMT_R8G8B8A8);
      int dxt  = tl.compressed;
      /* Compressed rows are counted in blocks, so keep bpp at 1 for the byte
-@@ -3241,7 +3250,7 @@
+@@ -3259,7 +3268,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
      UINT64 mtotal = 0;
      u32 levels = 1;
      if (s_mips_on && !cube && mips > 1 && !(dxt && ((w & 3u) || (h & 3u)))) {
 -        levels = rsx_texture_mip_chain(fmt, w, h, mips, 0u, mlv);
-+        levels = rsx_texture_mip_chain(fmt, w, h, mips, s_tpitch_on ? tpitch : 0u, mlv);
++        levels = rsx_texture_mip_chain(fmt, w, h, mips, s_pitch_arg_on ? pitch_arg : 0u, mlv);
          if (levels > 1) {
              D3D12_RESOURCE_DESC md = {0};
              md.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-@@ -5311,7 +5320,7 @@
-                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
-                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,
-                                                 dr->tex[_u].h, dr->tex[_u].fmt,
--                                                _cube, dr->tex[_u].mips);
-+                                                _cube, dr->tex[_u].mips, dr->tex[_u].pitch);
-                     if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
-                         s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
-                     /* Both forms of the offset are in hand here; the filters
-@@ -7594,7 +7603,7 @@
-                     dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
-                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
-                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
--                    dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border;
-+                    dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border; dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
-                     dr->tex[_u].set = s_d3d.cur_texs[_u].set;
-                     dr->tex_rt[_u]  = -1;
-                 }
-@@ -7715,7 +7724,7 @@
-                 dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
-                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
-                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
--                    dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border;
-+                    dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border; dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
-                 dr->tex[_u].set = s_d3d.cur_texs[_u].set;
-                 dr->tex_rt[_u]  = -1;
-             }
-@@ -7883,7 +7892,7 @@
-             dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
-                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
-                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
--                    dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border;
-+                    dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border; dr->tex[_u].pitch = s_d3d.cur_texs[_u].pitch;
-             dr->tex[_u].set = s_d3d.cur_texs[_u].set;
-             dr->tex_rt[_u]  = -1;
-         }
-@@ -8036,6 +8045,7 @@
-         s_d3d.cur_texs[unit].filter = tex->filter;
-         s_d3d.cur_texs[unit].ctrl0  = tex->control0;
-         s_d3d.cur_texs[unit].border = tex->border_color;
-+        s_d3d.cur_texs[unit].pitch  = tex->control3 & 0xFFFFFu;
-         if (env_str("TEXFMTDBG", &s_env_texfmtdbg)) { static u32 seen[64]; static int ns=0;
-             u32 k = (unit<<24) | (((tex->format>>8) & 0xFFu)<<16) | (width & 0xFFFFu);
-             int f=0; for (int i=0;i<ns;i++) if (seen[i]==k) f=1;
 diff --git a/libs/video/rsx_texture_layout.c b/libs/video/rsx_texture_layout.c
+index 51a30a23..5129f83f 100644
 --- a/libs/video/rsx_texture_layout.c
 +++ b/libs/video/rsx_texture_layout.c
-@@ -101,9 +101,13 @@
+@@ -101,9 +101,13 @@ void rsx_texture_layout_pitched(u32 rsx_fmt, u32 w, u32 h, u32 pitch,
          out->bytes_per_texel = 0;
          out->swizzled = 0;
          out->row_bytes = ((w + 3u) / 4u) * out->block_bytes;
@@ -123,7 +56,7 @@ diff --git a/libs/video/rsx_texture_layout.c b/libs/video/rsx_texture_layout.c
      } else {
          /* Swizzled unless the LN bit is set. The hardware requires power-of-two
           * dimensions to swizzle, so a NPOT image is linear regardless. */
-@@ -281,7 +285,7 @@
+@@ -281,7 +285,7 @@ void rsx_texture_decode(void* dst, u32 dst_pitch,
           * rather than converted -- only the row stride changes. */
          for (u32 y = 0; y < tl->rows; y++)
              memcpy(d + (size_t)y * dst_pitch,

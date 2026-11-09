@@ -10,22 +10,61 @@ SHADER_HASH_MEMO.
 Tested (US disc, Free Battle, same scripted route, same build): game flips per second over the same 100 s of the fight 13.1
 with it, 11.8 with SHADER_HASH_MEMO=0.
 
-diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
---- a/libs/video/rsx_fp_decompiler.h
-+++ b/libs/video/rsx_fp_decompiler.h
-@@ -255,4 +255,8 @@
- /* Kept from this tree (see the .c) -- used by rsx_d3d12_backend.c. */
- int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_out);
- u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes);
-+/* rsx_fp_code_hash's value from a per-thread memo keyed on the hashed instruction blocks (exact: a hit compares the
-+ * blocks byte for byte), plus the program size and rsx_fp_texture_units' mask for the same bytes.
-+ * SHADER_HASH_MEMO=0 computes all three every call. */
-+u32 rsx_fp_code_hash_memo(const u8* ucode, u32 max_bytes, u32* size_out, u32* units_out);
- #endif /* PS3RECOMP_RSX_FP_DECOMPILER_H */
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 57a8db5a..59b7bd33 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2327,14 +2327,13 @@ static u32 dr_unnorm_units(const D3D12DrawRecord* dr, u32 dim[16][3])
+  * so the pipeline key can compare them: enabled (2 bits) | func<<2 | linear<<5 | unnormalized<<6. */
+ static int off_rt_find(u32 off);
+ static int off_ds_find(u32 off);
+-static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16])
++static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 units)
+ {
+     extern uint8_t* vm_base;
+     memset(sh, 0, 16);
+     static int en = -1;
+     if (en < 0) { const char* e = getenv("RSX_SHADOW_CMP"); en = e ? atoi(e) : 1; }
+     if (!en || !dr || !vm_base) return;
+-    u32 units = rsx_fp_texture_units(vm_base + off, 0x10000);
+     static u32 s_units_seen[64]; static int s_units_n;
+     for (u32 u = 0; u < 16 && u < VP_TEX_UNITS; u++) {
+         if (!(units & (1u << u))) continue;
+@@ -2832,7 +2831,10 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+     u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
+     if (off == 0xFFFFFFFFu) return NULL;
+-    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig);
++    /* Code hash, size and texture-unit mask in one memoised walk (SHADER_HASH_MEMO=0: three full walks). */
++    u32 fpm_size = 0, fpm_units = 0;
++    const u32 fpm_hash = rsx_fp_code_hash_memo(vm_base + off, 0x10000, &fpm_size, &fpm_units);
++    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig, fpm_units);
+ 
+     /* Content hash: inline constants are patched in place per frame (wave's
+      * stamp), so identity is the BYTES, not the address. */
+@@ -2841,7 +2843,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+      * so hashing them made the pipeline key move every draw. */
+     u32 uhash;
+     {
+-        u32 usz = rsx_fp_program_size(vm_base + off, 0x10000);
++        u32 usz = fpm_size;
+         if (usz == 0) usz = 64;
+         s_perf_pso_hashbytes += (int)usz;
+         static int consts_inline = -1;
+@@ -2852,7 +2854,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+             const u8* up = vm_base + off;
+             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
+         } else {
+-            uhash = rsx_fp_code_hash(vm_base + off, 0x10000);
++            uhash = fpm_hash;
+         }
+     }
+ 
 diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 650f342a..d41cc78d 100644
 --- a/libs/video/rsx_fp_decompiler.c
 +++ b/libs/video/rsx_fp_decompiler.c
-@@ -1645,6 +1645,79 @@
+@@ -1732,6 +1732,79 @@ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes)
      return h;
  }
  
@@ -105,52 +144,16 @@ diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
  /* Scale texel-space coordinates to the 0..1 range HLSL sampling expects.
   *
   * An RSX texture whose format carries RSX_TEX_FMT_UNNORM (0x40) is addressed in
-diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
---- a/libs/video/rsx_d3d12_backend.c
-+++ b/libs/video/rsx_d3d12_backend.c
-@@ -2343,14 +2343,13 @@
-  * so the pipeline key can compare them: enabled (2 bits) | func<<2 | linear<<5 | unnormalized<<6. */
- static int off_rt_find(u32 off);
- static int off_ds_find(u32 off);
--static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16])
-+static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 units)
- {
-     extern uint8_t* vm_base;
-     memset(sh, 0, 16);
-     static int en = -1;
-     if (en < 0) { const char* e = getenv("RSX_SHADOW_CMP"); en = e ? atoi(e) : 1; }
-     if (!en || !dr || !vm_base) return;
--    u32 units = rsx_fp_texture_units(vm_base + off, 0x10000);
-     static u32 s_units_seen[64]; static int s_units_n;
-     for (u32 u = 0; u < 16 && u < VP_TEX_UNITS; u++) {
-         if (!(units & (1u << u))) continue;
-@@ -2836,7 +2835,10 @@
-     extern u32 cellGcmResolveLocated(int local, u32 offset);
-     u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
-     if (off == 0xFFFFFFFFu) return NULL;
--    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig);
-+    /* Code hash, size and texture-unit mask in one memoised walk (SHADER_HASH_MEMO=0: three full walks). */
-+    u32 fpm_size = 0, fpm_units = 0;
-+    const u32 fpm_hash = rsx_fp_code_hash_memo(vm_base + off, 0x10000, &fpm_size, &fpm_units);
-+    u8 shsig[16]; vp_shadow_pack(sdr, off, shsig, fpm_units);
- 
-     /* Content hash: inline constants are patched in place per frame (wave's
-      * stamp), so identity is the BYTES, not the address. */
-@@ -2845,7 +2847,7 @@
-      * so hashing them made the pipeline key move every draw. */
-     u32 uhash;
-     {
--        u32 usz = rsx_fp_program_size(vm_base + off, 0x10000);
-+        u32 usz = fpm_size;
-         if (usz == 0) usz = 64;
-         s_perf_pso_hashbytes += (int)usz;
-         static int consts_inline = -1;
-@@ -2856,7 +2858,7 @@
-             const u8* up = vm_base + off;
-             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
-         } else {
--            uhash = rsx_fp_code_hash(vm_base + off, 0x10000);
-+            uhash = fpm_hash;
-         }
-     }
- 
+diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
+index b6bf0704..65f4e176 100644
+--- a/libs/video/rsx_fp_decompiler.h
++++ b/libs/video/rsx_fp_decompiler.h
+@@ -267,4 +267,8 @@ u32 rsx_fp_program_size(const u8* ucode, u32 max_bytes);
+ /* Kept from this tree (see the .c) -- used by rsx_d3d12_backend.c. */
+ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_out);
+ u32 rsx_fp_code_hash(const u8* ucode, u32 max_bytes);
++/* rsx_fp_code_hash's value from a per-thread memo keyed on the hashed instruction blocks (exact: a hit compares the
++ * blocks byte for byte), plus the program size and rsx_fp_texture_units' mask for the same bytes.
++ * SHADER_HASH_MEMO=0 computes all three every call. */
++u32 rsx_fp_code_hash_memo(const u8* ucode, u32 max_bytes, u32* size_out, u32* units_out);
+ #endif /* PS3RECOMP_RSX_FP_DECOMPILER_H */

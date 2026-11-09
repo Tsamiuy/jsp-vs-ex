@@ -3,9 +3,10 @@ guest offset; a capture manifest op ends with fh=<fragment-program code hash>; F
 from that frame to a .hlsl file named by its hash; FP_PICK also takes a comma list.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 824ae0ea..c5dd4f27 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -1565,6 +1565,11 @@
+@@ -1532,6 +1532,11 @@ static void dump_backbuffer_bmp(void)
  
  /* Shared 24-bit BMP writer for readbacks. R8G8B8A8_UNORM straight; the half/
   * float RT formats are |v|-tonemapped so signed/HDR data is visible. */
@@ -17,7 +18,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  static void cap_write_bmp(const char* path, const void* mapped, u32 w, u32 h,
                            u32 pitch, u32 dxgi)
  {
-@@ -1720,11 +1725,11 @@
+@@ -1687,11 +1692,11 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
                          r->cc[0], r->cc[1], r->cc[2], r->cc[3]);
              else {
                  fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
@@ -31,7 +32,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
                  for (int u = 0; u < 4; u++)
                      if (r->tex[u].set)
                          fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
-@@ -2375,6 +2380,16 @@
+@@ -2362,6 +2367,16 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
      { static const char* fpk = (const char*)1; static u32 wantf = 0; static int done = 0;
        if (fpk == (const char*)1) { fpk = getenv("FP_PICK");
                                     wantf = fpk ? (u32)strtoul(fpk, NULL, 16) : 0; }
@@ -48,7 +49,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
        if (wantf && !done && fp_addr == wantf) { done = 1;
            FILE* f = fopen("duck_fp.hlsl", "w");
            if (f) { fprintf(f, "/* fp_addr=0x%08X, %d instrs */%s", fp_addr, n, hlsl);
-@@ -2795,6 +2810,7 @@
+@@ -2786,6 +2801,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
          }
      }
  
@@ -56,7 +57,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      s_perf_pso_calls++;
      /* Keyed on the code, not on where it lives. The compiled shader reads its
       * inline constants from the draw's own fp_addr (fp_k[], refilled per draw),
-@@ -3569,6 +3585,17 @@
+@@ -3583,6 +3599,17 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
        } }
      }   /* end per-face conversion */
      off = _off0; mapped = _map0;

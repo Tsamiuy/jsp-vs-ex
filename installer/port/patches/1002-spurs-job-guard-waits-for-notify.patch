@@ -6,17 +6,18 @@ do exactly that between submissions. With the give-up, a notify after a quiet sp
 timeout and leaves only when the guard opens or the instance shuts down.
 
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index b09220e2..03ea65be 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
-@@ -2323,6 +2323,7 @@
+@@ -2575,6 +2575,7 @@ static struct {
      u16 max_grab;
      int run_count;
      volatile long running;   /* 1 while a host thread walks this chain */
 +    volatile long shutdown;  /* cellSpursShutdownJobChain: leave the guard wait, end the walk */
  } s_jobchains[MAX_JOBCHAINS];
-
+ 
  static void jc_dump_commands(const char* tag, u32 ea, int max_words)
-@@ -2611,11 +2612,15 @@
+@@ -2863,11 +2864,15 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
       * OBSERVED zero, which threw away any notify that arrived while the job
       * was still running -- the title notified 6 times and the chain completed
       * 2 laps, so the thread waiting on the other 4 completions never woke. */
@@ -33,10 +34,10 @@ diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
      { static int _n = 0;
        if (PS3_LOG_FIRST(_n, 8))
            printf("[cellSpurs] JobGuardNotify(0x%08X) -> %u remaining\n",
-@@ -2634,19 +2639,27 @@
+@@ -2886,19 +2891,27 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
      return CELL_OK;
  }
-
+ 
 -/* Wait for a guard to be released. Returns 1 if it opened, 0 on timeout (the
 - * chain then gives up this pass rather than spinning the walker thread
 - * forever). An unknown guard opens immediately -- a chain guarded by something
@@ -68,25 +69,25 @@ diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
              if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
              s_jobguards[i].count = s_jobguards[i].reset;
              vm_write32(ea, s_jobguards[i].count);
-@@ -2658,8 +2671,6 @@
+@@ -2910,8 +2923,6 @@ static int jg_wait(u32 ea)
          usleep(1000);
  #endif
      }
 -    printf("[cellSpurs] guard 0x%08X still closed after 20 s -- chain gives up\n", ea);
 -    return 0;
  }
-
+ 
  /* Tell the application a lap of chain work is done.
-@@ -2748,7 +2759,7 @@
+@@ -3000,7 +3011,7 @@ static void jc_signal_done(u32 jc_ea, int job_index)
      }
  }
-
+ 
 -static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
 +static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc, int slot)
  {
      u32 pc = entry_ea, ret_pc = 0;
      int jobs = 0;
-@@ -2762,6 +2773,7 @@
+@@ -3014,6 +3025,7 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
      int idle = 0;
      for (;; idle++) {
          if (idle > 4096) break;
@@ -94,7 +95,7 @@ diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
          u64 cmd = vm_read64(pc);
          u32 op  = (u32)(cmd & 7);
          u32 ext = (u32)(cmd & 127);
-@@ -2799,7 +2811,7 @@
+@@ -3051,7 +3063,7 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
          }
          if (op == 7 && ext == (7 | (1 << 3))) {           /* GUARD */
              u32 g_ea = (u32)(cmd & ~127ull);
@@ -103,7 +104,7 @@ diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
              pc += 8; continue;
          }
          /* NOP(0) / SYNC+LWSYNC(2, one virtual SPU: nothing to wait for) /
-@@ -2823,7 +2835,7 @@
+@@ -3075,7 +3087,7 @@ static DWORD WINAPI jc_thread(LPVOID p)
      { const char* d = getenv("SPURS_JC_DELAY");
        if (d && *d) Sleep((unsigned)atoi(d)); }
      jc_execute(s_jobchains[slot].entry_ea, s_jobchains[slot].jc_ea,
@@ -112,7 +113,7 @@ diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
      s_jobchains[slot].running = 0;
      /* Tell the application the chain is done. Without this the walk finishes
       * in silence and a thread waiting on the attached queue never runs again. */
-@@ -2860,6 +2872,7 @@
+@@ -3112,6 +3124,7 @@ static s32 jc_start(u64 jc_ea, const char* who)
          if (s_off || !s_jobchains[i].entry_ea) return CELL_OK;
          /* Coalesce: a chain already being walked must not start twice. */
          if (_InterlockedCompareExchange(&s_jobchains[i].running, 1, 0) == 0) {
@@ -120,7 +121,7 @@ diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
              HANDLE th = CreateThread(NULL, 1u << 20, jc_thread, (LPVOID)(intptr_t)i, 0, NULL);
              if (th) CloseHandle(th);
              else s_jobchains[i].running = 0;
-@@ -2894,7 +2907,10 @@
+@@ -3146,7 +3159,10 @@ s32 cellSpursShutdownJobChain(u64 jc_ea)
      if (PS3_LOG_FIRST(_n, 8)) printf("[cellSpurs] ShutdownJobChain(jc=0x%08X)\n", (u32)jc_ea);
      for (int i = 0; i < MAX_JOBCHAINS; i++) {
          if (s_jobchains[i].jc_ea == (u32)jc_ea) {

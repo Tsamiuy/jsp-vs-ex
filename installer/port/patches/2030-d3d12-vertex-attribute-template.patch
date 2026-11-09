@@ -1,13 +1,12 @@
 Patch 2030: B32 step 2: per-draw attribute template, decode only array attributes (VF_FAST=0 old). Indexed upload ~132 -> 82-109 ns per vertex (boot168_vf)
 
-Source: the maintainer's other port, toolkit b600eb8.
-
+Source: that port's toolkit b600eb8.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 92bc6711..2c3a26d1 100644
+index d3730cd4..11fc2af3 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -6861,6 +6861,31 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+@@ -6989,6 +6989,31 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
      }
  }
  
@@ -39,7 +38,7 @@ index 92bc6711..2c3a26d1 100644
  /* Per-draw vertex cache for the paths that expand one guest vertex into
   * several output vertices: indexed lists (shared vertices), strips and fans
   * (each vertex in up to three triangles) and indexed quads. Fetching all 16
-@@ -7279,6 +7304,7 @@ static int ix_can_continue(u32 first)
+@@ -7438,6 +7463,7 @@ static int ix_can_continue(u32 first)
  /* Returns the number of indices written; 0 means "use the list path". */
  static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int cont)
  {
@@ -47,7 +46,7 @@ index 92bc6711..2c3a26d1 100644
      extern uint8_t* vm_base;
      extern u32 cellGcmResolveLocated(int local, u32 offset);
      if (!state || !vm_base || !s_d3d.vp_vb_mapped || !s_d3d.vp_ib_mapped) return 0;
-@@ -7315,7 +7341,7 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
+@@ -7474,7 +7500,7 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
          if (s_ix_stamp[ix] != s_ix_gen) {
              s_ix_stamp[ix] = s_ix_gen;
              s_ix_slot[ix] = n;
@@ -56,7 +55,7 @@ index 92bc6711..2c3a26d1 100644
              n++;
          }
          ib[k] = s_ix_slot[ix];
-@@ -7342,6 +7368,7 @@ static int strip_ix_on(void)
+@@ -7501,6 +7527,7 @@ static int strip_ix_on(void)
  }
  static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int fan)
  {
@@ -64,7 +63,7 @@ index 92bc6711..2c3a26d1 100644
      extern uint8_t* vm_base;
      extern u32 cellGcmResolveLocated(int local, u32 offset);
      if (!state || !vm_base || !s_d3d.vp_vb_mapped || !s_d3d.vp_ib_mapped) return 0;
-@@ -7382,7 +7409,7 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
+@@ -7541,7 +7568,7 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
          if (s_ix_stamp[ix] != s_ix_gen) {
              s_ix_stamp[ix] = s_ix_gen;
              s_ix_slot[ix] = n;

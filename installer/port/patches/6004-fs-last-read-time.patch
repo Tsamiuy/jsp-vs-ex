@@ -6,7 +6,7 @@ the CPK re-bind after the check lands mid-way through the boot-logo stream, and 
 the skipped block corrupts memory. No behaviour change on its own.
 
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index f73907c2..b22c176a 100644
+index 37e37454..23544682 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
 @@ -24,6 +24,11 @@
@@ -21,7 +21,7 @@ index f73907c2..b22c176a 100644
  #include <mutex>
  #include <atomic>
  #include <sys/stat.h>
-@@ -519,6 +524,8 @@ static void cellFsRead(ppu_context* ctx)
+@@ -526,6 +531,8 @@ static void cellFsRead(ppu_context* ctx)
       * the end of the log and look identical to reads that never happen.
       * FS_READ_ALL=1 logs every read; otherwise a per-fd first-read line plus a
       * periodic summary is enough to tell the two apart. */

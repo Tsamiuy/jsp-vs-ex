@@ -4,9 +4,43 @@ upload_strip_vp_indexed expanded every index into the strip, including the resta
 restart fetched a vertex from garbage memory and the next triangles fanned out from it. rsx_state now keeps the restart setting and
 the expansion splits the strip at the sentinel.
 
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index a39639f1..7d3cad2a 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -929,6 +929,14 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->index_array_offset = data;
+         return 0;
+     }
++    if (method == 0x00001DAC) {   /* NV4097_SET_RESTART_INDEX_ENABLE */
++        state->restart_index_enable = data;
++        return 0;
++    }
++    if (method == 0x00001DB0) {   /* NV4097_SET_RESTART_INDEX */
++        state->restart_index = data;
++        return 0;
++    }
+     if (method == NV4097_SET_INDEX_ARRAY_DMA) {
+         state->index_array_dma = data;
+         return 0;
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 246ca166..0574b324 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -350,6 +350,8 @@ typedef struct rsx_state {
+     u32 begin_epoch;
+     u32 index_array_offset;
+     u32 index_array_dma;
++    u32 restart_index_enable;   /* NV4097_SET_RESTART_INDEX_ENABLE 0x1DAC */
++    u32 restart_index;          /* NV4097_SET_RESTART_INDEX 0x1DB0 */
+ 
+     /* Shader state */
+     /* RSX viewport transform (SET_VIEWPORT_OFFSET 0x0A20 / _SCALE 0x0A30,
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b11b204b..10cf6e9f 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -7147,20 +7147,35 @@
+@@ -7300,20 +7300,35 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
      if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
      if (!state->vertex_attribs[0].enabled) return 0;
      if (count < 3) return 0;
@@ -52,31 +86,3 @@ the expansion splits the strip at the sentinel.
      }
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
---- a/libs/video/rsx_commands.c
-+++ b/libs/video/rsx_commands.c
-@@ -929,6 +929,14 @@
-         state->index_array_offset = data;
-         return 0;
-     }
-+    if (method == 0x00001DAC) {   /* NV4097_SET_RESTART_INDEX_ENABLE */
-+        state->restart_index_enable = data;
-+        return 0;
-+    }
-+    if (method == 0x00001DB0) {   /* NV4097_SET_RESTART_INDEX */
-+        state->restart_index = data;
-+        return 0;
-+    }
-     if (method == NV4097_SET_INDEX_ARRAY_DMA) {
-         state->index_array_dma = data;
-         return 0;
---- a/libs/video/rsx_commands.h
-+++ b/libs/video/rsx_commands.h
-@@ -350,6 +350,8 @@
-     u32 begin_epoch;
-     u32 index_array_offset;
-     u32 index_array_dma;
-+    u32 restart_index_enable;   /* NV4097_SET_RESTART_INDEX_ENABLE 0x1DAC */
-+    u32 restart_index;          /* NV4097_SET_RESTART_INDEX 0x1DB0 */
- 
-     /* Shader state */
-     /* RSX viewport transform (SET_VIEWPORT_OFFSET 0x0A20 / _SCALE 0x0A30,

@@ -1,0 +1,9 @@
+# Upstream status of the toolkit patches, read by installer/tools/patch_index.py (number, tab, status).
+# Not listed = "J-Stars" (game-specific or not offered). Statuses: candidate, PR sent (#n), merged upstream (#n).
+# Patches dropped in the v0.19.0 move because upstream has them: 0001-0003 (#668, #610), 0007-0010 (#689, #690),
+# 1001 (#629), 2004 and 2010 (#600).
+2028	candidate
+2041	candidate
+2042	candidate
+2043	candidate
+6005	candidate

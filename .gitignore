@@ -192,6 +192,8 @@ __pycache__/
 !/installer/port/patches/
 /installer/port/patches/*
 !/installer/port/patches/*.patch
+!/installer/port/patches/INDEX.md
+!/installer/port/patches/upstream.tsv
 !/installer/port/test/
 /installer/port/test/*
 !/installer/port/test/*.txt

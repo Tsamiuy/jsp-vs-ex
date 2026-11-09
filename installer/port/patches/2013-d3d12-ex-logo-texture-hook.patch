@@ -5,30 +5,9 @@ of a 1024 x 531/532 texture and, for the two logo layers, composites an RGBA fil
 the BC3 blocks that changed. The art is read from JSP_EX_LOGO_ART, the exe directory or the working directory; without that file
 nothing is changed (the installer does not ship one). No game data is stored in the patch.
 
-diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
---- a/libs/video/rsx_d3d12_backend.c
-+++ b/libs/video/rsx_d3d12_backend.c
-@@ -24,6 +24,7 @@
- #include "rsx_primitives.h"
- #include "rsx_vertex_fetch.h"
- #include "rsx_texture_layout.h"
-+#include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
- #include <stdio.h>
- #include <string.h>
- #include <stdlib.h>
-@@ -3568,6 +3569,10 @@
-       } }
-     }   /* end per-face conversion */
-     off = _off0; mapped = _map0;
-+    /* Patch 2013: the title logo's "+" becomes "EX" (JSP_EX_LOGO=0 = off). */
-+    if (!cube && tl.fmt == RSX_TEXFMT_BC3 && !tl.swizzled)
-+        { jex_apply(vm_base + off, w, h, 1, (u8*)mapped, pitch);
-+          jex_apply_small(vm_base + off, w, h, 1, (u8*)mapped, pitch); }
-     /* Levels 1.. into their own footprints (level 0 is at offset 0). */
-     for (u32 _l = 1; _l < levels; _l++)
-         rsx_texture_decode(_map0 + mfp[_l].Offset, mfp[_l].Footprint.RowPitch,
 diff --git a/libs/video/jsp_ex_logo.h b/libs/video/jsp_ex_logo.h
 new file mode 100644
+index 00000000..1088d2a2
 --- /dev/null
 +++ b/libs/video/jsp_ex_logo.h
 @@ -0,0 +1,215 @@
@@ -247,3 +226,26 @@ new file mode 100644
 +    return 1;
 +}
 +#endif
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 4e2ee38b..c051fa01 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -24,6 +24,7 @@
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
++#include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -3582,6 +3583,10 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+       } }
+     }   /* end per-face conversion */
+     off = _off0; mapped = _map0;
++    /* Patch 2013: the title logo's "+" becomes "EX" (JSP_EX_LOGO=0 = off). */
++    if (!cube && tl.fmt == RSX_TEXFMT_BC3 && !tl.swizzled)
++        { jex_apply(vm_base + off, w, h, 1, (u8*)mapped, pitch);
++          jex_apply_small(vm_base + off, w, h, 1, (u8*)mapped, pitch); }
+     /* Levels 1.. into their own footprints (level 0 is at offset 0). */
+     for (u32 _l = 1; _l < levels; _l++)
+         rsx_texture_decode(_map0 + mfp[_l].Offset, mfp[_l].Footprint.RowPitch,
