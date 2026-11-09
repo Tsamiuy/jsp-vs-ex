@@ -129,6 +129,9 @@ __pycache__/
 /launcher/*
 !/launcher/JStarsLauncher.cs
 !/launcher/build_launcher.bat
+!/launcher/JStarsLauncher19.cs
+!/launcher/build_launcher19.bat
+!/launcher/make_launcher19.py
 !/jstars/port/exit_label_light.inc
 !/jstars/port/exit_label_dark.inc
 
@@ -188,6 +191,7 @@ __pycache__/
 !/installer/port/jsp/
 /installer/port/jsp/*
 !/installer/port/jsp/*.cpp
+!/installer/port/jsp/*.inc
 !/installer/port/jsp/CMakeLists.txt
 !/installer/port/patches/
 /installer/port/patches/*
