@@ -45,7 +45,7 @@ first build takes a while and needs several GB of free space, and `Build again` 
 | Higher resolutions, a resizable window and borderless fullscreen | [Features: Display](docs/FEATURES.md#resolution) |
 | Keyboard, mouse or controller, with a launcher to rebind keys | [Features: Input](docs/FEATURES.md#input-modes) |
 | Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
-| The game's own Online Battle over a self-hosted psnr server (experimental, opt-in, newer tree) | [installer/README.md, "Online Battle"](installer/README.md#online-battle-experimental) |
+| The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [installer/README.md, "Online Battle"](installer/README.md#online-battle-experimental) |
 
 ## Coming soon
 
@@ -76,7 +76,7 @@ Direct3D 12. Details: [installer/README.md](installer/README.md) and [docs/LAYOU
 ## Known problems
 
 - Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The v19 tree (`--tree v18`) has
-  an experimental Online Battle over a psnr server, off unless turned on: see [installer/README.md](installer/README.md).
+  an experimental Online Battle over a re-psn server, off unless turned on: see [installer/README.md](installer/README.md).
 - A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `toolkit/ps3recomp-local.patch`, see
   [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine; the notes build from a local checkout
   with the same changes. The installer applies the same patch for you.

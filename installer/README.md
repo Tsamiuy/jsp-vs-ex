@@ -6,7 +6,7 @@ copy, see RPCS3 and its documentation), copies the port's sources, a
 pinned compiler and a Python to the install folder, and then builds the port there (`installer/tools/firstrun.py`: lift,
 SPU jobs, compile). You need no Visual Studio: the compiler (llvm-mingw, with CMake and Ninja) is in the package. The
 installer and the program contact no server: no update check, no crash report, no telemetry. The one exception is
-Online Battle (experimental, `v18` only), which is off unless you turn it on and give a psnr server, see
+Online Battle (experimental, `v18` only), which is off unless you turn it on and give a re-psn server, see
 [Online Battle](#online-battle-experimental).
 
 **The compile step has not been run on a real Windows PC.** See the table.
@@ -192,12 +192,13 @@ With none of them the defaults apply (`settings: none found`). The installed gam
 
 ## Online Battle (experimental)
 
-The game's own Online Battle can run against a [psnr](https://github.com/sp00nznet/psnr) server instead of PSN: a small
-matchmaking server (MIT) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
-match itself goes peer to peer between the players' games, through the server's relay when a direct link fails. It is in
+The game's own Online Battle can run against a [re-psn](https://github.com/undecuple/re-psn) server instead of PSN: a small
+matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
+match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in
 the `v18` tree only (an installer assembled with `--tree v18`, see above). Online is off unless these settings are
-present. Setting up the server: see the psnr README (it has a `Setup.cmd` for Windows; players need TCP 36100 on the
-server, and UDP between each other or the relay).
+present. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
+Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
+other or the relay. The original psnr server speaks the same protocol and still works.
 
 Add to the settings file (see above) of each player:
 
@@ -212,8 +213,10 @@ Two copies on one PC need a second settings file with another name and `PS3_NET_
 started with `jsp-launcher.exe --settings <file>`, and their own save data: `PS3_GAMEDATA_ROOT=<folder>` in that file,
 with a copy of your save folder in it.
 
-What has been tested, and what has not: two copies on one Linux PC under Proton, talking to a psnr server on the same
-PC, reached a Friendly Match room together, started the battle and played into the fight with data going both ways.
+What has been tested, and what has not: two copies on one Linux PC under Proton, talking to a server on the same PC,
+reached a Friendly Match room together, started the battle and played into the fight with data going both ways; first
+with psnr, then with the re-psn v0.3.0 Linux release (same result). Both runs used a build of the port on ps3recomp
+v0.18.0; the tree on v0.19.0 has not been re-checked online yet. Not run: the re-psn Windows build.
 Not yet: Windows, two PCs, a fight to its end, Rank Match. Rollback netcode is planned (see `docs/ROADMAP.md`); until
 then the game's own netcode runs the match.
 
