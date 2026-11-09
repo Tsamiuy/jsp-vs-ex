@@ -23,7 +23,8 @@ translated ahead of time to native x64. Unofficial fan project.
 > the maps that were tested. It has a launcher and a Training mode. These runs were made on one Windows machine.
 >
 > An opt-in newer tree (v19, built on ps3recomp v0.19.0; the installer switch is still called `--tree v18`) also boots and plays fights with sound
-> and the opening movie, at about 30 frames per second in the demo and in Free Battle on the same machine. It is not the
+> and the opening movie, at about 30 frames per second in the demo and in Free Battle on the same machine (its earlier
+> v18 build, on toolkit v0.18.0, ran at 16 to 22). It is not the
 > default yet: it has had far fewer tests (the EU disc, the first-start window and long runs are not re-checked on it)
 > and has known problems, such as washed-out lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
 >
