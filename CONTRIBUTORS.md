@@ -37,7 +37,7 @@ Keep the list to names or handles you are happy to have public.
 Updated by the contributors workflow from merged pull requests in this repository (it started on 2026-11-04; earlier work is in the lines above). Do not edit by hand.
 
 <!-- contributors:start -->
-- [Tsamiuy](https://github.com/Tsamiuy): 26 merged pull requests, most recent #49, #48, #47
+- [Tsamiuy](https://github.com/Tsamiuy): 27 merged pull requests, most recent #51, #49, #48
 - [undecuple](https://github.com/undecuple): 11 merged pull requests, most recent #33, #32, #35
 <!-- contributors:end -->
 
