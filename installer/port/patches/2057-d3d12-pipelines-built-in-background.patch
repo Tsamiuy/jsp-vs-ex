@@ -1,0 +1,194 @@
+Patch 2057: a new fragment program is decompiled where the draw meets it, then its shader compile and pipeline
+are built on worker threads (PSO_ASYNC=0 off, PSO_ASYNC_THREADS=N workers, default 4). Draws that need it are
+skipped until it is ready.
+
+Each new program cost a 100-400 ms frame on the drawing thread (shader compile ~160 ms plus pipeline ~80 ms), and
+J-Stars keeps meeting new ones in fights. The decompile stays on the drawing thread because it reads guest memory
+the title may reuse. The batch pre-pass that built a batch's misses in parallel and waited for them is skipped. The
+literal-constant scratch buffers of the compile are now per thread.
+
+Tested (US disc, bench.ps1, HITCH=50): frames over 50 ms in Free Battle 2 (before 16-22), demo 4 (one is a 5 s
+loading screen); Free Battle 29.90 flips/s, demo 29.05; no crashes; pictures as before
+(bench/exp/2026-11-08_1346-async1).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 2058dd62..45a066ad 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2728,6 +2728,7 @@ static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 un
+     }
+ }
+ 
++static __thread char** t_fp_defer;   /* 2057: set = return the finished HLSL (malloc'd) here instead of compiling */
+ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mask, const u8 sh[16],
+                                     u32 unnorm_mask, const u32 unnorm_dim[16][3])
+ {
+@@ -2797,7 +2798,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+       }
+       if (cb) {
+           char* cbe = strstr(cb, "};\n");
+-          static float kv[256 * 4];
++          static __thread float kv[256 * 4];
+           const int nk = rsx_fp_extract_consts(vm_base + off, 0x10000, kv, 256);
+           if (cbe) {
+               static const char rep_decl[] = "static const float4 fp_alpha = float4(0.0, 0.0, 0.0, 0.0);\n";
+@@ -2805,7 +2806,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+               memmove(cb + new_len, cb + old_len, used - (size_t)(cb + old_len - hlsl) + 1);
+               memcpy(cb, rep_decl, new_len);
+           }
+-          static char tmp[RSX_FP_HLSL_BUFFER_SIZE];
++          static __thread char tmp[RSX_FP_HLSL_BUFFER_SIZE];
+           char* o = tmp; const char* q = hlsl; const char* end_o = tmp + sizeof tmp - 64;
+           while (*q && o < end_o) {
+               if (!strncmp(q, "fp_constants[", 13)) {
+@@ -3071,6 +3072,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+         char* rp = strstr(hlsl, "return r[0];");
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+     }
++    if (t_fp_defer) { *t_fp_defer = _strdup(hlsl); return NULL; }   /* 2057 */
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+     hr = sc_compile(hlsl, "guest_fp", "ps_5_0", &pb, &e);
+     if (FAILED(hr) || !pb) {
+@@ -3260,6 +3262,87 @@ static DWORD WINAPI vp_fp_worker(LPVOID arg)
+         j->status = 2;
+     }
+ }
++/* PSO_ASYNC (2057, default on, PSO_ASYNC=0 off): new programs are built off the drawing thread. The program is decompiled where it is met (it
++ * reads guest memory, which the title may reuse), the HLSL goes to a queue, and PSO_ASYNC_THREADS workers (default 4)
++ * compile it and make the pipeline. Until then vp_get_fp_pso returns NULL with s_fp_pending set and the draw is
++ * skipped: a new effect may miss a frame or two instead of the whole game stalling 100-400 ms per new program
++ * (HITCH=50, bench/exp/2026-11-08_1259-psocache2). The batch pre-pass, which waited for its builds, is skipped. */
++static int s_fp_pending;
++typedef struct { FPJob k; char* hlsl; volatile LONG st; } FPAsync;   /* st: 0 free, 1 queued, 2 building, 3 done */
++#define FP_ASYNC_MAX 512
++static FPAsync s_fpa[FP_ASYNC_MAX];
++static HANDLE s_fpa_sem;
++static int fp_async_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("PSO_ASYNC"); v = (e && *e == '0') ? 0 : 1; }   /* default on, =0 off */
++    return v;
++}
++static DWORD WINAPI vp_fp_async_worker(LPVOID arg)
++{
++    (void)arg;
++    for (;;) {
++        WaitForSingleObject(s_fpa_sem, INFINITE);
++        for (int i = 0; i < FP_ASYNC_MAX; i++) {
++            FPAsync* a = &s_fpa[i];
++            if (InterlockedCompareExchange(&a->st, 2, 1) != 1) continue;
++            ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
++            HRESULT hr = sc_compile(a->hlsl, "guest_fp", "ps_5_0", &pb, &e);
++            if (e) e->lpVtbl->Release(e);
++            free(a->hlsl); a->hlsl = NULL;
++            if (FAILED(hr) || !pb) a->k.status = 1;
++            else {
++                a->k.hr = vp_fp_make_pso(a->k.vsb, pb, a->k.blend, a->k.nrt, (DXGI_FORMAT)a->k.rtfmt, a->k.cmask,
++                                         a->k.cull, a->k.zs, a->k.vs_idx, &a->k.pso);
++                pb->lpVtbl->Release(pb);
++                a->k.status = 2;
++            }
++            if (a->k.vsb) a->k.vsb->lpVtbl->Release(a->k.vsb);
++            MemoryBarrier();
++            a->st = 3;
++            break;
++        }
++    }
++}
++static void fp_async_start(void)
++{
++    static volatile LONG started = 0;
++    if (started || InterlockedCompareExchange(&started, 1, 0) != 0) return;
++    s_fpa_sem = CreateSemaphoreA(NULL, 0, FP_ASYNC_MAX, NULL);
++    const char* e = getenv("PSO_ASYNC_THREADS");
++    int n = e ? atoi(e) : 4; if (n < 1) n = 1; if (n > 16) n = 16;
++    for (int i = 0; i < n; i++) { HANDLE h = CreateThread(NULL, 0, vp_fp_async_worker, NULL, 0, NULL); if (h) CloseHandle(h); }
++}
++/* 1 = queued or still building (s_fp_pending set), 0 = not known, 2 = finished: its result is in *out (slot freed). */
++static int fp_async_take(const FPJob* key, FPJob* out)
++{
++    for (int i = 0; i < FP_ASYNC_MAX; i++) {
++        FPAsync* a = &s_fpa[i];
++        const LONG st = a->st;
++        if (!st || !fpj_same(&a->k, key)) continue;
++        if (st != 3) return 1;
++        MemoryBarrier();
++        *out = a->k; a->st = 0;
++        return 2;
++    }
++    return 0;
++}
++static int fp_async_queue(const FPJob* key, char* hlsl)
++{
++    fp_async_start();
++    for (int i = 0; i < FP_ASYNC_MAX; i++) {
++        FPAsync* a = &s_fpa[i];
++        if (a->st) continue;
++        a->k = *key; a->k.status = 0; a->k.pso = NULL; a->hlsl = hlsl;
++        if (a->k.vsb) a->k.vsb->lpVtbl->AddRef(a->k.vsb);
++        MemoryBarrier();
++        a->st = 1;
++        ReleaseSemaphore(s_fpa_sem, 1, NULL);
++        return 1;
++    }
++    return 0;   /* queue full: build inline */
++}
++
+ /* FP_PAR_COMPILE=0 keeps the serial path; FP_THREADS=N workers (default 12). */
+ static int vp_fp_par_threads(void)
+ {
+@@ -3292,6 +3375,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+                                           u32 cube_mask, u32 unnorm_mask, const u32 unnorm_dim[16][3], u64 zs,
+                                           const D3D12DrawRecord* sdr)
+ {
++    s_fp_pending = 0;   /* 2057 */
+     if (nrt < 0) nrt = 0; if (nrt > 4) nrt = 4;   /* 0: a depth-only pass */
+     if (rtfmt == 0) rtfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+     extern uint8_t* vm_base;
+@@ -3418,9 +3502,28 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     if (unnorm_mask) memcpy(key.unnorm_dim, unnorm_dim, sizeof key.unnorm_dim);
+     if (s_fp_collect) { vp_fp_job_add(&key); return NULL; }
+     FPJob* pj = vp_fp_find_done(&key);
+-    if (pj) {
++    FPJob aj;
++    const int as = (!pj && fp_async_on()) ? fp_async_take(&key, &aj) : 0;
++    if (as == 1) { s_fp_pending = 1; return NULL; }   /* 2057: still building */
++    if (as == 2) {
++        if (aj.status == 1) return NULL;
++        pso = aj.pso; hr = aj.hr;
++    } else if (pj) {
+         if (pj->status == 1) return NULL;      /* compile failed: not cached, as before */
+         pso = pj->pso; hr = pj->hr; pj->pso = NULL;
++    } else if (fp_async_on()) {
++        char* h = NULL;
++        t_fp_defer = &h;
++        vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, shsig, unnorm_mask, unnorm_dim);
++        t_fp_defer = NULL;
++        if (!h) return NULL;                   /* decompile failed */
++        if (fp_async_queue(&key, h)) { s_fp_pending = 1; return NULL; }
++        ID3DBlob* pb = NULL; ID3DBlob* e = NULL;   /* queue full: as before, inline */
++        hr = sc_compile(h, "guest_fp", "ps_5_0", &pb, &e);
++        free(h); if (e) e->lpVtbl->Release(e);
++        if (FAILED(hr) || !pb) return NULL;
++        hr = vp_fp_make_pso(vsb, pb, blend, nrt, rtfmt, cmask, cull, zs, vs_idx, &pso);
++        pb->lpVtbl->Release(pb);
+     } else {
+         ID3DBlob* pb = vp_fp_compile_blob(fp_addr, off, ctrl, cube_mask, shsig, unnorm_mask, unnorm_dim);
+         if (!pb) return NULL;
+@@ -5859,7 +5962,7 @@ static void render_frame(void)
+      * A texture whose offset matches an offscreen RT samples the RT directly
+      * (tex_slot 1000+idx) -- no guest-memory upload. */
+     double _pre0 = perf_on() ? perf_now() : 0.0;
+-    if (vp_fp_par_threads() >= 2) {   /* compile this batch's new programs in parallel */
++    if (vp_fp_par_threads() >= 2 && !fp_async_on()) {   /* compile this batch's new programs in parallel */
+         vp_fp_jobs_reset(); s_fp_collect = 1;
+         for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+             D3D12DrawRecord* dr = &s_d3d.draws[_d];
+@@ -6506,6 +6609,7 @@ static void render_frame(void)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_ctrl, dr->cmask, dr->cull,
+                                                 dr_cube_mask(dr), unnorm_mask, unnorm_dim, dr->zs_key, dr) : NULL;
++                if (!dpso && dr->fp_addr && s_fp_pending) continue;   /* 2057: its program is still building */
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+                 s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
