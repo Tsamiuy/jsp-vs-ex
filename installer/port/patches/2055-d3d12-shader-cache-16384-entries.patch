@@ -1,0 +1,35 @@
+Patch 2055: the disk shader and pipeline caches hold 16384 entries each (were 4096), and a full cache says so once.
+
+J-Stars' shader_cache.bin had reached 4096 entries, so every shader past that was compiled again in every run and
+never kept. The HITCH=50 log showed those compiles as the fight hitches: 100-400 ms frames with 1-30 shader compiles
+and pipeline builds each (bench/exp/2026-11-08_0033-quickroute).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index d19d072e..0235d3b8 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2066,7 +2066,10 @@ static void compile_vp(void)
+  * pipeline blobs and they are replaced.
+  * Record: u32 'DSC1', u32 size, u64 key, then the data. A torn last record ends the
+  * load, later records replace earlier ones. SHADER_CACHE=0, PSO_CACHE=0: off. */
+-#define SC_SLOTS 8192u
++/* 2055: 32768 slots (16384 entries per cache). 8192 held 4096, and J-Stars' shader_cache.bin had filled it: every
++ * shader past the 4096th was compiled again in every run and never kept, a 100-400 ms hitch each time a fight met
++ * one (HITCH=50 log, bench/exp/2026-11-08_0033-quickroute). A full cache now says so once. */
++#define SC_SLOTS 32768u
+ typedef struct { u64 key; u8* data; u32 size; } SCSlot;
+ typedef struct {
+     const char* file; const char* env;
+@@ -2122,7 +2125,11 @@ static void sc_open(SCache* c)
+ }
+ static void sc_store(SCache* c, SCSlot* sl, u64 key, const void* data, u32 size)
+ {
+-    if (!sl->key && c->n >= SC_SLOTS / 2u) return;
++    if (!sl->key && c->n >= SC_SLOTS / 2u) {
++        static int said = 0;
++        if (!said) { said = 1; fprintf(stderr, "[SHADERCACHE] %s full (%u), new entries are not kept%c", c->file, c->n, 10); }
++        return;
++    }
+     u8* copy = (u8*)malloc(size);
+     if (copy) { memcpy(copy, data, size); sc_set(c, sl, key, copy, size); }
+     if (c->out) {

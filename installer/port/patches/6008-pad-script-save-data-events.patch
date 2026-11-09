@@ -1,0 +1,96 @@
+Patch 6008: PAD_SCRIPT "^N:mask" fires N clock units after a save-data load or save finishes, and "*N:mask"
+presses every N until a save-data operation starts (each counted from when the previous event fired).
+
+J-Stars' title came up 50 to 70 s into a boot and "Save data loaded" 11 to 22 s after the title START, so fixed
+delays pressed too early: a lost OK made every later press land a screen early and the Free Battle CROSS opened
+J-Adventure. "*" presses START on the title until its save load begins, "^" presses OK once that load has
+finished. cellSaveData counts started and finished operations (g_savedata_begun, g_savedata_done).
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index ba6faf24..0a1540e2 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -27,6 +27,7 @@
+  * flip schedule replays the same screens however slow the run is. */
+ extern u32 cellGcm_flip_request_count(void);
+ extern unsigned long long ppu_fs_idle_ms(void);   /* 6007 */
++extern volatile long g_savedata_done, g_savedata_begun;   /* 6008 */
+ static double pad_clock(unsigned long long t0_ms)
+ {
+     static int flips = -1;
+@@ -1009,6 +1010,8 @@ skip_inject: ;
+               while (*p && n_ev < 256) {
+                   int kind = 0;
+                   if (*p == '+') { kind = 1; p++; } else if (*p == '~') { kind = 2; p++; }
++                  else if (*p == '^') { kind = 3; p++; }   /* 6008: t after a save-data load finishes */
++                  else if (*p == '*') { kind = 4; p++; }   /* 6008: press every t until a save-data load starts */
+                   double t = strtod(p, (char**)&p);
+                   if (*p == ':') p++;
+                   unsigned m = (unsigned)strtoul(p, (char**)&p, 0);
+@@ -1031,17 +1034,35 @@ skip_inject: ;
+            * looks like regardless of poll rate. */
+           static int fired[256], held[256];
+           static double fired_at[256]; static unsigned long long fired_ms[256];
++          static long sd_at[256], sb_at[256]; static double sd_seen[256], rep_last[256];   /* 6008 */
++          /* 6008: when a save-data operation was last seen to finish. A load runs inside the guest's call, so it can
++           * finish before the poll that sees the "*" event fire; comparing times (not counts) still catches it. */
++          static long sd_last = 0; static double sd_done_at = -1;
++          if (g_savedata_done != sd_last) { sd_last = g_savedata_done; sd_done_at = now; }
+           for (int i = 0; i < n_ev; i++) {
+               if (!fired[i]) {
+                   const int prev_ok = (i == 0) || fired[i - 1];
+                   int go = 0;
+                   if (ev[i].kind == 0) go = now >= ev[i].t && (i == 0 || fired[i - 1] || ev[i - 1].kind == 0);
+                   else if (ev[i].kind == 1) go = prev_ok && now >= (i ? fired_at[i - 1] : 0.0) + ev[i].t;
++                  else if (ev[i].kind == 3) {
++                      if (prev_ok && sd_seen[i] == 0 && sd_done_at >= 0 && sd_done_at >= (i ? fired_at[i - 1] : 0.0))
++                          sd_seen[i] = sd_done_at > 0 ? sd_done_at : 1;
++                      go = sd_seen[i] > 0 && now >= sd_seen[i] + ev[i].t;
++                  }
++                  else if (ev[i].kind == 4) {
++                      /* "*t": a title screen that comes up at a different time each boot. Press every t until the
++                       * title starts its save load; the press that did it is the one the title took. */
++                      if (prev_ok && g_savedata_begun > (i ? sb_at[i - 1] : 0)) go = 1;
++                      else if (prev_ok && held[i] <= 0 && now >= rep_last[i] + ev[i].t) { held[i] = ev[i].hold; rep_last[i] = now; }
++                  }
+                   else go = prev_ok && held[i ? i - 1 : 0] <= 0 && (!i || GetTickCount64() - fired_ms[i - 1] >= 1000) &&
+                             (double)ppu_fs_idle_ms() >= ev[i].t;   /* 1 s first: a load starts a moment after its press */
+-                  if (go) { fired[i] = 1; fired_at[i] = now; fired_ms[i] = GetTickCount64(); held[i] = ev[i].hold;
++                  if (go) { fired[i] = 1; fired_at[i] = now; fired_ms[i] = GetTickCount64();
++                            held[i] = ev[i].kind == 4 ? 0 : ev[i].hold;
++                            sd_at[i] = g_savedata_done; sb_at[i] = g_savedata_begun;
+                             if (ev[i].kind) printf("[cellPad] PAD_SCRIPT #%d (%c%.0f) fired at %.0f%c", i,
+-                                                   ev[i].kind == 1 ? '+' : '~', ev[i].t, now, 10); }
++                                                   ev[i].kind == 1 ? '+' : ev[i].kind == 2 ? '~' : ev[i].kind == 3 ? '^' : '*', ev[i].t, now, 10); }
+               }
+               if (held[i] > 0) {
+                   held[i]--;
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index 1fb1b120..8c1bacdc 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -6,6 +6,8 @@
+  */
+ 
+ #include "cellSaveData.h"
++volatile long g_savedata_done = 0;   /* 6008: save-data operations completed, for PAD_SCRIPT "^N" events */
++volatile long g_savedata_begun = 0;  /* 6008: save-data operations started, for PAD_SCRIPT "*N" events */
+ #include "ps3_psf.h"
+ #include "ps3emu/guest_call.h"
+ #include "../../runtime/ppu/ppu_memory.h"
+@@ -879,6 +881,7 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+ 
+     int is_new = !dir_has_save(save_path);
+ 
++    g_savedata_begun++;   /* 6008: PAD_SCRIPT "*N" */
+     printf("[cellSaveData] %s dir='%s' (new=%d)\n",
+            is_save ? "SAVE" : "LOAD", dirName, is_new);
+ 
+@@ -998,6 +1001,7 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+         return CELL_SAVEDATA_ERROR_CBRESULT;
+     }
+ 
++    { extern volatile long g_savedata_done; g_savedata_done++; }   /* 6008: PAD_SCRIPT "^N" */
+     printf("[cellSaveData] %s complete for '%s'\n",
+            is_save ? "SAVE" : "LOAD", dirName);
+     return CELL_OK;

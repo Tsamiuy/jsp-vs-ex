@@ -1,0 +1,86 @@
+Patch 6006: cellFsRead, Write, Lseek and Fstat hold the FILE*'s own stdio lock across their steps
+(FS_STREAM_LOCK=0 off).
+
+Several guest threads share one fd. Fstat seeks to the end and back, Lseek does tell/seek/tell and Read does tell then
+read, with nothing held across the steps, so another thread's step could land in between: a read at the wrong offset or
+at EOF, a short read a loader retries. Only cellFsAioRead held the lock. Found in another title's port (a freeze while
+streaming a map); not seen in J-Stars, same code. Upstream candidate.
+
+Tested: in the same build as 1004 (bench\exp\2026-11-07_2235-v15on1, 2317-v15on2): boots, demo and Free Battle run.
+
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 23544682..dba84d4a 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -77,6 +77,30 @@ static int FS_STAT64(const char* p, fs_stat64_t* s)
+ typedef struct stat fs_stat64_t;
+ #endif
+ 
++/* FS_STREAM_LOCK (default on, FS_STREAM_LOCK=0 off; patch 6006): several guest threads share one fd. Fstat (seek
++ * to the end and back), Lseek (tell, seek, tell) and Read (tell, then read) took several steps on the shared FILE*
++ * without holding anything across them, so another thread's step could land in between: a read at the wrong offset
++ * or at EOF, a short read a loader retries forever. Each of them now holds the stream's own lock (recursive, per
++ * FILE*; stdio's calls take the same one, and so does cellFsAioRead) across its steps. Found by another v19 port. */
++#ifdef _WIN32
++#  define FS_LOCKF(f)   _lock_file(f)
++#  define FS_UNLOCKF(f) _unlock_file(f)
++#else
++#  define FS_LOCKF(f)   flockfile(f)
++#  define FS_UNLOCKF(f) funlockfile(f)
++#endif
++static int fs_stream_lock_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FS_STREAM_LOCK"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++struct FsStreamGuard {
++    FILE* f;
++    explicit FsStreamGuard(FILE* fp) : f(fs_stream_lock_on() ? fp : nullptr) { if (f) FS_LOCKF(f); }
++    ~FsStreamGuard() { if (f) FS_UNLOCKF(f); }
++};
++
+ extern "C" uint8_t* vm_base;
+ extern "C" void ppu_guest_caller(char* out, size_t n);
+ extern "C" uint32_t ppu_vm_size;
+@@ -494,6 +518,7 @@ static void cellFsRead(ppu_context* ctx)
+     FILE* f = fd_file(fd);
+     if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
+     uint64_t raw_nbytes = ctx->gpr[5];
++    FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
+     long fpos_before = ftell(f);
+     if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
+     fs_prefault(buf, nbytes);
+@@ -568,6 +593,7 @@ static void cellFsWrite(ppu_context* ctx)
+     FILE* f = fd_file(fd);
+     if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
+     fs_prefault(buf, nbytes);   /* kernel READS the buffer; same reserved-page trap */
++    FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
+     fs_set_dir(fd, f, 2);
+     size_t n = fwrite(vm_base + buf, 1, (size_t)nbytes, f);
+     /* DIAGNOSTIC (PS3_FSLOG_BT=1): dump the guest back-chain when the game logs the
+@@ -658,6 +684,7 @@ static void cellFsLseek(ppu_context* ctx)
+      * so the old position is put back explicitly. */
+     if (wh > CELL_FS_SEEK_END) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EINVAL; return; }
+     int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
++    FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
+     const int64_t before = FS_TELL64(f);
+     if (FS_SEEK64(f, off, worigin) != 0) {
+         if (before >= 0) FS_SEEK64(f, before, SEEK_SET);
+@@ -720,10 +747,12 @@ static void cellFsFstat(ppu_context* ctx)
+     if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
+     if (ps3_env_once("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
+         fprintf(stderr, "[fs] fstat fd=%d  (by %s)\n", fd, w); }
+-    int64_t cur = FS_TELL64(f);
+-    FS_SEEK64(f, 0, SEEK_END);
+-    int64_t sz = FS_TELL64(f);
+-    FS_SEEK64(f, cur, SEEK_SET);
++    int64_t cur, sz;
++    { FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
++      cur = FS_TELL64(f);
++      FS_SEEK64(f, 0, SEEK_END);
++      sz = FS_TELL64(f);
++      FS_SEEK64(f, cur, SEEK_SET); }
+     /* FS_FSTAT_CAP=<bytes>: DIAGNOSTIC. Report a smaller size than the file
+      * has. You Don't Know Jack reads a 100 KB archive whole but only probes
+      * (open/fstat/close) its 500 KB and 2.4 MB ones; if that branch is driven
