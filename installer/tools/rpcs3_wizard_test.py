@@ -196,6 +196,168 @@ class T(unittest.TestCase):
         self.assertEqual(json.loads(out)["code"], "dst_in_rpcs3")
         self.assertFalse((root / "dev_hdd0" / "home" / "00000001" / "savedata" / "NPUB31647-B0" / "NPUB31647-B0").exists())
 
+    def import_fixture(self):
+        root = self.tree(save=True)
+        src = root / "dev_hdd0/home/00000001/savedata/NPUB31647-B0"
+        hdd0 = self.tmp / "hdd0"
+        dst = hdd0 / "home/00000001/savedata/NPUB31647-B0"
+        w(dst / "GAME.DAT", b"original progress")
+        w(dst / "PARAM.SFO", b"original metadata")
+        w(dst / "STALE", b"keep me")
+        rc, ini, _ = self.plan(root, hdd0)
+        self.assertEqual(rc, 0)
+        return root, src, hdd0, dst, ini["plan"]
+
+    def copy(self, root, hdd0, plan):
+        rc, out = run("save-copy", "--rpcs3", str(root), "--hdd0", str(hdd0), "--plan", plan, "--json", "--redacted")
+        return rc, json.loads(out)
+
+    def test_source_copy_failure_preserves_existing_save(self):
+        root, src, hdd0, dst, plan = self.import_fixture()
+        before = {p.name: p.read_bytes() for p in dst.iterdir()}
+        source = {p.name: p.read_bytes() for p in src.iterdir()}
+
+        def fail_after_write(_a, b, _length):
+            b.write(b"partial import")
+            raise OSError("simulated device failure")
+
+        with mock.patch.object(L.shutil, "copyfileobj", side_effect=fail_after_write):
+            rc, out = self.copy(root, hdd0, plan)
+        self.assertEqual((rc, out.get("code")), (4, "copy_failed"))
+        self.assertEqual({p.name: p.read_bytes() for p in dst.iterdir()}, before)
+        self.assertEqual({p.name: p.read_bytes() for p in src.iterdir()}, source)
+        self.assertEqual(list(dst.parent.glob(".jsp-save-import-*")), [])
+
+    def test_later_publish_failure_restores_replaced_and_new_files(self):
+        root, src, hdd0, dst, _ = self.import_fixture()
+        w(src / "A-NEW", b"new file")
+        rc, ini, _ = self.plan(root, hdd0)
+        self.assertEqual(rc, 0)
+        before = {p.name: p.read_bytes() for p in dst.iterdir()}
+        replace = os.replace
+
+        def fail_metadata(a, b):
+            if Path(a).parent.name == "new" and Path(b).name == "PARAM.SFO":
+                raise OSError("simulated publish failure")
+            return replace(a, b)
+
+        with mock.patch.object(W.os, "replace", side_effect=fail_metadata):
+            rc, out = self.copy(root, hdd0, ini["plan"])
+        self.assertEqual((rc, out.get("code")), (4, "copy_failed"))
+        self.assertEqual({p.name: p.read_bytes() for p in dst.iterdir()}, before)
+        self.assertEqual(list(dst.parent.glob(".jsp-save-import-*")), [])
+
+    def test_failed_rollback_keeps_original_for_recovery(self):
+        root, _src, hdd0, dst, plan = self.import_fixture()
+        before = (dst / "GAME.DAT").read_bytes()
+        replace = os.replace
+
+        def fail_publish_and_rollback(a, b):
+            if Path(a).parent.name in ("new", "old"):
+                raise OSError("simulated unavailable destination")
+            return replace(a, b)
+
+        with mock.patch.object(W.os, "replace", side_effect=fail_publish_and_rollback):
+            rc, out = self.copy(root, hdd0, plan)
+        self.assertEqual((rc, out.get("code")), (4, "rollback_failed"))
+        stages = list(dst.parent.glob(".jsp-save-import-*"))
+        self.assertEqual(len(stages), 1)
+        self.assertEqual((stages[0] / "old/GAME.DAT").read_bytes(), before)
+        self.assertIn(stages[0].name, out["recovery"])
+        self.assertNotIn(str(self.tmp), out["recovery"])
+
+    def test_interruption_preserves_recovery_and_propagates(self):
+        for exception in (KeyboardInterrupt, SystemExit, RuntimeError):
+            with self.subTest(exception=exception.__name__):
+                root, _src, hdd0, dst, plan = self.import_fixture()
+                original = (dst / "GAME.DAT").read_bytes()
+                replace = os.replace
+
+                def interrupt_publish(a, b):
+                    if Path(a).parent.name == "new":
+                        raise exception("simulated interruption")
+                    return replace(a, b)
+
+                with mock.patch.object(W.os, "replace", side_effect=interrupt_publish):
+                    with self.assertRaises(exception):
+                        self.copy(root, hdd0, plan)
+                stages = list(dst.parent.glob(".jsp-save-import-*"))
+                self.assertEqual(len(stages), 1)
+                self.assertEqual((stages[0] / "old/GAME.DAT").read_bytes(), original)
+                # Each subcase has a distinct filesystem, including recovery data.
+                self.tmp = Path(tempfile.mkdtemp(dir=self._td.name)).resolve()
+
+    def test_interrupted_rollback_preserves_recovery_and_propagates(self):
+        root, _src, hdd0, dst, plan = self.import_fixture()
+        original = (dst / "GAME.DAT").read_bytes()
+        replace = os.replace
+
+        def interrupt_rollback(a, b):
+            if Path(a).parent.name == "new":
+                raise OSError("simulated publish failure")
+            if Path(a).parent.name == "old":
+                raise KeyboardInterrupt("simulated rollback interruption")
+            return replace(a, b)
+
+        with mock.patch.object(W.os, "replace", side_effect=interrupt_rollback):
+            with self.assertRaises(KeyboardInterrupt):
+                self.copy(root, hdd0, plan)
+        stages = list(dst.parent.glob(".jsp-save-import-*"))
+        self.assertEqual(len(stages), 1)
+        self.assertEqual((stages[0] / "old/GAME.DAT").read_bytes(), original)
+
+    def test_destination_symlink_is_refused_without_writing_target(self):
+        root = self.tree(save=True)
+        hdd0 = self.tmp / "hdd0"
+        dst = hdd0 / "home/00000001/savedata/NPUB31647-B0"
+        dst.mkdir(parents=True)
+        outside = w(self.tmp / "outside", b"untouched")
+        try:
+            (dst / "GAME.DAT").symlink_to(outside)
+        except OSError:
+            self.skipTest("creating a symbolic link is not permitted")
+        rc, _ini, out = self.plan(root, hdd0)
+        self.assertEqual((rc, json.loads(out).get("code")), (4, "bad_dst"))
+        self.assertEqual(outside.read_bytes(), b"untouched")
+
+    def test_plain_save_without_pfd_copies_bytes_unchanged(self):
+        root = self.tree(save=True)
+        src = root / "dev_hdd0/home/00000001/savedata/NPUB31647-B0"
+        (src / "GAME.DAT").rename(src / "SYS-DATA")
+        hdd0 = self.tmp / "hdd0"
+        rc, ini, _ = self.plan(root, hdd0)
+        self.assertEqual(rc, 0)
+        rc, _out = self.copy(root, hdd0, ini["plan"])
+        self.assertEqual(rc, 0)
+        dst = hdd0 / "home/00000001/savedata/NPUB31647-B0"
+        self.assertEqual({p.name: p.read_bytes() for p in dst.iterdir()},
+                         {p.name: p.read_bytes() for p in src.iterdir()})
+        self.assertFalse((dst / "PARAM.PFD").exists())
+
+    def test_destination_link_created_after_plan_is_refused(self):
+        root, _src, hdd0, dst, plan = self.import_fixture()
+        outside = w(self.tmp / "outside", b"untouched")
+        (dst / "GAME.DAT").unlink()
+        try:
+            (dst / "GAME.DAT").symlink_to(outside)
+        except OSError:
+            self.skipTest("creating a symbolic link is not permitted")
+        rc, out = self.copy(root, hdd0, plan)
+        self.assertEqual((rc, out.get("code")), (4, "bad_dst"))
+        self.assertEqual(outside.read_bytes(), b"untouched")
+
+    def test_destination_alias_into_rpcs3_is_refused(self):
+        root = self.tree(save=True)
+        home = root / "dev_hdd0/home"
+        (home / "00000001").rename(home / "00000002")
+        alias = self.tmp / "alias"
+        try:
+            alias.symlink_to(root / "dev_hdd0", target_is_directory=True)
+        except OSError:
+            self.skipTest("creating a symbolic link is not permitted")
+        rc, _ini, out = self.plan(root, alias)
+        self.assertEqual((rc, json.loads(out).get("code")), (4, "dst_in_rpcs3"))
+
     def test_other_user_save_is_taken_when_001_has_none(self):
         root = self.tree()
         s = root / "dev_hdd0" / "home" / "00000002" / "savedata" / "NPUB31647-B0"

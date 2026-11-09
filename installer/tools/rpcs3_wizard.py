@@ -19,7 +19,10 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -120,6 +123,9 @@ def plan(rpcs3, hdd0):
         r = L.copy_save(e["path"], dst, overwrite=True, dry_run=True)
         if not r["ok"]:
             return [], "", r
+        err = destination_error(dst, r["files"])
+        if err:
+            return [], "", err
         runs.append(r)
     h = hashlib.sha256()
     for r in runs:
@@ -127,6 +133,102 @@ def plan(rpcs3, hdd0):
         for f in r["files"]:   # a changed file with the same size must change the plan too
             h.update(L.sha256(os.path.join(r["src"], f["rel"])).get("sha256", "").encode())
     return runs, h.hexdigest()[:16], None
+
+
+def destination_error(dst, files):
+    """Refuse redirected destinations before the preview and again before copying."""
+    d = Path(dst)
+    # The shared helper checks lexical paths; also check resolved paths so an
+    # alias of an RPCS3 folder cannot make the installer write into RPCS3.
+    try:
+        resolved = L._nc(d.resolve())
+        for root, hdd0 in L._ROOTS:
+            if any(L._under(resolved, L._nc(Path(p).resolve())) is not None for p in (root, hdd0)):
+                return {"ok": False, "code": "dst_in_rpcs3"}
+    except (OSError, RuntimeError):
+        return {"ok": False, "code": "bad_dst"}
+    paths = {d}
+    for f in files:
+        p = d / f["rel"]
+        paths.add(p)
+        paths.update(parent for parent in p.parents if parent == d or d in parent.parents)
+    for p in paths:
+        try:
+            s = p.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return {"ok": False, "code": "bad_dst"}
+        if stat.S_ISLNK(s.st_mode) or getattr(s, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return {"ok": False, "code": "bad_dst"}
+        is_file = p != d and any(p == d / f["rel"] for f in files)
+        if not (stat.S_ISREG(s.st_mode) if is_file else stat.S_ISDIR(s.st_mode)):
+            return {"ok": False, "code": "bad_dst"}
+    return None
+
+
+def import_save(run):
+    """Stage all source bytes, then replace files with rollback on an I/O error.
+
+    Keep stale destination files and never read existing destination contents.
+    A failed or interrupted transaction retains staging for manual recovery.
+    Stop signals propagate; imports require the game/emulator to be closed.
+    """
+    d = Path(run["dst"])
+    err = destination_error(d, run["files"])
+    if err:
+        return err
+    stage = None
+    changed, created = [], []
+    keep = False
+    try:
+        d.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=".jsp-save-import-", dir=d.parent))
+        staged = L.copy_save(run["src"], stage / "new", dry_run=False)
+        if not staged["ok"]:
+            return {"ok": False, "code": "copy_failed", "copied": 0}
+        err = destination_error(d, staged["files"])
+        if err:
+            return err
+        for f in staged["files"]:
+            t = d / f["rel"]
+            missing = []
+            parent = t.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            t.parent.mkdir(parents=True, exist_ok=True)
+            created.extend(reversed(missing))
+            old = None
+            if t.exists():
+                old = stage / "old" / f["rel"]
+                old.parent.mkdir(parents=True, exist_ok=True)
+            # Until commit or rollback finishes, cleanup could delete the only
+            # originals if an interruption bypasses the OSError handler.
+            keep = True
+            if old is not None:
+                os.replace(t, old)
+            changed.append((t, old))
+            os.replace(stage / "new" / f["rel"], t)
+        keep = False
+        return {"ok": True, "copied": len(staged["files"])}
+    except OSError:
+        try:
+            for t, old in reversed(changed):
+                if old is not None:
+                    os.replace(old, t)
+                else:
+                    t.unlink(missing_ok=True)
+            for p in reversed(created):
+                p.rmdir()
+        except OSError:
+            keep = True
+            return {"ok": False, "code": "rollback_failed", "recovery": str(stage), "copied": 0}
+        keep = False
+        return {"ok": False, "code": "copy_failed", "copied": 0}
+    finally:
+        if stage is not None and not keep:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def summary(runs):
@@ -191,9 +293,12 @@ def main(argv=None):
         return 3
     copied = 0
     for r in runs:
-        c = L.copy_save(r["src"], r["dst"], overwrite=True, dry_run=False)
+        c = import_save(r)
         if not c["ok"]:
-            emit(a, {"ok": False, "code": c.get("code"), "copied": copied}, roots)
+            out = {"ok": False, "code": c.get("code"), "copied": copied}
+            if c.get("recovery"):
+                out["recovery"] = c["recovery"]
+            emit(a, out, roots)
             return 4
         copied += c["copied"]
     emit(a, {"ok": True, "copied": copied, "saves": len(runs)}, roots)

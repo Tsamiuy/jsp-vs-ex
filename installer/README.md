@@ -165,6 +165,11 @@ would be copied, the ones that would replace a file already in this port's save 
 they are. Nothing is copied unless you tick "Import this save", and the copy only runs if the list is still the same when setup copies (otherwise nothing is
 written). The destination is the port's save folder (`%APPDATA%\JSP Fan Revival\hdd0`, user `00000001`); nothing is deleted and RPCS3 is never written to.
 The save's `PARAM.SFO` can hold your PlayStation account id: it is copied as a file and its content is never read into the log.
+Close the game and RPCS3 before importing. The helper stages incoming files before replacing any save file and restores replaced files if
+an I/O error interrupts that save's import. If restoration also fails, it keeps the originals in a `.jsp-save-import-*` folder beside the save
+and reports `rollback_failed` with that recovery folder; preserve it and restore its `old` files before playing. Linked save destinations are
+refused. An interruption or unexpected exception during replacement or restoration also preserves this recovery folder and propagates the
+exception. This protects against ordinary I/O errors, but does not make an import immune to power loss or another program changing the save.
 
 For tests: `/RPCS3=<folder>` gives the folder to a silent install, which then fills `/DISC` or `/EBOOT` when you did not give it (a given value wins),
 and `/IMPORTSAVE=1` imports the save. The log (`/LOG=`) holds the helper's `--json --redacted` output (lines starting with `rpcs3_wizard>`), never a
