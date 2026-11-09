@@ -1,0 +1,36 @@
+Patch 2043: the sampler-state lookup hashed instead of a linear search.
+
+vp_sampler compared a draw unit's sampler key with every sampler made so far (up to 2048) on every unit of every draw;
+in J-Stars' fights with GPU vertex pulling (about 4,000 records a frame) memcmp was 6% of the drawing thread. A 4096-entry
+open-addressing table maps a key to its descriptor; the descriptors and their order are unchanged.
+
+Tested (US disc, attract demo, VPULL=1, FRAME_TL=1): memcmp 6.0% -> 3.1% of the drawing thread (the rest is the fragment
+program memo's exact compare); the drain per fight frame about 20-22 ms (24-26 before); 20.36 flips/s over 180-395 s
+against 18.1-20.1 for the same setup without it.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c5dfe394..9f6a61b0 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2467,10 +2467,19 @@ static int vp_sampler(const D3D12DrawRecord* dr, int u)
+     if (!dr->tex[u].set) return u == 0 ? 0 : 1;
+     const u32 k[4] = { dr->tex[u].addr & 0x000F0F0Fu, dr->tex[u].filter & 0x07071FFFu,
+                        dr->tex[u].ctrl0 & 0x70u, dr->tex[u].border };
+-    for (u32 i = 2; i < s_d3d.samp_n; i++)
+-        if (!memcmp(s_d3d.samp_key[i], k, sizeof k)) return (int)i;
++    /* Hashed: the linear search compared up to 2048 keys per unit per draw (memcmp was 6% of the drawing
++     * thread in J-Stars' fights with ~3000 draws a frame). s_samp_ht holds index+1, 0 = empty. */
++    static u16 s_samp_ht[4096];
++    u32 h = (k[0] * 0x9E3779B1u) ^ (k[1] * 0x85EBCA77u) ^ (k[2] * 0xC2B2AE3Du) ^ (k[3] * 0x27D4EB2Fu);
++    h = (h ^ (h >> 15)) & 4095u;
++    for (;; h = (h + 1) & 4095u) {
++        const u32 e = s_samp_ht[h];
++        if (!e) break;
++        if (!memcmp(s_d3d.samp_key[e - 1], k, sizeof k)) return (int)(e - 1);
++    }
+     if (s_d3d.samp_n >= 2048) return u == 0 ? 0 : 1;
+     const u32 i = s_d3d.samp_n++;
++    s_samp_ht[h] = (u16)(i + 1);
+     memcpy(s_d3d.samp_key[i], k, sizeof k);
+     D3D12_SAMPLER_DESC s;
+     rsx_sampler_desc(k, &s);

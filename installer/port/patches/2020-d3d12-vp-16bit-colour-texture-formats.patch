@@ -4,11 +4,14 @@ It only recorded formats 0x81/85/8B/86-88/9A; a unit set to any other format (A1
 D8R8G8B8) kept the previous texture, so the character-select labels were drawn with the wrong texture. The layout and decode code
 already handles these formats. RSX_TEX_FMT16=0 restores the old behaviour. Diagnostics: TEX_DDS_OFF, ATLAS_VTX, TEXSKIP_DBG.
 
+Re-fitted for v0.19.0: The list of recorded formats merged with v0.19.0's (#635).
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b5603288..91e4a1d4 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -3042,6 +3042,13 @@
-     return h;
+@@ -3070,6 +3070,13 @@ static DXGI_FORMAT vp_tex_dxgi(u32 fmt)
+     }
  }
  
 +/* TEX_DDS_OFF=<hex>[,<hex>...] limits TEX_DDS_DUMP to those guest offsets (no count limit). */
@@ -18,10 +21,10 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
 +    return 0;
 +}
 +
- static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 tpitch)
+ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 pitch_arg)
  {
      /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
-@@ -3651,7 +3658,7 @@
+@@ -3670,7 +3677,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
      { static int dd = -2; static u32 d_from = 0, d_max = 0, d_n = 0;
        if (dd == -2) { const char* e = getenv("TEX_DDS_DUMP"); dd = e ? 1 : 0;
                        if (e) { d_from = (u32)strtoul(e, NULL, 10); const char* c = strchr(e, ':'); d_max = c ? (u32)atoi(c + 1) : 64; } }
@@ -30,7 +33,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
          char pn[96]; snprintf(pn, sizeof pn, "texdds_%08X_%ux%u_%s.dds", off, w, h, tl.fmt == RSX_TEXFMT_BC1 ? "bc1" : "bc3");
          FILE* f = fopen(pn, "wb");
          if (f) { u32 hd[32] = {0}; u32 bsz = ((w + 3) / 4) * ((h + 3) / 4) * (tl.fmt == RSX_TEXFMT_BC1 ? 8u : 16u);
-@@ -6967,6 +6974,32 @@
+@@ -7094,6 +7101,32 @@ static void vp_attrs_dbg(const rsx_state* state)
                    ai, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], nfin, nnan, 10); } } }
  }
  
@@ -63,7 +66,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
  {
      extern uint8_t* vm_base;
-@@ -6994,6 +7027,7 @@
+@@ -7121,6 +7154,7 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
                      c[k][8].v[0],c[k][8].v[1]);
                fclose(f); } } }
      }
@@ -71,7 +74,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
  }
-@@ -7058,6 +7092,7 @@
+@@ -7185,6 +7219,7 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
                  out[k*16+2].v[0],out[k*16+2].v[1],out[k*16+2].v[2],
                  out[k*16+9].v[0],out[k*16+9].v[1],out[k*16+9].v[2],out[k*16+9].v[3]);
            fclose(f); } } }
@@ -79,7 +82,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      s_d3d.vp_vb_offset += count * VP_VERT_STRIDE;
      return count;
  }
-@@ -7089,6 +7124,7 @@
+@@ -7216,6 +7251,7 @@ static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan
          read_vp_vertex_cached(state, first + i1, &out[o*16]); o++;
          read_vp_vertex_cached(state, first + i2, &out[o*16]); o++;
      }
@@ -87,7 +90,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
  }
-@@ -7149,6 +7185,7 @@
+@@ -7307,6 +7343,7 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
                  fclose(f);
              } } }
      }
@@ -95,12 +98,12 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
      return o;
  }
-@@ -7993,7 +8030,11 @@
-         (base_fmt == 0x81 /* B8 */ || base_fmt == 0x85 /* A8R8G8B8 */ ||
-          base_fmt == 0x8B /* G8B8: LBP's font atlas */ ||
-          (base_fmt >= 0x86 && base_fmt <= 0x88) /* DXT1/23/45 */ ||
--         base_fmt == 0x9A /* W16Z16Y16X16 half-float: RTT intermediates */)) {
-+         base_fmt == 0x9A /* W16Z16Y16X16 half-float: RTT intermediates */ ||
+@@ -8225,7 +8262,11 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+           * decodes: X16 (God of War: Ascension's 256x256 font atlas -- without
+           * it every glyph drew as a solid quad), Y16_X16, X32_FLOAT and
+           * Y16_X16_FLOAT (its post-process intermediates). */
+-         base_fmt == 0x94 || base_fmt == 0x95 || base_fmt == 0x9C || base_fmt == 0x9F)) {
++         base_fmt == 0x94 || base_fmt == 0x95 || base_fmt == 0x9C || base_fmt == 0x9F ||
 +         /* the 16-bit colour formats and D8R8G8B8 are decoded by rsx_texture_layout/decode, but were missing here, so a unit set to one
 +          * of them kept the PREVIOUS texture: J-Stars' CPU-level label (A4R4G4B4 148x30) was drawn with the text atlas. RSX_TEX_FMT16=0 = old. */
 +         (tex16_on() && (base_fmt == 0x82 || base_fmt == 0x83 || base_fmt == 0x84 || base_fmt == 0x97 ||
@@ -108,7 +111,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
          /* TEX_RESOLVE_AUTO=1: resolve through the page tables (local-page map
           * then IO table) instead of trusting the format's location bits. A
           * texture the guest built in main memory but tagged local resolves to
-@@ -8054,6 +8095,14 @@
+@@ -8286,6 +8327,14 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
                          unit, (tex->format >> 8) & 0xFFu, width, height,
                          (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset, 10); } }
          s_d3d.cur_texs[unit].set = 1;

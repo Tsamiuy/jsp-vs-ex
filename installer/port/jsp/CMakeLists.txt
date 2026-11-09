@@ -1,4 +1,4 @@
-# J-Stars Victory VS+ game project (ps3recomp v0.18.0).
+# J-Stars Victory VS+ game project (ps3recomp v0.19.0).
 # Starts from the ps3recomp v0.18.0 project template (templates/project/CMakeLists.txt, MIT).
 # From jsp-vs-ex jstars/port/CMakeLists.txt (Tsamiuy, MIT), adapted to ps3recomp v0.18.0: the project's
 # game files list (jstars_*.cpp, left out for now) and the dxguid link (only if the link needs it).

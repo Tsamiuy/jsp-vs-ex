@@ -2,6 +2,7 @@ Patch 2016 (diagnostic, always on, one line per 30 s): [RSXMEM] logs process wor
 GetDeviceRemovedReason, to catch memory growth before a device loss in a long fight.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c5dd4f27..7f809dff 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -41,6 +41,7 @@
@@ -12,7 +13,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  #include <d3d12.h>
  #include <d3d12sdklayers.h>   /* ID3D12Debug / ID3D12InfoQueue */
  #include <dxgi1_4.h>
-@@ -6250,6 +6251,15 @@
+@@ -6372,6 +6373,15 @@ skip_dump_consider: ;
              fprintf(stderr, "[RSXFPS] renders/s=%.1f presents/s=%.1f frame_count=%u draws=%u\n",
                      s_tframes * 1000.0 / (double)(tnow - s_tt0),
                      s_tpres * 1000.0 / (double)(tnow - s_tt0), s_d3d.frame_count, s_dbg_last_draws);

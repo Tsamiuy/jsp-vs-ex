@@ -5,15 +5,18 @@ its HLE call and was running lifted code still showed that call as in flight. Th
 name is recorded in a new g_hle_last[tid]. Diagnostics only.
 
 diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 52d32df9..fdccde73 100644
 --- a/runtime/ppu/ppu_hle.cpp
 +++ b/runtime/ppu/ppu_hle.cpp
-@@ -124,4 +124,5 @@
+@@ -151,6 +151,7 @@ extern "C" const char* g_last_hle_name = "";
   * set on entry, cleared on every exit path by the guard below. */
  #define PS3_HLE_INFLIGHT_MAX 64
  extern "C" const char* g_hle_inflight[PS3_HLE_INFLIGHT_MAX] = { nullptr };
 +extern "C" const char* g_hle_last[PS3_HLE_INFLIGHT_MAX] = { nullptr };   /* last HLE call per thread (patch 6002) */
-
-@@ -719,4 +720,9 @@
+ 
+ /* Real-PRX bridge: a loaded system PRX (libsre = cellSpurs/cellSync) may export
+  * this NID. If so, dispatch into the REAL recompiled Sony code (its OPD -> our
+@@ -756,6 +757,11 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
              g_ctx[i].fn(ctx);
              { unsigned t = (unsigned)ctx->thread_id;
                if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = nullptr; }
@@ -23,14 +26,18 @@ diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
 +                fprintf(stderr, "[hle-first] ctx %s tid=%u r=0x%08X\n", g_ctx[i].name, (unsigned)ctx->thread_id,
 +                        (uint32_t)ctx->gpr[3]); } }
              return;
-@@ -808,5 +814,5 @@
+         }
+ 
+@@ -835,7 +841,7 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+       if (s_ht > 0) hle_top_note(nid, e->name, ctx, s_ht); }
      ps3_msf("hle:%s", e->name);
      { unsigned t = (unsigned)ctx->thread_id;
 -      if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = e->name; }
 +      if (t < PS3_HLE_INFLIGHT_MAX) g_hle_last[t] = g_hle_inflight[t] = e->name; }
      if (nid == 0xD0B1D189u /*cellGcmSetTile*/ || nid == 0xDC09357Eu /*SetDisplayBuffer*/) {
          static int _g=0; if (PS3_LOG_FIRST(_g, 8))
-@@ -818,4 +824,13 @@
+             fprintf(stderr, "[hle-trace] %s lr=0x%08X cia=0x%08X r3..r8=%08X %08X %08X %08X %08X %08X\n",
+@@ -847,6 +853,15 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
      uint64_t r = fn(ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6],
                      ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10]);
      ctx->gpr[3] = r;   /* PPC return value */
@@ -44,3 +51,5 @@ diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
 +        fprintf(stderr, "[hle-first] %s nid=0x%08X tid=%u r=0x%08X\n", e->name ? e->name : "?", nid,
 +                (unsigned)ctx->thread_id, (uint32_t)r); } }
      /* PS3_HLE_PTRCHECK: the guest stores HLE return values as guest pointers, so
+      * an HLE returning a value outside guest RAM (>= 0x10000000) that is not a
+      * CELL_ERROR code (0x8001xxxx / 0x8002xxxx) is leaking a truncated HOST

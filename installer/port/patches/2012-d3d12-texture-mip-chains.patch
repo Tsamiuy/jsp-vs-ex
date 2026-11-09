@@ -4,19 +4,21 @@ Every guest texture was uploaded with MipLevels = 1, so minified ground and wate
 Uploads now take the RSX chain from rsx_texture_mip_chain, place it with GetCopyableFootprints, create the resource with that many
 levels and expose all of them through the per-draw SRVs. Cubes and DXT textures with a size not a multiple of 4 keep one level.
 
+Re-fitted for v0.19.0: v0.19.0 (#600) already re-creates a texture when its pitch changes; the mip-level count is added to that test.
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 96bdf6e..38b1f25 100644
+index 134448ea..4e2ee38b 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -201,6 +201,7 @@ typedef struct {
-     u32 off, w, h, fmt; /* current contents (resource reused when dims match) */
+@@ -203,6 +203,7 @@ typedef struct {
+     u32 pitch;
      u32 csum;           /* sparse checksum of the source bytes last uploaded */
      int cube;           /* resource is a 6-face cube, sampled as TextureCube */
 +    u32 levels;         /* mip levels uploaded (TEX_MIPS, default on; 1 = level 0 only) */
      u32 key;            /* the ORIGINAL bound offset -- the cache lookup key.
                           * off is the RESOLVED source after TEX_OFF_BIAS/TEX_REMAP
                           * shift it, so keying on off never matches the raw offset
-@@ -3160,12 +3161,34 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+@@ -3173,12 +3174,35 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
       * format rsx_texture_decode unpacks. */
      u32 pitch = (tl.dst_row_bytes + 255) & ~255u;
      int fresh = 0;
@@ -47,12 +49,13 @@ index 96bdf6e..38b1f25 100644
       * the same dimensions would otherwise be reused with 1 array slice while the
       * cube path copies 6 subresources and writes a 6x upload buffer -- which
       * crashes. */
--    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube)) {
-+    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube || t->levels != levels)) {
+-    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube || t->pitch != pitch_arg)) {
++    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube || t->pitch != pitch_arg ||
++                   t->levels != levels)) {
          t->res->lpVtbl->Release(t->res); t->res = NULL;
          if (t->up) { t->up->lpVtbl->Release(t->up); t->up = NULL; }
      }
-@@ -3175,7 +3198,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+@@ -3188,7 +3212,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
          td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
          td.Width = w; td.Height = h;
          td.DepthOrArraySize = cube ? 6 : 1;   /* cube = 6 array slices */
@@ -61,7 +64,7 @@ index 96bdf6e..38b1f25 100644
          td.Format = dxfmt; td.SampleDesc.Count = 1;
          td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
          if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
-@@ -3187,7 +3210,8 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+@@ -3200,7 +3224,8 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
      }
      /* Stage the decoded image in the ring, or in the slot's own upload
       * buffer when the ring is full or could not be made. */
@@ -71,7 +74,7 @@ index 96bdf6e..38b1f25 100644
      const u32 fi = s_d3d.frame_index;
      if (!s_d3d.tex_ring) {
          D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
-@@ -3544,6 +3568,11 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+@@ -3557,6 +3582,11 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
        } }
      }   /* end per-face conversion */
      off = _off0; mapped = _map0;
@@ -83,7 +86,7 @@ index 96bdf6e..38b1f25 100644
      if (up_res != s_d3d.tex_ring) t->up->lpVtbl->Unmap(t->up, 0, NULL);
  
      if (!fresh) {   /* reused resource: PSR -> COPY_DEST first */
-@@ -3568,6 +3597,12 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+@@ -3581,6 +3611,12 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
          src.PlacedFootprint.Offset  = up_base + (u64)_f * pitch * _face_rows;
          s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
      }
@@ -96,7 +99,7 @@ index 96bdf6e..38b1f25 100644
      {
          D3D12_RESOURCE_BARRIER b = {0};
          b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-@@ -3579,7 +3614,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+@@ -3592,7 +3628,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
      }
  
      t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
@@ -105,7 +108,7 @@ index 96bdf6e..38b1f25 100644
      { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
        t->csum = TEX_CSUM(vm_base + off, nb); }
      #undef TEX_CSUM
-@@ -4069,7 +4104,7 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+@@ -4082,7 +4118,7 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
      sv.Format = fmt;
      sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
      sv.Shader4ComponentMapping = mapping;

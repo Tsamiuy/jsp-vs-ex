@@ -2,7 +2,7 @@
 """Assemble the installer payload (what jsp.iss copies into {app}): a port of the game, built on the player's PC.
 
 Two trees (--tree): "v15" (default) is this repository's earlier port (jstars/port) on the v0.15 toolkit as described below;
-"v18" is installer/port, the glue for the ps3recomp v0.18.0 toolkit, with installer/port/patches applied to the exported toolkit
+"v18" is installer/port, the glue for the ps3recomp v0.19.0 toolkit, with installer/port/patches applied to the exported toolkit
 (installer/tools/export_toolkit.py). v18 stays opt-in until its open issues (sound, fight speed, fight graphics) are fixed. firstrun.py reads <payload>/tree.txt to know which recipe to run.
 
 Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). The payload holds only code that
@@ -66,7 +66,7 @@ This program contacts no server: no update check, no crash report, no telemetry.
 (experimental), which is off unless you turn it on and give a psnr server (see the installer README).
 
 The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
-Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.18.0 with this project's patches).
+Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.19.0 with this project's patches).
 More in licenses/jstars-port-NOTICE.md.
 Python (PSF licence, toolchain/python/LICENSE.txt) is the Windows embeddable package. The build uses the bundled llvm-mingw
 (LLVM: Apache-2.0 with LLVM exception; MinGW-w64 and winpthreads: see licenses/llvm-mingw/), CMake (BSD-3-Clause) and Ninja

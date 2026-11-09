@@ -10,9 +10,10 @@ Tested (US disc, title and menus, 240 s each): before 100.0% silent blocks in ev
 starts; with SPURS_CTX_PAD=0 silent again.
 
 diff --git a/runtime/spu/spurs_job.c b/runtime/spu/spurs_job.c
+index 9beb8932..c57bcd9c 100644
 --- a/runtime/spu/spurs_job.c
 +++ b/runtime/spu/spurs_job.c
-@@ -274,8 +274,18 @@
+@@ -275,8 +275,18 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
          ls32(ls, 0x1CC, JOB_DMA_TAG);
          memset(ls + 0x210, 0, 0x10);
      }

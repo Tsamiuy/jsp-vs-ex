@@ -2,7 +2,6 @@ Patch 2036: fit: drop that port's duplicate restart-index fields and handlers (a
 
 Source: fit for J-Stars.
 
-
 diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
 index 623731c5..a0e67ffb 100644
 --- a/libs/video/rsx_commands.c

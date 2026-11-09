@@ -1,0 +1,79 @@
+Patch 2041: the common vertex formats decoded with fixed component counts and tables (VF_UNROLL=0 off).
+
+In the demo fights read_vp_vertex_fast was 26% of the drawing thread (sampled profile). Per array attribute and vertex it ran
+a switch on the type and a loop over the component count. Now float32 x1-x4, half x2-x4 and u8-normalized x3-x4 are decoded
+with the count fixed per case, float words byte-swapped as words, half floats and u8 normalized through tables (64K and 256
+entries, filled from rsx_rd_half_be and the same multiply, so the values are the same: half denormals still read as zero).
+Other formats take the loops as before.
+
+Tested (US disc, attract demo, demo fights 180-520 s, three on/off pairs, same build): on 18.46 / 17.28 / 18.53 flips/s,
+off 17.55 / 16.20 / 17.37; on was faster in every pair, by about 1 flip/s.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 299d2bb2..82d8708b 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7327,6 +7327,7 @@ typedef struct {
+     const u8* page_ptr;
+ } VFAttr;
+ static VFAttr s_vfa[16];
++static void vf_tables(void);
+ static void vf_prepare(const rsx_state* state)
+ {
+     extern uint8_t* vm_base;
+@@ -7335,6 +7336,7 @@ static void vf_prepare(const rsx_state* state)
+         s_vf.on = e ? atoi(e) : 2;
+         if (s_vf.on == 2 && (getenv("VP_NOFREQ") || getenv("VTX_W1") || getenv("VTX_TYPEDBG"))) s_vf.on = 1;
+     }
++    vf_tables();
+     s_vf.n = 0;
+     for (int i = 0; i < 16; i++) {
+         const rsx_vertex_attrib* a = &state->vertex_attribs[i];
+@@ -7356,6 +7358,28 @@ static void vf_prepare(const rsx_state* state)
+     }
+     (void)vm_base;
+ }
++/* VF_UNROLL (default on, VF_UNROLL=0 off): the common formats decoded with the
++ * component count fixed per case, the bytes swapped as words, half floats and
++ * u8 normalized through tables. Same values as the loops below (rsx_rd_half_be
++ * turns half denormals into zero, so does the table). The demo fight profile had
++ * read_vp_vertex_fast at 26% of the drawing thread. */
++static u32 s_vf_half[65536];
++static float s_vf_u8n[256];
++static int s_vf_unroll = -1;
++static void vf_tables(void)
++{
++    if (s_vf_unroll >= 0) return;
++    const char* e = getenv("VF_UNROLL");
++    s_vf_unroll = (e && e[0] == '0') ? 0 : 1;
++    for (u32 h = 0; h < 65536; h++) {
++        u8 b[2] = { (u8)(h >> 8), (u8)h };
++        float f = rsx_rd_half_be(b);
++        memcpy(&s_vf_half[h], &f, 4);
++    }
++    for (u32 k = 0; k < 256; k++) s_vf_u8n[k] = k * (1.0f / 255.0f);
++}
++static inline float vf_f32(const u8* p) { u32 w; memcpy(&w, p, 4); w = __builtin_bswap32(w); float f; memcpy(&f, &w, 4); return f; }
++static inline float vf_h16(const u8* p) { u16 w; memcpy(&w, p, 2); float f; memcpy(&f, &s_vf_half[__builtin_bswap16(w)], 4); return f; }
+ static inline void vf_decode(VFAttr* v, u32 vi, float* out)
+ {
+     extern uint8_t* vm_base;
+@@ -7368,6 +7392,18 @@ static inline void vf_decode(VFAttr* v, u32 vi, float* out)
+     }
+     const u8* p = v->page_ptr + (off & 0xFFFFFu);
+     const u32 n = v->n;
++    if (s_vf_unroll) switch ((v->type << 3) | n) {
++    case (2 << 3) | 4: out[0] = vf_f32(p); out[1] = vf_f32(p + 4); out[2] = vf_f32(p + 8); out[3] = vf_f32(p + 12); return;
++    case (2 << 3) | 3: out[0] = vf_f32(p); out[1] = vf_f32(p + 4); out[2] = vf_f32(p + 8); out[3] = 1.0f; return;
++    case (2 << 3) | 2: out[0] = vf_f32(p); out[1] = vf_f32(p + 4); out[2] = 0.0f; out[3] = 1.0f; return;
++    case (2 << 3) | 1: out[0] = vf_f32(p); out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f; return;
++    case (3 << 3) | 4: out[0] = vf_h16(p); out[1] = vf_h16(p + 2); out[2] = vf_h16(p + 4); out[3] = vf_h16(p + 6); return;
++    case (3 << 3) | 3: out[0] = vf_h16(p); out[1] = vf_h16(p + 2); out[2] = vf_h16(p + 4); out[3] = 1.0f; return;
++    case (3 << 3) | 2: out[0] = vf_h16(p); out[1] = vf_h16(p + 2); out[2] = 0.0f; out[3] = 1.0f; return;
++    case (4 << 3) | 4: out[0] = s_vf_u8n[p[0]]; out[1] = s_vf_u8n[p[1]]; out[2] = s_vf_u8n[p[2]]; out[3] = s_vf_u8n[p[3]]; return;
++    case (4 << 3) | 3: out[0] = s_vf_u8n[p[0]]; out[1] = s_vf_u8n[p[1]]; out[2] = s_vf_u8n[p[2]]; out[3] = 1.0f; return;
++    default: break;
++    }
+     switch (v->type) {
+     case 3: /* half float */
+         for (u32 k = 0; k < n; k++) out[k] = rsx_rd_half_be(p + k * 2);

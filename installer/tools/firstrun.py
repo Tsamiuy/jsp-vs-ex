@@ -17,7 +17,7 @@ unchanged and says which input changed otherwise; a marker in the old plain form
   build   cmake + ninja with the bundled llvm-mingw (cmake/llvm-mingw.cmake; the same commands in build/build-port.cmd) -> build/port/JStarsRecomp.exe
   place   game/JStarsRecomp.exe, game/EBOOT.elf, game/run/, paths.txt for the launcher
 Which tree is built is written by assemble_payload.py into <root>/tree.txt: "v15" (this repository's jstars/port on the v0.15 toolkit,
-no file = v15) or "v18" (installer/port: the glue in port/, the ps3recomp v0.18.0 toolkit with installer/port/patches applied, exe jsp.exe).
+no file = v15) or "v18" (installer/port: the glue in port/, the ps3recomp v0.19.0 toolkit with installer/port/patches applied, exe jsp.exe).
 Exit code 0 when everything asked for passed. The last line is "RESULT: ...". The log (--log) is appended to.
 
 Portable zip (layout of --interactive --portable adapted from the same installer):
@@ -531,7 +531,7 @@ def step_lift(c):
         return False
     funcs, jobs_args, t3 = an / "EBOOT.functions.json", ["--jobs"], 0
     if c.tree == "v18":
-        # the v0.18 lifter wants the function list completed by find_functions.py and the TOC value
+        # the v0.19 lifter wants the function list completed by find_functions.py and the TOC value
         funcs = an / "functions.json"
         ok, t3 = run("lift: find_functions", [*c.py, c.tools / "find_functions.py", e, "--seed-json", an / "EBOOT.functions.json",
                                               "--output", funcs], an / "find_functions.log")

@@ -4,9 +4,11 @@ The pre-pass bound the previous frame copy to every sampler whose texture is as 
 offscreen render target with that offset. The 3D title scene is drawn into a 1280x720 target that the post chain samples, so the
 post chain read the wrong image. The offscreen target now wins.
 
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 10cf6e9f..5a67f3d6 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -4963,7 +4963,8 @@
+@@ -5078,7 +5078,8 @@ static void render_frame(void)
              }
              /* Display-sized sampler source -> the rendered frame. */
              if (dr->tex[_u].set && s_screen_copy &&

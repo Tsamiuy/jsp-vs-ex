@@ -15,10 +15,13 @@ Tested (US disc, Free Battle, scripted route): a fight with 326 pipelines and no
 150 s of the fight 15.9 (15.5 before); pictures as before. A second run was lost to the menu route. Not tested: a session long
 enough to fill 4096 pipelines.
 
+Re-fitted for v0.19.0: The lookup hint keeps v0.19.0's full key (unnormalized mask and sizes).
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 59b7bd33..eb95b622 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -236,7 +236,7 @@
+@@ -235,7 +235,7 @@ typedef struct {
      ID3DBlob* vs;
      int uses_c03;
  } VPVSEntry;
@@ -27,7 +30,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
                           * thrashed every frame and eviction shifted slots
                           * under recorded vs_idx values -- the display mesh
                           * drew with the WRONG vertex program (sub-rect +
-@@ -273,7 +273,7 @@
+@@ -274,7 +274,7 @@ typedef struct {
   * single frame, so the FIFO evicted entries that were needed again immediately
   * and ~17 shaders were recompiled EVERY frame -- about half the frame's CPU
   * time. Entries are small (a PSO pointer plus key fields). */
@@ -36,7 +39,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  
  /* ---------------------------------------------------------------------------
   * Internal state
-@@ -1438,6 +1438,34 @@
+@@ -1406,6 +1406,34 @@ static int init_d3d12(u32 width, u32 height)
      return 0;
  }
  
@@ -71,7 +74,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
  /* ---------------------------------------------------------------------------
   * Frame sync helpers
   * -----------------------------------------------------------------------*/
-@@ -2046,10 +2074,13 @@
+@@ -2014,10 +2042,13 @@ static int vp_get_vs(const rsx_state* st)
      }
      int slot;
      if (s_d3d.vp_vs_n < VP_VS_CACHE) slot = s_d3d.vp_vs_n++;
@@ -89,7 +92,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      }
      s_d3d.vp_vs[slot].hash = hash;
      s_d3d.vp_vs[slot].vs   = vb;
-@@ -2870,7 +2901,9 @@
+@@ -2866,7 +2897,9 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
       * War HD uploads its fragment programs into a ring every frame: keyed on the
       * address, every draw of every frame missed and went through a full
       * decompile + D3DCompile (179 draws -> seconds per frame on its menu). */
@@ -100,12 +103,12 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
          if (s_d3d.vp_fp[i].ucode_hash != uhash) continue;   /* cheap reject first */
          else if (s_d3d.vp_fp[i].vs_idx == vs_idx &&
              s_d3d.vp_fp[i].vs_hash == vs_hash && s_d3d.vp_fp[i].gen == s_d3d.vp_gen &&
-@@ -2879,8 +2912,11 @@
-             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
-             s_d3d.vp_fp[i].cull == cull &&
+@@ -2877,8 +2910,11 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
              s_d3d.vp_fp[i].cube_mask == cube_mask && s_d3d.vp_fp[i].zs == zs &&
--            !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16))
-+            !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16)) {
+             !memcmp(s_d3d.vp_fp[i].shadow, shsig, 16) &&
+             s_d3d.vp_fp[i].unnorm_mask == unnorm_mask &&
+-            (!unnorm_mask || memcmp(s_d3d.vp_fp[i].unnorm_dim, unnorm_dim, sizeof(s_d3d.vp_fp[i].unnorm_dim)) == 0))
++            (!unnorm_mask || memcmp(s_d3d.vp_fp[i].unnorm_dim, unnorm_dim, sizeof(s_d3d.vp_fp[i].unnorm_dim)) == 0)) {
 +            s_fp_hint[uhash & 4095u] = i;
              return s_d3d.vp_fp[i].pso;
 +        }
@@ -113,7 +116,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
      /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
       * entry for the same program. "the cache misses" is not actionable; "it
-@@ -2962,9 +2998,11 @@
+@@ -2962,9 +2998,11 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
  
      /* insert (evict oldest when full) */
      if (s_d3d.vp_fp_n >= VP_FP_CACHE) {
@@ -126,7 +129,7 @@ diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
      }
      s_d3d.vp_fp[s_d3d.vp_fp_n].fp_addr = fp_addr;
      s_d3d.vp_fp[s_d3d.vp_fp_n].vs_idx  = vs_idx;
-@@ -4832,6 +4870,7 @@
+@@ -4952,6 +4990,7 @@ static void render_frame(void)
       * polygons). These workloads are a few draws/frame, so full serialisation
       * costs little. */
      wait_for_gpu();

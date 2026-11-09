@@ -9,14 +9,20 @@ sample). With 1024 slots the fight creates 0-20 textures per 5 s.
 Tested (US disc, Free Battle, same scripted route): game flips per second over the same 100 s of the fight 10.3-10.6 before
 (three runs), 12.1 with this patch; menus unchanged.
 
+Re-fitted for v0.19.0: v0.19.0 has 256 slots (#600); this raises it to 1024.
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 66725f89..57a8db5a 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -217,7 +217,7 @@
-  * so every draw past the fourth got slot -1 from vp_upload_tex_slot ("out of
-  * slots") and drew UNTEXTURED. That reads as a correctly-lit but solid black
-  * object, which is indistinguishable from a missing texture upload. */
--#define VP_TEX_SLOTS 192
+@@ -214,8 +214,9 @@ typedef struct {
+     u32 last_frame;     /* frame_count when last referenced: the slot least
+                          * recently used is the one given to a new texture */
+ } VPTexSlot;
+-/* Distinct textures uploadable per frame. */
+-#define VP_TEX_SLOTS 256
++/* Distinct textures uploadable per frame. J-Stars' fights churned ~4,500 texture re-creations per 5 s through
++ * the LRU at 192 slots; 1024 keeps every fight texture resident (patch 2024). */
 +#define VP_TEX_SLOTS 1024
  /* Guest texture uploads are staged in one persistently mapped upload buffer,
   * a part per frame in flight, reset when that frame's command allocator is

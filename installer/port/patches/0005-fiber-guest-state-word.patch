@@ -5,9 +5,10 @@ scheduler; +0x19 priority). The game's SPU job wakes a parked fiber with GETLLAR
 unused slot. Done on the toolkit's own scheduler instead of a second one, after the v0.15 port's fiber code (jstars/port/jstars_fiber.cpp).
 
 diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+index 3673985c..1bad1ece 100644
 --- a/libs/spurs/cellFiber.c
 +++ b/libs/spurs/cellFiber.c
-@@ -108,6 +108,52 @@
+@@ -108,6 +108,52 @@ static Sched* s_scheds;
  static Fiber* s_fibers;
  static u64    s_seq;
  
@@ -60,7 +61,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
  /* The fiber running on this host thread, if any. */
  static PPU_THREAD_LOCAL Fiber* t_cur;
  
-@@ -147,6 +193,7 @@
+@@ -147,6 +193,7 @@ static Fiber* pick_runnable(const Sched* s)
  {
      Fiber* best = NULL;
      for (Fiber* f = s_fibers; f; f = f->next) {
@@ -68,7 +69,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
          if (f->sched != s || f->state != F_READY) continue;
          if (!best || f->priority < best->priority ||
              (f->priority == best->priority && f->seq < best->seq))
-@@ -155,14 +202,6 @@
+@@ -155,14 +202,6 @@ static Fiber* pick_runnable(const Sched* s)
      return best;
  }
  
@@ -83,7 +84,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
  /* ---------------------------------------------------------------------------
   * Host context switching: ucontext on POSIX, fibers on Windows. RunFibers' own context is the "back" one every fiber
   * returns to when it blocks, yields or ends.
-@@ -243,6 +282,7 @@
+@@ -243,6 +282,7 @@ static void fiber_finish_locked(Fiber* f, s32 status)
  {
      f->status = status;
      f->state  = F_DONE;
@@ -91,7 +92,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
      for (Fiber* g = s_fibers; g; g = g->next)
          if (g->state == F_WAIT_JOIN && g->join_ea == f->ea) g->state = F_READY;
  }
-@@ -402,6 +442,11 @@
+@@ -402,6 +442,11 @@ s32 cellFiberPpuCreateFiber(CellFiberPpuScheduler* scheduler, CellFiberPpu* fibe
          f->seq   = s_seq++;
          f->next  = s_fibers;
          s_fibers = f;
@@ -103,7 +104,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
      }
      UNLOCK();
      if (rc != CELL_OK) {
-@@ -430,12 +475,14 @@
+@@ -430,12 +475,14 @@ s32 cellFiberPpuRunFibers(CellFiberPpuScheduler* scheduler)
  
      for (;;) {
          Fiber* f = pick_runnable(s);
@@ -123,7 +124,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
          UNLOCK();
  
          ppu_context* saved_active = g_active_ctx;
-@@ -448,6 +495,8 @@
+@@ -448,6 +495,8 @@ s32 cellFiberPpuRunFibers(CellFiberPpuScheduler* scheduler)
          LOCK();
          if (f->state == F_DONE)
              host_destroy(f);     /* off its stack now; the Fiber stays for JoinFiber's status */
@@ -132,7 +133,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
      }
      s->running = 0;
      UNLOCK();
-@@ -460,10 +509,21 @@
+@@ -460,10 +509,21 @@ s32 cellFiberPpuWaitSignal(void)
      if (!f) return (s32)CELL_FIBER_ERROR_PERM;
  
      LOCK();
@@ -158,7 +159,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
      }
      f->state = F_WAIT_SIGNAL;
      UNLOCK();
-@@ -479,11 +539,18 @@
+@@ -479,11 +539,18 @@ s32 cellFiberPpuSendSignal(CellFiberPpu* fiber, u32* numWorker)
      LOCK();
      Fiber* f = find_fiber(ea);
      if (!f) { UNLOCK(); return (s32)CELL_FIBER_ERROR_INVAL; }
@@ -180,7 +181,7 @@ diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
      return CELL_OK;
  }
  
-@@ -495,6 +562,7 @@
+@@ -495,6 +562,7 @@ s32 cellFiberPpuYield(void)
      LOCK();
      f->state = F_READY;
      f->seq   = s_seq++;          /* behind the other fibers of its priority */

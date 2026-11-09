@@ -7,9 +7,10 @@ raises CRI's lead to 12 (CRI_LEAD, installer/port/jsp/jsp_hle.cpp), as the v0.15
 Unset (the default) changes nothing.
 
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index f231ea26..78458437 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
-@@ -806,6 +806,14 @@
+@@ -843,6 +843,14 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
          return CELL_AUDIO_ERROR_PARAM;
      if (nblk != CELL_AUDIO_BLOCK_8 && nblk != CELL_AUDIO_BLOCK_16 && nblk != CELL_AUDIO_BLOCK_32)
          return CELL_AUDIO_ERROR_PARAM;

@@ -500,7 +500,7 @@ int main(int argc, char** argv)
     setenv("CRI_LEAD", "12", 0);
 #endif
 
-    printf("=== jsp (J-Stars Victory VS+, ps3recomp v0.18.0) ===\n");
+    printf("=== jsp (J-Stars Victory VS+, ps3recomp v0.19.0) ===\n");
 
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");

@@ -5,9 +5,10 @@ byte of the depth); the backend bound the colour copy with the identity mapping,
 orange hair yellow). RSX_DS_REMAP=0 restores the identity mapping.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 9eeb3eaa..b2bda618 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -5243,8 +5243,17 @@
+@@ -5364,8 +5364,17 @@ static void render_frame(void)
                  if (crt >= 0) {
                      dr->tex_rt[_u] = crt;
                      dr->tex_ds[_u] = ds;

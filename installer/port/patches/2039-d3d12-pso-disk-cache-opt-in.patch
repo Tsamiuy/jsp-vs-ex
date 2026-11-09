@@ -2,12 +2,11 @@ Patch 2039: fit: pso_cache.bin opt-in (PSO_CACHE=1); cached pipelines hung the s
 
 Source: fit for J-Stars.
 
-
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 567e6250..a36336fa 100644
+index e9f037f0..9102ab7a 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -2117,6 +2117,9 @@ static void sc_open(SCache* c)
+@@ -2086,6 +2086,9 @@ static void sc_open(SCache* c)
  {
      const char* e = getenv(c->env);
      c->on = (e && e[0] == '0') ? 0 : 1;

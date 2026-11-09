@@ -1,0 +1,25 @@
+Patch 2042: 4096 draw records per frame instead of 2048.
+
+A J-Stars fight frame records more than 2048 draws, so nearly every fight frame was split by patch 2002's mid-frame flush
+([MIDFLUSH] records=2040: about 5,000 in a 9-minute demo run), each split costing an extra render pass. With GPU vertex
+pulling on (VPULL=1, patch 2034), draws are not merged at all and every frame was split: that is what froze the picture
+in the earlier VPULL tests. The upload heaps grow with it (per-draw constants about 69 MB instead of 35).
+
+Tested (US disc, attract demo, FRAME_TL=1): mid-frame flushes from about 5,000 to 40 per run; the drain's time per demo
+fight frame from 34-46 ms to 28-31 ms. The game still waits for a third vblank, so flips/s are about the same alone
+(18.5 vs 17.3-18.5). With VPULL=1 the picture no longer freezes: drain 22-26 ms, 17.3-19.9 flips/s in four runs; VPULL
+stays opt-in until that is measured more.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 82d8708b..c5dfe394 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -64,7 +64,7 @@
+                                  * ~7.5k verts/frame; leave generous headroom) */
+ #define VP_MAX_INDICES  (1u << 21)  /* per-frame index buffer of indexed VP draws, x2 parity */
+ #define VP_TEX_UNITS      16    /* RSX texture units: t0-t15 / s0-s15 end to end (upstream #600 sizes its tables 16) */
+-#define MAX_DRAWS         2048  /* per-frame draw records. Sized from the
++#define MAX_DRAWS         4096  /* per-frame draw records. Sized from the
+                                  * measured worst case (~1841, FRAME_BUDGET);
+                                  * the per-draw constant buffer is
+                                  * VP_CB_STRIDE * MAX_DRAWS * 2 bytes, so 16384

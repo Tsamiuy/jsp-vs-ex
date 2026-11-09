@@ -4,9 +4,10 @@ ppu_report_guest_lrs() prints only each thread's last direct call site. To read 
 itself; g_resv_ctxs is file-static. This adds a read-only accessor, used by the port's JSP_THREADDUMP_MS diagnostic.
 
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index ea7de18a..fb105b71 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
-@@ -920,6 +920,13 @@
+@@ -919,6 +919,13 @@ extern "C" void ppu_resv_register(ppu_context* c)
      long i = _InterlockedExchangeAdd(&g_resv_ctx_n, 1);
      if (i < PPU_RESV_MAX) g_resv_ctxs[i] = c;
  }

@@ -1,12 +1,13 @@
 Patch 2034: VPULL=1 (opt-in): GPU vertex pulling for indexed tris/strips/fans, ported from the J-Stars vpull + vpull-once patches
 
-Source: the maintainer's other port, toolkit 3598e10.
+Source: that port's toolkit 3598e10.
 
 Guest vertex bytes go into a byte ring and the VS decodes them by SV_VertexID; everything else stays on the CPU path. First fight A/B: 56.8 vs 51.8 median flips, [PERF] vtx 0.06 vs 0.13 s, 100% of indexed draws pulled, 0 not drawn.
 
+Re-fitted for v0.19.0: Defines VP_TEX_UNITS (16, as v0.19.0 #600 sizes its tables), which patch 2004 used to define.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 1db656b5..0fc92dac 100644
+index beefc54e..c31a4be7 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -23,6 +23,7 @@
@@ -17,7 +18,15 @@ index 1db656b5..0fc92dac 100644
  #include "rsx_texture_layout.h"
  #include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
  #include <stdio.h>
-@@ -155,6 +156,12 @@ typedef struct {
+@@ -62,6 +63,7 @@
+ #define MAX_VERTICES    393216  /* per-frame vertex buffer (dbgfont submits
+                                  * ~7.5k verts/frame; leave generous headroom) */
+ #define VP_MAX_INDICES  (1u << 21)  /* per-frame index buffer of indexed VP draws, x2 parity */
++#define VP_TEX_UNITS      16    /* RSX texture units: t0-t15 / s0-s15 end to end (upstream #600 sizes its tables 16) */
+ #define MAX_DRAWS         2048  /* per-frame draw records. Sized from the
+                                  * measured worst case (~1841, FRAME_BUDGET);
+                                  * the per-draw constant buffer is
+@@ -156,6 +158,12 @@ typedef struct {
       * indices into vp_ib, relative to the vertex at vb_byte_offset. */
      int   indexed;
      u32   ib_first, index_count;
@@ -30,7 +39,7 @@ index 1db656b5..0fc92dac 100644
  } D3D12DrawRecord;
  /* An indexed run (upload_tris_vp_ix) may take the next batch; cleared with the records. */
  static int s_ix_run_valid;
-@@ -235,6 +242,7 @@ typedef struct {
+@@ -234,6 +242,7 @@ typedef struct {
      u32 hash;               /* FNV-1a of the ucode */
      ID3DBlob* vs;
      int uses_c03;
@@ -38,7 +47,7 @@ index 1db656b5..0fc92dac 100644
  } VPVSEntry;
  #define VP_VS_CACHE 1024 /* wave uses 5+ distinct VPs; at 4 the cache
                           * thrashed every frame and eviction shifted slots
-@@ -423,6 +431,55 @@ static D3D12State s_d3d;
+@@ -426,6 +435,55 @@ static D3D12State s_d3d;
  char g_rsx_title_base[128] = "ps3recomp";
  static u32 s_dbg_last_draws = 0;
  static u64 s_req_verts = 0, s_req_draws = 0, s_drop_draws = 0;
@@ -94,16 +103,16 @@ index 1db656b5..0fc92dac 100644
  /* Raw bind offset of the duck's texture, identified by CONTENT (duck.tga is
   * overwhelmingly yellow, avg 243,191,23). VRAM offsets move between runs, so a
   * hard-coded offset in a filter silently matches nothing and the run looks like
-@@ -1332,7 +1389,7 @@ static int init_d3d12(u32 width, u32 height)
+@@ -1305,7 +1363,7 @@ static int init_d3d12(u32 width, u32 height)
          srv_range.BaseShaderRegister = 0;
          srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
  
--        D3D12_ROOT_PARAMETER rp[3 + VP_TEX_UNITS] = {0};
+-        D3D12_ROOT_PARAMETER rp[19] = {0};
 +        D3D12_ROOT_PARAMETER rp[6 + VP_TEX_UNITS] = {0};   /* the last 3: VPULL only */
          rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 = vp_c bank */
          rp[0].Descriptor.ShaderRegister = 0;
          rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-@@ -1362,8 +1419,21 @@ static int init_d3d12(u32 width, u32 height)
+@@ -1330,8 +1388,21 @@ static int init_d3d12(u32 width, u32 height)
              rp[3 + _s].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
          }
  
@@ -121,12 +130,12 @@ index 1db656b5..0fc92dac 100644
 +        rp[VPULL_RP_TAB].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 +
          D3D12_ROOT_SIGNATURE_DESC rd = {0};
--        rd.NumParameters = 3 + VP_TEX_UNITS; rd.pParameters = rp;
+-        rd.NumParameters = 19; rd.pParameters = rp;
 +        rd.NumParameters = (vpull_on() ? 6 : 3) + VP_TEX_UNITS; rd.pParameters = rp;
          rd.NumStaticSamplers = 0; rd.pStaticSamplers = NULL;
          rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
  
-@@ -1411,6 +1481,39 @@ static int init_d3d12(u32 width, u32 height)
+@@ -1379,6 +1450,39 @@ static int init_d3d12(u32 width, u32 height)
          else
              fprintf(stderr, "[VPIB] allocation failed -- indexed draws are expanded to lists%c", 10);
  
@@ -166,7 +175,7 @@ index 1db656b5..0fc92dac 100644
          bd.Width = (u64)VP_CB_STRIDE * MAX_DRAWS * 2;   /* per-draw constant slots, x2 parity */
          /* A failure here is silent and catastrophic: vp_record_cb returns early,
           * every draw loses its constants, and the whole scene transforms by
-@@ -1982,9 +2085,11 @@ static u32 vp_hash_ucode(const u8* p, u32 n)
+@@ -1950,9 +2054,11 @@ static u32 vp_hash_ucode(const u8* p, u32 n)
      return h ? h : 1u;
  }
  
@@ -178,7 +187,7 @@ index 1db656b5..0fc92dac 100644
      if (!st || st->vp_ucode_bytes < 16) return -1;
      /* Start at the instruction SET_TRANSFORM_PROGRAM_START selects, not at 0.
       * The microcode store holds every resident program -- this title keeps its
-@@ -2006,11 +2111,15 @@ static int vp_get_vs(const rsx_state* st)
+@@ -1974,11 +2080,15 @@ static int vp_get_vs(const rsx_state* st)
        const u32 instrs = rsx_vp_program_size_instrs(vuc, vlen);
        if (instrs) vlen = instrs * 16u; }
      u32 hash = vp_hash_ucode(vuc, vlen);
@@ -195,7 +204,7 @@ index 1db656b5..0fc92dac 100644
      if (ni <= 0) return -1;
      if (getenv("VP_DUMP")) { static int _d=0; if (PS3_LOG_FIRST(_d, 4)) {
          FILE* f = fopen("vp2_dump.hlsl", _d==1 ? "w" : "a");
-@@ -2084,6 +2193,7 @@ static int vp_get_vs(const rsx_state* st)
+@@ -2052,6 +2162,7 @@ static int vp_get_vs(const rsx_state* st)
      }
      s_d3d.vp_vs[slot].hash = hash;
      s_d3d.vp_vs[slot].vs   = vb;
@@ -203,7 +212,7 @@ index 1db656b5..0fc92dac 100644
      s_d3d.vp_vs[slot].uses_c03 =
          (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
           strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
-@@ -2674,6 +2784,8 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
+@@ -2665,6 +2776,8 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
      pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb);
      pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
      pd.InputLayout.pInputElementDescs = il; pd.InputLayout.NumElements = 16;
@@ -212,7 +221,7 @@ index 1db656b5..0fc92dac 100644
      pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
      /* Guest face culling. CULL_OFF=1 forces double-sided, the old
       * unconditional behaviour -- geometry that vanishes under culling is a
-@@ -5621,6 +5733,15 @@ static void render_frame(void)
+@@ -5745,6 +5858,15 @@ static void render_frame(void)
              D3D12_CPU_DESCRIPTOR_HANDLE cur_dsv = dsv_handle;
              double _rec0 = perf_on() ? perf_now() : 0.0;
              int seen_small_vp = 0, captured = 0;
@@ -228,7 +237,7 @@ index 1db656b5..0fc92dac 100644
              for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
                  const D3D12DrawRecord* dr = &s_d3d.draws[d];
                  if (!dr->is_vp) continue;
-@@ -5911,6 +6032,23 @@ static void render_frame(void)
+@@ -6037,6 +6159,23 @@ static void render_frame(void)
                          s_d3d.cmd_list->lpVtbl->IASetIndexBuffer(s_d3d.cmd_list, &ibv);
                          ib_bound = 1;
                      }
@@ -252,7 +261,7 @@ index 1db656b5..0fc92dac 100644
                      s_d3d.cmd_list->lpVtbl->DrawIndexedInstanced(s_d3d.cmd_list,
                          dr->index_count, 1, dr->ib_first, (INT)(dr->vb_byte_offset / 256), 0);
                  } else
-@@ -6042,9 +6180,11 @@ static void render_frame(void)
+@@ -6168,9 +6307,11 @@ static void render_frame(void)
      s_d3d.vb_offset  = 0; /* reset for next frame */
      s_d3d.vp_vb_offset = 0;
      s_d3d.vp_ib_offset = 0;
@@ -265,7 +274,7 @@ index 1db656b5..0fc92dac 100644
      s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
  
      /* Debug: RTT_SAVERT=<hex raw offset>[:frame] copies that offscreen RT
-@@ -6604,8 +6744,9 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+@@ -6732,8 +6873,9 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
          s_last_clear_presented_flip = s_last_clear_boundary_flip;
      }
      s_dbg_clears_since_present++;
@@ -276,7 +285,7 @@ index 1db656b5..0fc92dac 100644
      s_d3d.draw_count   = 0;
      s_d3d.vb_offset    = 0;
      s_d3d.vp_vb_offset = 0;
-@@ -7436,7 +7577,7 @@ static int ix_can_continue(u32 first)
+@@ -7595,7 +7737,7 @@ static int ix_can_continue(u32 first)
      if (!s_ix_run_valid || !s_d3d.merge_prev_draw || s_d3d.draw_count == 0) return 0;
      const D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
      const rsx_state* st = s_d3d.current_rsx_state;
@@ -285,7 +294,7 @@ index 1db656b5..0fc92dac 100644
             pv->fp_addr == (st ? st->shader_program : 0) &&
             pv->begin_epoch == (st ? st->begin_epoch : 0) &&
             pv->ib_first + pv->index_count == s_d3d.vp_ib_offset &&
-@@ -7598,6 +7739,257 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
+@@ -7757,6 +7899,257 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
      return out;
  }
  
@@ -543,7 +552,7 @@ index 1db656b5..0fc92dac 100644
  static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
  {
      extern uint8_t* vm_base;
-@@ -7845,6 +8237,7 @@ static void vp_flush_if_full(u32 guest_count, int indexed)
+@@ -8035,6 +8428,7 @@ static void vp_flush_if_full(u32 guest_count, int indexed)
      u32 used = s_d3d.vp_vb_offset / VP_VERT_STRIDE;
      int full = used + guest_count * 3u > MAX_VERTICES || s_d3d.draw_count + 8 >= MAX_DRAWS;
      if (indexed && s_d3d.vp_ib_offset + guest_count * 3u > VP_MAX_INDICES) full = 1;
@@ -551,7 +560,7 @@ index 1db656b5..0fc92dac 100644
      if (!full) return;
      static u32 n = 0;
      static double t_end = 0.0;
-@@ -8136,9 +8529,24 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8342,9 +8736,24 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
      u32 emitted = 0;
      u32 rec = s_d3d.vp_vb_offset;
      const long long vs_t0 = vs_begin_indexed(s_d3d.current_rsx_state, primitive, first, count);
@@ -578,7 +587,7 @@ index 1db656b5..0fc92dac 100644
          ix_cont = ix_can_continue(first);
          emitted = upload_tris_vp_ix(s_d3d.current_rsx_state, first, count, ix_cont);
          ix_used = emitted != 0;
-@@ -8165,7 +8573,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8373,7 +8782,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
      if (ix_used && ix_cont) {          /* a batch of the previous record's run */
          D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
          pv->index_count += emitted;
@@ -587,7 +596,7 @@ index 1db656b5..0fc92dac 100644
          s_d3d.merge_first_end = first + count;
          return;
      }
-@@ -8188,17 +8596,20 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8396,17 +8805,20 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
              return;
          }
      }
@@ -610,7 +619,7 @@ index 1db656b5..0fc92dac 100644
          dr->topology       = RSX_TOPOLOGY_TRIANGLES;
          dr->textured       = s_d3d.tex_bound;
          dr->is_vp          = 1;
-@@ -8232,7 +8643,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8445,7 +8857,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
              dr->tex_rt[_u]  = -1;
          }
          dr->tex_slot = -1;
@@ -619,7 +628,7 @@ index 1db656b5..0fc92dac 100644
          dr->is_clear = 0;
          dr->blend = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->blend_enable : 1;
          dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
-@@ -8246,6 +8657,12 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -8459,6 +8871,12 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
          } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
          dr->cb_slot = s_d3d.draw_count;
                  vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
@@ -701,7 +710,7 @@ index 130b1ca4..35abfafa 100644
   * program that rsx_vp_uses_branch_bits() must be keyed on them too. */
 diff --git a/libs/video/rsx_vpull.h b/libs/video/rsx_vpull.h
 new file mode 100644
-index 00000000..a6415ebe
+index 00000000..83ed5e64
 --- /dev/null
 +++ b/libs/video/rsx_vpull.h
 @@ -0,0 +1,121 @@

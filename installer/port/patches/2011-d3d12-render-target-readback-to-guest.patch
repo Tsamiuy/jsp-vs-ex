@@ -3,11 +3,42 @@ Patch 2011: optional write-back of small main-memory colour render targets to gu
 The game's exposure loop (PPU) reads the average-luminance target that the post chain draws into main memory. The backend never
 wrote any render target back, so the PPU averaged zeros. This copies such a target to guest memory after the frame.
 
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 7d3cad2a..daf2014e 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -555,6 +555,11 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
+         return 0;
+       } }
++    /* Colour-surface DMA contexts (outside the 0x200/0x280 surface ranges). */
++    if (method == 0x194) { state->dma_color[0] = data; return 0; }
++    if (method == 0x18C) { state->dma_color[1] = data; return 0; }
++    if (method == 0x2B8) { state->dma_color[2] = data; return 0; }
++    if (method == 0x2BC) { state->dma_color[3] = data; return 0; }
+     if ((method >= 0x200 && method <= 0x23C) ||
+         (method >= 0x280 && method <= 0x28C))
+         return process_surface_method(state, method, data);
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 0574b324..867fa0a7 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -262,6 +262,10 @@ typedef struct rsx_state {
+     u32 surface_color_pitch[RSX_MAX_RENDER_TARGETS];
+     u32 surface_zeta_offset;
+     u32 surface_zeta_pitch;
++    /* SET_CONTEXT_DMA_COLOR_A/B/C/D (0x194/0x18C/0x2B8/0x2BC): 0xFEED0000 = local
++     * memory, 0xFEED0001 = main memory. Says where a colour surface lives, so a
++     * render target in main memory can be written back for the CPU. */
++    u32 dma_color[4];
+     u32 surface_clip_x, surface_clip_y;
+     u32 surface_clip_w, surface_clip_h;
+     u32 color_target;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index cccb756..96bdf6e 100644
+index 5a67f3d6..134448ea 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -3778,6 +3778,29 @@ static void rec_zeta(D3D12DrawRecord* dr)
+@@ -3791,6 +3791,29 @@ static void rec_zeta(D3D12DrawRecord* dr)
      dr->no_color = st->color_target == 0 && dr->zeta_off != 0;
  }
  
@@ -37,7 +68,7 @@ index cccb756..96bdf6e 100644
  /* Which offscreen surface (if any) does the current RSX state render to?
   * Returns 0 for a display buffer (backbuffer), else the surface's RAW RSX
   * offset. RTs are keyed by raw offset -- a texture bound at the same raw
-@@ -3836,6 +3859,7 @@ static u32 current_rt_off(u32* out_w, u32* out_h, u32 out_mrt[3])
+@@ -3849,6 +3872,7 @@ static u32 current_rt_off(u32* out_w, u32* out_h, u32 out_mrt[3])
      if (w < 16 || w > 2048 || h < 16 || h > 2048) { w = 0; h = 0; }
      if (out_w) *out_w = w;
      if (out_h) *out_h = h;
@@ -45,9 +76,9 @@ index cccb756..96bdf6e 100644
      return raw;
  }
  
-@@ -4544,6 +4568,120 @@ static void guest_fb_present(u32 fi)
+@@ -4657,6 +4681,120 @@ static void scanout_auto_present(u32 fi)
+     s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &gb);
  }
- 
  
 +/* RT_READBACK=1 (default OFF, the guest's exposure loop did not
 + * pick the data up in the title scene; RT_READBACK=0 off, RT_READBACK_MAXPX=<n> pixel cap,
@@ -166,7 +197,7 @@ index cccb756..96bdf6e 100644
  static void render_frame(void)
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
-@@ -5823,10 +5961,12 @@ skip_dump_consider: ;
+@@ -5944,10 +6082,12 @@ skip_dump_consider: ;
          s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &barrier);
      }
  
@@ -179,34 +210,3 @@ index cccb756..96bdf6e 100644
  
      /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
       * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
-diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
-index 7d3cad2..daf2014 100644
---- a/libs/video/rsx_commands.c
-+++ b/libs/video/rsx_commands.c
-@@ -555,6 +555,11 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
-         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
-         return 0;
-       } }
-+    /* Colour-surface DMA contexts (outside the 0x200/0x280 surface ranges). */
-+    if (method == 0x194) { state->dma_color[0] = data; return 0; }
-+    if (method == 0x18C) { state->dma_color[1] = data; return 0; }
-+    if (method == 0x2B8) { state->dma_color[2] = data; return 0; }
-+    if (method == 0x2BC) { state->dma_color[3] = data; return 0; }
-     if ((method >= 0x200 && method <= 0x23C) ||
-         (method >= 0x280 && method <= 0x28C))
-         return process_surface_method(state, method, data);
-diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
-index 0574b32..867fa0a 100644
---- a/libs/video/rsx_commands.h
-+++ b/libs/video/rsx_commands.h
-@@ -262,6 +262,10 @@ typedef struct rsx_state {
-     u32 surface_color_pitch[RSX_MAX_RENDER_TARGETS];
-     u32 surface_zeta_offset;
-     u32 surface_zeta_pitch;
-+    /* SET_CONTEXT_DMA_COLOR_A/B/C/D (0x194/0x18C/0x2B8/0x2BC): 0xFEED0000 = local
-+     * memory, 0xFEED0001 = main memory. Says where a colour surface lives, so a
-+     * render target in main memory can be written back for the CPU. */
-+    u32 dma_color[4];
-     u32 surface_clip_x, surface_clip_y;
-     u32 surface_clip_w, surface_clip_h;
-     u32 color_target;

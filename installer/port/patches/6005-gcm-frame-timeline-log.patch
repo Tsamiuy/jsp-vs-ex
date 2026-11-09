@@ -1,0 +1,98 @@
+Patch 6005: FRAME_TL=1, a per-flip timeline in the log (diagnostic, off by default).
+
+Per flip: request (the flip marker queued on the guest thread) -> the drain reaches it ("draw"), -> the DONE the guest sees
+("tick"), DONE -> the next request ("game"). One [FTL] line per 60 flips, mean and max in ms. It showed that J-Stars' fight
+frames are bound by the drain (34-46 ms per frame, menus 4 ms) and that the game builds nothing while it waits.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index b98465f6..3457a309 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -124,6 +124,62 @@ static volatile int s_flip_pending = 0;
+  * however many vblanks go by. */
+ static volatile u32 s_fifo_flips_queued = 0, s_fifo_flips_reached = 0;
+ static u32 s_fifo_flips_completed = 0;   /* reached count at the last completion */
++/* FRAME_TL=1 (diagnostic, off by default): per flip the time from its request (marker queued, guest thread)
++ * to the drain reaching it ("draw"), from there to the DONE the guest sees ("tick"), and from that DONE to
++ * the next request ("game": the game's own build and waits). One [FTL] line per 60 flips, mean and max in ms. */
++static int s_ftl = -1;
++static double s_ftl_req[64], s_ftl_reach[64], s_ftl_done_t;
++static double s_ftl_sum[3], s_ftl_max[3]; static u32 s_ftl_n[3], s_ftl_flips;
++static double ftl_now(void)
++{
++#ifdef _WIN32
++    static LARGE_INTEGER f; LARGE_INTEGER c;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
++#else
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
++#endif
++}
++static int ftl_on(void)
++{
++    if (s_ftl < 0) { const char* e = getenv("FRAME_TL"); s_ftl = (e && *e == '1') ? 1 : 0; }
++    return s_ftl;
++}
++static void ftl_add(int k, double v)
++{
++    if (v < 0 || v > 5000) return;
++    s_ftl_sum[k] += v; s_ftl_n[k]++; if (v > s_ftl_max[k]) s_ftl_max[k] = v;
++}
++static void ftl_request(u32 idx)   /* idx: queued count after this flip */
++{
++    if (!ftl_on()) return;
++    const double t = ftl_now();
++    s_ftl_req[idx & 63] = t;
++    if (s_ftl_done_t > 0) ftl_add(2, t - s_ftl_done_t);
++    if (++s_ftl_flips % 60 == 0) {
++        fprintf(stderr, "[FTL] 60 flips: draw %.1f (max %.1f)  tick %.1f (max %.1f)  game %.1f (max %.1f) ms%c",
++                s_ftl_n[0] ? s_ftl_sum[0] / s_ftl_n[0] : 0.0, s_ftl_max[0],
++                s_ftl_n[1] ? s_ftl_sum[1] / s_ftl_n[1] : 0.0, s_ftl_max[1],
++                s_ftl_n[2] ? s_ftl_sum[2] / s_ftl_n[2] : 0.0, s_ftl_max[2], 10);
++        for (int k = 0; k < 3; k++) { s_ftl_sum[k] = 0; s_ftl_max[k] = 0; s_ftl_n[k] = 0; }
++    }
++}
++static void ftl_reach(u32 idx)     /* idx: reached count after this flip */
++{
++    if (!ftl_on()) return;
++    const double t = ftl_now();
++    s_ftl_reach[idx & 63] = t;
++    if (s_ftl_req[idx & 63] > 0) ftl_add(0, t - s_ftl_req[idx & 63]);
++}
++static void ftl_done(u32 idx)      /* idx: reached count at the completion */
++{
++    if (!ftl_on()) return;
++    const double t = ftl_now();
++    s_ftl_done_t = t;
++    if (s_ftl_reach[idx & 63] > 0) ftl_add(1, t - s_ftl_reach[idx & 63]);
++}
+ /* A flip requested outside the command stream (cellGcmSetFlipCommand, or a
+  * 0xFEAD word the drain met), not completed yet. */
+ static volatile int s_flip_direct_pending = 0;
+@@ -993,6 +1049,7 @@ void ppu_gcm_pump(void)
+         if (s_flip_tick_seq == s_flip_req_seq)
+             s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+         FLIP_UNLOCK();
++        ftl_done(s_fifo_flips_completed);
+         if (s_flip_handler_opd && g_ps3_guest_caller) {
+             ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
+             g_ps3_guest_caller(s_flip_handler_opd, 1, 0, 0, 0, 0, 0, 0, 0);
+@@ -2583,7 +2640,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                 s_flip_request_count++;
+                 /* Not past `queued`: a resync may already have written off
+                  * this flip. */
+-                if (s_fifo_flips_reached != s_fifo_flips_queued) s_fifo_flips_reached++;
++                if (s_fifo_flips_reached != s_fifo_flips_queued) { s_fifo_flips_reached++; ftl_reach(s_fifo_flips_reached); }
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+             }
+@@ -3502,6 +3559,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     if (gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
+     vm_write32(cur, GCM_FLIP_MARKER | bufferId);
+     s_fifo_flips_queued++;
++    ftl_request(s_fifo_flips_queued);
+     /* Wrap here, on the guest thread, once the ring is nearly used -- what the
+      * SDK's buffer-full callback does. Otherwise the drain thread recycles it
+      * (see "recycled the title's own ring"), rewriting ctx->current and put

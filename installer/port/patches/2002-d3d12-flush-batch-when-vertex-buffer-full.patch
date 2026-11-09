@@ -4,14 +4,16 @@ After the opening movie the game's frame starts with a depth-only pass of 634 dr
 (393216). Every later op of the frame then got no vertex slots and was not recorded, so each flip presented the bare clear. The
 backend now renders what is recorded and continues in the other half. VP_NO_MIDFLUSH=1 restores the old truncation.
 
+Re-fitted for v0.19.0: v0.19.0 adds upload_quad_strip_vp_indexed (#617) at the same spot; both kept.
+
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index bc05a30..e242499 100644
+index 854739e7..6fbcee64 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -7014,6 +7014,35 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
+@@ -7191,6 +7191,35 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
      return o;
  }
-
+ 
 +/* J-Stars: a frame that does not fit the per-frame vertex buffer (or the draw
 + * records) used to be truncated silently -- the first big pass (the depth-only
 + * shadow pass, 634 draws = exactly MAX_VERTICES vertices) took every slot and
@@ -44,19 +46,19 @@ index bc05a30..e242499 100644
  static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
  {
      /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
-@@ -7035,6 +7064,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
-
+@@ -7212,6 +7241,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ 
      if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
      if (count == 0 || count > MAX_VERTICES) return;
 +    vp_flush_if_full(count, 0);
      vs_arrays(s_d3d.current_rsx_state, primitive, count);
-
+ 
      /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
-@@ -7281,6 +7311,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+@@ -7474,6 +7504,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
      if (!s_d3d.pipeline_ready) return;
      if (count == 0 || count > MAX_VERTICES) return;
      if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;
 +    vp_flush_if_full(count, 1);
-
+ 
      /* Expand through the VP path (indices resolved CPU-side): QUADS -> two
       * triangles per quad, TRIANGLES straight through, STRIP/FAN -> triangle

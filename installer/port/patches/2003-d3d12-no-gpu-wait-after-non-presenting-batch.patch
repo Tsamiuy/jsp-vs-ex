@@ -5,10 +5,10 @@ every offscreen-only batch stalled the CPU until the GPU finished. A failed frag
 retried every draw.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index e242499..b987017 100644
+index 6fbcee64..02442d51 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -2758,11 +2758,21 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+@@ -2747,11 +2747,21 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
          s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso);
      pb->lpVtbl->Release(pb);
      if (FAILED(hr)) {
@@ -30,22 +30,22 @@ index e242499..b987017 100644
      { static int _ok=0; if (PS3_LOG_FIRST(_ok, 32)) printf("[FP] guest FP pipeline ready (fp=0x%08X)\n", fp_addr); }
      rdoc_name((ID3D12Object*)pso, "pso fp 0x%08X ucode %08X vs %d", fp_addr, uhash, vs_idx);
 +    }
-
+ 
      /* insert (evict oldest when full) */
      if (s_d3d.vp_fp_n >= VP_FP_CACHE) {
-@@ -4159,6 +4169,8 @@ static void ds_convert(int i, int rt)
+@@ -4167,6 +4177,8 @@ static void ds_convert(int i, int rt)
   * render-to-texture pass) must still run -- it is what fills the texture a
   * later batch samples -- but presenting it would show a half-built frame. */
  static int s_present_this_frame = 1;
 +/* VP_MIDFLUSH_WAIT=1: old behaviour, wait for the GPU after a non-presenting batch (comparison). */
 +static int s_midflush_wait = 0;
-
+ 
  /* Resolve a DRAW_*_TEX value: a hex raw offset, or the literal "duck" for the
   * content-identified duck texture. */
-@@ -5850,7 +5862,14 @@ skip_dump_consider: ;
+@@ -5964,7 +5976,14 @@ skip_dump_consider: ;
      }
      rdoc_frame_end();
-
+ 
 -    move_to_next_frame();
 +    /* J-Stars: a batch that did not present keeps the same back buffer, so
 +     * move_to_next_frame() would only wait for the fence it just signalled
@@ -55,10 +55,10 @@ index e242499..b987017 100644
 +     * so recording after a flush overlaps with the GPU rendering it. */
 +    if (s_present_this_frame || s_midflush_wait)
 +        move_to_next_frame();
-
+ 
      s_d3d.frame_count++;
-
-@@ -5859,9 +5878,16 @@ skip_dump_consider: ;
+ 
+@@ -5973,9 +5992,16 @@ skip_dump_consider: ;
      {
          static ULONGLONG s_tt0 = 0;
          static u64 s_tframes = 0;
@@ -75,7 +75,7 @@ index e242499..b987017 100644
          if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
              extern char g_rsx_title_base[128];
              char tb[256];
-@@ -7028,19 +7054,24 @@ static void vp_flush_if_full(u32 guest_count, int indexed)
+@@ -7205,19 +7231,24 @@ static void vp_flush_if_full(u32 guest_count, int indexed)
  {
      static int off = -1;
      if (off < 0) off = getenv("VP_NO_MIDFLUSH") ? 1 : 0;
@@ -102,5 +102,5 @@ index e242499..b987017 100644
 +    n++;
 +    t_end = perf_now();
  }
-
+ 
  static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
