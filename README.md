@@ -42,7 +42,7 @@ first build takes a while and needs several GB of free space, and `Build again` 
 |---|---|
 | Native x64 code, not an emulator: the game's own code translated ahead of time with [ps3recomp](https://github.com/sp00nznet/ps3recomp) | [docs/LAYOUT.md](docs/LAYOUT.md) |
 | Built on your PC from your own copy; nothing from the game is shipped | [installer/README.md](installer/README.md) |
-| No server contact: no update check, no crash report, no telemetry | [installer/README.md](installer/README.md) |
+| No server contact unless you turn Online Battle on: no update check, no crash report, no telemetry | [installer/README.md](installer/README.md) |
 | Higher resolutions, a resizable window and borderless fullscreen | [Features: Display](docs/FEATURES.md#resolution) |
 | Keyboard, mouse or controller, with a launcher to rebind keys | [Features: Input](docs/FEATURES.md#input-modes) |
 | Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
