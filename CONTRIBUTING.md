@@ -45,4 +45,5 @@ CI) reports any version that disagrees. To release, either way:
 
 Merging a change to `installer/VERSION` into `main` starts the `release` workflow: it tags `vX.Y.Z`, builds the installer
 and creates a **draft** GitHub release with the files and the notes (`python3 tools/release.py notes X.Y.Z`). Look at the
-draft and publish it by hand. Do not push the tag yourself; the workflow skips a version whose tag exists.
+draft and publish it by hand. If a build fails after tagging, rerun the release workflow: a tag at the same commit with no release resumes
+the build. Existing drafts and published releases are left alone, and tags at another commit are never moved.

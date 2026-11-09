@@ -164,7 +164,7 @@ def main(argv=None):
     for rel in changed:
         print("  " + rel)
     print(f"Next: git add {' '.join(changed)} && git commit -m 'Release {new}', then merge it to main by pull request.")
-    print(f"The release workflow then tags v{new} and drafts the release; do not tag by hand (it skips a version whose tag exists).")
+    print(f"The release workflow then tags v{new} and drafts the release; failed builds can retry the same-commit tag until a release exists.")
     return 0
 
 
