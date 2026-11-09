@@ -6,7 +6,7 @@ name: release
 # DRAFT GitHub release with the files and the CHANGELOG notes. Publishing the draft is done by hand.
 #
 # Tags pushed with GITHUB_TOKEN start no other workflow, so everything runs here, in one workflow, not on a tag trigger.
-# Do not push the tag by hand first: a version whose tag already exists is skipped.
+# A same-commit tag without a release resumes a failed build; tags are never moved.
 
 on:
   push:
@@ -48,17 +48,10 @@ jobs:
         run: |
           set -euo pipefail
           version=$(tr -d '[:space:]' < installer/VERSION)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$version" > /dev/null 2>&1; then
-            echo "Tag v$version exists: nothing to release."
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Needs a CHANGELOG section for this version (release.py notes fails without one).
+          # Require notes before reserving a tag. Existing releases are never replaced.
           python3 tools/release.py notes "$version" > /dev/null
-          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$version" -f sha="$GITHUB_SHA" > /dev/null
-          echo "Tagged v$version at $GITHUB_SHA."
-          echo "build=true" >> "$GITHUB_OUTPUT"
+          python3 tools/ci/release_tag.py --repo "$GITHUB_REPOSITORY" --version "$version" \
+            --sha "$GITHUB_SHA" --output "$GITHUB_OUTPUT" --execute
 
   build:
     needs: tag
