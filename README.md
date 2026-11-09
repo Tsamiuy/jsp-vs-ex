@@ -1,20 +1,60 @@
 <p align="center"><img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS-EX, Fan Revival. White ASCII art on black: a star with a 3D J inside on the left; on the right the title J-Stars Victory, the letters VS-EX and Fan Revival; below them: unofficial fan project, no game files included, you need your own copy."></p>
 
-# J-Stars Victory VS-EX, Fan Revival (work in progress)
+# J-Stars Victory VS-EX, Fan Revival
 
-**J-Stars Victory VS+: unofficial PC port (static recompilation)**
+**J-Stars Victory VS+ running natively on Windows: the game's own code, recompiled to x64 on your PC from your own copy.**
 
 [![CI](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-![Status: work in progress](https://img.shields.io/badge/status-work%20in%20progress-orange)
-![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D6)
-![Direct3D 12](https://img.shields.io/badge/graphics-Direct3D%2012-555)
 
-**[Status](docs/notes/STATUS.md)** · **[Features](docs/FEATURES.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Building](docs/BUILDING.md)** · **[Scripts](docs/SCRIPTS.md)** · **[Layout](docs/LAYOUT.md)** · **[Notes](docs/notes/README.md)** · **[Contributing](CONTRIBUTING.md)**
+**[Status](docs/notes/STATUS.md)** · **[Features](docs/FEATURES.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Installer](installer/README.md)** · **[Building](docs/BUILDING.md)** · **[Notes](docs/notes/README.md)** · **[Contributing](CONTRIBUTING.md)**
 
-A PC port of **J-Stars Victory VS+** (PS3, BLUS31519) to Windows x64, built with the
-[ps3recomp](https://github.com/sp00nznet/ps3recomp) toolkit (MIT). It is a static recompilation: the game's own code,
-translated ahead of time to native x64. Unofficial fan project.
+> **Bring your own game.** This repository holds no game code, no game assets and no firmware: no ISO, EBOOT,
+> recompiled game code, captures or screenshots. You need your own copy of the game (US BLUS31519 or EU BLES02136) and
+> its decrypted EBOOT, from your own copy. Please do not post game files in issues or pull requests.
+
+| ~30 fps | ~29 fps | 34,092 | 0 |
+|:---:|:---:|:---:|:---:|
+| fights, newer v19 tree (opt-in) | fights, default v15 tree | game functions recompiled | game files in this repository |
+
+The frame rates were measured on one Windows machine; see [Status](#status).
+
+## How to play
+
+**Windows 10 or 11, x64**
+
+1. Have your game's disc folder (the one with `PS3_GAME`) and its decrypted `EBOOT.elf` ready.
+2. Build `jsp-setup.exe` once: [installer/README.md, "Building the installer"](installer/README.md#building-the-installer-windows).
+   It needs Git, Python, Inno Setup and an internet connection for the pinned compiler.
+3. Run `jsp-setup.exe` (no admin rights) and point it at the disc folder and `EBOOT.elf`. It builds the port on your PC.
+4. Start **JSP Fan Revival** from the Start menu.
+
+Caveat: this installer has not been run on a real Windows PC yet (see its [status table](installer/README.md#status)); the
+first build takes a while and needs several GB of free space, and `Build again` in the Start menu resumes it.
+
+**A ready-made installer download:** coming soon (no release is published yet).
+
+**Linux and Steam Deck (Proton):** coming soon. Not supported yet; the newer tree has reached fights under Proton in tests.
+
+## What makes it different
+
+| | |
+|---|---|
+| Native x64 code, not an emulator: the game's own code translated ahead of time with [ps3recomp](https://github.com/sp00nznet/ps3recomp) | [docs/LAYOUT.md](docs/LAYOUT.md) |
+| Built on your PC from your own copy; nothing from the game is shipped | [installer/README.md](installer/README.md) |
+| No server contact: no update check, no crash report, no telemetry | [installer/README.md](installer/README.md) |
+| Higher resolutions, a resizable window and borderless fullscreen | [Features: Display](docs/FEATURES.md#resolution) |
+| Keyboard, mouse or controller, with a launcher to rebind keys | [Features: Input](docs/FEATURES.md#input-modes) |
+| Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
+| The game's own Online Battle over a self-hosted psnr server (experimental, opt-in, newer tree) | [installer/README.md, "Online Battle"](installer/README.md#online-battle-experimental) |
+
+## Coming soon
+
+- A published installer and portable zip.
+- The newer v19 tree as the default, once it has had the tests the v15 tree had ([issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
+- Online matches with rollback netcode, spectating and lobbies ([Roadmap, section 4](docs/ROADMAP.md)).
+- More match options and Training options ([Roadmap, section 3](docs/ROADMAP.md)).
+- Linux through Proton ([Roadmap, Platforms](docs/ROADMAP.md#platforms)).
 
 ## Status
 
@@ -28,24 +68,11 @@ translated ahead of time to native x64. Unofficial fan project.
 > default yet: it has had far fewer tests (the EU disc, the first-start window and long runs are not re-checked on it)
 > and has known problems, such as washed-out lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
 >
-> Dated table (top refreshed 2026-10-30, for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md). What the port
-> adds: [docs/FEATURES.md](docs/FEATURES.md).
+> Dated table (top refreshed 2026-10-30, for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md).
 
-## Requirements
-
-- **Your own copy of the game** (the notes use the US disc, BLUS31519).
-- **A Windows x64 build environment** for a hand build: Visual Studio 2022 Build Tools with clang-cl, CMake, Ninja and
-  Python 3. The [installer](installer/README.md) brings its own compiler and needs none of these.
-- **A ps3recomp checkout with this project's patches**, and an **RPCS3 installation** (the port reads its `dev_flash`
-  folder at run time, read only).
-
-Full list and steps: [docs/BUILDING.md](docs/BUILDING.md).
-
-## No game data
-
-This repository holds no game data: no ISO, EBOOT, firmware, recompiled game code, captures or screenshots. Please do
-not post any of these in issues or pull requests. The EBOOT comes from your own copy of the game; for how to obtain
-the decrypted file, see RPCS3 and its documentation.
+**How it works:** the installer lifts the game's PowerPC and SPU code from your `EBOOT.elf` to C, compiles it with a
+bundled compiler and links it against the ps3recomp runtime, which provides the PS3 system libraries and draws through
+Direct3D 12. Details: [installer/README.md](installer/README.md) and [docs/LAYOUT.md](docs/LAYOUT.md).
 
 ## Known problems
 
