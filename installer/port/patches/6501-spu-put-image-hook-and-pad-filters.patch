@@ -1,0 +1,75 @@
+Patch 6501: title-port hooks from the v0.15 port: g_spu_put_hook_img (every SPU PUT with the SPU image that issued it,
+after the bytes are in guest memory), g_cellpad_filter and g_cellpad_rstick_filter (change the buttons and sticks
+cellPadGetData hands the game), and g_cellpad_want_p2.
+
+All NULL or 0 by default: nothing changes until a port installs them. J-Stars' host code uses them for rewording
+PS3-only text in unpacked files, the Exit Game option, Free Battle boxes and the free camera.
+
+Tested (US disc): builds and runs with the hooks unset (feature build).
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 5ab5614d..885c95f8 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1126,6 +1126,11 @@ void cellPad_poll(void)
+  * were fixed.) These used to be redeclared here with a 64-bit address
+  * parameter, which conflicts with the header now that it is included. */
+ 
++void (*g_cellpad_filter)(u32 port_no, u16* buttons, u16* lx, u16* ly) = 0;   /* 6501 */
++void (*g_cellpad_rstick_filter)(u32 port_no, u16* rx, u16* ry) = 0;          /* 6501 */
++/* 6501: a title port that drives player 2 itself asks for port 1 to exist. */
++int g_cellpad_want_p2 = 0;
++
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
+     { static int _once = 0;
+@@ -1425,6 +1430,21 @@ skip_inject: ;
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = hs->analog_lx;
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]  = hs->analog_ly;
+ 
++    /* Patch 6501 (from the v0.15 port): title-port filters on what the game reads. The right stick first, then the
++     * buttons (DIGITAL2 << 8 | DIGITAL1, as PAD_SCRIPT masks) and the left stick. NULL by default. */
++    { extern void (*g_cellpad_rstick_filter)(u32 port_no, u16* rx, u16* ry);
++      if (g_cellpad_rstick_filter) g_cellpad_rstick_filter(port_no, &data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X],
++                                                           &data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y]); }
++    { extern void (*g_cellpad_filter)(u32 port_no, u16* buttons, u16* lx, u16* ly);
++      if (g_cellpad_filter) {
++          u16 fb = (u16)((data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & 0xFF) |
++                         ((data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] & 0xFF) << 8));
++          g_cellpad_filter(port_no, &fb, &data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X],
++                           &data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]);
++          data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] = (u16)(fb & 0xFF);
++          data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] = (u16)(fb >> 8);
++      } }
++
+     /* Pressure-sensitive buttons (only meaningful if PRESS_ON) */
+     if (setting & CELL_PAD_SETTING_PRESS_ON) {
+         data->button[CELL_PAD_BTN_OFFSET_PRESS_RIGHT]    = hs->press_right;
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 84b7ac96..a5d5df1b 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -176,6 +176,9 @@ void (*g_spu_out_mbox_hook)(uint32_t group_id, uint32_t spu_id,
+  * stream is, so the only evidence is the DMA that writes it. NULL until
+  * installed, so a title with no SPU-built FIFO pays nothing. */
+ void (*g_spu_put_hook)(uint32_t ea, uint32_t size) = 0;
++/* Patch 6501 (from the v0.15 port): every SPU PUT with the image that issued it, after the bytes are in guest memory;
++ * lets a title port look at (or reword) one job's output, e.g. J-Stars' data decompressor. NULL by default. */
++void (*g_spu_put_hook_img)(int image_id, uint32_t ea, uint32_t size) = 0;
+ 
+ void spu_halt(spu_context* ctx)
+ {
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 8c4ccaa8..3b084638 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -743,6 +743,9 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+          * find the pushbuffer; NULL for every title that does not. */
+         { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
+           if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
++        /* Patch 6501: the same with the SPU image that wrote it (title ports, e.g. J-Stars rewording PS3-only text). */
++        { extern void (*g_spu_put_hook_img)(int image_id, uint32_t ea, uint32_t size);
++          if (g_spu_put_hook_img) g_spu_put_hook_img(spu->image_id, (uint32_t)ea, size); }
+         /* Bink sync-area watch (armed by the PPU barrier probe): log SPU PUTs
+          * that touch the per-SPU lane counters. */
+         { extern uint32_t g_barrier_sync_watch;
