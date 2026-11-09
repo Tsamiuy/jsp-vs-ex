@@ -38,6 +38,11 @@ jobs:
           python3 tools/test_features.py
           python3 tools/features.py --check
 
+      - name: Save import preserves progress on failure
+        run: |
+          python3 installer/tools/rpcs3_wizard_test.py
+          python3 installer/tools/test_rpcs3_locate.py
+
       - name: Version numbers agree (tools/release.py)
         run: |
           python3 tools/test_release.py
