@@ -122,6 +122,7 @@ uint64_t ppu_guest_call(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t,
 
 /* The GCM half of the frame clock. */
 void     cellGcmTickVBlank(void);
+void     cellGcm_fifo_kick_wait(unsigned ms);   /* idle wait, woken by a FIFO kick (cellGcmSys) */
 void     cellGcmTickFlip(void);
 int      cellGcm_take_flip_pending(void);
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
@@ -207,7 +208,7 @@ static void present_guest_frame(void)
 static DWORD WINAPI frame_clock(LPVOID)
 {
     const char* title = getenv("PS3_TITLE");
-    if (!title || !*title) title = "ps3recomp";
+    if (!title || !*title) title = "J-Stars Victory VS+";   /* the launcher sets PS3_TITLE; scripted runs may not */
 
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
@@ -216,7 +217,46 @@ static DWORD WINAPI frame_clock(LPVOID)
     unsigned  last_flip = 0;
     ULONGLONG next_tick = GetTickCount64();
 
+    /* VBLANK_QPC (on by default, VBLANK_QPC=0 = the old tick): the 60 Hz vblank/flip tick off
+     * QueryPerformanceCounter at exactly 1000/60 ms, and the idle wait never runs past the next tick.
+     * GetTickCount64 only advances in 15-16 ms steps, even with timeBeginPeriod(1), so with
+     * `next_tick += 16` a tick fires late by up to a whole step or two fire in one burst; J-Stars waits
+     * for a vblank after each flip request, so a frame ready in 30 ms often waited for a third vblank.
+     * The idle wait is cellGcm_fifo_kick_wait (a guest fence wait or flush wakes it) instead of
+     * Sleep(4). From the v0.15 port (jstars/port/main.cpp, VBLANK_QPC, default on there). */
+    static int vqpc = -1;
+    if (vqpc < 0) { const char* e = getenv("VBLANK_QPC"); vqpc = (e && *e == '0') ? 0 : 1; }
+    LARGE_INTEGER qf, qn; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&qn);
+    const double q_period = 1000.0 / 60.0;
+    double q_next = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
+    if (vqpc) fprintf(stderr, "[rsx] VBLANK_QPC: vblank tick from QPC, %.4f ms\n", q_period);
+
     for (;;) {
+        if (vqpc) {
+            QueryPerformanceCounter(&qn);
+            const double qms = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
+            const double left = q_next - qms;
+            unsigned w = left <= 0.0 ? 0u : (unsigned)(left + 0.999);
+            if (w > 4) w = 4;
+            if (w) cellGcm_fifo_kick_wait(w);
+            QueryPerformanceCounter(&qn);
+            const double qnow = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
+            int qfired = 0;
+            while (qnow >= q_next && qfired < 240) {
+                cellGcmTickVBlank();
+                cellGcmTickFlip();
+                if (rsx_ok && cellGcm_take_flip_pending()) {
+                    present_guest_frame();
+                    last_flip = cellGcm_flip_request_count();
+                }
+                if (rsx_ok) cellGcm_rsx_process_fifo();
+                q_next += q_period;
+                qfired++;
+            }
+            if (qfired >= 240) q_next = qnow + q_period;   /* fell too far behind -- resync */
+            goto outer_cadence;
+        }
+        {
         Sleep(4);
         ULONGLONG now = GetTickCount64();
 
@@ -241,6 +281,8 @@ static DWORD WINAPI frame_clock(LPVOID)
             fired++;
         }
         if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
+        }
+outer_cadence:
 
         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
          * fence every render pass on a label the drain writes, and one wave of

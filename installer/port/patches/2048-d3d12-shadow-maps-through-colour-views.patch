@@ -1,0 +1,310 @@
+Patch 2048: J-Stars' shadow maps compared as the game reads them (ZPASS_ARGB_TXP=0, RSX_POLY_OFFSET=0, RSX_FP_INLINE_K=0 off).
+
+J-Stars reads its two shadow maps (D24S8 surfaces, t7 2048x1024 and t8 1024x1024) through an A8R8G8B8 view with a
+depth func in TEXTURE_ADDRESS. Its materials take TXP taps and sum .x as comparison results; its fog pass reads the
+same kind of view with TEX and rebuilds depth from the bytes. Only DEPTH24/DEPTH16 views were compared here, so every
+material read "lit": the floor of Yoshiwara under the roof came out washed out (a SHADOW_NULL test darkened it).
+After the v0.15 port (ZPASS_ARGB_TXP, polygon offset on casters):
+- such a view read with TXP becomes a shadow comparison (patch 2017's helper), judged as the DEPTH24_D8 view it is;
+  it samples the byte copy of the surface unremapped and rebuilds the 24-bit depth from its A/R/G bytes (_rsx_d24);
+- the guest polygon offset (SET_POLY_OFFSET_FILL_ENABLE, SCALE_FACTOR, BIAS: new rsx_state fields) becomes the D3D
+  depth bias, through bits 48..55 of the depth key;
+- the comparison decompile path emits "buffered" constants (a b1 cbuffer of fp_constants[] / fp_alpha) that do not
+  match this backend's b1 slot (rsx_texscale / rsx_alphatest / fp_k): every program with a compared unit read garbage
+  constants and drew black. They are put back inline, as the plain decompiler emits them.
+Diagnostic: SHADOW_BIAS=<f> is subtracted from the comparison reference.
+
+Tested (US disc, bench.ps1 exp line): demo 20.83 and Free Battle 21.58 flips/s (bench\exp\2026-11-07_1442-inlinek);
+the Yoshiwara floor now has the roof's and the statue's shadows and darker tiles, as in the v0.15 Training picture;
+characters lit and shaded normally in the demo and the fight.
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 320197c4..3b5b8673 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -713,6 +713,18 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->depth_dirty = 1;
+         return 0;
+     }
++    if (method == NV4097_SET_POLY_OFFSET_FILL_ENABLE) {
++        state->poly_offset_fill = data ? 1 : 0;
++        state->depth_dirty = 1;
++        return 0;
++    }
++    if (method == NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR || method == NV4097_SET_POLYGON_OFFSET_BIAS) {
++        float f; memcpy(&f, &data, sizeof f);
++        if (method == NV4097_SET_POLYGON_OFFSET_BIAS) state->poly_offset_bias = f;
++        else                                          state->poly_offset_scale = f;
++        state->depth_dirty = 1;
++        return 0;
++    }
+ 
+     /* Stencil */
+     if (method == NV4097_SET_STENCIL_TEST_ENABLE) {
+diff --git a/libs/video/rsx_commands.h b/libs/video/rsx_commands.h
+index 6126a86f..ce723e38 100644
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -186,6 +186,9 @@ extern "C" {
+ #define NV4097_SET_DEPTH_TEST_ENABLE            0x00000A74
+ #define NV4097_SET_DEPTH_FUNC                   0x00000A6C
+ #define NV4097_SET_DEPTH_MASK                   0x00000A70
++#define NV4097_SET_POLY_OFFSET_FILL_ENABLE      0x00000A68
++#define NV4097_SET_POLYGON_OFFSET_SCALE_FACTOR  0x00000A78
++#define NV4097_SET_POLYGON_OFFSET_BIAS          0x00000A7C
+ #define NV4097_SET_STENCIL_TEST_ENABLE          0x00000328
+ #define NV4097_SET_STENCIL_FUNC                 0x00000330
+ #define NV4097_SET_STENCIL_FUNC_REF             0x00000334
+@@ -292,6 +295,8 @@ typedef struct rsx_state {
+     int depth_test_enable;
+     u32 depth_func;
+     int depth_mask;
++    int poly_offset_fill;                       /* SET_POLY_OFFSET_FILL_ENABLE */
++    float poly_offset_scale, poly_offset_bias;  /* SET_POLYGON_OFFSET_SCALE_FACTOR / _BIAS */
+ 
+     /* Stencil */
+     int stencil_test_enable;
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 27c2f86f..2f28aafd 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -121,7 +121,8 @@ typedef struct {
+         u32 addr, filter, ctrl0, border;   /* TEXTURE_ADDRESS/FILTER/CONTROL0/BORDER_COLOR */
+     } tex[16];
+     int tex_rt[16];     /* pre-pass: OffRT index sampled by unit, -1 = none */
+-    int tex_ds[16];     /* pre-pass: OffDS read through unit u (its colour copy is tex_rt), -1 = none */
++    int tex_ds[16];     /* pre-pass: OffDS read through unit u (its colour copy is tex_rt), -1 = none;
++                         * <= -2: OffDS (-2 - value) sampled directly as depth by a shadow comparison (2048) */
+     int tex_slot;       /* legacy single-slot path (atlas); -1 = none */
+     int vs_idx;         /* VPVSEntry slot for this draw's vertex program (-1 = primary) */
+     int blend;          /* guest blend enable at draw time */
+@@ -2512,10 +2513,24 @@ static u32 rsx_stencil_op(u32 op)
+  *   bit 0 depth test, 1 depth write, 2-4 depth func,
+  *   5 stencil test, 6-8 front func, 9-17 front fail/zfail/zpass,
+  *   18-20 back func, 21-29 back fail/zfail/zpass, 32-39 read mask, 40-47 write mask */
++/* Distinct guest polygon offsets (scale, bias), referenced from bits 48..55 of the depth key (0 = none). */
++static float s_poff[256][2]; static int s_poff_n = 1;
++static u32 rsx_poff_index(const rsx_state* st)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("RSX_POLY_OFFSET"); on = (e && *e == '0') ? 0 : 1; }
++    if (!on || !st->poly_offset_fill || (st->poly_offset_scale == 0.0f && st->poly_offset_bias == 0.0f)) return 0;
++    for (int i = 1; i < s_poff_n; i++)
++        if (s_poff[i][0] == st->poly_offset_scale && s_poff[i][1] == st->poly_offset_bias) return (u32)i;
++    if (s_poff_n >= 256) return 0;
++    s_poff[s_poff_n][0] = st->poly_offset_scale; s_poff[s_poff_n][1] = st->poly_offset_bias;
++    return (u32)s_poff_n++;
++}
+ static u64 rsx_zs_key(const rsx_state* st)
+ {
+     if (!st) return 0;
+     u64 k = 0;
++    k |= (u64)rsx_poff_index(st) << 48;   /* guest polygon offset (2048) */
+     if (st->depth_test_enable) {
+         k |= 1u;
+         if (st->depth_mask) k |= 2u;
+@@ -2635,6 +2650,36 @@ static u32 dr_unnorm_units(const D3D12DrawRecord* dr, u32 dim[16][3])
+  * so the pipeline key can compare them: enabled (2 bits) | func<<2 | linear<<5 | unnormalized<<6. */
+ static int off_rt_find(u32 off);
+ static int off_ds_find(u32 off);
++/* ZPASS_ARGB_TXP (default on, =0 off; from the v0.15 port): J-Stars reads its shadow maps (D24S8 surfaces) through
++ * an A8R8G8B8 view with a depth func in TEXTURE_ADDRESS, two ways. Its materials take TXP taps and sum .x as
++ * comparison results; its fog pass reads the same kind of view with TEX and rebuilds depth from the bytes. Only
++ * DEPTH24_D8/DEPTH16 views compared here, so every material read the far-depth bytes of the map as "lit": the
++ * indoor floor of Yoshiwara under the roof came out washed out instead of shadowed (v0.15 FINDINGS 29/31).
++ * So: A8R8G8B8 + depth surface + depth func + TXP = comparison, + TEX = bytes, as before. */
++static u32 fp_txp_units_at(u32 off)
++{
++    extern uint8_t* vm_base;
++    if (!vm_base) return 0;
++    const u8* uc = vm_base + off;
++    u32 units = 0;
++    for (u32 o = 0; o + 16 <= 0x10000u;) {
++        const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
++        const u32 w2 = rsx_fp_read_word(uc + o + 8), w3 = rsx_fp_read_word(uc + o + 12);
++        if (!(w2 & (1u << 31)) && ((w0 >> 24) & 63u) == 0x18u)      /* TXP */
++            units |= 1u << ((w0 >> 17) & 15u);
++        o += 16;
++        if (!(w2 & (1u << 31)) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2))
++            o += 16;                                                   /* inline constant */
++        if (w0 & 1u) break;                                            /* END */
++    }
++    return units;
++}
++static int zargb_txp_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("ZPASS_ARGB_TXP"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
+ static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 units)
+ {
+     extern uint8_t* vm_base;
+@@ -2656,6 +2701,15 @@ static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 un
+         rsx_fp_shadow_desc d;
+         rsx_fp_shadow_desc_from_texture(&d, dr->tex[u].fmt, 2, dr->tex[u].cube, dr->tex[u].mips,
+                                         dr->tex[u].filter, dr->tex[u].addr, dr->tex[u].ctrl0);
++        if (!d.enabled && zargb_txp_on() && (dr->tex[u].fmt & 0x9Fu) == 0x85u && off_ds_find(dr->tex[u].raw) >= 0) {
++            static u32 txp_off = 0xFFFFFFFFu, txp_units = 0;
++            if (off != txp_off) { txp_off = off; txp_units = fp_txp_units_at(off); }
++            if (txp_units & (1u << u)) { /* judged as the DEPTH24_D8 view it stands for */
++                rsx_fp_shadow_desc_from_texture(&d, (dr->tex[u].fmt & ~0x9Fu) | 0x92u, 2, dr->tex[u].cube,
++                                                dr->tex[u].mips, dr->tex[u].filter, dr->tex[u].addr, dr->tex[u].ctrl0);
++                if (d.enabled) { sh[u] = (u8)((d.enabled & 3) | (d.func << 2) | (d.linear << 5) | (d.unnormalized << 6) | 0x80u); continue; }
++            }
++        }
+         if (!d.enabled) continue;
+         sh[u] = (u8)((d.enabled & 3) | (d.func << 2) | (d.linear << 5) | (d.unnormalized << 6));
+     }
+@@ -2696,6 +2750,68 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+         for (int u = 0; u < 16; u++) if (sh[u]) fprintf(stderr, " t%d(en=%d func=%d lin=%d un=%d)", u, sh[u] & 3, (sh[u] >> 2) & 7, (sh[u] >> 5) & 1, (sh[u] >> 6) & 1);
+         fprintf(stderr, " n=%d%c", n, 10); } }
+     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
++    { /* The shadow (and gamma) decompile entry points emit "buffered" constants: a b1 cbuffer of fp_constants[N] and
++       * fp_alpha. This backend's b1 slot holds rsx_texscale / rsx_alphatest / fp_k, so every program with a compared
++       * unit read garbage constants (J-Stars' characters black). Put them back inline, as the plain decompiler does,
++       * in the order rsx_fp_extract_consts walks them. RSX_FP_INLINE_K=0 off. */
++      static int ik = -1; if (ik < 0) { const char* e = getenv("RSX_FP_INLINE_K"); ik = (e && *e == '0') ? 0 : 1; }
++      char* cb = ik ? strstr(hlsl, "cbuffer PSConstants : register(b1) {") : NULL;
++      if (cb) {
++          char* cbe = strstr(cb, "};\n");
++          static float kv[256 * 4];
++          const int nk = rsx_fp_extract_consts(vm_base + off, 0x10000, kv, 256);
++          if (cbe) {
++              static const char rep_decl[] = "static const float4 fp_alpha = float4(0.0, 0.0, 0.0, 0.0);\n";
++              const size_t old_len = (size_t)(cbe + 3 - cb), new_len = sizeof rep_decl - 1, used = strlen(hlsl);
++              memmove(cb + new_len, cb + old_len, used - (size_t)(cb + old_len - hlsl) + 1);
++              memcpy(cb, rep_decl, new_len);
++          }
++          static char tmp[RSX_FP_HLSL_BUFFER_SIZE];
++          char* o = tmp; const char* q = hlsl; const char* end_o = tmp + sizeof tmp - 64;
++          while (*q && o < end_o) {
++              if (!strncmp(q, "fp_constants[", 13)) {
++                  unsigned idx = (unsigned)strtoul(q + 13, NULL, 10);
++                  const char* rb = strchr(q, ']');
++                  if (rb && (int)idx < nk) {
++                      o += snprintf(o, (size_t)(end_o - o), "float4(%.9g,%.9g,%.9g,%.9g)",
++                                    kv[idx * 4], kv[idx * 4 + 1], kv[idx * 4 + 2], kv[idx * 4 + 3]);
++                      q = rb + 1; continue;
++                  }
++              }
++              *o++ = *q++;
++          }
++          *o = 0;
++          if (!*q) memcpy(hlsl, tmp, (size_t)(o - tmp) + 1);
++      }
++    }
++    { /* 2048: units compared through the byte copy of a D24S8 surface read the full depth from its bytes */
++      int any24 = 0;
++      for (int u = 0; u < 16; u++) {
++          if (!(sh[u] & 0x80u)) continue;
++          char pat[64]; snprintf(pat, sizeof pat, "rsx_tex[%d].SampleLevel(rsx_samp[%d], ", u, u);
++          char* q = hlsl;
++          while ((q = strstr(q, pat)) != NULL) {
++              char* e = strstr(q, ", 0.0).r;");
++              char* nl = strchr(q, '\n');
++              if (!e || (nl && e > nl)) { q += strlen(pat); continue; }
++              /* "X.SampleLevel(..., 0.0).r;" -> "_rsx_d24(X.SampleLevel(..., 0.0));" (same length + 9) */
++              const size_t tail = strlen(e + 9) + 1, used = strlen(hlsl);
++              if (used + 16 >= sizeof hlsl) break;
++              memmove(e + 17, e + 9, tail);                /* rest moves by +8: "_rsx_d24(" (9) in front, ", 0.0).r;" (9) -> ", 0.0));" (8) */
++              memmove(q + 9, q, (size_t)(e - q));
++              memcpy(q, "_rsx_d24(", 9);
++              memcpy(e + 9, ", 0.0));", 8);
++              any24 = 1;
++              q = e + 9 + 8;
++          }
++      }
++      if (any24) {
++          static const char fn[] = "float _rsx_d24(float4 c) { return dot(round(c.agr * 255.0), float3(65536.0, 256.0, 1.0)) / 16777215.0; }\n";
++          const size_t fl = strlen(fn), used = strlen(hlsl);
++          char* at = strstr(hlsl, "float _rsx_shadow_cmp");
++          if (at && used + fl + 1 < sizeof hlsl) { memmove(at + fl, at, used - (size_t)(at - hlsl) + 1); memcpy(at, fn, fl); }
++      }
++    }
+     /* A shadow-compare unit divides an unnormalized coordinate by the size in its own helper (patch 2017), so
+      * #618's scaling skips it: dividing twice would sample the wrong texel. */
+     for (int u = 0; u < 16; u++) if (sh && (sh[u] & 3)) unnorm_mask &= ~(1u << u);
+@@ -3021,6 +3137,14 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
+         ds->BackFace.StencilDepthFailOp  = (D3D12_STENCIL_OP)(((zs >> 24) & 7u) + 1u);
+         ds->BackFace.StencilPassOp       = (D3D12_STENCIL_OP)(((zs >> 27) & 7u) + 1u);
+     }
++    /* glPolygonOffset(factor, units) == D3D slope-scaled bias + integer bias in units of the depth format's
++     * resolution (as the v0.15 port). The game's shadow casters carry one; without it a receiver compared with
++     * its own depth sits exactly at the reference and shadows itself. */
++    { const u32 pi = (u32)((zs >> 48) & 0xFFu);
++      if (pi && pi < (u32)s_poff_n) {
++          pd.RasterizerState.DepthBias = (INT)s_poff[pi][1];
++          pd.RasterizerState.SlopeScaledDepthBias = s_poff[pi][0];
++      } }
+     /* DEPTH_OFF=1: drop the depth test for guest-FP draws, so submission order
+      * alone decides what is on top. Paired with DRAW_LAST_TEX this puts one
+      * object in front of everything and answers "is it merely occluded?" --
+@@ -5745,6 +5869,26 @@ static void render_frame(void)
+              * draw (ds_convert). */
+             if (dr->tex[_u].set) {
+                 const int ds = off_ds_find(dr->tex[_u].raw);
++                /* 2048: an A8R8G8B8 view read with TXP and a depth func is compared (vp_shadow_pack); the comparison
++                 * samples the depth surface itself, at full precision, instead of the byte copy. */
++                if (ds >= 0 && zargb_txp_on() && (dr->tex[_u].fmt & 0x9Fu) == 0x85u &&
++                    ((dr->tex[_u].addr >> 28) & 15u) != 0 && ((dr->tex[_u].addr >> 28) & 15u) != 7 &&
++                    (dr->tex[_u].ctrl0 & 0x80000000u) && dr->fp_addr) {
++                    extern u32 cellGcmResolveLocated(int local, u32 offset);
++                    const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
++                    static u32 c_off = 0xFFFFFFFFu, c_units = 0;
++                    if (foff != c_off) { c_off = foff; c_units = foff == 0xFFFFFFFFu ? 0 : fp_txp_units_at(foff); }
++                    const int crt2 = off_rt_find(dr->tex[_u].raw);
++                    if ((c_units & (1u << _u)) && crt2 >= 0) {
++                        /* the colour copy's bytes as stored (A = depth[23:16], R = [15:8], G = [7:0]); the shader
++                         * rebuilds the depth from them (vp_fp_compile_blob, _rsx_d24) */
++                        dr->tex_rt[_u] = crt2;
++                        dr->tex_ds[_u] = ds;
++                        srv_write(wslot, s_d3d.off_rt[crt2].res, (DXGI_FORMAT)s_d3d.off_rt[crt2].dxgi,
++                                  D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                        continue;
++                    }
++                }
+                 const int crt = ds >= 0 ? off_rt_find(dr->tex[_u].raw) : -1;
+                 if (crt >= 0) {
+                     dr->tex_rt[_u] = crt;
+@@ -6301,6 +6445,8 @@ static void render_frame(void)
+                  * one of the currently-bound colour targets). */
+                 for (int _u = 0; _u < 16; _u++) {
+                     int rt = dr->tex_rt[_u];
++                    if (dr->tex_ds[_u] <= -2 && (-2 - dr->tex_ds[_u]) != cur_z)
++                        off_ds_transition(-2 - dr->tex_ds[_u], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                     if (rt >= 0 && rt != cur_rt &&
+                         rt != cur_m[0] && rt != cur_m[1] && rt != cur_m[2])
+                         off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index cebc890b..ec4d8190 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -512,6 +512,14 @@ u32 rsx_fp_texture_units(const u8* ucode, u32 max_bytes)
+     return units;
+ }
+ 
++/* SHADOW_BIAS=<float> (diagnostic, default 0): subtracted from the comparison reference, to measure how far the
++ * stored depths sit from the references when a shadow comparison fails everywhere. */
++static const char* shadow_bias_txt(void)
++{
++    static char b[32] = "";
++    if (!b[0]) { const char* e = getenv("SHADOW_BIAS"); snprintf(b, sizeof b, "%s", (e && *e) ? e : "0.0"); }
++    return b;
++}
+ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,
+                               const rsx_fp_shadow_desc* d)
+ {
+@@ -523,10 +531,10 @@ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,
+         "depth <= reference", "depth > reference", "depth != reference",
+         "depth >= reference", "1.0" };
+     snprintf(text, sizeof text,
+-        "float _rsx_shadow_cmp%u(float reference, float depth) { return (float)(%s); }\n"
++        "float _rsx_shadow_cmp%u(float reference, float depth) { reference -= %s; return (float)(%s); }\n"
+         "float4 _rsx_shadow%u(float3 coordinate) {\n"
+         "    float reference = saturate(coordinate.z);\n",
+-        unit, cmp[d->func], unit);
++        unit, shadow_bias_txt(), cmp[d->func], unit);
+     out_puts(p, text);
+     if (d->linear || d->unnormalized) {
+         snprintf(text, sizeof text, "    uint width, height; %s.GetDimensions(width, height);\n"

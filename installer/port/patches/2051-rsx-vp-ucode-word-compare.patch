@@ -1,0 +1,28 @@
+Patch 2051: an uploaded vertex-program word is compared as one 32-bit value, not with a memcmp call.
+
+Titles upload a draw's vertex program before every draw (NV4097_SET_TRANSFORM_PROGRAM), mostly the one already there,
+and each word was checked with a 4-byte memcmp, which this build does not inline: memcmp was about 6% of the drawing
+thread in J-Stars' demo fights (no caller name in the sampled stacks). Same result, one load and one compare.
+
+Tested (US disc, bench.ps1): demo 21.60 / 21.96 / 21.62 flips/s (median 21.62, before 20.68), drain per frame
+20.5 ms (before 22.9), Free Battle 21.77 (before 20.00); pictures right (bench\exp\2026-11-07_1842-vpword).
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index 3b5b8673..d5eb4f44 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -353,9 +353,11 @@ static inline void rsx_vp_ucode_word(rsx_state* state, u32 data)
+         /* Titles upload a draw's program before every draw, mostly the
+          * one already there. Only a changed word changes the program
+          * (vp_dirty lets the backend skip looking it up again). */
+-        const u8 b[4] = { (u8)data, (u8)(data >> 8), (u8)(data >> 16), (u8)(data >> 24) };
+-        if (memcmp(&state->vp_ucode[w], b, 4) != 0) {
+-            memcpy(&state->vp_ucode[w], b, 4);
++        /* One 32-bit compare, not a memcmp call: this runs for every word of every upload (patch 2051; the
++         * memcmp calls were ~6% of the drawing thread in J-Stars' fights). Little-endian host, as before. */
++        u32 cur; memcpy(&cur, &state->vp_ucode[w], 4);
++        if (cur != data) {
++            memcpy(&state->vp_ucode[w], &data, 4);
+             state->vp_dirty = 1;
+         }
+         state->vp_ucode_write = w + 4;

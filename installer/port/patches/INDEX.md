@@ -45,6 +45,13 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2041 | fix | the common vertex formats decoded with fixed component counts and tables (VF_UNROLL=0 off). | rsx_d3d12_backend.c | vf_prepare, vf_decode | VF_UNROLL | candidate |
 | 2042 | fix | 4096 draw records per frame instead of 2048. | rsx_d3d12_backend.c |  |  | candidate |
 | 2043 | fix | the sampler-state lookup hashed instead of a linear search. | rsx_d3d12_backend.c | vp_sampler |  | candidate |
+| 2044 | fix | an SRV heap slot that already holds the same view is not written again (SRV_MEMO=0 off). | rsx_d3d12_backend.c | off_rt_rtv, srv_write_ex | SRV_MEMO | candidate |
+| 2045 | fix | GPU vertex pulling (patch 2034) on by default (VPULL=0 off). | rsx_d3d12_backend.c |  | VPULL | J-Stars |
+| 2048 | fix | J-Stars' shadow maps compared as the game reads them (ZPASS_ARGB_TXP=0, RSX_POLY_OFFSET=0, RSX_FP_INLINE_K=0 off). | rsx_commands.c, rsx_commands.h, rsx_d3d12_backend.c, rsx_fp_decompiler.c | rsx_process_method, rsx_stencil_op, dr_unnorm_units, vp_shadow_pack, vp_fp_compile_blob, vp_fp_make_pso ... | RSX_POLY_OFFSET, ZPASS_ARGB_TXP, RSX_FP_INLINE_K, SHADOW_BIAS | J-Stars |
+| 2049 | fix | GPU vertex pulling for draws whose attributes come from up to 4 separate streams (VPULL_MULTI=0 off). | rsx_d3d12_backend.c | upload_strip_vp_ix, vpull_layout, upload_vpull | VPULL_MULTI | candidate |
+| 2050 | fix | a vertex range already copied into the vertex-pulling ring in this batch is reused, not copied again | rsx_d3d12_backend.c | render_frame, d3d12_clear, vpull_layout_multi, vp_get_vs_pull, upload_vpull, vpull_report | VPULL_REUSE, VPULL_DUP | candidate |
+| 2051 | fix | an uploaded vertex-program word is compared as one 32-bit value, not with a memcmp call. | rsx_commands.c | rsx_vp_ucode_word |  | candidate |
+| 2053 | fix | a draw whose vertex constants are unchanged since the previous draw of the batch shares that draw's | rsx_d3d12_backend.c | vp_record_cb, render_frame, d3d12_draw_arrays, d3d12_draw_indexed | VCB_SHARE | candidate |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 6001 | fix | export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.) | ppu_loader.cpp | ppu_resv_register |  | J-Stars |
 | 6002 | fix | g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.) | ppu_hle.cpp | ps3_hle_call |  | J-Stars |
