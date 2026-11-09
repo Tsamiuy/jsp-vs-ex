@@ -1,0 +1,110 @@
+Patch 2512: FX_FULL=1, from the v0.15 backend (after the RES_SCALE patches 2503/2504). A title's half-size effect
+layers get twice the scale of everything else (rs_draw_sc), so they match the scene at any RES_SCALE, 1 included.
+FX_FULL_TARGETS=<hex,...> lists their colour and depth offsets; the default is J-Stars' on v0.19: 640x360 colour
+0x0D430000, 0x0D520000, 0x0D340000, 0x0D610000 and depth 0x0D240000 (7 MB lower than on v0.15). With it, sampled
+depth is copied at full size (as ZCOPY_FULL=1) and FX_NOBLUR is on: the game's alpha blur of the effect layer (8
+samples, code 0xF01DA36B by the v0.15 toolkit's bytewise FNV code hash, kept here as fx_blur_hash) reads the centre
+for all 8 (tc8), which narrows the rim around things standing in front of smoke. FX_NOBLUR=1 alone keeps the blur
+change without the scale.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 55cb37ad..687059a4 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -477,6 +477,23 @@ static float s_rs = 1.0f;   /* 2504: any factor 1-4 (1.25 = 900p, 1.5 = 1080p, 2
+ /* A guest size in resource pixels at scale sc (rounded). */
+ static u32 RSZ(u32 v, float sc) { return (u32)((float)v * sc + 0.5f); }
+ static int s_rs_zfull = 0;
++static int fx_full(void);   /* 2512 */
++/* 2512: the v0.15 toolkit's rsx_fp_code_hash (bytewise FNV-1a over the instructions, constants skipped), which
++ * named J-Stars' effect-alpha blur 0xF01DA36B; v0.19's hash is a different (faster) mix. */
++u32 rsx_fp_read_word(const u8* p);   /* rsx_fp_decompiler.h, included further down */
++static u32 fx_blur_hash(const u8* uc)
++{
++    u32 h = 2166136261u;
++    for (u32 o = 0; o + 16 <= 0x10000;) {
++        const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
++        const u32 w2 = rsx_fp_read_word(uc + o + 8), w3 = rsx_fp_read_word(uc + o + 12);
++        for (u32 i = 0; i < 16; i++) { h ^= uc[o + i]; h *= 16777619u; }
++        o += 16;
++        if (!(w2 & (1u << 31)) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2)) o += 16;
++        if (w0 & 1u) break;
++    }
++    return h;
++}
+ static u32 rs_tiny(u32 w, u32 h) { return w && h && (w < 32u || h < 32u); }
+ char g_rsx_title_base[128] = "ps3recomp";
+ static u32 s_dbg_last_draws = 0;
+@@ -3257,6 +3274,15 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+         char* rp = strstr(hlsl, "return r[0];");
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+     }
++    /* FX_NOBLUR=1 (on with FX_FULL, patch 2512): J-Stars blurs the half-size effect layer's alpha over 8 samples
++     * (code hash 0xF01DA36B) before compositing it, which leaves a rim around whatever stands in front of smoke
++     * (in RPCS3 too). All 8 samples then read the centre (tc8). */
++    { static int nb = -1; if (nb < 0) nb = getenv("FX_NOBLUR") || fx_full() ? 1 : 0;
++      if (nb && fx_blur_hash(vm_base + off) == 0xF01DA36Bu) {
++          char t[16] = "(input.tc0)";
++          for (char c = '0'; c < '8'; c++) { t[9] = c;
++              for (char* q = strstr(hlsl, t); q; q = strstr(q + 1, t)) q[9] = '8'; }
++          static int _n = 0; if (PS3_LOG_FIRST(_n, 4)) fprintf(stderr, "[FX_NOBLUR] fp=0x%08X alpha blur off%c", fp_addr, 10); } }
+     if (t_fp_defer) { *t_fp_defer = _strdup(hlsl); return NULL; }   /* 2057 */
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+     hr = sc_compile(hlsl, "guest_fp", "ps_5_0", &pb, &e);
+@@ -6392,8 +6418,45 @@ static void rtread_finish(void)
+  * target and its zeta must match, or the draw is clipped to the smaller), a
+  * new depth-only surface 1 unless it is display-sized (shadow maps stay at
+  * guest size), otherwise s_rs, 1 for a target under 32 pixels on a side. */
++/* FX_FULL=1 (patch 2512, from the v0.15 backend): a title's half-size effect layers get twice the scale of
++ * everything else, so they match the scene; their alpha blur goes too (FX_NOBLUR) and sampled depth is copied at
++ * full size (ZCOPY_FULL), or a rim stays around things in front of smoke. FX_FULL_TARGETS=<hex,hex,...> lists the
++ * colour and depth offsets of those layers; the default is J-Stars' on v0.19 (640x360 colour 0x0D430000,
++ * 0x0D520000, 0x0D340000, 0x0D610000 and depth 0x0D240000; v0.15 had them 7 MB higher). */
++static int fx_full(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FX_FULL"); on = e && *e && *e != '0'; }
++    return on;
++}
++static int fx_layer(u32 off)
++{
++    static u32 t[16]; static int n = -1;
++    if (n < 0) {
++        const char* e = getenv("FX_FULL_TARGETS");
++        if (!e) e = "0D430000,0D520000,0D340000,0D610000,0D240000";
++        n = 0;
++        for (const char* q = e; *q && n < 16; ) {
++            char* end; const unsigned long v = strtoul(q, &end, 16);
++            if (end == q) break;
++            t[n++] = (u32)v & 0x0FFFFFFFu;
++            q = *end == ',' ? end + 1 : end;
++        }
++    }
++    off &= 0x0FFFFFFFu;
++    if (!off) return 0;
++    for (int i = 0; i < n; i++) if (t[i] == off) return 1;
++    return 0;
++}
++
+ static float rs_draw_sc(const D3D12DrawRecord* dr)
+ {
++    if (fx_full() && (fx_layer(dr->rt_off) || fx_layer(dr->zeta_off))) {
++        static int _n = 0; if (PS3_LOG_FIRST(_n, 8))
++            fprintf(stderr, "[FX_FULL] rt 0x%08X zeta 0x%08X %ux%u at x%g%c", dr->rt_off, dr->zeta_off,
++                    dr->rt_w, dr->rt_h, 2.0f * s_rs, 10);
++        return 2.0f * s_rs;
++    }
+     if (s_rs <= 1.0f) return 1.0f;
+     if (dr->zeta_off && (dr->rt_off || dr->no_color)) {
+         const int zi = off_ds_find(dr->zeta_off);
+@@ -11285,7 +11348,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+         if (n > 4.0f) n = 4.0f;
+         s_rs = n;
+         const char* zf = getenv("ZCOPY_FULL");
+-        s_rs_zfull = zf && *zf && *zf != '0';
++        s_rs_zfull = (zf && *zf && *zf != '0') || fx_full();   /* 2512: FX_FULL wants full-size depth */
+         if (s_rs > 1)
+             fprintf(stderr, "[RES_SCALE] %g: guest %ux%u renders at %ux%u%s%c", s_rs, width, height,
+                     RSZ(width, s_rs), RSZ(height, s_rs), s_rs_zfull ? " (ZCOPY_FULL)" : "", 10);

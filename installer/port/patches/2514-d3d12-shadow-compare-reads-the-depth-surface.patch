@@ -1,0 +1,56 @@
+Patch 2514 (after 2048): a shadow map compared through an A8R8G8B8 view (J-Stars' two maps) is read as the depth
+surface itself (R24_UNORM_X8 SRV, the OffDS sampled directly, tex_ds <= -2), as the v0.15 port did, instead of its
+colour copy whose A/R/G bytes the shader put back together (_rsx_d24). The game's sampler for the maps is linear;
+a lookup off a texel centre mixed the bytes of two depths into a wrong one. SHADOW_DEPTH_DIRECT=0 restores the
+byte copy.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 687059a4..881cbb8a 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2859,6 +2859,16 @@ static u32 fp_txp_units_at(u32 off)
+     }
+     return units;
+ }
++/* SHADOW_DEPTH_DIRECT (patch 2514, default on; =0 the byte copy of 2048): a shadow map compared through an
++ * A8R8G8B8 view is read as the depth surface itself (R24_UNORM_X8), as the v0.15 port did, instead of the colour
++ * copy whose A/R/G bytes the shader put back together (_rsx_d24). The game's sampler for the map is linear, and any
++ * lookup that was not exactly on a texel centre mixed the bytes of two depths into a wrong one. */
++static int shadow_depth_direct(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SHADOW_DEPTH_DIRECT"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
+ static int zargb_txp_on(void)
+ {
+     static int on = -1;
+@@ -3026,9 +3036,10 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+           if (!*q) memcpy(hlsl, tmp, (size_t)(o - tmp) + 1);
+       }
+     }
+-    { /* 2048: units compared through the byte copy of a D24S8 surface read the full depth from its bytes */
++    { /* 2048: units compared through the byte copy of a D24S8 surface read the full depth from its bytes
++       * (2514: not when the depth surface itself is bound) */
+       int any24 = 0;
+-      for (int u = 0; u < 16; u++) {
++      for (int u = 0; u < 16 && !shadow_depth_direct(); u++) {
+           if (!(sh[u] & 0x80u)) continue;
+           char pat[64]; snprintf(pat, sizeof pat, "rsx_tex[%d].SampleLevel(rsx_samp[%d], ", u, u);
+           char* q = hlsl;
+@@ -7406,6 +7417,13 @@ static void render_frame(void)
+                     const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
+                     static u32 c_off = 0xFFFFFFFFu, c_units = 0;
+                     if (foff != c_off) { c_off = foff; c_units = foff == 0xFFFFFFFFu ? 0 : fp_txp_units_at(foff); }
++                    if ((c_units & (1u << _u)) && shadow_depth_direct()) {   /* 2514: the depth surface itself */
++                        dr->tex_rt[_u] = -1;
++                        dr->tex_ds[_u] = -2 - ds;
++                        srv_write(wslot, s_d3d.off_ds[ds].res, DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
++                                  D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                        continue;
++                    }
+                     const int crt2 = off_rt_find(dr->tex[_u].raw);
+                     if ((c_units & (1u << _u)) && crt2 >= 0) {
+                         /* the colour copy's bytes as stored (A = depth[23:16], R = [15:8], G = [7:0]); the shader

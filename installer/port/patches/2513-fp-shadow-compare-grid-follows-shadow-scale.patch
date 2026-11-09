@@ -1,0 +1,63 @@
+Patch 2513 (after 2502 SHADOW_SCALE and 2506): SHADOW_SOFT=<n> makes the bilinear shadow compare work on a grid of n
+shadow-map texels; "auto" = SHADOW_SCALE, i.e. one texel of the game's own map. J-Stars softens its shadow edges
+itself with 4 lookups spaced one guest texel apart; on a map SHADOW_SCALE times finer each lookup's soft edge is
+narrower than that spacing. The taps land on texel centres of the map. Default 1 (the plain lookup): with 2514 the
+maintainer preferred it.
+
+Also: the receiver-plane depth bias of 2506 (SHADOW_RPDB) is off by default again (the maintainer judged the shadows
+better without it); SHADOW_RPDB=2 brings the tested workaround back.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index f7ec2cb1..28dc009e 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -554,13 +554,13 @@ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,
+         out_puts(p, text);
+         return;
+     }
+-    /* SHADOW_RPDB=<texels> (patch 2506, default 2; 0 = off): receiver-plane depth bias. The reference is lowered by
++    /* SHADOW_RPDB=<texels> (patch 2506, off by default since patch 2513 at the maintainer's request; 2 = the tested workaround): receiver-plane depth bias. The reference is lowered by
+      * how much it changes across this many shadow-map texels, worked out from its screen-space derivatives together
+      * with the lookup's: large on surfaces at a grazing angle to the light (sleeves, hat brims, sword blades), near
+      * zero on surfaces facing it (the ground under a character), capped at 0.05. The constant shift of patch 2505
+      * removed J-Stars' self-shadow lines too but cut away the shadow near the feet; this one keeps most of it. */
+     { static int rk = -2; static char rt[32];
+-      if (rk == -2) { const char* e = getenv("SHADOW_RPDB"); snprintf(rt, sizeof rt, "%s", (e && *e) ? e : "2");
++      if (rk == -2) { const char* e = getenv("SHADOW_RPDB"); snprintf(rt, sizeof rt, "%s", (e && *e) ? e : "0");
+                       rk = atof(rt) != 0.0; }
+       if (rk) { char t2[1024];
+           snprintf(t2, sizeof t2,
+@@ -569,13 +569,29 @@ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,
+               "      if (abs(_det) > 1e-12) { float2 _dz = float2(_dy.y * _dx.z - _dx.y * _dy.z, _dx.x * _dy.z - _dy.x * _dx.z) / _det;\n"
+               "        reference -= %s * min(abs(_dz.x) / size.x + abs(_dz.y) / size.y, 0.05); } }\n", rt);
+           out_puts(p, t2); } }
++    /* SHADOW_SOFT=<n> (patch 2513; default 1 = the plain lookup, the maintainer preferred it once 2514 removed the lines; "auto" = SHADOW_SCALE): the bilinear compare works on a grid
++     * of n shadow-map texels, i.e. one texel of the game's own map. J-Stars softens its shadow edges itself with 4
++     * lookups one guest texel apart; on a map SHADOW_SCALE times finer each lookup's soft edge was that much narrower,
++     * so the 4 showed as stacked hard-edged copies of every shadow (Ultra: "more than one shadow"). */
++    /* The taps land on texel centres of the map itself: J-Stars' maps are read through a byte copy of the depth
++     * (A, R, G = depth bytes, _rsx_d24), and a linear sampler between two texels mixes their bytes into a wrong
++     * depth. */
++    static int g = -1;
++    if (g < 0) { const char* e = getenv("SHADOW_SOFT"); const char* k = getenv("SHADOW_SCALE");
++                 int ks = (k && *k) ? atoi(k) : 2; if (ks < 1) ks = 1; if (ks > 4) ks = 4;
++                 g = !(e && *e) ? 1 : !strcmp(e, "auto") ? ks : atoi(e); if (g < 1) g = 1; if (g > 8) g = 8; }
++    if (g > 1) { snprintf(text, sizeof text, "    float2 fsize = size; size /= %d.0;\n", g); out_puts(p, text); }
+     out_puts(p, "    float2 position = uv * size - 0.5;\n"
+         "    float2 base = floor(position); float2 fraction = position - base;\n");
+     for (u32 tap = 0; tap < 4; tap++) {
++        char at[160];
++        if (g > 1) snprintf(at, sizeof at, "(floor((base + float2(%s, %s)) * %d.0) + 0.5) / fsize",
++                            (tap & 1) ? "1.5" : "0.5", (tap & 2) ? "1.5" : "0.5", g);
++        else snprintf(at, sizeof at, "(base + float2(%s, %s)) / size", (tap & 1) ? "1.5" : "0.5", (tap & 2) ? "1.5" : "0.5");
+         snprintf(text, sizeof text,
+-            "    float d%u = %s.SampleLevel(rsx_samp[%u], (base + float2(%s, %s)) / size, 0.0).r;\n"
++            "    float d%u = %s.SampleLevel(rsx_samp[%u], %s, 0.0).r;\n"
+             "    float c%u = _rsx_shadow_cmp%u(reference, d%u);\n",
+-            tap, tex, unit, (tap & 1) ? "1.5" : "0.5", (tap & 2) ? "1.5" : "0.5", tap, unit, tap);
++            tap, tex, unit, at, tap, unit, tap);
+         out_puts(p, text);
+     }
+     out_puts(p, "    return (float4)lerp(lerp(c0, c1, fraction.x), lerp(c2, c3, fraction.x), fraction.y);\n}\n");
