@@ -1,0 +1,57 @@
+Patch 2065: when the async pipeline queue of patch 2057 is full, finished builds that no draw came back for are freed
+(FPA_RECLAIM=0 off).
+
+A finished build stays in its slot until a draw with the same key asks for it. One that is never asked for again (a
+one-off effect, a program seen in one scene, an older vertex-program generation) kept its slot for good, so in a long
+session the 512 slots filled up and every new program was built inline on the drawing thread again (100-400 ms each).
+J-Stars: after a few demo matches hitches began, the FIFO walker stopped long enough for "fifo recycle: drain stalled"
+(2 s each, then commands dropped) and a Free Battle froze. The freed pipelines were never bound, so they are released at
+once; a draw that comes back rebuilds its program. Log: [FPA].
+
+Tested (US disc): a play session of about 18 minutes on the build before (bench/fix/2026-11-09_1458-play_v19) had three
+drain stalls and froze; a 25-minute attract demo with this patch (bench/fix/2026-11-09_1520-longdemo) filled the queue
+once (512 finished builds, all untaken, freed), no drain stall, demo 29.8 flips/s.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 26f245b0..1e487fd6 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3365,6 +3365,38 @@ static int fp_async_queue(const FPJob* key, char* hlsl)
+         ReleaseSemaphore(s_fpa_sem, 1, NULL);
+         return 1;
+     }
++    /* 2065 (FPA_RECLAIM=0 off): a finished build stays in its slot until a draw with the same key asks for it. One that
++     * is never asked for again (a one-off effect, a program seen in one scene, an older vertex-program generation) kept
++     * its slot for good, so over a long session the 512 slots filled up and every new program was built inline on the
++     * drawing thread again (100-400 ms each). J-Stars: hitches after a few demo matches, then the FIFO walker stopped
++     * long enough for "fifo recycle: drain stalled" (2 s each) and the game froze. Free those slots: their pipeline
++     * was never bound, so it is released at once; a draw that comes back for it rebuilds it. */
++    static int rc = -1; if (rc < 0) { const char* e = getenv("FPA_RECLAIM"); rc = (e && *e == '0') ? 0 : 1; }
++    if (rc) {
++        int freed = 0;
++        for (int i = 0; i < FP_ASYNC_MAX; i++) {
++            FPAsync* a = &s_fpa[i];
++            if (a->st != 3) continue;
++            MemoryBarrier();
++            if (a->k.pso) { a->k.pso->lpVtbl->Release(a->k.pso); a->k.pso = NULL; }
++            a->st = 0; freed++;
++        }
++        static unsigned s_rcn = 0, s_rcf = 0; s_rcn++; s_rcf += (unsigned)freed;
++        if (s_rcn <= 8 || (s_rcn & 63) == 0)
++            fprintf(stderr, "[FPA] queue full: freed %d finished builds nobody took (%u times, %u in all)%c", freed, s_rcn, s_rcf, 10);
++        if (freed) {
++            for (int i = 0; i < FP_ASYNC_MAX; i++) {
++                FPAsync* a = &s_fpa[i];
++                if (a->st) continue;
++                a->k = *key; a->k.status = 0; a->k.pso = NULL; a->hlsl = hlsl;
++                if (a->k.vsb) a->k.vsb->lpVtbl->AddRef(a->k.vsb);
++                MemoryBarrier();
++                a->st = 1;
++                ReleaseSemaphore(s_fpa_sem, 1, NULL);
++                return 1;
++            }
++        }
++    } else { static int said = 0; if (!said) { said = 1; fprintf(stderr, "[FPA] queue full: building inline%c", 10); } }
+     return 0;   /* queue full: build inline */
+ }
+ 

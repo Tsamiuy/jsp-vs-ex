@@ -63,6 +63,8 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2060 | fix | render_frame's "display-sized texture = a read of the rendered frame" rule skips DXT textures | rsx_d3d12_backend.c | render_frame | SCREEN_TEX_DXT | J-Stars |
 | 2061 | fix | guest fragment programs do the RSX alpha test (ALPHA_TEST=0 off). | rsx_d3d12_backend.c | vp_fp_compile_blob | ALPHA_TEST | J-Stars |
 | 2062 | fix | a display-sized texture with data in guest memory, that is not a display buffer, is not swapped for the frame | rsx_d3d12_backend.c | draw_filter_tex, render_frame | SCREEN_TEX_DATA | J-Stars |
+| 2064 | fix | the per-draw fragment constants of patch 2056 cover programs with up to 128 inline constants (was 64). | rsx_d3d12_backend.c | vp_fp_compile_blob, vp_record_cb, render_frame |  | J-Stars |
+| 2065 | fix | when the async pipeline queue of patch 2057 is full, finished builds that no draw came back for are freed | rsx_d3d12_backend.c | fp_async_queue | FPA_RECLAIM | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
 | 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
