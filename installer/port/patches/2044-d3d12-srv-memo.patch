@@ -1,0 +1,59 @@
+Patch 2044: an SRV heap slot that already holds the same view is not written again (SRV_MEMO=0 off).
+
+Every draw fills its 16-slot SRV window each batch: about 50,000 CreateShaderResourceView calls per J-Stars fight
+frame, nearly all identical to the previous frame's. RF_TIME showed render_frame recording 13-18 ms per demo fight frame.
+The per-draw windows (from DRAW_SRV_BASE) now keep what they hold (resource, format, component mapping, 2D/cube) and
+skip an identical write. The heap is not reused under the GPU (render_frame drains it first), so a kept descriptor stays
+valid; the memo holds a reference to the resource it names, so a released resource can't be freed and its address reused
+while a slot still names it.
+
+Tested (US disc, attract demo, bench.ps1): demo 19.52 / 19.36 / 18.52 flips/s (median 19.36) against the fix baseline
+18.85 / 18.02 / 17.10 (median 18.02); FTL tick (drain reached -> DONE, which includes render_frame) 15-18 ms against
+18-21. Free Battle route: 20.24 against 17.32 and 18.72 without it; one run hit a heavy-effect moment of the fight at
+13.0 (the route's fights are not identical from run to run). Pictures right.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 9f6a61b0..a393e080 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4559,9 +4559,28 @@ static D3D12_CPU_DESCRIPTOR_HANDLE off_rt_rtv(int slot)
+ 
+ /* Write a texture SRV (or a null SRV when res == NULL) at an absolute SRV
+  * heap slot. Used to fill per-draw t0-t3 descriptor windows. */
++/* SRV_MEMO (default on, SRV_MEMO=0 off): a heap slot that already holds the same view (resource, format,
++ * component mapping, 2D/cube) is not written again. Every draw fills its 16-slot window each batch, about 50,000
++ * CreateShaderResourceView calls per J-Stars fight frame, nearly all identical to the previous frame's. The heap is
++ * not reused under the GPU (render_frame drains it first), so a kept descriptor stays valid. The memo holds a
++ * reference to the resource it names, so a released resource can't be freed and its address reused while a slot
++ * still names it. */
++static ID3D12Resource* s_srvm_res[SRV_HEAP_SIZE];
++static u32 s_srvm_key[SRV_HEAP_SIZE];      /* fmt | cube << 16; 0 = empty */
++static UINT s_srvm_map[SRV_HEAP_SIZE];
++static int srv_memo_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SRV_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
+ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+                          UINT mapping, int cube)
+ {
++    const u32 key = ((u32)fmt & 0xFFFFu) | ((cube ? 1u : 0u) << 16) | 0x80000000u;
++    const int memo = srv_memo_on() && heap_slot >= DRAW_SRV_BASE && heap_slot < SRV_HEAP_SIZE;   /* only the per-draw windows */
++    if (memo && s_srvm_key[heap_slot] == key && s_srvm_res[heap_slot] == res && s_srvm_map[heap_slot] == mapping)
++        return;
+     D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
+     sv.Format = fmt;
+     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+@@ -4577,6 +4596,11 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+     s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &h);
+     h.ptr += (u64)heap_slot * s_d3d.srv_inc;
+     s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, res, &sv, h);
++    if (memo) {
++        if (res) res->lpVtbl->AddRef(res);
++        if (s_srvm_res[heap_slot]) s_srvm_res[heap_slot]->lpVtbl->Release(s_srvm_res[heap_slot]);
++        s_srvm_res[heap_slot] = res; s_srvm_key[heap_slot] = key; s_srvm_map[heap_slot] = mapping;
++    }
+ }
+ 
+ static void srv_write(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt, UINT mapping)

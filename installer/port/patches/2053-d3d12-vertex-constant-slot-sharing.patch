@@ -1,0 +1,87 @@
+Patch 2053: a draw whose vertex constants are unchanged since the previous draw of the batch shares that draw's
+vertex-constant slot (VCB_SHARE=0 off).
+
+Every draw copied all 512 vertex constants (8 KB) into its own slot of the upload heap: about 3,300 draws a J-Stars
+fight frame, ~27 MB per frame of write-combined writes, mostly the same values reloaded. rsx_state's
+vertex_constants_dirty (set by every constant write) now says whether anything changed since the last copy; with the
+same program (the garbage-projection fallback depends on it), viewport z and batch/parity, the record points its
+vcb_slot at the earlier slot. Draw records got vcb_slot; the fragment-side slot (cb_slot) is unchanged.
+
+Tested (US disc, bench.ps1): drain per frame 18.2-19.3 ms in the demo (before 20.5) and 15.6 in the fight (before
+19.3); Free Battle 23.09 flips/s (before 21.77); demo 21.96 / 21.44 / 21.20 (median 21.44, before 21.62: the demo's
+frames now wait on the 60 Hz beat instead); pictures right (bench\exp\2026-11-07_2021-vcbshare).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 0f689af9..2a4f32f0 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -138,6 +138,7 @@ typedef struct {
+      * DRAW_LIMIT) would otherwise make every surviving draw read some other
+      * object's MVP -- silently transforming it somewhere else entirely. */
+     u32 cb_slot;
++    u32 vcb_slot;       /* 2053: the slot whose vertex constants this draw uses (its own, or an earlier identical one) */
+     u32 rt_mrt[3];      /* colour targets B,C,D (MRT1/2/3), 0 = none. Deferred
+                          * shading G-buffers write 3-4 targets in one pass. */
+     u32 rt_w, rt_h;     /* surface clip dims at record time (offscreen RT size) */
+@@ -4284,6 +4285,25 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+                       fprintf(stderr, "[FPK] distinct fp #%d = 0x%08X%c", ns, dr->fp_addr, 10); } } }
+         }
+     }
++    /* VCB_SHARE (default on, =0 off; patch 2053): titles reload a draw's constants before every draw, mostly the same
++     * values; vertex_constants_dirty says whether any constant was written since the last copy. Unchanged constants,
++     * program and viewport z within the same batch and parity share the previous draw's slot, which saves an 8 KB
++     * write to the upload heap per draw (J-Stars: ~3,300 draws a frame). */
++    { static int share = -1; if (share < 0) { const char* e = getenv("VCB_SHARE"); share = (e && *e == '0') ? 0 : 1; }
++      static u32 l_slot = 0xFFFFFFFFu; static u64 l_batch = ~0ull; static int l_vs = -2, l_par = -1;
++      static float l_z[2];
++      if (share && dr && !st->vertex_constants_dirty && l_slot < slot && l_batch == s_d3d.frame_count &&
++          l_par == (int)s_d3d.vp_parity && l_vs == vs_idx &&
++          l_z[0] == st->viewport_scale[2] && l_z[1] == st->viewport_offset[2]) {
++          ((D3D12DrawRecord*)dr)->vcb_slot = l_slot;
++          return;
++      }
++      if (share) {
++          l_slot = slot; l_batch = s_d3d.frame_count; l_par = (int)s_d3d.vp_parity; l_vs = vs_idx;
++          l_z[0] = st->viewport_scale[2]; l_z[1] = st->viewport_offset[2];
++          ((rsx_state*)st)->vertex_constants_dirty = 0;
++      }
++      if (dr) ((D3D12DrawRecord*)dr)->vcb_slot = slot; }
+     char* dst = (char*)s_d3d.vp_cb_mapped
+         + ((u64)s_d3d.vp_parity * MAX_DRAWS + slot) * VP_CB_STRIDE;
+     memcpy(dst, st->vertex_constants, RSX_MAX_VERTEX_CONSTANTS * 16);
+@@ -6474,7 +6494,7 @@ static void render_frame(void)
+                 /* Per-draw constants: this draw's vp_cb + FP texscale slots. */
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
+                     s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb)
+-                    + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_CB_STRIDE);
++                    + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->vcb_slot) * VP_CB_STRIDE);
+                 if (s_d3d.vp_fpcb)
+                     s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
+                         s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
+@@ -9115,7 +9135,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                     dr->vp_w = s_d3d.current_rsx_state->viewport_w;
+                     dr->vp_h = s_d3d.current_rsx_state->viewport_h;
+                 } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
+-                dr->cb_slot = s_d3d.draw_count;
++                dr->cb_slot = dr->vcb_slot = s_d3d.draw_count;
+                 vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
+                 s_d3d.draw_count++;
+             }
+@@ -9241,7 +9261,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+                 dr->vp_w = s_d3d.current_rsx_state->viewport_w;
+                 dr->vp_h = s_d3d.current_rsx_state->viewport_h;
+             } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
+-            dr->cb_slot = s_d3d.draw_count;
++            dr->cb_slot = dr->vcb_slot = s_d3d.draw_count;
+                 vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
+             s_d3d.draw_count++;
+             /* Anchor for merging the next DRAW_ARRAYS batch of this stream. */
+@@ -9441,7 +9461,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+             dr->vp_w = s_d3d.current_rsx_state->viewport_w;
+             dr->vp_h = s_d3d.current_rsx_state->viewport_h;
+         } else { dr->vp_x = dr->vp_y = dr->vp_w = dr->vp_h = 0; }
+-        dr->cb_slot = s_d3d.draw_count;
++        dr->cb_slot = dr->vcb_slot = s_d3d.draw_count;
+                 vp_record_cb(s_d3d.draw_count, dr->vs_idx, dr);
+         if (vp_pulled) {   /* VPULL: the record's attribute table, in its slot */
+             memcpy(s_vpull.tab_mapped + ((u64)s_d3d.vp_parity * MAX_DRAWS + s_d3d.draw_count) * RSX_VPULL_TAB_BYTES,

@@ -1,0 +1,150 @@
+Patch 2049: GPU vertex pulling for draws whose attributes come from up to 4 separate streams (VPULL_MULTI=0 off).
+
+In J-Stars' demo fights about 20% of indexed draws fell back to the CPU path on "layout" (attributes in more than one
+stream: different strides or buffers), and read_vp_vertex_fast was still 12.5% of the drawing thread. The pulling
+shader already reads each attribute with its own offset and stride (vpull_attr); only the copy into the ring assumed
+one interleaved stream. A several-stream call now gets one record of its own, one region per stream, and each
+attribute's offset points into its stream's region; such a record is not extended by later calls.
+
+Tested (US disc, bench.ps1): pulled 99% of indexed draws (was ~79%); demo 20.14 / 20.56 / 20.51 flips/s (median
+20.51) against the fix baseline 18.61 / 18.67 / 19.34 (median 18.67), all three above its best; Free Battle 19.84
+against 20.68 (the route's fight varies); pictures right (bench\exp\2026-11-07_1555-vpullmulti).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 2f28aafd..f2338d07 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -472,6 +472,9 @@ static struct {
+     /* This call's layout (vpull_layout). */
+     u32 S, lbase, extent, pad, loc;
+     rsx_vpull_tab tab_cur;
++    /* Several streams (patch 2049): nstr > 1; per stream its base, stride, extent and memory; per attribute
++     * its stream and its offset in that stream. One record per call, copied as one region per stream. */
++    int nstr; u32 str_base[4], str_S[4], str_ext[4], str_loc[4]; int a_str[16]; u32 a_rel[16];
+     int vs_idx;                         /* pulling VS of the record this call opens */
+     int last_cont;                      /* the call continued the open record */
+     u32* raw; u32 raw_cap;              /* the batch's guest indices (VPULL_NO = restart) */
+@@ -8301,9 +8304,20 @@ static u32 upload_strip_vp_ix(const rsx_state* state, u32 first, u32 count, int
+  * layout and the attribute table into s_vpull. One stream: every array
+  * attribute plain (no frequency divider), the same stride and memory, all
+  * within 4 KB of the lowest; VF_FAST=2 (the decode this one reproduces). */
++static int vpull_layout_multi(void);
+ static int vpull_layout(void)
+ {
++    s_vpull.nstr = 1;
+     if (s_vf.on != 2 || s_vf.n <= 0) return 0;
++    { const VFAttr* g0 = &s_vfa[0]; u32 lo = g0->off; int one = 1;
++      for (int c = 0; c < s_vf.n; c++) {
++          const VFAttr* f = &s_vfa[c];
++          if (!f->plain) return 0;
++          if (f->stride != g0->stride || f->loc != g0->loc) one = 0;
++          if (f->off < lo) lo = f->off;
++      }
++      if (one) for (int c = 0; c < s_vf.n; c++) if (s_vfa[c].off - lo > 4096u) one = 0;
++      if (!one) return vpull_layout_multi(); }
+     const VFAttr* f0 = &s_vfa[0];
+     u32 base = f0->off;
+     for (int c = 0; c < s_vf.n; c++) {
+@@ -8337,6 +8351,54 @@ static int vpull_layout(void)
+     return 1;
+ }
+ 
++/* VPULL_MULTI (default on, =0 off): attributes in up to 4 streams. A stream is a (stride, memory) with all its
++ * attributes within 4 KB of its lowest. */
++static int vpull_layout_multi(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("VPULL_MULTI"); on = (e && *e == '0') ? 0 : 1; }
++    if (!on) return 0;
++    int ns = 0;
++    for (int c = 0; c < s_vf.n; c++) {
++        const VFAttr* f = &s_vfa[c];
++        if (!f->plain || !f->stride) return 0;
++        int j;
++        for (j = 0; j < ns; j++)
++            if (s_vpull.str_S[j] == f->stride && s_vpull.str_loc[j] == f->loc &&
++                (f->off >= s_vpull.str_base[j] ? f->off - s_vpull.str_base[j] : s_vpull.str_base[j] - f->off) <= 4096u)
++                break;
++        if (j == ns) {
++            if (ns >= 4) return 0;
++            s_vpull.str_S[ns] = f->stride; s_vpull.str_loc[ns] = f->loc; s_vpull.str_base[ns] = f->off; s_vpull.str_ext[ns] = 0;
++            ns++;
++        } else if (f->off < s_vpull.str_base[j]) s_vpull.str_base[j] = f->off;
++        s_vpull.a_str[c] = j;
++    }
++    rsx_vpull_tab* t = &s_vpull.tab_cur;
++    memset(t, 0, sizeof *t);
++    for (int i = 0; i < 16; i++) memcpy(t->konst[i], s_vf.tmpl[i].v, sizeof t->konst[i]);
++    for (int c = 0; c < s_vf.n; c++) {
++        const VFAttr* f = &s_vfa[c];
++        const int j = s_vpull.a_str[c];
++        const u32 rel = f->off - s_vpull.str_base[j];
++        if (rel > 4096u) return 0;
++        const u32 type = (f->type >= 1u && f->type <= 7u) ? f->type : 2u;
++        const u32 e = rel + rsx_vpull_type_size(type, f->n);
++        if (e > s_vpull.str_ext[j]) s_vpull.str_ext[j] = e;
++        const int idx = s_vf.idx[c];
++        s_vpull.a_rel[c] = rel;
++        t->attr[idx][0] = rel;          /* + the stream's place in the record, in upload_vpull */
++        t->attr[idx][1] = f->stride;
++        t->attr[idx][2] = type;
++        t->attr[idx][3] = f->n;
++        t->konst[idx][0] = 0.0f; t->konst[idx][1] = 0.0f; t->konst[idx][2] = 0.0f; t->konst[idx][3] = 1.0f;
++    }
++    s_vpull.nstr = ns;
++    s_vpull.S = s_vpull.str_S[0]; s_vpull.lbase = s_vpull.str_base[0]; s_vpull.extent = s_vpull.str_ext[0];
++    s_vpull.loc = s_vpull.str_loc[0]; s_vpull.pad = 0;
++    return 1;
++}
++
+ /* May this batch extend the open pulled record? The same tests as
+  * ix_can_continue, plus the same layout and table (constants included). */
+ static int vpull_can_continue(u32 first)
+@@ -8398,7 +8460,7 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     if (!vpull_layout()) { s_vpull.fb_layout++; return VPULL_NO; }
+     const int strip = prim != RSX_PRIMITIVE_TRIANGLES;
+     const int fan = prim == RSX_PRIMITIVE_TRIANGLE_FAN;
+-    const int cont = vpull_can_continue(first);
++    const int cont = s_vpull.nstr > 1 ? 0 : vpull_can_continue(first);
+     u32 pre[2] = {0, 0}; int scont = 0; u32 npre = 0;
+     if (strip) npre = strip_cont_prefix(&s_sc_indexed, st, first, fan, pre, &scont);
+     const u32 total = count + npre;
+@@ -8510,9 +8572,27 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+         at = (u64)rec_base + (u64)rec_k * S;
+         len = (u64)(span - 1u) * S + s_vpull.extent;
+     }
++    u32 str_off[4] = {0, 0, 0, 0};
++    if (s_vpull.nstr > 1) {   /* one region per stream, one after the other (2049) */
++        u64 o = 0;
++        for (int j = 0; j < s_vpull.nstr; j++) {
++            str_off[j] = (u32)o;
++            o += (u64)(span - 1u) * s_vpull.str_S[j] + s_vpull.str_ext[j];
++            o = (o + 15u) & ~(u64)15u;
++        }
++        at = rec_base; len = o; copy_lo = vmin;
++        seg_k = 0; seg_lo = vmin; seg_hi = vmax + 1u;
++    }
+     if (at + len > s_vpull.ring_bytes) { s_vpull.fb_full++; return VPULL_NO; }
+     /* Committed from here on. */
+     u8* ring = s_vpull.ring_mapped + (u64)s_d3d.vp_parity * ((u64)s_vpull.ring_bytes + VPULL_RING_SLACK);
++    if (s_vpull.nstr > 1) {
++        for (int j = 0; j < s_vpull.nstr; j++)
++            vpull_copy(ring + at + str_off[j], s_vpull.str_base[j] + vmin * s_vpull.str_S[j],
++                       (span - 1u) * s_vpull.str_S[j] + s_vpull.str_ext[j], s_vpull.str_loc[j]);
++        for (int c = 0; c < s_vf.n; c++)
++            s_vpull.tab_cur.attr[s_vf.idx[c]][0] = str_off[s_vpull.a_str[c]] + s_vpull.a_rel[c];
++    } else
+     if (len) vpull_copy(ring + at, s_vpull.lbase + copy_lo * S, (u32)len, s_vpull.loc);
+     u32* ib = (u32*)s_d3d.vp_ib_mapped + (u64)s_d3d.vp_parity * VP_MAX_INDICES + s_d3d.vp_ib_offset;
+     const u32 k0 = seg_k - seg_lo;   /* index = seg_k + (v - seg_lo), mod 2^32 */
+@@ -8521,8 +8601,9 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     s_vpull.rec_base = rec_base;
+     s_vpull.seg_k = seg_k; s_vpull.seg_lo = seg_lo; s_vpull.seg_hi = seg_hi; s_vpull.seg_valid = 1;
+     s_vpull.rec_k = seg_k + (seg_hi - seg_lo) + s_vpull.pad;
+-    { const u64 o = (u64)rec_base + (u64)s_vpull.rec_k * S;
++    { const u64 o = s_vpull.nstr > 1 ? (u64)rec_base + len : (u64)rec_base + (u64)s_vpull.rec_k * S;
+       s_vpull.off = o > s_vpull.ring_bytes ? s_vpull.ring_bytes : (u32)o; }
++    if (s_vpull.nstr > 1) s_vpull.seg_valid = 0;   /* a several-stream record is not extended */
+     if (!cont) {
+         s_vpull.vs_idx = vs;
+         s_vpull.rec_S = S; s_vpull.rec_lbase = s_vpull.lbase; s_vpull.rec_loc = s_vpull.loc;

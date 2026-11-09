@@ -1,0 +1,209 @@
+Patch 2050: a vertex range already copied into the vertex-pulling ring in this batch is reused, not copied again
+(VPULL_REUSE=0 off). Diagnostic VPULL_DUP=1 adds the bytes that repeat an earlier copy ('dup') to the [VPULL] line.
+
+With pulling on for 99% of draws (2049) the drawing thread copied about 2.5 GB/s of guest vertex bytes into the ring,
+about 126 MB per demo fight frame; a quarter repeated an earlier copy exactly, and several-stream draws share streams.
+A new single-stream record whose range was copied before sits on that copy (and is not extended); several-stream
+records address their streams from the ring start, each reused or copied once. A table of (guest offset, length,
+memory) -> ring offset is emptied whenever the ring restarts.
+
+Tested (US disc, bench.ps1): ring copies 12.6 -> 7.0 GB per 5 s, drain per demo frame 24.6 -> 22.9 ms; demo
+20.68 / 20.52 / 21.00 flips/s (median 20.68, before 20.51), Free Battle 20.00 (before 19.84); pictures right
+(bench\exp\2026-11-07_1727-vpullreuse2).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index f2338d07..0f689af9 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -475,6 +475,7 @@ static struct {
+     /* Several streams (patch 2049): nstr > 1; per stream its base, stride, extent and memory; per attribute
+      * its stream and its offset in that stream. One record per call, copied as one region per stream. */
+     int nstr; u32 str_base[4], str_S[4], str_ext[4], str_loc[4]; int a_str[16]; u32 a_rel[16];
++    int rec_noext;                      /* the open record sits on a reused copy or has several streams (2050) */
+     int vs_idx;                         /* pulling VS of the record this call opens */
+     int last_cont;                      /* the call continued the open record */
+     u32* raw; u32 raw_cap;              /* the batch's guest indices (VPULL_NO = restart) */
+@@ -483,6 +484,7 @@ static struct {
+     u64 n_batch, n_rec, n_idx, vbytes, n_cpu, fb_layout, fb_sparse, fb_full, fb_vs, fb_prim, n_skip;
+     double t0;
+ } s_vpull = { .on = -1 };
++static u32 s_vpull_gen = 1;   /* bumped whenever the ring restarts (patch 2050) */
+ static int vpull_on(void)
+ {
+     /* On by default for J-Stars (patch 2045, VPULL=0 off): with 4096 draw records (2042) the picture no longer
+@@ -6672,7 +6674,7 @@ static void render_frame(void)
+     s_d3d.vp_ib_offset = 0;
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++) { s_d3d.draws[_i].indexed = 0; s_d3d.draws[_i].vpull = 0; }
+     s_ix_run_valid = 0;
+-    s_vpull.off = 0; s_vpull.open = 0;   /* VPULL records end with the batch too */
++    s_vpull.off = 0; s_vpull.open = 0; s_vpull_gen++;   /* VPULL records end with the batch too */
+     s_d3d.draw_count = 0;
+     if (s_vpull.ring_mapped) vpull_report();
+     s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
+@@ -7238,7 +7240,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+     s_dbg_clears_since_present++;
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++) { s_d3d.draws[_i].indexed = 0; s_d3d.draws[_i].vpull = 0; }
+     s_ix_run_valid = 0;
+-    s_vpull.off = 0; s_vpull.open = 0;   /* VPULL records end with the batch too */
++    s_vpull.off = 0; s_vpull.open = 0; s_vpull_gen++;   /* VPULL records end with the batch too */
+     s_d3d.draw_count   = 0;
+     s_d3d.vb_offset    = 0;
+     s_d3d.vp_vb_offset = 0;
+@@ -8403,7 +8405,7 @@ static int vpull_layout_multi(void)
+  * ix_can_continue, plus the same layout and table (constants included). */
+ static int vpull_can_continue(u32 first)
+ {
+-    if (!s_vpull.open || !s_d3d.merge_prev_draw || s_d3d.draw_count == 0) return 0;
++    if (!s_vpull.open || s_vpull.rec_noext || !s_d3d.merge_prev_draw || s_d3d.draw_count == 0) return 0;
+     if (s_vpull.rec_draw != s_d3d.draw_count - 1) return 0;
+     const D3D12DrawRecord* pv = &s_d3d.draws[s_d3d.draw_count - 1];
+     const rsx_state* st = s_d3d.current_rsx_state;
+@@ -8426,8 +8428,51 @@ static int vp_get_vs_pull(const rsx_state* st)
+ 
+ /* Copy `len` guest bytes at array offset `off` to dst, one 1 MB page at a
+  * time, resolved as vf_decode resolves them (loc: 1 = LOCAL, 0 = MAIN). */
++static u64 s_vpdup_bytes;
++/* VPULL_REUSE (default on, =0 off; patch 2050): (guest offset, length, memory) -> ring offset of a copy made in this
++ * batch. s_vpull_gen changes whenever the ring restarts, which empties the table. */
++/* s_vpull_gen is declared with s_vpull */
++static u32 s_vr_off[16384], s_vr_len[16384], s_vr_at[16384], s_vr_gen[16384];
++static int vpull_reuse_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("VPULL_REUSE"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++static int vpull_reuse_find(u32 off, u32 len, u32 loc, u32* at)
++{
++    u32 h = (off * 2654435761u) ^ (len * 40503u) ^ (loc << 31);
++    h = (h ^ (h >> 15)) & 16383u;
++    const u32 lk = len | (loc << 31);
++    for (int p = 0; p < 8; p++, h = (h + 1) & 16383u) {
++        if (s_vr_gen[h] != s_vpull_gen) return 0;
++        if (s_vr_off[h] == off && s_vr_len[h] == lk) { *at = s_vr_at[h]; return 1; }
++    }
++    return 0;
++}
++static void vpull_reuse_add(u32 off, u32 len, u32 loc, u32 at)
++{
++    u32 h = (off * 2654435761u) ^ (len * 40503u) ^ (loc << 31);
++    h = (h ^ (h >> 15)) & 16383u;
++    for (int p = 0; p < 8; p++, h = (h + 1) & 16383u)
++        if (s_vr_gen[h] != s_vpull_gen) { s_vr_gen[h] = s_vpull_gen; s_vr_off[h] = off; s_vr_len[h] = len | (loc << 31); s_vr_at[h] = at; return; }
++}
++static void vpull_dup_note(u32 off, u32 len, u32 loc)
++{
++    static int on = -1; if (on < 0) on = getenv("VPULL_DUP") ? 1 : 0;
++    if (!on) return;
++    static u32 k_off[16384], k_len[16384]; static u64 k_frame[16384];
++    const u64 fr = s_d3d.frame_count + 1;
++    u32 h = (off * 2654435761u) ^ (len * 40503u) ^ (loc << 31);
++    h = (h ^ (h >> 15)) & 16383u;
++    for (int probe = 0; probe < 16; probe++, h = (h + 1) & 16383u) {
++        if (k_frame[h] != fr) { k_frame[h] = fr; k_off[h] = off; k_len[h] = len | (loc << 31); return; }
++        if (k_off[h] == off && k_len[h] == (len | (loc << 31))) { s_vpdup_bytes += len; return; }
++    }
++}
+ static void vpull_copy(u8* dst, u32 off, u32 len, u32 loc)
+ {
++    vpull_dup_note(off, len, loc);
+     extern uint8_t* vm_base;
+     extern u32 cellGcmResolveLocated(int, u32);
+     while (len) {
+@@ -8555,7 +8600,9 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     }
+     static int once = -1;
+     if (once < 0) { const char* ev = getenv("VPULL_ONCE"); once = (ev && *ev == '0') ? 0 : 1; }
+-    const u32 rec_base = cont ? s_vpull.rec_base : ((s_vpull.off + 15u) & ~15u);
++    u32 rec_base = cont ? s_vpull.rec_base : ((s_vpull.off + 15u) & ~15u);
++    if (!cont && s_vpull.nstr > 1 && vpull_reuse_on()) rec_base = 0;   /* streams addressed from the ring start */
++    int reused = 0;
+     const u32 rec_k = cont ? s_vpull.rec_k : 0u;
+     u64 at = 0, len = 0;
+     u32 copy_lo = vmin, seg_k, seg_lo, seg_hi;
+@@ -8586,14 +8633,45 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     if (at + len > s_vpull.ring_bytes) { s_vpull.fb_full++; return VPULL_NO; }
+     /* Committed from here on. */
+     u8* ring = s_vpull.ring_mapped + (u64)s_d3d.vp_parity * ((u64)s_vpull.ring_bytes + VPULL_RING_SLACK);
+-    if (s_vpull.nstr > 1) {
++    u64 multi_end = 0;
++    if (s_vpull.nstr > 1 && vpull_reuse_on()) {   /* rec_base 0: each stream at its absolute ring offset */
++        u64 o = (s_vpull.off + 15u) & ~15u;
++        for (int j = 0; j < s_vpull.nstr; j++) {
++            const u32 src = s_vpull.str_base[j] + vmin * s_vpull.str_S[j];
++            const u32 l = (span - 1u) * s_vpull.str_S[j] + s_vpull.str_ext[j];
++            u32 p;
++            if (vpull_reuse_find(src, l, s_vpull.str_loc[j], &p)) { str_off[j] = p; continue; }
++            if (o + l > s_vpull.ring_bytes) { s_vpull.fb_full++; return VPULL_NO; }   /* nothing committed yet */
++            str_off[j] = (u32)o;
++            o = (o + l + 15u) & ~(u64)15u;
++        }
++        multi_end = o;
++        for (int j = 0; j < s_vpull.nstr; j++) {
++            const u32 src = s_vpull.str_base[j] + vmin * s_vpull.str_S[j];
++            const u32 l = (span - 1u) * s_vpull.str_S[j] + s_vpull.str_ext[j];
++            u32 p;
++            if (vpull_reuse_find(src, l, s_vpull.str_loc[j], &p) && p == str_off[j]) { s_vpdup_bytes += 0; continue; }
++            vpull_copy(ring + str_off[j], src, l, s_vpull.str_loc[j]);
++            vpull_reuse_add(src, l, s_vpull.str_loc[j], str_off[j]);
++        }
++        len = 0;
++        for (int c = 0; c < s_vf.n; c++)
++            s_vpull.tab_cur.attr[s_vf.idx[c]][0] = str_off[s_vpull.a_str[c]] + s_vpull.a_rel[c];
++    } else if (s_vpull.nstr > 1) {
+         for (int j = 0; j < s_vpull.nstr; j++)
+             vpull_copy(ring + at + str_off[j], s_vpull.str_base[j] + vmin * s_vpull.str_S[j],
+                        (span - 1u) * s_vpull.str_S[j] + s_vpull.str_ext[j], s_vpull.str_loc[j]);
+         for (int c = 0; c < s_vf.n; c++)
+             s_vpull.tab_cur.attr[s_vf.idx[c]][0] = str_off[s_vpull.a_str[c]] + s_vpull.a_rel[c];
+-    } else
+-    if (len) vpull_copy(ring + at, s_vpull.lbase + copy_lo * S, (u32)len, s_vpull.loc);
++    } else if (len) {
++        u32 p;
++        if (!cont && vpull_reuse_on() && vpull_reuse_find(s_vpull.lbase + copy_lo * S, (u32)len, s_vpull.loc, &p)) {
++            rec_base = p; reused = 1; len = 0;   /* the record sits on the earlier copy */
++        } else {
++            vpull_copy(ring + at, s_vpull.lbase + copy_lo * S, (u32)len, s_vpull.loc);
++            if (!cont && vpull_reuse_on()) vpull_reuse_add(s_vpull.lbase + copy_lo * S, (u32)len, s_vpull.loc, (u32)at);
++        }
++    }
+     u32* ib = (u32*)s_d3d.vp_ib_mapped + (u64)s_d3d.vp_parity * VP_MAX_INDICES + s_d3d.vp_ib_offset;
+     const u32 k0 = seg_k - seg_lo;   /* index = seg_k + (v - seg_lo), mod 2^32 */
+     for (u32 i = 0; i < out; i++) ib[i] = k0 + tri[i];
+@@ -8601,9 +8679,12 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     s_vpull.rec_base = rec_base;
+     s_vpull.seg_k = seg_k; s_vpull.seg_lo = seg_lo; s_vpull.seg_hi = seg_hi; s_vpull.seg_valid = 1;
+     s_vpull.rec_k = seg_k + (seg_hi - seg_lo) + s_vpull.pad;
+-    { const u64 o = s_vpull.nstr > 1 ? (u64)rec_base + len : (u64)rec_base + (u64)s_vpull.rec_k * S;
++    if (multi_end) { s_vpull.off = (u32)multi_end; }
++    else if (!reused) {
++      const u64 o = s_vpull.nstr > 1 ? (u64)rec_base + len : (u64)rec_base + (u64)s_vpull.rec_k * S;
+       s_vpull.off = o > s_vpull.ring_bytes ? s_vpull.ring_bytes : (u32)o; }
+-    if (s_vpull.nstr > 1) s_vpull.seg_valid = 0;   /* a several-stream record is not extended */
++    if (!cont) s_vpull.rec_noext = (s_vpull.nstr > 1 || reused) ? 1 : 0;
++    if (s_vpull.nstr > 1 || reused) s_vpull.seg_valid = 0;   /* such a record is not extended */
+     if (!cont) {
+         s_vpull.vs_idx = vs;
+         s_vpull.rec_S = S; s_vpull.rec_lbase = s_vpull.lbase; s_vpull.rec_loc = s_vpull.loc;
+@@ -8626,18 +8707,18 @@ static void vpull_report(void)
+     const u64 all = s_vpull.n_batch + s_vpull.n_cpu;
+     fprintf(stderr, "[VPULL] %.1f s: pulled %llu of %llu indexed draws (%.0f%%, %llu records) | CPU path:"
+                     " layout %llu, sparse %llu, full %llu, no VS %llu, other prim %llu |"
+-                    " uploaded %.1f MB vertex bytes + %.1f MB indices (%.1f MB/s) | not drawn %llu%c",
++                    " uploaded %.1f MB vertex bytes (dup %.1f MB) + %.1f MB indices (%.1f MB/s) | not drawn %llu%c",
+             sec, (unsigned long long)s_vpull.n_batch, (unsigned long long)all,
+             all ? 100.0 * (double)s_vpull.n_batch / (double)all : 0.0, (unsigned long long)s_vpull.n_rec,
+             (unsigned long long)s_vpull.fb_layout, (unsigned long long)s_vpull.fb_sparse,
+             (unsigned long long)s_vpull.fb_full, (unsigned long long)s_vpull.fb_vs,
+             (unsigned long long)s_vpull.fb_prim,
+-            (double)s_vpull.vbytes / 1048576.0, (double)s_vpull.n_idx * 4.0 / 1048576.0,
++            (double)s_vpull.vbytes / 1048576.0, (double)s_vpdup_bytes / 1048576.0, (double)s_vpull.n_idx * 4.0 / 1048576.0,
+             ((double)s_vpull.vbytes + (double)s_vpull.n_idx * 4.0) / 1048576.0 / sec,
+             (unsigned long long)s_vpull.n_skip, 10);
+     s_vpull.n_batch = s_vpull.n_rec = s_vpull.n_idx = s_vpull.vbytes = s_vpull.n_cpu = 0;
+     s_vpull.fb_layout = s_vpull.fb_sparse = s_vpull.fb_full = s_vpull.fb_vs = s_vpull.fb_prim = 0;
+-    s_vpull.n_skip = 0;
++    s_vpull.n_skip = 0; s_vpdup_bytes = 0;
+     s_vpull.t0 = now;
+ }
+ 

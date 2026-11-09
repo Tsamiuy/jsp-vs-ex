@@ -1,0 +1,26 @@
+Patch 2045: GPU vertex pulling (patch 2034) on by default (VPULL=0 off).
+
+With 4096 draw records (2042) the picture no longer freezes with it: the earlier freeze was every frame being split at the
+2048-record limit. The vertices are then converted on the GPU instead of by read_vp_vertex_fast on the drawing thread,
+as in the v0.15 port (VPULL on there by default).
+
+Tested (US disc, attract demo, bench.ps1 on the fix line): demo 20.14 / 19.64 / 21.13 flips/s (median 20.14) against the
+fix baseline 17.03 / 17.85 / 18.58 (median 17.85), all three runs above the baseline's best; FTL drain 23-25 ms (was
+32), tick 14-17 ms. Free Battle route 19.41 against 20.13 (the route's fights vary by 1-2 flips/s and more). Pictures
+right in the demo and the fight.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index a393e080..27c2f86f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -481,7 +481,9 @@ static struct {
+ } s_vpull = { .on = -1 };
+ static int vpull_on(void)
+ {
+-    if (s_vpull.on < 0) { const char* e = getenv("VPULL"); s_vpull.on = (e && *e && *e != '0') ? 1 : 0; }
++    /* On by default for J-Stars (patch 2045, VPULL=0 off): with 4096 draw records (2042) the picture no longer
++     * freezes, and the demo fights run about 2 flips/s faster with the vertices converted on the GPU. */
++    if (s_vpull.on < 0) { const char* e = getenv("VPULL"); s_vpull.on = (e && *e == '0') ? 0 : 1; }
+     return s_vpull.on;
+ }
+ static void vpull_report(void);
