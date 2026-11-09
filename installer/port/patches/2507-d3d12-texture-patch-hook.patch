@@ -1,0 +1,24 @@
+Patch 2507: g_tex_patch_hook, a title-port hook called with each texture's guest offset, size and format before the
+upload reads it, so the port can swap the bytes (from the v0.15 port; J-Stars turns the Options 'Cross-Save' label
+into 'Exit Game'). NULL by default.
+
+Tested (US disc): builds and runs with the hook unset (feature build).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 46a60b4b..c84e6a35 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3879,8 +3879,13 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+     }
+     return r;
+ }
++/* Patch 2507 (from the v0.15 port): set by a title port to swap a texture's guest bytes before they are read (J-Stars:
++ * the Options "Cross-Save" label becomes "Exit Game"). Called on every upload, so it must reject fast on w/h/fmt.
++ * NULL by default. */
++void (*g_tex_patch_hook)(u32 off, u32 w, u32 h, u32 fmt) = 0;
+ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 pitch_arg)
+ {
++    if (g_tex_patch_hook && off) g_tex_patch_hook(off, w, h, fmt);
+     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
+      * tried against the TDR and does not help, because PERF shows the upload
+      * path costing 0.01s for 775 calls. Kept because it is the right lever if a

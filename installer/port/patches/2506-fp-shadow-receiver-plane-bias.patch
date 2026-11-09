@@ -1,0 +1,57 @@
+Patch 2506: shadow comparisons lower the reference by a receiver-plane depth bias of SHADOW_RPDB shadow-map texels
+(default 2, 0 = off); the constant shift of patch 2505 now defaults to 0.
+
+The reference's change across the given number of shadow-map texels is worked out from its screen-space derivatives
+together with the lookup's (capped at 0.05): large on surfaces at a grazing angle to the light, near zero on surfaces
+facing it. Patch 2505's constant 0.02 removed J-Stars' self-shadow lines but cut away part of the ground shadow near
+the feet (0.008 too); this keeps the lines away and most of that shadow. Still a workaround: the cause of the lines
+is open (the v0.15 port and RPCS3 show neither).
+
+Tested (US disc, attract demo watched at 1440p, High shadows): SHADOW_RPDB=2 no lines, a small gap near the feet;
+=1 lines back. Free Battle 29.8 flips/s (bench/feature/2026-11-09_2047-rpdbdef).
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 4b105414..f7ec2cb1 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -512,15 +512,15 @@ u32 rsx_fp_texture_units(const u8* ucode, u32 max_bytes)
+     return units;
+ }
+ 
+-/* SHADOW_BIAS=<float>: subtracted from the comparison reference. Patch 2505: default 0.02 (SHADOW_BIAS=0 = the old
+- * exact compare). J-Stars' characters and plants showed grey stair-step lines and shadows that moved with the camera
++/* SHADOW_BIAS=<float>: subtracted from the comparison reference (patch 2505; default 0 since patch 2506, which
++ * replaced the constant shift by the receiver-plane one below). J-Stars' characters and plants showed grey stair-step lines and shadows that moved with the camera
+  * (self-shadowing); neither a 4x shadow map nor rounding the reference to the depth format nor a caster depth bias
+  * removed them, a reference shift of 0.02 of the light's depth range did (0.002 did not). A workaround until the
+  * cause is found; the v0.15 port and RPCS3 do not show them. */
+ static const char* shadow_bias_txt(void)
+ {
+     static char b[32] = "";
+-    if (!b[0]) { const char* e = getenv("SHADOW_BIAS"); snprintf(b, sizeof b, "%s", (e && *e) ? e : "0.02"); }
++    if (!b[0]) { const char* e = getenv("SHADOW_BIAS"); snprintf(b, sizeof b, "%s", (e && *e) ? e : "0.0"); }
+     return b;
+ }
+ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,
+@@ -554,6 +554,21 @@ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,
+         out_puts(p, text);
+         return;
+     }
++    /* SHADOW_RPDB=<texels> (patch 2506, default 2; 0 = off): receiver-plane depth bias. The reference is lowered by
++     * how much it changes across this many shadow-map texels, worked out from its screen-space derivatives together
++     * with the lookup's: large on surfaces at a grazing angle to the light (sleeves, hat brims, sword blades), near
++     * zero on surfaces facing it (the ground under a character), capped at 0.05. The constant shift of patch 2505
++     * removed J-Stars' self-shadow lines too but cut away the shadow near the feet; this one keeps most of it. */
++    { static int rk = -2; static char rt[32];
++      if (rk == -2) { const char* e = getenv("SHADOW_RPDB"); snprintf(rt, sizeof rt, "%s", (e && *e) ? e : "2");
++                      rk = atof(rt) != 0.0; }
++      if (rk) { char t2[1024];
++          snprintf(t2, sizeof t2,
++              "    { float3 _c = float3(uv, reference); float3 _dx = ddx(_c), _dy = ddy(_c);\n"
++              "      float _det = _dx.x * _dy.y - _dx.y * _dy.x;\n"
++              "      if (abs(_det) > 1e-12) { float2 _dz = float2(_dy.y * _dx.z - _dx.y * _dy.z, _dx.x * _dy.z - _dy.x * _dx.z) / _det;\n"
++              "        reference -= %s * min(abs(_dz.x) / size.x + abs(_dz.y) / size.y, 0.05); } }\n", rt);
++          out_puts(p, t2); } }
+     out_puts(p, "    float2 position = uv * size - 0.5;\n"
+         "    float2 base = floor(position); float2 fraction = position - base;\n");
+     for (u32 tap = 0; tap < 4; tap++) {

@@ -1,0 +1,35 @@
+Patch 2505: shadow comparisons shift the reference by SHADOW_BIAS (default 0.02 of the light's depth range;
+SHADOW_BIAS=0 = the exact compare as before).
+
+J-Stars' characters (sleeves, hats, swords) showed grey stair-step lines and its plants shadows that moved with the
+camera. A 4x shadow map (patch 2502), rounding the reference to the 24-bit depth format, a slope-scaled caster depth
+bias and turning off vertex reuse did not remove them; the draw and copy order of both shadow maps is right and the
+depth format is fixed-point. A shift of 0.02 removed them (0.002 did not), with shadows kept. A workaround: the v0.15
+port and RPCS3 do not show the lines, so the cause is still open.
+
+Tested (US disc): lines gone in a watched Free Battle at 0.02 (bench/exp/2026-11-09_0203-sh_bias02); Free Battle
+29.79 flips/s with the default (bench/feature/2026-11-09_1958-bias02).
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index ec4d8190..4b105414 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -512,12 +512,15 @@ u32 rsx_fp_texture_units(const u8* ucode, u32 max_bytes)
+     return units;
+ }
+ 
+-/* SHADOW_BIAS=<float> (diagnostic, default 0): subtracted from the comparison reference, to measure how far the
+- * stored depths sit from the references when a shadow comparison fails everywhere. */
++/* SHADOW_BIAS=<float>: subtracted from the comparison reference. Patch 2505: default 0.02 (SHADOW_BIAS=0 = the old
++ * exact compare). J-Stars' characters and plants showed grey stair-step lines and shadows that moved with the camera
++ * (self-shadowing); neither a 4x shadow map nor rounding the reference to the depth format nor a caster depth bias
++ * removed them, a reference shift of 0.02 of the light's depth range did (0.002 did not). A workaround until the
++ * cause is found; the v0.15 port and RPCS3 do not show them. */
+ static const char* shadow_bias_txt(void)
+ {
+     static char b[32] = "";
+-    if (!b[0]) { const char* e = getenv("SHADOW_BIAS"); snprintf(b, sizeof b, "%s", (e && *e) ? e : "0.0"); }
++    if (!b[0]) { const char* e = getenv("SHADOW_BIAS"); snprintf(b, sizeof b, "%s", (e && *e) ? e : "0.02"); }
+     return b;
+ }
+ static void fp_shadow_helper(Out* p, u32 unit, u32 cube_mask,

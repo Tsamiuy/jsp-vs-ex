@@ -1,0 +1,32 @@
+Patch 2501: the game window hides the cursor where cellPad says so (g_pad_cursor_hidden, patch 6500) and adds mouse
+wheel notches to g_pad_wheel for the kbm menus, as the v0.15 port's window does.
+
+Needs 6500 (it defines both). Without INPUT_MODE the cursor stays as before.
+
+Tested (US disc): builds and runs with 6500 (bench/feature/2026-11-09_1558-pad1 route); the cursor and wheel are for a
+hands-on check.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 779766a0..b5e3366d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -761,6 +761,19 @@ static void win_set_fullscreen(HWND h, int on)
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
+     switch (msg) {
++    case WM_MOUSEWHEEL: {   /* 2501: cellPad mouse menus (INPUT_MODE=kbm, patch 6500): wheel = up/down */
++        extern volatile long g_pad_wheel;
++        static int rest = 0;
++        rest += GET_WHEEL_DELTA_WPARAM(wp);
++        while (rest >= WHEEL_DELTA) { InterlockedIncrement(&g_pad_wheel); rest -= WHEEL_DELTA; }
++        while (rest <= -WHEEL_DELTA) { InterlockedDecrement(&g_pad_wheel); rest += WHEEL_DELTA; }
++        return 0;
++    }
++    case WM_SETCURSOR: {   /* 2501: no cursor over the game where cellPad says so (fights, keyboard mode) */
++        extern volatile int g_pad_cursor_hidden;
++        if (g_pad_cursor_hidden && LOWORD(lp) == HTCLIENT) { SetCursor(NULL); return TRUE; }
++        break;
++    }
+     case WM_CLOSE:
+         s_d3d.window_closed = 1;
+         DestroyWindow(hwnd);
