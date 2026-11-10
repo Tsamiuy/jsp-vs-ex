@@ -66,6 +66,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2062 | fix | a display-sized texture with data in guest memory, that is not a display buffer, is not swapped for the frame | rsx_d3d12_backend.c | draw_filter_tex, render_frame | SCREEN_TEX_DATA | J-Stars |
 | 2064 | fix | the per-draw fragment constants of patch 2056 cover programs with up to 128 inline constants (was 64). | rsx_d3d12_backend.c | vp_fp_compile_blob, vp_record_cb, render_frame |  | J-Stars |
 | 2065 | fix | when the async pipeline queue of patch 2057 is full, finished builds that no draw came back for are freed | rsx_d3d12_backend.c | fp_async_queue | FPA_RECLAIM | J-Stars |
+| 2066 | fix | the D3D12 backend never frees or reuses GPU objects under a batch that may still be running: the GPU wait | rsx_d3d12_backend.c |  |  | candidate |
 | 2500 | feature | the window options of the v0.15 port: WINDOW_SIZE=<w>x<h>, FULLSCREEN=1 (borderless, F11 toggles), | rsx_d3d12_backend.c | d3d12_wndproc, create_window | WINDOW_ICON, WINDOW_SIZE, FULLSCREEN, TITLE_STATS | J-Stars |
 | 2501 | feature | the game window hides the cursor where cellPad says so (g_pad_cursor_hidden, patch 6500) and adds mouse | rsx_d3d12_backend.c | win_set_fullscreen |  | J-Stars |
 | 2502 | feature | shadow maps rendered at SHADOW_SCALE times the guest size (1-4, default 2; 1 = the game's own size). | rsx_d3d12_backend.c | vp_shadow_pack, off_ds_get, render_frame | SHADOW_SCALE | J-Stars |
