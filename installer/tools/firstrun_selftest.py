@@ -71,7 +71,37 @@ def units():
     (wd / "PS3_GAME" / "USRDIR").chmod(0o755)
     ran = []
     firstrun.check_disc = lambda d: ([("OK", "D1", "stub")], "BLUS31519")
-    firstrun.check_eboot = lambda e, d=None: [("OK", "E1", "stub")]
+    # E3 known build: a synthetic two-segment ELF (no game data) and a test table in place of the real one
+    import hashlib, struct
+    def elf(pad, body=b"code-bytes-1234", data=b"data-56"):
+        segs, blobs, off = [], b"", 64 + 2 * 56 + pad
+        for va, blob in ((0x10000, body), (0x870000, data)):
+            segs.append(struct.pack(">IIQQQQQQ", 1, 5, off + len(blobs), va, va, len(blob), len(blob), 0x10000))
+            blobs += blob
+        hdr = b"\x7fELF\x02\x02\x01" + b"\0" * 9 + struct.pack(">HHIQQQIHHHHHH", 2, 21, 1, 0x10000, 64, 0, 0, 64, 56, 2, 0, 0, 0)
+        return hdr + b"".join(segs) + b"\0" * pad + blobs
+    a_elf, b_elf, other = elf(0), elf(32), elf(0, body=b"code-bytes-9999")
+    real = firstrun.PROFILE["eboots"]
+    firstrun.PROFILE["eboots"] = [dict(real[0], sha256=hashlib.sha256(a_elf).hexdigest(), segment_sha256=firstrun.segment_hash(a_elf))]
+    check("segment hash: same program in another layout", firstrun.segment_hash(a_elf) == firstrun.segment_hash(b_elf) != "")
+    check("segment hash: other code differs", firstrun.segment_hash(other) != firstrun.segment_hash(a_elf))
+    check("segment hash: cut-off file is ''", firstrun.segment_hash(a_elf[:-4]) == "")
+    lvl, cid, msg = firstrun.identify_eboot(a_elf, "BLUS31519")
+    check("E3 known build, same disc: OK", (lvl, cid) == ("OK", "E3") and "matches the disc folder" in msg, msg)
+    lvl, _c, msg = firstrun.identify_eboot(b_elf, "BLUS31519")
+    check("E3 same program, other file layout: WARN", lvl == "WARN" and "should work" in msg, msg)
+    lvl, _c, msg = firstrun.identify_eboot(a_elf, "BLES02136")
+    check("E3 other region's EBOOT: FAIL", lvl == "FAIL" and "same copy as the disc folder" in msg, msg)
+    lvl, _c, msg = firstrun.identify_eboot(other, "BLUS31519")
+    check("E3 unknown build: FAIL with a hash prefix only", lvl == "FAIL" and hashlib.sha256(other).hexdigest()[:12] in msg
+          and hashlib.sha256(other).hexdigest() not in msg and "/" not in msg and "\\" not in msg, msg)
+    firstrun.PROFILE["eboots"] = real
+    check("E3 table: ids, sizes and 64-hex hashes only", all(set(e) == {"title_id", "region", "app_ver", "size", "status", "sha256",
+          "self_sha256", "segment_sha256"} and all(len(e[k]) == 64 and int(e[k], 16) >= 0 for k in ("sha256", "self_sha256", "segment_sha256"))
+          and e["title_id"] in firstrun.TITLE_IDS for e in real))
+    iss = (pathlib.Path(firstrun.__file__).resolve().parents[1] / "jsp.iss").read_text(encoding="utf-8", errors="replace")
+    check("E3 table: jsp.iss lists the same EBOOT.elf hashes", all(e["sha256"] in iss and e["title_id"] in iss for e in real))
+    firstrun.check_eboot = lambda e, d=None, t=None: [("OK", "E1", "stub")]
     firstrun.check_space = lambda r: [("OK", "S1", "stub")]
     for st in ("lift", "spu", "build", "place"):
         def fn(c, st=st):

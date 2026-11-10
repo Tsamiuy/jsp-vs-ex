@@ -228,6 +228,7 @@ then the game's own netcode runs the match.
 |---|---|
 | D1 D2 D3 | `PS3_GAME\PARAM.SFO`, a supported title id, `PS3_GAME\USRDIR` |
 | E1 E2 | `EBOOT.elf` is a decrypted PowerPC64 ELF; its size is plausible (7.6 to 64 MB) |
+| E3 | `EBOOT.elf` is a known build: the 1.00 disc EBOOT of the disc folder's region (OK). The same program code in a file laid out differently, for example by another decryption tool: WARN, it should work. The other region's EBOOT, or a build the port does not know (game update 1.02, a digital edition, a changed file): FAIL, because the port's hooks sit at fixed places in the 1.00 program and the lift uses the disc region's code range. The table holds ids, sizes and SHA-256 hashes only (`PROFILE["eboots"]` in `firstrun.py`); the setup wizard already refuses a known EBOOT of the other region |
 | P1 P2 | install folder and disc folder paths: refused with `[ ] ;` (CMake cannot configure); the install folder also with `& ^ % ! "` (break the generated `.cmd` files). Spaces, `( )` and accents are fine (tested, see below) |
 | S1 | free space where the build goes: FAIL under 4 GB, WARN under 10 GB (ASSUMPTION: no measured total yet) |
 | T1 to T3 | The bundled llvm-mingw clang++, CMake and Ninja (`toolchain\`) |
