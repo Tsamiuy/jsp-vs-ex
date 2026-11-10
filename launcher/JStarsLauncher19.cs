@@ -103,7 +103,8 @@ namespace JStarsLauncher
         CheckBox unlockBox;                  // ENHANCEMENT (opt-in): one start with everything unlocked; never saved to the settings file
         volatile bool unlockThisRun;
         string backupNote = "";              // what BackupSave did, written to the log once RunGame has opened it
-        const string SaveName = "NPUB31647-B0";
+        const string SaveName = "NPUB31647-B0";                          // US save folder (BLUS31519)
+        static readonly string[] SaveNames = { SaveName, "NPEB02204-B0" };   // US, EU (BLES02136): the launcher does not know the disc's region
         static readonly string[] AaIds = { "off", "fxaa", "fxaa2", "smaa" };
         Panel kbPanel, kbmPanel, padPanel;
         TabControl tabs;
@@ -402,9 +403,9 @@ namespace JStarsLauncher
             y += 34;
             p.Controls.Add(new Label {
                 Text = "All cards, J-Points, characters, supports, titles, icons, decks and coins are unlocked in the save\r\n" +
-                       "the game has loaded, and the game writes them out itself at its next save. The backup is the folder\r\n" +
-                       SaveName + " copied beside it as BACKUP-" + SaveName + "-<date>-<time>. Unlocked titles and icons\r\n" +
-                       "are visible to online opponents; the cheat is accepted online by the project's choice. To undo it,\r\n" +
+                       "the game has loaded, and the game writes them out itself at its next save. The backup is the save folder\r\n" +
+                       "(" + string.Join(" or ", SaveNames) + ") copied beside it as BACKUP-<folder>-<date>-<time>. Unlocked titles and icons\r\n" +
+                       "are visible to online opponents; accepted online for now, which may change when online play is ready. To undo it,\r\n" +
                        "close the game and put the backup folder back under the original name.",
                 Location = P(34, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             return p;
@@ -414,9 +415,23 @@ namespace JStarsLauncher
         string[] SaveFolders()
         {
             string hdd0 = Path.Combine(appData, "hdd0");
-            return new string[] {
-                Path.Combine(hdd0 + "_gamedata", @"dev_hdd0\home\00000001\savedata\" + SaveName),
-                Path.Combine(hdd0, @"home\00000001\savedata\" + SaveName) };
+            var l = new System.Collections.Generic.List<string>();
+            foreach (string n in SaveNames)
+            {
+                l.Add(Path.Combine(hdd0 + "_gamedata", @"dev_hdd0\home\00000001\savedata\" + n));
+                l.Add(Path.Combine(hdd0, @"home\00000001\savedata\" + n));
+            }
+            return l.ToArray();
+        }
+
+        // True when the game has run here before: it wrote its own data, the <hdd0>_gamedata folder (created by the game's runtime,
+        // not by this launcher) or its first-boot data install <hdd0>\game\<id>-INSTALL.
+        bool GameRanBefore()
+        {
+            string hdd0 = Path.Combine(appData, "hdd0");
+            if (Directory.Exists(hdd0 + "_gamedata")) return true;
+            string g = Path.Combine(hdd0, "game");
+            return Directory.Exists(g) && Directory.GetDirectories(g, "*-INSTALL").Length > 0;
         }
 
         static void CopyTree(string from, string to)
@@ -434,8 +449,9 @@ namespace JStarsLauncher
         }
 
         // Copies every existing save folder to a dated folder beside it and checks the copy (file count and bytes).
-        // Returns null when the backup is made (or there is no save yet: the game makes one at its first save, and the
-        // cheat edits a save that has been loaded), otherwise the reason it failed: the game must not start then.
+        // Returns null when the backup is made (or the game has never run here, so there is no save yet), otherwise the reason it
+        // failed: the game must not start then. Also refused: the game has run before (GameRanBefore) but no save folder is found.
+        // The folder names are the US and the EU save folder (NPEB02204-B0, the string in the EU program).
         string BackupSave()
         {
             string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
@@ -444,7 +460,7 @@ namespace JStarsLauncher
             foreach (string src in SaveFolders())
             {
                 if (!Directory.Exists(src)) continue;
-                string dst = Path.Combine(Path.GetDirectoryName(src), "BACKUP-" + SaveName + "-" + stamp);
+                string dst = Path.Combine(Path.GetDirectoryName(src), "BACKUP-" + Path.GetFileName(src) + "-" + stamp);
                 try
                 {
                     if (Directory.Exists(dst)) throw new IOException("the folder " + dst + " exists already");
@@ -461,7 +477,10 @@ namespace JStarsLauncher
                     return "Could not back up the save (" + src + "): " + ex.Message;
                 }
             }
-            if (!any) backupNote = "Save backup: no save folder yet, nothing to back up.";
+            if (!any && GameRanBefore())
+                return "The game has been run before, but no save folder was found, so there is nothing to back up and the cheat is not started. Looked for:\n" +
+                       string.Join("\n", SaveFolders()) + "\n\nStart the game without the cheat and let it save once, or put your save folder there.";
+            if (!any) backupNote = "Save backup: the game has not run here yet, no save folder, nothing to back up.";
             return null;
         }
 

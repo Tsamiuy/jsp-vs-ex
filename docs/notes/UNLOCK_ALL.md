@@ -9,18 +9,20 @@ gauges (Friendship, Effort, Triumph at their cap of 36000), the battle character
 Launcher, "Cheats" tab: tick "Unlock everything (cheat)" and press Start Game. Or set `JSP_UNLOCK_ALL=1` in the
 environment when running the game yourself (then nothing backs the save up: copy the folder first).
 
-- Before the game starts the launcher copies the save folder `NPUB31647-B0` beside itself as
-  `BACKUP-NPUB31647-B0-<date>-<time>` and checks the copy (file count and bytes). If the copy fails the game is not started.
+- Before the game starts the launcher copies the save folder (`NPUB31647-B0` on the US disc, `NPEB02204-B0` on the EU disc; the launcher looks for both) beside itself as
+  `BACKUP-<folder>-<date>-<time>` and checks the copy (file count and bytes). If the copy fails the game is not started.
 - The switch is for one start: the box unticks after use and is never written to the settings file. A `JSP_UNLOCK_ALL`
   line in the settings file is ignored by the launcher.
 - The game writes the unlocks into the save itself, with its own checksum, at its next save. It cannot undo them. The
   only way back is the backup: close the game and put the backup folder back under the original name.
-- A brand-new save is edited from the second start on, once the game has made a first save (nothing to back up on the
-  first start; the launcher says so in its log).
+- If the game has been run here before (its own data exists: the `<hdd0>_gamedata` folder or the first-boot install `<hdd0>\game\<id>-INSTALL`)
+  but no save folder is found, the launcher refuses to start the game with the cheat on. The message names every folder it looked for.
+- A fresh install where the game has never run starts normally with the box ticked (nothing to back up; the log says so). The
+  cheat edits a save that has been loaded, so it takes effect from the second start on, once the game has made a first save.
 
 ## Online
 
-Unlocked titles and icons are visible to online opponents. The cheat is accepted online by the project's choice.
+Unlocked titles and icons are visible to online opponents. The cheat is accepted online by the project's choice (confirmed by the maintainer). This may change when online play is ready.
 
 ## How it works
 

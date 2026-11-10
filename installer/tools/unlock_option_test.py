@@ -37,8 +37,11 @@ check("switch not written to settings", "JSP_UNLOCK_ALL" not in save and "unlock
 check("settings file value removed before launch",
       run.index('Remove("JSP_UNLOCK_ALL")') < run.index('["JSP_UNLOCK_ALL"] = "1"'))
 check("set to 1 only when ticked", re.search(r'if \(unlockThisRun\) \{ psi\.EnvironmentVariables\["JSP_UNLOCK_ALL"\] = "1"', run) is not None)
-check("backup name is dated and outside the game's save prefix", '"BACKUP-" + SaveName + "-" + stamp' in cs)
+check("backup name is dated and outside the game's save prefix", '"BACKUP-" + Path.GetFileName(src) + "-" + stamp' in cs)
 check("port hook only when set", re.search(r'getenv\("JSP_UNLOCK_ALL"\);\s*if \(!e \|\| !\*e \|\| e\[0\] == \'0\'\) return;', cpp) is not None)
+check("backup refuses when the game ran before and no save folder is found", re.search(r"if \(!any && GameRanBefore\(\)\)\s*return \"[^;]*SaveFolders\(\)", cs) is not None)
+check("run-before signal is the game's own data (_gamedata or -INSTALL)", '"_gamedata"' in cs and '"*-INSTALL"' in cs)
+check("US and EU save folder names", '"NPUB31647-B0"' in cs and '"NPEB02204-B0"' in cs)
 check("hook address is in the source", "0x0014E898u" in cpp)
 check("register call in stubs.cpp", "jsp_register_unlock_overrides();" in stubs)
 check("source in CMake", "jsp_unlock.cpp" in cmake)
