@@ -8,6 +8,8 @@ All notable changes are listed here, newest first. The format follows
 
 What `main` has so far; `docs/FEATURES.md` lists each item with how it was tested.
 
+- D3D12: the GPU wait only gives up on a removed device, and the deferred-release table grows instead of freeing its
+  oldest entry early (toolkit patch 2066).
 - RPCS3 save import stages incoming files before replacing progress, restores the old files after an I/O error,
   and refuses linked destinations that could overwrite files outside the selected save.
 - The game is built on your PC from your own copy (ps3recomp, Direct3D 12); no game files are included.
