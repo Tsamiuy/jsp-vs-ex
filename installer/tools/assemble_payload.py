@@ -217,6 +217,7 @@ def main(argv=None):
     for n in ("firstrun.py", spu_tool, "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
         shutil.copy2(ROOT / "installer/tools" / n, out / "tools" / n)
     shutil.move(out / "tools" / "firstrun.py", out / "firstrun.py")
+    shutil.copy2(ROOT / "installer/tools/eboot_ids.json", out / "eboot_ids.json")   # known EBOOT builds, read by firstrun.py (check E3)
     # the Start-menu "Make a support bundle" entry: support_bundle.py sits beside firstrun.py (it imports scrub() from it)
     shutil.copy2(ROOT / "installer/tools/support_bundle.py", out / "support_bundle.py")
     (out / "support-bundle.cmd").write_bytes(SUPPORT_CMD.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii"))

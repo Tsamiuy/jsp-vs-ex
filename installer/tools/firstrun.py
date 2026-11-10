@@ -63,19 +63,6 @@ PROFILE = {
     "elf_max_bytes": 64 << 20,                # ASSUMPTION: the US file is 9.7 MB; far beyond that is not this game's EBOOT
     "exe": "JStarsRecomp.exe",
     "game_title_env": "J-Stars Victory VS+",  # PS3_TITLE in paths.txt
-    # Known decrypted EBOOTs (check E3), in the shared list format: title_id, region, app_ver (PARAM.SFO), size and sha256 of the
-    # EBOOT.elf, status, self_sha256 of the disc's encrypted EBOOT.BIN, segment_sha256 (segment_hash below). Ids, sizes and hashes
-    # only, measured on the 1.00 discs of both regions. Game update 1.02 is not listed: its EBOOT has not been measured.
-    "eboots": [
-        {"title_id": "BLUS31519", "region": "US", "app_ver": "01.00", "size": 9723064, "status": "supported",
-         "sha256": "a8a1543b914b70aa87a83e50c6d90c216d9ed1b60c49c629ddad5590874d7716",
-         "self_sha256": "1e71ce86047f7cf99f29904a9fd045e818730425be76b4c780f42a3d8d8975f1",
-         "segment_sha256": "eb43c5d6ebabba67c037bbf49159ef7e1e4f19eba083c1269e603a7f3520488e"},
-        {"title_id": "BLES02136", "region": "EU", "app_ver": "01.00", "size": 9723080, "status": "supported",
-         "sha256": "719e4cd4d8925cd27c541370efe3b8cfdd3d948346f4db0848704dbce0afa352",
-         "self_sha256": "ddd05205d4a4f40ed5510a84cc5ea07813bea43e02ac58014307021f51130fbd",
-         "segment_sha256": "c5ea9e28086884e002163b1ffb5850c7d9182a9b3dccb6c72fd58926b15e116c"},
-    ],
 }
 TITLE_IDS = PROFILE["titles"]
 CODE_END = PROFILE["code_end"]
@@ -356,10 +343,18 @@ READONLY_HINT = ("the disc folder is on a read-only drive (a disc or a mounted i
                  "and its documentation), then pass it as --eboot")
 
 
+def known_eboots():
+    """The entries of eboot_ids.json beside this file (shared EBOOT id table format); [] when it is missing or unreadable."""
+    try:
+        return json.loads((pathlib.Path(__file__).resolve().parent / "eboot_ids.json").read_text(encoding="utf-8"))["entries"]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
 def segment_hash(data):
     """sha256 over the ELF's loadable segments, the bytes the lifter reads: for each program header in file order with p_type
     PT_LOAD (1) and a non-zero p_filesz or p_memsz, the 8-byte big-endian p_vaddr, p_filesz and p_memsz, then its p_filesz bytes at
-    p_offset. Another decryption tool may lay the file out differently; the loaded program stays the same. '' if the headers are bad."""
+    p_offset (the shared EBOOT id table definition). Another tool may pad or lay out the file differently; the program stays the same. '' if the headers are bad."""
     try:
         phoff, = struct.unpack_from(">Q", data, 0x20)
         phentsize, phnum = struct.unpack_from(">HH", data, 0x36)
@@ -381,11 +376,13 @@ def segment_hash(data):
 
 def identify_eboot(data, tid=None):
     """Check E3: which known build the ELF bytes are. OK: a known EBOOT of the disc's region. WARN: the same program as a known one in a
-    file laid out differently (another decryption tool), it should work. FAIL: a known EBOOT of the other region (the lift takes the code
+    file laid out differently (another tool), it should work. FAIL: a known EBOOT of the other region (the lift takes the code
     range of the disc's region, so it would lift wrong), or a build this port does not know: its hooks sit at fixed addresses of the
     1.00 code, so an update, another edition or a changed file would not run. The message names only the region, id and a hash prefix."""
     whole = hashlib.sha256(data).hexdigest()
-    known = PROFILE["eboots"]
+    known = known_eboots()
+    if not known:
+        return ("FAIL", "E3", "eboot_ids.json, the list of known EBOOT builds, is missing beside firstrun.py: the install is incomplete, run setup again")
     hit = next((e for e in known if e["sha256"] == whole), None)
     how = "the file"
     if hit is None:
@@ -402,8 +399,9 @@ def identify_eboot(data, tid=None):
                               f"{TITLE_IDS.get(tid, '?')} disc ({tid}). Use the EBOOT.elf made from the same copy as the disc folder")
     if how == "the file":
         return ("OK", "E3", name + (" (matches the disc folder)" if tid else ""))
-    return ("WARN", "E3", f"{name}: the program code matches, but the file differs from the known one (SHA-256 {whole[:12]}), probably "
-                          "made by another decryption tool. It should work; if the build fails, make the EBOOT.elf again from your own copy")
+    return ("WARN", "E3", f"{name}: the program code matches, but the file differs from the known one (SHA-256 {whole[:12]}), for "
+                          "example padded or laid out differently by another tool. It should work; if the build fails, make the EBOOT.elf "
+                          "again from your own copy")
 
 
 def check_eboot(path, disc=None, tid=None):

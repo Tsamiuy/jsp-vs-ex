@@ -254,9 +254,9 @@ end;
 { '' when Path is a decrypted PowerPC64 ELF (7F 45 4C 46, 64-bit, big endian, machine 21), else the message. An
   encrypted EBOOT.BIN (SELF, "SCE") gets its own message. Reads 20 bytes. When the file is not there and the disc folder is on a
   read-only drive, the message says how to get the file (no steps: the decryption itself is RPCS3's documentation). }
-{ Disc id of a known 1.00 EBOOT.elf by its whole-file SHA-256 (the table of firstrun.py PROFILE "eboots"; firstrun_selftest.py checks
+{ Disc id of a known 1.00 EBOOT.elf by its whole-file SHA-256 (the table in eboot_ids.json beside firstrun.py; firstrun_selftest.py checks
   that both list the same hashes), '' when not known. Only the wizard's quick region check: firstrun.py check E3 also knows the
-  program-code hash, so an EBOOT.elf made by another decryption tool is judged there, with the result in the log. }
+  program-code hash, so an EBOOT.elf laid out differently by another tool is judged there, with the result in the log. }
 function KnownEbootId(Path: String): String;
 var
   Hash: String;
