@@ -40,10 +40,11 @@ jobs:
             if [ "$id" = "$CURRENT_RUN" ]; then continue; fi
             total=$((total + 1))
             if [ "$DRY_RUN" = "true" ]; then continue; fi
-            if gh api -X DELETE "repos/${REPO}/actions/runs/${id}" > /dev/null 2>&1; then
+            if gh api -X DELETE "repos/${REPO}/actions/runs/${id}" > /dev/null; then
               deleted=$((deleted + 1))
             else
               failed=$((failed + 1))
             fi
           done
           echo "Finished runs found: ${total}; deleted: ${deleted}; failed: ${failed}; dry run: ${DRY_RUN}"
+          if [ "$failed" -gt 0 ]; then exit 1; fi
