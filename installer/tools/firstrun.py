@@ -374,11 +374,13 @@ def segment_hash(data):
         return ""
 
 
-def identify_eboot(data, tid=None):
+def identify_eboot(data, tid=None, allow_unknown=False):
     """Check E3: which known build the ELF bytes are. OK: a known EBOOT of the disc's region. WARN: the same program as a known one in a
     file laid out differently (another tool), it should work. FAIL: a known EBOOT of the other region (the lift takes the code
     range of the disc's region, so it would lift wrong), or a build this port does not know: its hooks sit at fixed addresses of the
-    1.00 code, so an update, another edition or a changed file would not run. The message names only the region, id and a hash prefix."""
+    1.00 code, so an update, another edition or a changed file would not run. The message names only the region, id and a hash prefix.
+    allow_unknown (--allow-unknown-eboot, an explicit opt-in): a build this port does not know becomes a WARN that says it is unsupported;
+    a known EBOOT of the other region stays a FAIL with or without it."""
     whole = hashlib.sha256(data).hexdigest()
     known = known_eboots()
     if not known:
@@ -389,10 +391,15 @@ def identify_eboot(data, tid=None):
         seg = segment_hash(data)
         hit = next((e for e in known if seg and e["segment_sha256"] == seg), None)
         how = "the program code"
+    if hit is None and allow_unknown:
+        return ("WARN", "E3", f"UNSUPPORTED build: this EBOOT.elf is not one this port knows (SHA-256 {whole[:12]}); you asked to go on "
+                              "(--allow-unknown-eboot). The port's hooks sit at fixed places in the 1.00 disc program, so the build may fail or "
+                              "the game may misbehave; problems with this file are not supported")
     if hit is None:
         return ("FAIL", "E3", f"this EBOOT.elf is not a build this port knows (SHA-256 {whole[:12]}): it may be from game update 1.02, a "
                               "digital edition or a changed file. Setup supports the 1.00 disc EBOOT of " + " or ".join(TITLE_IDS) +
-                              ", made without the update installed, because the port's hooks sit at fixed places in that program")
+                              ", made without the update installed, because the port's hooks sit at fixed places in that program. "
+                              "To try it anyway at your own risk, run again with --allow-unknown-eboot")
     name = f"J-Stars Victory VS+ {hit['app_ver'].lstrip('0')}, {hit['region']} disc ({hit['title_id']})"
     if tid and tid != hit["title_id"]:
         return ("FAIL", "E3", f"this EBOOT.elf is from the {hit['region']} disc ({hit['title_id']}), but the disc folder is the "
@@ -404,7 +411,7 @@ def identify_eboot(data, tid=None):
                           "again from your own copy")
 
 
-def check_eboot(path, disc=None, tid=None):
+def check_eboot(path, disc=None, tid=None, allow_unknown=False):
     p = pathlib.Path(path)
     if not p.is_file():
         return [("FAIL", "E1", f"{p} is missing" + (f": {READONLY_HINT}" if disc_read_only(disc) else ""))]
@@ -419,7 +426,7 @@ def check_eboot(path, disc=None, tid=None):
         out.append((lvl, "E2", f"size {size / 1e6:.1f} MB" + ("" if lvl == "OK" else
                     f" is outside {ELF_MIN_BYTES / 1e6:.1f} to {ELF_MAX_BYTES / 1e6:.0f} MB: cut off or not this game's EBOOT")))
         if lvl == "OK":
-            out.append(identify_eboot(p.read_bytes(), tid))
+            out.append(identify_eboot(p.read_bytes(), tid, allow_unknown))
     return out
 
 
@@ -834,7 +841,7 @@ def interactive(a, root, ask=input, out=None):
     if d is None:
         return False
     e = ask_valid(ask, out, "Your decrypted EBOOT.elf, from your own copy (see RPCS3 and its documentation)", saved["eboot"],
-                  lambda x: check_eboot(x, d, check_disc(d)[1]), "Type the path of your decrypted EBOOT.elf.")
+                  lambda x: check_eboot(x, d, check_disc(d)[1], a.allow_unknown_eboot), "Type the path of your decrypted EBOOT.elf.")
     if e is None:
         return False
     a.disc, a.eboot = str(disc_root(d)), e
@@ -884,6 +891,8 @@ def main(argv=None, ask=input):
     ap.add_argument("--interactive", action="store_true", help="the portable zip's text UI: ask for the inputs, keep the answers")
     ap.add_argument("--answers", help="with --interactive: read the answers from this file, one per line (scripted test runs; "
                                       "an empty line keeps the saved answer)")
+    ap.add_argument("--allow-unknown-eboot", action="store_true", help="opt in: go on with an EBOOT.elf this port does not know (check E3 "
+                    "becomes a WARN, the build is unsupported); the other region's known EBOOT is still refused")
     ap.add_argument("--portable", action="store_true", help="saves and settings in the install folder (jsp-install.ini portable=1)")
     a = ap.parse_args(argv)
     a.root = os.path.abspath(a.root or str(pathlib.Path(__file__).resolve().parent))   # CMake is run from other folders: absolute paths only
@@ -920,7 +929,7 @@ def main(argv=None, ask=input):
     loc.write_text(str(root) + "\n")
     checks = check_paths(a.root, a.disc)
     disc_checks, tid = check_disc(a.disc) if not path_problems(a.disc, "disc folder") else ([], "")
-    checks += disc_checks + check_eboot(a.eboot, a.disc, tid) + check_space(a.root)
+    checks += disc_checks + check_eboot(a.eboot, a.disc, tid, a.allow_unknown_eboot) + check_space(a.root)
     if a.until in ("build", "all"):
         checks += check_toolchain(a.toolchain)
     if a.until == "all" and a.devflash:

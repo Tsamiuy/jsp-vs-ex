@@ -566,6 +566,7 @@ end;
 { Silent installs (/VERYSILENT /DISC=<folder> /EBOOT=<file>, optional /DEVFLASH=<folder>) skip the pages: the same checks run here. A value that is
   not given is looked for in the player's RPCS3 install (/RPCS3=<folder>, or the usual places), as the RPCS3 page does; a value that is
   given always wins. /IMPORTSAVE=1 imports the RPCS3 save as the page's box does (the list is computed first and written to the log).
+  /ALLOWUNKNOWNEBOOT=1 (any install, silent or not) lets the build go on with an EBOOT.elf this port does not know: the wizard has no box for it.
   /SKIPBUILD=1 (test switch, e.g. wizard layout tests) skips the build step only.
   The RPCS3 search needs the bundled Python, which Setup can unpack only once the wizard exists: so a silent install that needs the
   search is checked in InitializeWizard (Abort there ends setup with a non-zero exit code); one that is fully given is checked here. }
@@ -866,6 +867,9 @@ begin
   Py := App + '\toolchain\python\python.exe';
   Params := '-X utf8 ' + ArgQ(App + '\firstrun.py') + ' --root ' + ArgQ(App) + ' --disc ' + ArgQ(DiscPath) + ' --eboot ' + ArgQ(EbootPath) +
     ' --devflash ' + ArgQ(FlashPath) + ' --rpcs3 ' + ArgQ(RpcsFoundDir) + ' --hdd0 ' + ArgQ(Hdd0) + ' --logdir ' + ArgQ(App + '\logs');
+  { /ALLOWUNKNOWNEBOOT=1: the explicit opt-in for an EBOOT.elf this port does not know (firstrun.py check E3 then warns instead of
+    stopping). It is kept in build-again.cmd, so "Build again" is as unsupported as the first build. The other region's EBOOT is refused regardless. }
+  if ExpandConstant('{param:ALLOWUNKNOWNEBOOT|0}') = '1' then Params := Params + ' --allow-unknown-eboot';
   { UTF-8 without a BOM and chcp 65001 first, like build-port.cmd: the ANSI code page broke folder names with accents
     (cmd reads a batch file in the console code page). }
   SetArrayLength(Again, 4);

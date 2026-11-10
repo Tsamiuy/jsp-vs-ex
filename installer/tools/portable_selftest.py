@@ -61,6 +61,8 @@ def main(scratch, payload=None, disc=None, eboot=None):
     scratch.mkdir(parents=True)
     subprocess.run([sys.executable, "-I", str(HERE / "make_fixture.py"), str(scratch / "fx")], check=True)
     fx = scratch / "fx"
+    with open(fx / "EBOOT.elf", "ab") as f:   # the fixture's 64-byte stand-in is under the E2 size floor: pad it with zeros (still an unknown build for E3)
+        f.write(b"\0" * (firstrun.ELF_MIN_BYTES + 1024 - 64))
     # --- path helpers
     root = pathlib.Path("/x/JSP")
     check("pack inside", firstrun.pack_path("/x/JSP/hdd0", root) == "@APP@/hdd0")
@@ -69,12 +71,21 @@ def main(scratch, payload=None, disc=None, eboot=None):
           firstrun.pack_path("/y/disc", root) == "/y/disc")
     check("unpack", firstrun.unpack_path("@APP@/hdd0", pathlib.Path("/z/Renamed")) == "/z/Renamed/hdd0")
     check("disc root accepts PS3_GAME", firstrun.disc_root(fx / "disc" / "PS3_GAME") == fx / "disc")
+    # the fixture's EBOOT.elf is not a known build: without --allow-unknown-eboot the portable flow refuses it (E3), with it only warns
+    app0 = scratch / "app0"
+    app0.mkdir()
+    rc, text = run_main(["--interactive", "--portable", "--root", str(app0), "--until", "checks"], ["", str(fx / "disc"), str(fx / "EBOOT.elf")])
+    check("portable flow: unknown EBOOT without the flag is refused (E3)", rc != 0 and "not a build this port knows" in text
+          and "--allow-unknown-eboot" in text, f"rc={rc}")
+    rc, text = run_main(["--interactive", "--portable", "--allow-unknown-eboot", "--root", str(app0), "--until", "checks"],
+                        ["", str(fx / "disc"), str(fx / "EBOOT.elf")])
+    check("portable flow: unknown EBOOT with --allow-unknown-eboot goes on with an UNSUPPORTED warning", rc == 0 and "UNSUPPORTED" in text, f"rc={rc}")
     # --- interactive: wrong answers first, then good ones (until checks: no compiler needed)
     app = scratch / "app1"
     app.mkdir()
     ans = ["", str(fx), str(fx / "disc" / "PS3_GAME"),                    # empty (nothing saved yet), no PS3_GAME, then good
            str(fx / "EBOOT.BIN"), str(fx / "EBOOT.elf")]                    # encrypted, then good (no dev_flash question)
-    rc, text = run_main(["--interactive", "--portable", "--root", str(app), "--until", "checks"], ans)
+    rc, text = run_main(["--interactive", "--portable", "--root", str(app), "--allow-unknown-eboot", "--until", "checks"], ans)
     check("interactive accepts after wrong answers", rc == 0 and "RESULT: ok, inputs accepted" in text, f"rc={rc}")
     check("wrong answers explained", "PARAM.SFO is missing" in text and "encrypted EBOOT.BIN" in text)
     check("no dev_flash question", "dev_flash" not in text)
@@ -82,11 +93,11 @@ def main(scratch, payload=None, disc=None, eboot=None):
     ini = (app / "jsp-install.ini").read_text()
     check("ini keeps the answers and portable=1", "portable=1" in ini and "title_id=BLUS31519" in ini and str(fx) in ini, ini.replace("\n", "|")[:120])
     # second start: Enter keeps the saved answers
-    rc, text = run_main(["--interactive", "--root", str(app), "--until", "checks"], ["", "", ""])
+    rc, text = run_main(["--interactive", "--root", str(app), "--allow-unknown-eboot", "--until", "checks"], ["", "", ""])
     check("saved answers kept with Enter (portable read from ini)", rc == 0 and "portable=1" in text, f"rc={rc}")
     # --answers FILE (scripted runs, for scripted runs where a pipe is not forwarded)
     (scratch / "ans.txt").write_text(f"\n\n\n")
-    rc, text = run_main(["--interactive", "--root", str(app), "--until", "checks", "--answers", str(scratch / "ans.txt")])
+    rc, text = run_main(["--interactive", "--root", str(app), "--allow-unknown-eboot", "--until", "checks", "--answers", str(scratch / "ans.txt")])
     check("--answers file: Enter keeps the saved answers", rc == 0 and "RESULT: ok, inputs accepted" in text, f"rc={rc}")
     # q and end of input stop without changing anything more
     rc, _ = run_main(["--interactive", "--root", str(app), "--until", "checks"], ["q"])
@@ -94,8 +105,8 @@ def main(scratch, payload=None, disc=None, eboot=None):
     rc, _ = run_main(["--interactive", "--root", str(app), "--until", "checks"], [])
     check("end of input stops with rc 3", rc == 3)
     # no compiler question: the bundled toolchain is checked (T1-T3), nothing is asked about Visual Studio
-    rc, text = run_main(["--interactive", "--root", str(app), "--until", "build", "--toolchain", str(scratch / "none")], ["", "", ""])
-    check("no Visual Studio question; missing bundled toolchain fails T1-T3", rc == 1 and "Visual Studio" not in text and text.count("FAILED") >= 3)
+    rc, text = run_main(["--interactive", "--root", str(app), "--allow-unknown-eboot", "--until", "build", "--toolchain", str(scratch / "none")], ["", "", ""])
+    check("no Visual Studio question; missing bundled toolchain fails T1-T3", rc == 1 and "Visual Studio" not in text and text.count("FAIL T") >= 3)
     # --- non-interactive needs disc and eboot
     try:
         run_main(["--root", str(app)])
