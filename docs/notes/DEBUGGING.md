@@ -110,7 +110,7 @@ RPCS3. Its log (`RPCS3\log\RPCS3.log`, copied to `jstars\run\rpcs3_reference.log
   Settings, then System, then Optional features, then Graphics Tools.
 - More rendering switches added on 2026-10-20 (runtime):
   - `RSX_FRAMELOG=N`: per-batch records, display draws, vertices, drops and how presenting runs.
-  - `STRIP_NATIVE=1`: native strip path (renders nothing yet).
+  - `STRIP_NATIVE=1`: native strip path (renders nothing yet; native strips are the default since 16c9a9d and render the match cleanly, FINDINGS §28; `STRIP_EXPAND=1` selects the old strip-to-triangle-list expansion).
   - `STRIP_DUMP=<frame>`: `[STRIP]` record-side and `[STRIPDRAW]` replay-side dumps.
   - `RSX_VBASE_OFF=1` and `VBASE_DBG=1`: vertex base offset/index.
   - `VP_NO_BRANCH_BASE=1`.
@@ -119,6 +119,6 @@ RPCS3. Its log (`RPCS3\log\RPCS3.log`, copied to `jstars\run\rpcs3_reference.log
 - Inspecting captures: use the scripts in `tools\` (README there): `capstat.py` (lit % per RT),
   `capops.py` (`--summary`, `--chain=<RT>`, filters), `capcompare.py` (A/B), `bmp2png.ps1`,
   `capture_match.ps1` (the whole demo-match capture run). They replace the old ad-hoc pixel count.
-- Only end-of-frame RT content is saved; to find which op blackens a target you need per-op
-  snapshots (backend change, see FINDINGS §20).
+- By default only end-of-frame RT content is saved. Now: `RSX_CAP_PASSES=1` on a captured frame also snapshots the bound
+  offscreen RT before/after every full-screen pass (`pass_opNNNN_{pre,post}_rt_*.bmp`) plus `fp_opNNNN.hlsl` (FINDINGS §22).
 

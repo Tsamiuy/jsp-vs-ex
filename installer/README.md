@@ -113,7 +113,7 @@ compiled with MinGW-w64 GCC on Linux; the wizard and the payload ran under Wine/
 On GitHub: the `installer` workflow (`.github/workflows/installer.yml`, Actions tab, **Run workflow**) runs the same steps on a
 Windows runner and keeps `jsp-setup.exe`, the portable zip if asked and `SHA256SUMS.txt` as a workflow artifact for 7 days
 (changeable when started), visible to whoever can see the repository. It downloads the embeddable Python and the font itself,
-pinned by SHA-256 in the workflow. Started by hand only; nothing is published.
+pinned by SHA-256 in the workflow. Started by hand, or by `release.yml`, which builds a release's files with it and creates a draft release; nothing is published until the draft is published by hand.
 
 For an unattended test of the wizard pages without a build:
 `jsp-setup.exe /VERYSILENT /DISC=<disc folder> /EBOOT=<EBOOT.elf> /SKIPBUILD=1`. Add
@@ -227,7 +227,7 @@ then the game's own netcode runs the match.
 | Code | Check |
 |---|---|
 | D1 D2 D3 | `PS3_GAME\PARAM.SFO`, a supported title id, `PS3_GAME\USRDIR` |
-| E1 E2 | `EBOOT.elf` is a decrypted PowerPC64 ELF; its size is plausible (7.6 to 64 MB) |
+| E1 E2 | `EBOOT.elf` is a decrypted PowerPC64 ELF; its size is plausible (7.6 to 67 MB, which is the 64 MiB limit in `firstrun.py`) |
 | E3 | `EBOOT.elf` is a known build: the 1.00 disc EBOOT of the disc folder's region (OK). The same program code in a file padded or laid out differently by another tool: WARN, it should work. The other region's EBOOT, or a build the port does not know (game update 1.02, a digital edition, a changed file): FAIL, because the port's hooks sit at fixed places in the 1.00 program and the lift uses the disc region's code range. The table holds ids, sizes and SHA-256 hashes only (`installer/tools/eboot_ids.json`, in the shared EBOOT id table format); the setup wizard already refuses a known EBOOT of the other region. Explicit opt-in for a build the port does not know: `firstrun.py --allow-unknown-eboot` (the portable zip: `run.cmd --allow-unknown-eboot`; the installer: `jsp-setup.exe /ALLOWUNKNOWNEBOOT=1`, also kept in `build-again.cmd`) turns that FAIL into a WARN that says the build is UNSUPPORTED and names the hash prefix. It is never saved and never on by default; the other region's known EBOOT is refused with or without it |
 | P1 P2 | install folder and disc folder paths: refused with `[ ] ;` (CMake cannot configure); the install folder also with `& ^ % ! "` (break the generated `.cmd` files). Spaces, `( )` and accents are fine (tested, see below) |
 | S1 | free space where the build goes: FAIL under 4 GB, WARN under 10 GB (ASSUMPTION: no measured total yet) |

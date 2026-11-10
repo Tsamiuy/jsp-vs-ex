@@ -35,12 +35,13 @@ Not covered by this path, which is fine: render targets sampled as textures (`RT
 zeta views, screen-as-texture, shadow passes). They are produced every frame and are not art.
 
 Measured context (CPU_PROFILE.md): one texture create + upload costs **~0.7-1 ms** on the drawing
-thread. Kameari had 3,462 creates in a window, and bursts of 300-600 freeze the frame for 0.2-0.6 s.
+thread. Kameari had 3,462 creates over its 41 fight windows (worst window 583), and bursts of 150-583 per window freeze the frame for 0.2-0.6 s.
 Any feature that adds creates must keep them off the drawing thread or ahead of time (§5).
 
 ## 2. Where to hash and dump
 
-**Hook point:** in `vp_upload_tex_slot_impl`, right after `s_txo` becomes `TXO_NEW` or
+**Hook point:** (Now: the backend already has `g_tex_patch_hook(off, w, h, fmt)`, patch 2507, NULL by default, called at the top of
+`vp_upload_tex_slot_impl`, and a `TEX_DDS_DUMP` level-0 BC1/BC3 dump, patch 2015; a pack hook can build on these.) In `vp_upload_tex_slot_impl`, right after `s_txo` becomes `TXO_NEW` or
 `TXO_STALE` (~5148), i.e. only when the bytes are new or changed. Never on the per-bind fast
 paths (`memo`, `bound`, `csum-same`), so the cost of a cached frame is unchanged.
 
@@ -66,7 +67,7 @@ marked dynamic and not dumped again.
 - `<hash>_<w>x<h>_<ff>.dds`, keeping the exact decoded format: BC1/2/3 stay compressed and lossless,
   RGBA8/RG8/R8 uncompressed. DDS is header + bytes, so no image library is needed.
 - With `TEX_DUMP_PNG=1`, also a `.png` of the RGBA8 (BC decoded by the same code as
-  `tools\texbin.py`) for browsing and upscaling.
+  `jstars-notes\tools\texbin.py`) for browsing and upscaling.
 - One line per texture in `texdump\<TITLE>\dump.csv`: hash, w, h, RSX fmt, swizzled/linear, mip
   count, guest offset, first frame, binds so far, and a free tag from `TEX_DUMP_TAG` (e.g. the
   stage name set by the run script). That tag is how we pick "environment of stage X".
@@ -118,7 +119,7 @@ Sizes per texture, with a full mip chain (x1.33):
 | 256x256 DXT5 | 0.09 MB | 0.35 MB | 1.4 MB | 5.6 MB |
 
 So **2x as BC7 is about 8x the VRAM of the original DXT1 art, and 4x is about 32x.** If one stage's
-environment has ~300 textures in view (Kameari has >512 of all kinds, CPU_PROFILE §24), 2x BC7 is
+environment has ~300 textures in view (Kameari filled all 512 texture slots in the old build, inferred in CPU_PROFILE §18; the slot default is now 1024, §24), 2x BC7 is
 ~0.4 GB and 4x BC7 ~1.6 GB of VRAM, plus the same in RAM if preloaded. **Recommendation: 2x BC7 by
 default; 4x only for large hero surfaces (floors, walls, sky).** A `TEXPACK_BUDGET_MB` cap stops
 replacing and falls back to the original once the budget is used.
@@ -217,9 +218,9 @@ two separate reasons, and a texture pack only fixes the first:
 2. **Many effects are drawn into reduced-size layers and then composited**, which no texture
    replacement can fix. Facts from VFX.md: the distortion pass draws into the **640x360** grey layer
    `0x0DB30000`, the effect alpha layer `0x0DC20000` sits next to it, the glow layer `0x0E590000`
-   is currently never drawn (glow missing), and there is a quarter-res sky/bloom layer
+   was not drawn when this was written (2026-10-27); the glow draws do run now (VFX.md, FINDINGS "Effect layers and the missing glow"), and there is a quarter-res sky/bloom layer
    (STAGE_TEXTURES §10). Even a 4x texture lands in a 640x360 target and gets stretched to 1280x720.
-   This needs a different feature (§9.3).
+   This needs a different feature (§9.3). Now: `FX_FULL=1` (patch 2512, on by default) already doubles the scale of the half-size effect layers; its default targets on v0.19 are 0x0D430000, 0x0D520000, 0x0D340000 and 0x0D610000 (depth 0x0D240000), not the addresses above.
 
 ### 9.1 How effect textures differ from environment art
 
@@ -260,8 +261,7 @@ To make the reduced-size layers sharp, the backend would create those offscreen 
 scale viewports, scissors and the texel-size constants that sample them. RPCS3 and Dolphin call
 this "resolution scaling". It touches the render-target and copy paths, not the texture upload,
 so it is a **render-backend change** of medium-large size and risk (REUSABLE.md §8 describes those
-substitution paths). Do it **after** the missing glow pass works (VFX.md), or we would be sharpening
-an incomplete image. Rough size: 300-600 lines, 2-4 days, with a per-layer on/off switch.
+substitution paths). (Written before the glow draws were found to run and before `FX_FULL=1`, patch 2512, existed; extra work is now only needed for scales beyond it.) Rough size: 300-600 lines, 2-4 days, with a per-layer on/off switch.
 
 ### 9.4 Changes to the plan
 
@@ -275,6 +275,6 @@ an incomplete image. Rough size: 300-600 lines, 2-4 days, with a per-layer on/of
 - **Step 5 (tools):** an **effect mode** in `texpack_list.py`: detect flipbook grids, split and
   reassemble cells, premultiply/unpremultiply, clamp backgrounds, premultiplied mips, BC4 for
   masks, and flag data textures (distortion, ramps, noise) as "do not AI-upscale". About +250 lines.
-- **New optional step 6:** effect-layer resolution scaling (§9.3). The maintainer's call, after the glow fix.
+- **New optional step 6:** effect-layer resolution scaling (§9.3). The maintainer's call, after the glow fix (the glow draws do run now; `FX_FULL=1`, patch 2512, covers part of this).
 - Order unchanged: environment first, because it is simpler and proves the pipeline. Effects come
   after, once the dump has tagged which textures are effects.

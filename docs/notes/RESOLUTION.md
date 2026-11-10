@@ -3,11 +3,13 @@
 The maintainer: before any texture upscaling, the game should render above 720p, at least up to 4K (his monitor is 4K).
 Machine: a laptop discrete GPU plus an integrated GPU, laptop panel 2560x1600 @ 240 Hz.
 
-## How it renders today
+## How it rendered before RES_SCALE (guest sizes, i.e. RES_SCALE=1)
 
-- Window and swap chain are fixed at 1280x720 (`jstars\port\main.cpp` WINDOW_WIDTH/HEIGHT;
-  `rsx_d3d12_backend.c` init_d3d12 creates the swap chain at that size). There is no WM_SIZE handling: when
-  the window is resized or maximised, Windows stretches the 1280x720 image (blurry at 4K).
+Now (RES_SCALE is done): every size below is multiplied by RES_SCALE n (colour targets, scene depth, shadow maps, swap chain).
+
+- The guest display size is 1280x720 (`jstars\port\main.cpp` WINDOW_WIDTH/HEIGHT, passed to `rsx_backend_init`); the swap chain
+  is created at that size times RES_SCALE and stretched to the window, which is resizable and can go borderless fullscreen
+  (WINDOW_SIZE, FULLSCREEN, F11). There is still no WM_SIZE handler or ResizeBuffers.
 - The game draws natively at 720p. Display draws (guest surface offset 0) go straight into the swap-chain
   back buffer; every other guest colour surface is an offscreen D3D target created at the guest's size
   (`off_rt`, created in the surface path ~line 6299), depth surfaces likewise (`s_zrt`).
@@ -17,8 +19,8 @@ Machine: a laptop discrete GPU plus an integrated GPU, laptop panel 2560x1600 @ 
   - reduced: 640x360 (3 effect layers, and a 640x360 depth for an effect pass), 320x180 x2, 80x45 (bloom /
     blur chain), the 20x11 luminance target (read back to the CPU for exposure, LUM_READBACK);
   - shadow maps: 2048x1024 (scenery) and 1024x1024 (characters); 256x256 targets (character icons/portraits).
-- 42 places in the backend use the back-buffer size (`s_d3d.width/height`): viewport/scissor defaults,
-  captures, the rename panel, readbacks.
+- 42 places in the backend use the display size (`s_d3d.width/height`, the guest size; since RES_SCALE the swap chain is
+  scaled separately): viewport/scissor defaults, captures, the rename panel, readbacks.
 
 ## What an internal-resolution scale needs
 
@@ -63,12 +65,14 @@ than that; no concern.
 
 ## FPS risk
 
-- The frame rate today is limited by the CPU side (drawing thread, FIFO, vertex work, ~29-30 f/s locked to
-  the game's 30), not the GPU. Scaling multiplies only pixel work: 2.25x at 1080p, 4x at 1440p, 9x at 4K.
+- At 720p the frame rate is limited by the CPU side (drawing thread, FIFO, vertex work, ~29-30 f/s locked to
+  the game's 30), not the GPU. Measured afterwards with RES_SCALE (FINDINGS "Higher resolution"): the first runs were GPU-bound
+  (1440p 14-16 f/s, 4K 5-9 f/s); later 1440p about 29.0 and 4K about 28.4 f/s. Scaling multiplies only pixel work: 2.25x at 1080p, 4x at 1440p, 9x at 4K.
   On a laptop GPU the game's pixel shaders at 4K should still fit well inside 33 ms, so the expected
   cost is small; measure per step (1080p, 1440p, 4K) with GCM_FLIPCOUNT and GPU timestamps.
 - Risk: the backend's per-frame copies of targets (copy-on-sample snapshots, dt_snapshot) grow 9x at 4K;
-  those copies are the first thing to watch.
+  those copies are the first thing to watch. Measured later: about 790 target copies per frame at RES_SCALE=3, cut to about 4
+  by not copying depth bound on units the program does not sample (`ZSNAP_ALL=1` turns that off; STATUS 2026-11-02).
 
 ## Resolution choice for the player
 
