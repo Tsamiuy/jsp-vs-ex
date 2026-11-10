@@ -206,7 +206,9 @@ The launcher's Online tab sets this up without editing files: Off, re-psn (serve
 (a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
 not work on a community server). Choosing one turns the other off in the same save. It writes `repsn.ini` and
 `community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a
-portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. Keys that belong to the game itself
+portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. On the re-psn choice, **Find on LAN** broadcasts one small UDP request (port 36100) and fills the Server field from a server that
+answers; the host starts re-psn with `-discover` (a build with LAN discovery; see [docs/ONLINE.md](../docs/ONLINE.md#playing-on-the-same-network-lan)).
+It fills a normal `host:port`; nothing else is saved. Keys that belong to the game itself
 are never changed by the launcher. The launcher sets no online environment variable; the game reads the files at
 startup (`installer/port/jsp/jsp_online.cpp`, logging each decision on `[online]` lines) and sets the runtime's
 variables from them. Re-psn and community on together: online is refused. Community on: no client yet, offline. The

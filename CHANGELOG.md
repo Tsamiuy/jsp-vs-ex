@@ -10,6 +10,8 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
 
 - Setup checks the decrypted EBOOT against the known 1.00 builds and refuses the other region's. An unknown build can
   be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
+- Launcher: a Find on LAN button in the Online tab looks for a re-psn server started with `-discover` on the same
+  network and fills the Server field (needs a re-psn build with LAN discovery; not tested across a real network yet).
 - Launcher: an Online tab edits the shared online settings files (`repsn.ini`, `community.ini`): off, re-psn or a
   community server preset, one method at a time, written atomically; the launcher sets no online environment variable.
 - Game: reads `repsn.ini` and `community.ini` at startup and sets the runtime's online variables from them (re-psn

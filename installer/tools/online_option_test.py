@@ -23,7 +23,7 @@ def check(name, ok):
         fails.append(name)
 
 
-ini = cs[cs.index("class OnlineIni"):cs.index("class Preset")]
+ini = cs[cs.index("class OnlineIni"):cs.index("// LAN discovery for re-psn")]
 save = cs[cs.index("string SaveOnline()"):]
 save = save[:save.index("\n        }\n")]
 tab = cs[cs.index("TabPage BuildOnlineTab()"):cs.index("string SaveOnline()")]
@@ -69,5 +69,27 @@ check("launcher sets no online environment variable",
 check("unsaved tab edits are saved before the start, a bad value stops it",
       start.index("SaveOnline()") < start.index("new Thread(RunGame)") and "return;" in start[start.index("SaveOnline()"):start.index("new Thread(RunGame)")])
 check("no real server named", not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", tab + ini))
+# Find on LAN
+lan = cs[cs.index("class LanServer"):cs.index("class Preset {")]
+find = cs[cs.index("void FindOnLan()"):cs.index("int OnlineMethod()")]
+check("Find on LAN button is in the re-psn panel", 'Text = "Find on LAN"' in tab and "repsnPanel.Controls.Add(lanBtn)" in tab)
+check("request: magic, type 0x04, big-endian nonce, 64 bytes",
+      "RequestLen = 64" in lan and "r[4] = 0x04" in lan and "(byte)(nonce >> 24)" in lan and "r[8] = (byte)nonce" in lan)
+check("reply: exactly 52 bytes, type 0x84, nonce matched, port 0 refused",
+      "ReplyLen = 52" in lan and "len != ReplyLen" in lan and "b[4] != 0x84" in lan and "n != nonce" in lan and "TcpPort == 0" in lan)
+check("reply text: NUL-terminated, non-printable becomes ?", "b[off + i] != 0" in lan and "0x20" in lan and "0x7f" in lan and "'?'" in lan)
+check("UdpClient with broadcast, 255.255.255.255 and each interface's directed broadcast",
+      "UdpClient" in lan and "EnableBroadcast = true" in lan and "IPAddress.Broadcast" in lan and "a[i] | ~m[i]" in lan)
+check("default port 36100, about 1200 ms, results capped", "DefaultPort = 36100" in lan and "LanTimeoutMs = 1200" in cs and "MaxFound = 16" in lan)
+check("search runs on a background thread and returns to the UI thread",
+      "new Thread(delegate" in find and "IsBackground = true" in find and "BeginInvoke(" in find and "LanDiscover.Find(" in find)
+check("button disabled while searching", "lanBtn.Enabled = false" in find and "lanBtn.Enabled = true" in find)
+check("none found: the required message",
+      "No server found on this network. The host must start re-psn with -discover, and both PCs must be on the same network." in find)
+check("one found fills Server, several are picked, found addresses are validated",
+      "repsnServerBox.Text = pick.Ip" in find and "PickLanServer(ok)" in find and "OnlineIni.ValidAddress(s.Ip" in find)
+check("listing shows name, address:port, players, relay yes/no, version",
+      all(t in find for t in ("s.Ip", "s.TcpPort", "s.Players", '"yes" : "no"', "s.Version")))
+check("no 'auto' server value is saved by the launcher", not re.search(r'"auto"', cs))
 print("RESULT:", "ok" if not fails else "FAILED")
 sys.exit(1 if fails else 0)

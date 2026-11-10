@@ -36,6 +36,28 @@ To turn online off again, choose **Off**.
 2. One player picks **Create a Room**; the others pick **Search for a Room** and join it.
 3. When everyone is in the room, start the battle.
 
+## Playing on the same network (LAN)
+
+On a home network you can skip typing the host's address.
+
+1. **The host** starts re-psn with `-discover` (and `-name "Some name"` if you want a name shown, at most 24 letters or
+   digits). Add `-relay` as in step 1 above if needed. Discovery is off unless `-discover` is given.
+2. **The others** open the launcher's **Online** tab, choose **re-psn** and press **Find on LAN**. The search takes about
+   a second. One server found: its address goes into the Server field. Several: pick one from the list, which shows
+   each one's name, address, players, relay on or off and version.
+3. Press **Save online settings** and play as in step 3 above.
+
+Limits:
+- Same subnet only. It does not cross routers, VPNs or the internet; use the host's address for those.
+- Wi-Fi networks with client isolation (guest networks, some public or hotel Wi-Fi) block it.
+- A Windows firewall prompt may appear the first time; allow the launcher on private networks. The host's firewall must
+  allow UDP port 36100 as well as the TCP port.
+- If nothing is found, the Server field can still be filled by hand.
+- Discovery needs a re-psn build made from its source after the LAN discovery change was merged. Until a release has
+  it, older releases do not answer and Find on LAN finds nothing.
+- The launcher sends one small broadcast and shows only what answers; it does not connect to anything until you start
+  the game.
+
 ## If it does not work
 
 - **Online Battle shows a connection error:** online is off or the server is not reachable. Check that the Online tab shows re-psn and

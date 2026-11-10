@@ -257,6 +257,123 @@ namespace JStarsLauncher
         }
     }
 
+    // LAN discovery for re-psn (the DISCOVER request and reply of re-psn's server/discover.go and client/psnr.c, as of its
+    // main branch after the LAN discovery merges). The request is 64 bytes: "PSNR", type 0x04, a 4-byte nonce, zeros.
+    // The reply is exactly 52 bytes: "PSNR", type 0x84, the nonce, tcp_port u16, udp_port u16, flags u8 (bit 0: relay),
+    // players u16, name[24], version[12], all big-endian, text NUL-padded. Replies are untrusted input: anything of
+    // the wrong length, magic, type or nonce, or with port 0, is ignored; text is cut at the first NUL and every
+    // byte outside printable ASCII becomes '?'. Only servers started with -discover answer, and only on the same
+    // subnet; the reply goes to the sender of the request.
+    class LanServer { public string Ip, Name, Version; public int TcpPort, UdpPort, Players; public bool Relay; }
+
+    static class LanDiscover
+    {
+        public const int DefaultPort = 36100, RequestLen = 64, ReplyLen = 52, MaxFound = 16;
+
+        public static byte[] BuildRequest(uint nonce)
+        {
+            byte[] r = new byte[RequestLen];
+            r[0] = (byte)'P'; r[1] = (byte)'S'; r[2] = (byte)'N'; r[3] = (byte)'R';
+            r[4] = 0x04;
+            r[5] = (byte)(nonce >> 24); r[6] = (byte)(nonce >> 16); r[7] = (byte)(nonce >> 8); r[8] = (byte)nonce;
+            return r;
+        }
+
+        static string Text(byte[] b, int off, int n)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < n && b[off + i] != 0; i++)
+                sb.Append(b[off + i] >= 0x20 && b[off + i] < 0x7f ? (char)b[off + i] : '?');
+            return sb.ToString();
+        }
+
+        // Returns null for anything that is not a well-formed reply to this nonce.
+        public static LanServer ParseReply(byte[] b, int len, uint nonce, string fromIp)
+        {
+            if (b == null || len != ReplyLen || b.Length < ReplyLen || fromIp == null) return null;
+            if (b[0] != 'P' || b[1] != 'S' || b[2] != 'N' || b[3] != 'R' || b[4] != 0x84) return null;
+            uint n = ((uint)b[5] << 24) | ((uint)b[6] << 16) | ((uint)b[7] << 8) | b[8];
+            if (n != nonce) return null;
+            var s = new LanServer();
+            s.Ip = fromIp;
+            s.TcpPort = (b[9] << 8) | b[10];
+            s.UdpPort = (b[11] << 8) | b[12];
+            s.Relay = (b[13] & 1) != 0;
+            s.Players = (b[14] << 8) | b[15];
+            s.Name = Text(b, 16, 24);
+            s.Version = Text(b, 40, 12);
+            if (s.TcpPort == 0) return null;
+            return s;
+        }
+
+        // 255.255.255.255 plus the directed broadcast address of each IPv4 interface that is up.
+        public static List<System.Net.IPAddress> Destinations()
+        {
+            var list = new List<System.Net.IPAddress> { System.Net.IPAddress.Broadcast };
+            try
+            {
+                foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    if (nic.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                    foreach (var ua in nic.GetIPProperties().UnicastAddresses)
+                    {
+                        if (ua.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || ua.IPv4Mask == null) continue;
+                        byte[] a = ua.Address.GetAddressBytes(), m = ua.IPv4Mask.GetAddressBytes();
+                        if (a.Length != 4 || m.Length != 4) continue;
+                        byte[] d = new byte[4];
+                        for (int i = 0; i < 4; i++) d[i] = (byte)(a[i] | ~m[i]);
+                        var ip = new System.Net.IPAddress(d);
+                        if (!list.Contains(ip) && list.Count < 32) list.Add(ip);
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        // Blocks for about timeoutMs; run it on a worker thread. dests null means Destinations().
+        public static List<LanServer> Find(int port, int timeoutMs, List<System.Net.IPAddress> dests)
+        {
+            var found = new List<LanServer>();
+            byte[] g = Guid.NewGuid().ToByteArray();
+            uint nonce = BitConverter.ToUInt32(g, 0);
+            byte[] req = BuildRequest(nonce);
+            if (dests == null) dests = Destinations();
+            using (var u = new System.Net.Sockets.UdpClient(System.Net.Sockets.AddressFamily.InterNetwork))
+            {
+                u.EnableBroadcast = true;
+                int sent = 0;
+                foreach (var d in dests)
+                {
+                    try { if (u.Send(req, req.Length, new System.Net.IPEndPoint(d, port)) == req.Length) sent++; }
+                    catch { }
+                }
+                if (sent == 0) return found;
+                var sw = Stopwatch.StartNew();
+                while (found.Count < MaxFound)
+                {
+                    long left = timeoutMs - sw.ElapsedMilliseconds;
+                    if (left <= 0) break;
+                    try
+                    {
+                        if (!u.Client.Poll((int)Math.Min(left, 100000) * 1000, System.Net.Sockets.SelectMode.SelectRead)) continue;
+                        var from = new System.Net.IPEndPoint(System.Net.IPAddress.Any, 0);
+                        byte[] buf = u.Receive(ref from);
+                        var s = ParseReply(buf, buf.Length, nonce, from.Address.ToString());
+                        if (s == null) continue;
+                        bool dup = false;
+                        foreach (var f in found) if (f.Ip == s.Ip && f.TcpPort == s.TcpPort) dup = true;
+                        if (!dup) found.Add(s);
+                    }
+                    catch (System.Net.Sockets.SocketException) { } // e.g. a connection-reset report for an earlier send
+                    catch (ObjectDisposedException) { break; }
+                }
+            }
+            return found;
+        }
+    }
+
     class Preset { public string Label, Address, Name; }
 
     class LauncherForm : Form, IMessageFilter
@@ -961,7 +1078,7 @@ namespace JStarsLauncher
         RadioButton rbOnOff, rbOnRepsn, rbOnComm;
         TextBox repsnServerBox, repsnNameBox, presetLabelBox, presetAddrBox, presetNameBox;
         ListBox presetList;
-        Button presetAddBtn, presetUpdBtn, presetDelBtn, presetActiveBtn, onlineSaveBtn;
+        Button lanBtn, presetAddBtn, presetUpdBtn, presetDelBtn, presetActiveBtn, onlineSaveBtn;
         Label onlineMsg, onlineWhere;
         Panel repsnPanel, commPanel;
         readonly List<Preset> presets = new List<Preset>();
@@ -1002,6 +1119,10 @@ namespace JStarsLauncher
             repsnNameBox.TextChanged += delegate { OnlineChanged(); };
             repsnPanel.Controls.Add(repsnNameBox);
             repsnPanel.Controls.Add(new Label { Text = "3 to 16 of A-Z a-z 0-9 _ -, starting with a letter", Location = P(300, 60), AutoSize = true, ForeColor = SystemColors.GrayText });
+            lanBtn = new Button { Text = "Find on LAN", Location = P(130, 92), Size = Z(110, 28) };
+            lanBtn.Click += delegate { FindOnLan(); };
+            repsnPanel.Controls.Add(lanBtn);
+            repsnPanel.Controls.Add(new Label { Text = "looks for a re-psn server started with -discover on this network", Location = P(250, 98), AutoSize = true, ForeColor = SystemColors.GrayText });
             p.Controls.Add(repsnPanel);
             y += 140;
 
@@ -1049,6 +1170,70 @@ namespace JStarsLauncher
             onlineWhere = new Label { Location = P(16, y + 44), Size = Z(700, 20), ForeColor = SystemColors.GrayText };
             p.Controls.Add(onlineWhere);
             return p;
+        }
+
+        // Find on LAN: the search runs on a worker thread for about 1.2 s (LanDiscover), the result comes back on the UI thread.
+        const int LanTimeoutMs = 1200;
+
+        void FindOnLan()
+        {
+            lanBtn.Enabled = false;
+            PresetMsg("Looking for a server on this network...");
+            var t = new Thread(delegate () {
+                List<LanServer> r = null; bool fail = false;
+                try { r = LanDiscover.Find(LanDiscover.DefaultPort, LanTimeoutMs, null); } catch { fail = true; }
+                try { BeginInvoke((MethodInvoker)delegate { LanDone(r, fail); }); } catch { }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        static string LanLine(LanServer s)
+        {
+            return (s.Name.Length > 0 ? s.Name : "(no name)") + "  " + s.Ip + ":" + s.TcpPort + "  players " + s.Players
+                + "  relay " + (s.Relay ? "yes" : "no") + "  version " + (s.Version.Length > 0 ? s.Version : "?");
+        }
+
+        void LanDone(List<LanServer> r, bool fail)
+        {
+            lanBtn.Enabled = true;
+            if (fail) { PresetMsg("The search could not be run (network error)."); return; }
+            var ok = new List<LanServer>();
+            if (r != null) foreach (var s in r) if (OnlineIni.ValidAddress(s.Ip + ":" + s.TcpPort)) ok.Add(s);
+            if (ok.Count == 0)
+            {
+                PresetMsg("No server found on this network. The host must start re-psn with -discover, and both PCs must be on the same network.");
+                return;
+            }
+            LanServer pick = ok[0];
+            if (ok.Count > 1)
+            {
+                pick = PickLanServer(ok);
+                if (pick == null) { PresetMsg("Found " + ok.Count + " servers; none chosen."); return; }
+            }
+            repsnServerBox.Text = pick.Ip + ":" + pick.TcpPort;
+            PresetMsg("Server set: " + LanLine(pick) + ". Not saved yet.");
+        }
+
+        LanServer PickLanServer(List<LanServer> list)
+        {
+            using (var f = new Form())
+            {
+                f.Text = "Servers on this network";
+                f.FormBorderStyle = FormBorderStyle.FixedDialog; f.StartPosition = FormStartPosition.CenterParent;
+                f.MinimizeBox = false; f.MaximizeBox = false; f.ShowInTaskbar = false;
+                f.ClientSize = Z(560, 220);
+                var lb = new ListBox { Location = P(10, 10), Size = Z(540, 160) };
+                foreach (var s in list) lb.Items.Add(LanLine(s));
+                lb.SelectedIndex = 0;
+                var ok = new Button { Text = "Use this server", Location = P(330, 180), Size = Z(130, 28), DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = "Cancel", Location = P(470, 180), Size = Z(80, 28), DialogResult = DialogResult.Cancel };
+                lb.DoubleClick += delegate { if (lb.SelectedIndex >= 0) f.DialogResult = DialogResult.OK; };
+                f.Controls.Add(lb); f.Controls.Add(ok); f.Controls.Add(cancel);
+                f.AcceptButton = ok; f.CancelButton = cancel;
+                if (f.ShowDialog(this) == DialogResult.OK && lb.SelectedIndex >= 0) return list[lb.SelectedIndex];
+                return null;
+            }
         }
 
         int OnlineMethod() { return rbOnRepsn.Checked ? 1 : rbOnComm.Checked ? 2 : 0; }
