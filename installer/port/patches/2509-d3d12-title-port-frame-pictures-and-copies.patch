@@ -1,0 +1,196 @@
+Patch 2509: title-port hooks on the finished frame, from the v0.15 port, drawn just before present (before the
+on-screen-keyboard panel):
+  g_rsx_copy_rects  rectangles of the frame to copy elsewhere in it, {src x, src y, dst x, dst y, w, h} in guest
+                    pixels, up to 8 (J-Stars: the 0-star training dummy on character select);
+  g_rsx_stamp       a small opaque RGBA picture, placed and sized in 1280x720 coordinates, shrunk bilinearly to
+                    the back buffer (J-Stars: Training's time-limit lock);
+  g_rsx_stamp2      a second one drawn after it (J-Stars: the FPS counter).
+Also defines g_rsx_ui_scale, g_rsx_aa_mode and g_rsx_cutout for the patches that use them (HUD size, edge smoothing,
+see-through scenery). All NULL by default.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 9004b3ae..3e2e5b4e 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6234,6 +6234,77 @@ static void oskp_render(u8* dst_rgba, u32 pitch, u32 W, u32 H)
+ }
+ 
+ 
++/* Set by a title port: rectangles of the finished frame to copy elsewhere in
++ * it just before present, as {src x, src y, dst x, dst y, w, h} in guest pixels
++ * (up to 8). J-Stars' Training mode shows a 0-star training dummy on character
++ * select by copying an empty star over the one lit star. */
++int (*g_rsx_copy_rects)(short (*rects)[6], int max) = NULL;
++static ID3D12Resource* s_cr_tmp = NULL;
++static u32 s_cr_w = 0, s_cr_h = 0;
++
++static void copyrects_draw(u32 fi)
++{
++    if (!g_rsx_copy_rects) return;
++    short r[8][6];
++    const int n = g_rsx_copy_rects(r, 8);
++    if (n <= 0) return;
++    const u32 W = s_d3d.bb_w, H = s_d3d.bb_h;
++    const float sx = (float)W / (float)s_d3d.width, sy = (float)H / (float)s_d3d.height;
++    if (!s_cr_tmp || s_cr_w < W || s_cr_h < H / 4) {
++        if (s_cr_tmp) { s_cr_tmp->lpVtbl->Release(s_cr_tmp); s_cr_tmp = NULL; }
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC td = {0};
++        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        td.Width = W; td.Height = H / 4; td.DepthOrArraySize = 1; td.MipLevels = 1;
++        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
++                D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&s_cr_tmp)))
++            return;
++        s_cr_w = W; s_cr_h = H / 4;
++    }
++    D3D12_RESOURCE_BARRIER b[2]; memset(b, 0, sizeof b);
++    b[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b[0].Transition.pResource = s_d3d.render_targets[fi];
++    b[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, b);
++    D3D12_TEXTURE_COPY_LOCATION bb = {0}, tmp = {0};
++    bb.pResource = s_d3d.render_targets[fi]; bb.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    tmp.pResource = s_cr_tmp; tmp.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    u32 tx[8], used = 0; int m = 0;
++    for (int i = 0; i < n; i++) {   /* source pieces side by side in the scratch texture */
++        D3D12_BOX box;
++        box.left = (UINT)(r[i][0] * sx); box.top = (UINT)(r[i][1] * sy);
++        box.right = box.left + (UINT)(r[i][4] * sx + 0.5f); box.bottom = box.top + (UINT)(r[i][5] * sy + 0.5f);
++        box.front = 0; box.back = 1;
++        if (box.right > W || box.bottom > H || used + (box.right - box.left) > s_cr_w ||
++            box.bottom - box.top > s_cr_h) break;
++        tx[i] = used; used += box.right - box.left; m = i + 1;
++        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &tmp, tx[i], 0, 0, &bb, &box);
++    }
++    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++    b[1] = b[0];
++    b[1].Transition.pResource = s_cr_tmp;
++    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 2, b);
++    for (int i = 0; i < m; i++) {
++        D3D12_BOX box;
++        box.left = tx[i]; box.top = 0;
++        box.right = tx[i] + (UINT)(r[i][4] * sx + 0.5f); box.bottom = (UINT)(r[i][5] * sy + 0.5f);
++        box.front = 0; box.back = 1;
++        const UINT dx = (UINT)(r[i][2] * sx), dy = (UINT)(r[i][3] * sy);
++        if (dx + (box.right - box.left) > W || dy + box.bottom > H) continue;
++        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &bb, dx, dy, 0, &tmp, &box);
++    }
++    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 2, b);
++}
+ /* Record the panel copy into back buffer `fi` (in RENDER_TARGET state; left in
+  * RENDER_TARGET). No-op unless the panel is up. */
+ static void oskp_draw(u32 fi)
+@@ -6296,6 +6367,92 @@ static void oskp_draw(u32 fi)
+ }
+ 
+ 
++/* A small opaque picture a title port can put on the frame. The callback gives RGBA pixels (w x h), and
++ * where and how large to show them in 1280x720 coordinates, or NULL when there is nothing to show. */
++const u32* (*g_rsx_stamp)(short* x, short* y, short* w, short* h, short* show_w, short* show_h) = NULL;
++/* A second one, drawn after the first (J-Stars: the FPS counter, which can be up while the first shows). */
++const u32* (*g_rsx_stamp2)(short* x, short* y, short* w, short* h, short* show_w, short* show_h) = NULL;
++static ID3D12Resource* s_stamp_upload[2][FRAME_COUNT];
++#define STAMP_UPLOAD_SIZE (6u * 1024u * 1024u)
++
++static void stamp_draw_one(u32 fi, int k)
++{
++    const u32* (*fn)(short*, short*, short*, short*, short*, short*) = k ? g_rsx_stamp2 : g_rsx_stamp;
++    if (!fn) return;
++    short x = 0, y = 0, w = 0, h = 0, show_w = 0, show_h = 0;
++    const u32* px = fn(&x, &y, &w, &h, &show_w, &show_h);
++    if (!px || w <= 0 || h <= 0 || show_w <= 0 || show_h <= 0) return;
++    const u32 sw = s_d3d.bb_w, sh = s_d3d.bb_h;
++    const u32 W = (u32)show_w * sh / 720, H = (u32)show_h * sh / 720, pitch = (W * 4 + 255) & ~255u;
++    if (W == 0 || H == 0 || pitch * H > STAMP_UPLOAD_SIZE) return;
++    const u32 dx = (u32)x * sw / 1280, dy = (u32)y * sh / 720;
++    if (dx >= sw || dy >= sh) return;
++    if (!s_stamp_upload[k][fi]) {
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
++        D3D12_RESOURCE_DESC rd = {0};
++        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        rd.Width = STAMP_UPLOAD_SIZE;
++        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
++        rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
++                D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&s_stamp_upload[k][fi])))
++            return;
++    }
++    void* mapped = NULL; D3D12_RANGE none = {0, 0};
++    if (FAILED(s_stamp_upload[k][fi]->lpVtbl->Map(s_stamp_upload[k][fi], 0, &none, &mapped)) || !mapped) return;
++    for (u32 j = 0; j < H; j++) {   /* bilinear, so a large picture shrinks cleanly at any window size */
++        u32* row = (u32*)((u8*)mapped + j * pitch);
++        const u64 fy0 = ((u64)j * 2 + 1) * (u32)h * 128 / H;
++        const u32 fy = fy0 > 128 ? (u32)(fy0 - 128) : 0;
++        int y0 = (int)(fy >> 8); const u32 ty = fy & 255;
++        int y1 = y0 + 1; if (y1 >= h) y1 = h - 1; if (y0 >= h) y0 = h - 1;
++        for (u32 i = 0; i < W; i++) {
++            const u64 fx0 = ((u64)i * 2 + 1) * (u32)w * 128 / W;
++            const u32 fx = fx0 > 128 ? (u32)(fx0 - 128) : 0;
++            int x0 = (int)(fx >> 8); const u32 tx = fx & 255;
++            int x1 = x0 + 1; if (x1 >= w) x1 = w - 1; if (x0 >= w) x0 = w - 1;
++            const u32 a = px[y0 * w + x0], b2 = px[y0 * w + x1], c = px[y1 * w + x0], d = px[y1 * w + x1];
++            u32 out = 0xFF000000u;
++            for (int sft = 0; sft < 24; sft += 8) {
++                const u32 top = ((a >> sft) & 255) * (256 - tx) + ((b2 >> sft) & 255) * tx;
++                const u32 bot = ((c >> sft) & 255) * (256 - tx) + ((d >> sft) & 255) * tx;
++                out |= (((top * (256 - ty) + bot * ty) >> 16) & 255) << sft;
++            }
++            row[i] = out;
++        }
++    }
++    s_stamp_upload[k][fi]->lpVtbl->Unmap(s_stamp_upload[k][fi], 0, NULL);
++    D3D12_RESOURCE_BARRIER b = {0};
++    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = s_d3d.render_targets[fi];
++    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++    D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
++    dst.pResource = s_d3d.render_targets[fi];
++    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    src.pResource = s_stamp_upload[k][fi];
++    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    src.PlacedFootprint.Footprint.Width = W;
++    src.PlacedFootprint.Footprint.Height = H;
++    src.PlacedFootprint.Footprint.Depth = 1;
++    src.PlacedFootprint.Footprint.RowPitch = pitch;
++    D3D12_BOX part = {0, 0, 0, dx + W > sw ? sw - dx : W, dy + H > sh ? sh - dy : H, 1};   /* can start part off the screen */
++    s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, dx, dy, 0, &src, &part);
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++}
++
++static void stamp_draw(u32 fi) { stamp_draw_one(fi, 0); stamp_draw_one(fi, 1); }
++
++/* Set by a title port (patch 2509; used by the HUD size, edge smoothing and see-through scenery patches): */
++float (*g_rsx_ui_scale)(u32 rt_off, const float box[4], float* ax, float* ay) = 0;
++int (*g_rsx_aa_mode)(u32 rt_off) = 0;
++int (*g_rsx_cutout)(float* out) = 0;
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -7742,6 +7899,8 @@ skip_dump_consider: ;
+         /* End-of-frame fallback snapshot: used when the frame never contained a
+          * reduced-viewport pass to capture mid-frame. */
+         screen_copy_capture(fi);
++        copyrects_draw(fi);      /* title port's frame patches (J-Stars: 0-star dummy) */
++        stamp_draw(fi);          /* title port's small pictures (J-Stars: Training's time limit lock, FPS counter) */
+         oskp_draw(fi);           /* on-screen-keyboard text panel, if one is up */
+         /* Transition render target to PRESENT state */
+         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;

@@ -1,0 +1,793 @@
+Patch 2508: the on-screen keyboard and the port's Yes/No box, from the v0.15 port.
+
+cellOskDialog: LoadAsync no longer answers at once and sends no sysutil events (titles waited for FINISHED forever;
+J-Stars' J-Customize deck rename locked up). OSK_DIALOG=2 (default) opens a text panel inside the game window,
+OSK_DIALOG=1 a separate Windows text box, OSK_DIALOG=0 the old instant answer. LOADED, FINISHED and UNLOADED go out on
+the title's cellSysutilCheckCallback polls (cellOskDialog_tick). LoadAsync starts the dialog without cellOskDialogInit
+(J-Stars imports no Init). The same panel serves a title port as a Yes/No box (cellOskDialog_confirm_open / _poll)
+or a choice between two named buttons (cellOskDialog_choice_open).
+
+D3D12 backend: the panel is drawn on the CPU (gradients by hand, text by GDI) like the game's own message box,
+scaled to the back buffer and copied over it before present; while it is up the window's keys type into it (Enter
+and Esc answer it, not on auto-repeat). rsx_d3d12_request_close() closes the window as its close button would.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/misc/cellOskDialog.c b/libs/misc/cellOskDialog.c
+index 17e7c674..109c92f8 100644
+--- a/libs/misc/cellOskDialog.c
++++ b/libs/misc/cellOskDialog.c
+@@ -10,6 +10,17 @@
+ #include "cellOskDialog.h"
+ #include <stdio.h>
+ #include <string.h>
++#include <stdlib.h>
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <process.h>
++#else
++typedef long LONG;
++#define InterlockedExchange(p, v) __atomic_exchange_n((p), (v), __ATOMIC_SEQ_CST)
++static inline LONG InterlockedCompareExchange(volatile LONG* p, LONG v, LONG cmp)
++{ __atomic_compare_exchange_n(p, &cmp, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return cmp; }
++#endif
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+ #include "../guest_struct.h"   /* GUEST_EA, vm_read/vm_write: guest EA -> host */
+ 
+@@ -25,6 +36,297 @@ static char s_default_response[CELL_OSK_MAX_TEXT_LENGTH + 1] = "";
+ static CellOskDialogChar s_result_text[CELL_OSK_MAX_TEXT_LENGTH + 1];
+ static u32               s_result_length = 0;
+ 
++/* ---------------------------------------------------------------------------
++ * Host text box (Windows; OSK_DIALOG=0 keeps the old instant answer)
++ *
++ * The PS3 shows its on-screen keyboard and tells the title through sysutil
++ * events: LOADED when it is up, FINISHED when the user is done, UNLOADED after
++ * cellOskDialogUnloadAsync. Answering LoadAsync instantly and sending no event
++ * left titles waiting for FINISHED forever (J-Stars' J-Customize deck rename,
++ * Square: the game locked up). Here a small Windows window with a text field
++ * stands in for the keyboard: it opens with the current text, Enter / OK
++ * accepts, Esc / Cancel cancels, and the events go out on the title's next
++ * cellSysutilCheckCallback poll (cellOskDialog_tick).
++ * -----------------------------------------------------------------------*/
++#define CELL_SYSUTIL_OSKDIALOG_LOADED    0x0502
++#define CELL_SYSUTIL_OSKDIALOG_FINISHED  0x0503
++#define CELL_SYSUTIL_OSKDIALOG_UNLOADED  0x0504
++extern void cellSysutilQueueEvent(int slot, u32 status, u32 param);
++
++static void osk_queue_event(u32 status)
++{
++    for (int slot = 0; slot < 4; slot++)        /* every registered slot */
++        cellSysutilQueueEvent(slot, status, 0);
++}
++
++/* OSK_DIALOG: 0 = old instant answer, 1 = separate Windows text box,
++ * 2 (default) = a panel drawn inside the game window (the D3D12 backend draws
++ * it, its window procedure feeds the keys here). */
++static int osk_mode(void)
++{
++#ifdef _WIN32
++    static int m = -1;
++    if (m < 0) { const char* e = getenv("OSK_DIALOG"); m = e ? atoi(e) : 2; if (m < 0 || m > 2) m = 2; }
++    return m;
++#else
++    return 0;
++#endif
++}
++static int osk_dialog_on(void) { return osk_mode() != 0; }
++
++static volatile LONG s_osk_state = 0;   /* 0 idle, 1 box open, 2 done (FINISHED pending), 3 FINISHED sent */
++static s32 s_osk_result = CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK;
++static u32 s_osk_limit = CELL_OSK_MAX_TEXT_LENGTH;
++static wchar_t s_osk_title[CELL_OSK_MAX_TEXT_LENGTH + 1];
++
++/* ---- in-game panel (OSK_DIALOG=2) ---------------------------------------
++ * The text being typed lives here; the backend polls overlay_gen() and
++ * redraws its panel when it changes. Keys come from the game window's
++ * procedure on the window thread, the game reads the result on its own
++ * thread, so the text is guarded by a lock. */
++#ifdef _WIN32
++static SRWLOCK s_ov_lock = SRWLOCK_INIT;
++static volatile LONG s_ov_active = 0, s_ov_gen = 0;
++static wchar_t s_ov_text[CELL_OSK_MAX_TEXT_LENGTH + 1];
++static u32 s_ov_len = 0;
++static volatile LONG s_ov_sel = 0;     /* highlighted button: 0 OK, 1 Cancel */
++/* The same panel as a Yes/No confirmation for the port (no text field):
++ * cellOskDialog_confirm_open(), then cellOskDialog_confirm_poll() for the
++ * answer. s_ov_mode 1 = confirm; its result: -1 pending, 0 No, 1 Yes.
++ * s_ov_mode 2 = a choice between two named buttons (cellOskDialog_choice_open):
++ * 1 the left one, 0 the right one, 2 backed out (Esc / Circle). */
++static volatile LONG s_ov_mode = 0, s_confirm_result = -1;
++static wchar_t s_choice_label[2][40];
++
++int cellOskDialog_overlay_active(void) { return s_ov_active != 0; }
++unsigned cellOskDialog_overlay_gen(void) { return (unsigned)s_ov_gen; }
++int cellOskDialog_overlay_sel(void) { return (int)s_ov_sel; }
++int cellOskDialog_overlay_mode(void) { return (int)s_ov_mode; }
++const wchar_t* cellOskDialog_choice_label(int b) { return s_choice_label[b ? 1 : 0]; }
++
++void cellOskDialog_overlay_get(wchar_t* prompt, int pmax, wchar_t* text, int tmax)
++{
++    AcquireSRWLockShared(&s_ov_lock);
++    wcsncpy(prompt, s_osk_title, (size_t)pmax - 1); prompt[pmax - 1] = 0;
++    wcsncpy(text, s_ov_text, (size_t)tmax - 1);     text[tmax - 1] = 0;
++    ReleaseSRWLockShared(&s_ov_lock);
++}
++
++static void osk_overlay_finish(s32 result)
++{
++    if (s_ov_mode != 0) {   /* confirmation or choice: report the answer, no OSK events */
++        InterlockedExchange(&s_confirm_result, result == CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK ? 1 : 0);
++        InterlockedExchange(&s_ov_active, 0);
++        InterlockedExchange(&s_ov_mode, 0);
++        InterlockedIncrement(&s_ov_gen);
++        return;
++    }
++    AcquireSRWLockExclusive(&s_ov_lock);
++    if (result == CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK) {
++        for (u32 i = 0; i <= s_ov_len; i++) s_result_text[i] = (CellOskDialogChar)s_ov_text[i];
++        s_result_length = s_ov_len;
++        if (!s_ov_len) result = CELL_OSK_DIALOG_INPUT_FIELD_RESULT_NO_INPUT_TEXT;
++    }
++    s_osk_result = result;
++    ReleaseSRWLockExclusive(&s_ov_lock);
++    InterlockedExchange(&s_ov_active, 0);
++    InterlockedIncrement(&s_ov_gen);
++    InterlockedExchange(&s_osk_state, 2);    /* FINISHED goes out on the next poll */
++}
++
++/* A typed character (UTF-16). */
++void cellOskDialog_overlay_char(unsigned ch)
++{
++    if (!s_ov_active || s_ov_mode != 0 || ch < 0x20 || ch == 0x7F) return;
++    AcquireSRWLockExclusive(&s_ov_lock);
++    if (s_ov_len < s_osk_limit && s_ov_len < CELL_OSK_MAX_TEXT_LENGTH) {
++        s_ov_text[s_ov_len++] = (wchar_t)ch; s_ov_text[s_ov_len] = 0; }
++    ReleaseSRWLockExclusive(&s_ov_lock);
++    InterlockedIncrement(&s_ov_gen);
++}
++
++/* A key press: Enter presses the highlighted button (OK or Cancel), Left/Right/
++ * Tab move the highlight, Esc cancels, Backspace deletes. Returns 1 when the key
++ * belongs to the panel. */
++static ULONGLONG s_confirm_opened;   /* GetTickCount64 when the Yes/No box opened */
++int cellOskDialog_overlay_key(unsigned vk)
++{
++    if (!s_ov_active) return 0;
++    /* The Enter that opened the Yes/No box (a pad poll saw it as START) can
++     * reach the window afterwards; it must not answer the box at once. */
++    if (vk == VK_RETURN && s_ov_mode != 0 && GetTickCount64() - s_confirm_opened < 400) return 1;
++    if (vk == VK_ESCAPE && s_ov_mode == 2) {   /* a choice: backing out is its own answer */
++        InterlockedExchange(&s_confirm_result, 2);
++        InterlockedExchange(&s_ov_active, 0);
++        InterlockedExchange(&s_ov_mode, 0);
++        InterlockedIncrement(&s_ov_gen);
++        return 1;
++    }
++    if (vk == VK_RETURN) {
++        osk_overlay_finish(s_ov_sel ? CELL_OSK_DIALOG_INPUT_FIELD_RESULT_CANCELED
++                                    : CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK);
++        return 1;
++    }
++    if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_TAB) {
++        InterlockedExchange(&s_ov_sel, vk == VK_LEFT ? 0 : vk == VK_RIGHT ? 1 : !s_ov_sel);
++        InterlockedIncrement(&s_ov_gen);
++        return 1;
++    }
++    if (vk == VK_ESCAPE) { osk_overlay_finish(CELL_OSK_DIALOG_INPUT_FIELD_RESULT_CANCELED); return 1; }
++    if (vk == VK_BACK && s_ov_mode == 0) {
++        AcquireSRWLockExclusive(&s_ov_lock);
++        if (s_ov_len) s_ov_text[--s_ov_len] = 0;
++        ReleaseSRWLockExclusive(&s_ov_lock);
++        InterlockedIncrement(&s_ov_gen);
++    }
++    return 1;
++}
++
++static void osk_overlay_open(void)
++{
++    AcquireSRWLockExclusive(&s_ov_lock);
++    s_ov_len = 0;
++    for (; s_ov_len < s_result_length && s_ov_len < s_osk_limit; s_ov_len++)
++        s_ov_text[s_ov_len] = (wchar_t)s_result_text[s_ov_len];
++    s_ov_text[s_ov_len] = 0;
++    ReleaseSRWLockExclusive(&s_ov_lock);
++    InterlockedExchange(&s_ov_sel, 0);
++    InterlockedExchange(&s_ov_active, 1);
++    InterlockedIncrement(&s_ov_gen);
++}
++/* Open the panel as a Yes/No question (No highlighted). 0 if a panel is up. */
++int cellOskDialog_confirm_open(const wchar_t* prompt)
++{
++    if (s_ov_active) return 0;
++    s_confirm_opened = GetTickCount64();
++    AcquireSRWLockExclusive(&s_ov_lock);
++    wcsncpy(s_osk_title, prompt, CELL_OSK_MAX_TEXT_LENGTH);
++    s_osk_title[CELL_OSK_MAX_TEXT_LENGTH] = 0;
++    s_ov_len = 0; s_ov_text[0] = 0;
++    ReleaseSRWLockExclusive(&s_ov_lock);
++    InterlockedExchange(&s_confirm_result, -1);
++    InterlockedExchange(&s_ov_sel, 1);
++    InterlockedExchange(&s_ov_mode, 1);
++    InterlockedExchange(&s_ov_active, 1);
++    InterlockedIncrement(&s_ov_gen);
++    return 1;
++}
++/* Open the panel as a choice between two buttons (the left one highlighted).
++ * The answer comes from cellOskDialog_confirm_poll: 1 left, 0 right, 2 back. */
++int cellOskDialog_choice_open(const wchar_t* prompt, const wchar_t* left, const wchar_t* right)
++{
++    if (s_ov_active) return 0;
++    s_confirm_opened = GetTickCount64();
++    AcquireSRWLockExclusive(&s_ov_lock);
++    wcsncpy(s_osk_title, prompt, CELL_OSK_MAX_TEXT_LENGTH);
++    s_osk_title[CELL_OSK_MAX_TEXT_LENGTH] = 0;
++    wcsncpy(s_choice_label[0], left, 39);  s_choice_label[0][39] = 0;
++    wcsncpy(s_choice_label[1], right, 39); s_choice_label[1][39] = 0;
++    s_ov_len = 0; s_ov_text[0] = 0;
++    ReleaseSRWLockExclusive(&s_ov_lock);
++    InterlockedExchange(&s_confirm_result, -1);
++    InterlockedExchange(&s_ov_sel, 0);
++    InterlockedExchange(&s_ov_mode, 2);
++    InterlockedExchange(&s_ov_active, 1);
++    InterlockedIncrement(&s_ov_gen);
++    return 1;
++}
++/* -1 while open (or never opened), else 1 Yes / 0 No (choice: 1 / 0 / 2), once. */
++int cellOskDialog_confirm_poll(void)
++{
++    return (int)InterlockedExchange(&s_confirm_result, -1);
++}
++#else
++int cellOskDialog_overlay_active(void) { return 0; }
++int cellOskDialog_overlay_sel(void) { return 0; }
++int cellOskDialog_overlay_mode(void) { return 0; }
++int cellOskDialog_confirm_open(const wchar_t* prompt) { (void)prompt; return 0; }
++int cellOskDialog_choice_open(const wchar_t* prompt, const wchar_t* left, const wchar_t* right)
++{ (void)prompt; (void)left; (void)right; return 0; }
++int cellOskDialog_confirm_poll(void) { return -1; }
++#endif
++
++#ifdef _WIN32
++static HWND s_osk_edit;
++static LRESULT CALLBACK osk_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
++{
++    switch (m) {
++    case WM_COMMAND:
++        if (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL) {
++            wchar_t buf[CELL_OSK_MAX_TEXT_LENGTH + 1];
++            int n = GetWindowTextW(s_osk_edit, buf, (int)s_osk_limit + 1);
++            if (LOWORD(w) == IDOK) {
++                for (int i = 0; i < n; i++) s_result_text[i] = (CellOskDialogChar)buf[i];
++                s_result_text[n] = 0;
++                s_result_length = (u32)n;
++                s_osk_result = n ? CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK
++                                 : CELL_OSK_DIALOG_INPUT_FIELD_RESULT_NO_INPUT_TEXT;
++            } else {
++                s_osk_result = CELL_OSK_DIALOG_INPUT_FIELD_RESULT_CANCELED;
++            }
++            DestroyWindow(h);
++            return 0;
++        }
++        break;
++    case WM_CLOSE:
++        SendMessageW(h, WM_COMMAND, IDCANCEL, 0);
++        return 0;
++    case WM_DESTROY:
++        PostQuitMessage(0);
++        return 0;
++    }
++    return DefWindowProcW(h, m, w, l);
++}
++
++static unsigned __stdcall osk_thread(void* arg)
++{
++    (void)arg;
++    HINSTANCE inst = GetModuleHandleW(NULL);
++    WNDCLASSW wc; memset(&wc, 0, sizeof wc);
++    wc.lpfnWndProc = osk_wndproc; wc.hInstance = inst; wc.lpszClassName = L"ps3recomp_osk";
++    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
++    RegisterClassW(&wc);
++    const int W = 460, H = 150;
++    HWND h = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME, L"ps3recomp_osk",
++                             s_osk_title[0] ? s_osk_title : L"Enter text",
++                             WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
++                             (GetSystemMetrics(SM_CXSCREEN) - W) / 2, (GetSystemMetrics(SM_CYSCREEN) - H) / 2,
++                             W, H, NULL, NULL, inst, NULL);
++    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
++    wchar_t init[CELL_OSK_MAX_TEXT_LENGTH + 1];
++    u32 i = 0; for (; i < s_result_length && i < CELL_OSK_MAX_TEXT_LENGTH; i++) init[i] = s_result_text[i];
++    init[i] = 0;
++    s_osk_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", init, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
++                                 12, 14, W - 40, 26, h, (HMENU)100, inst, NULL);
++    HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
++                              W - 200, 56, 80, 28, h, (HMENU)IDOK, inst, NULL);
++    HWND cancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
++                                  W - 110, 56, 80, 28, h, (HMENU)IDCANCEL, inst, NULL);
++    SendMessageW(s_osk_edit, WM_SETFONT, (WPARAM)font, TRUE);
++    SendMessageW(ok, WM_SETFONT, (WPARAM)font, TRUE);
++    SendMessageW(cancel, WM_SETFONT, (WPARAM)font, TRUE);
++    SendMessageW(s_osk_edit, EM_LIMITTEXT, (WPARAM)s_osk_limit, 0);
++    SendMessageW(s_osk_edit, EM_SETSEL, 0, -1);
++    SetForegroundWindow(h);
++    SetFocus(s_osk_edit);
++    MSG msg;
++    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
++        if (!IsDialogMessageW(h, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++    }
++    InterlockedExchange(&s_osk_state, 2);    /* FINISHED goes out on the next poll */
++    return 0;
++}
++#endif
++
++/* Called from cellSysutilCheckCallback: send FINISHED once the box closed. */
++void cellOskDialog_tick(void)
++{
++    if (InterlockedCompareExchange(&s_osk_state, 3, 2) == 2) {
++        printf("[cellOskDialog] input finished (result %d, %u chars)\n", s_osk_result, s_result_length);
++        osk_queue_event(CELL_SYSUTIL_OSKDIALOG_FINISHED);
++    }
++}
++
+ /* Convert narrow string to UTF-16LE (simple ASCII subset) */
+ static void osk_ascii_to_utf16(const char* src, CellOskDialogChar* dst,
+                                 u32 maxChars)
+@@ -125,6 +427,12 @@ s32 cellOskDialogLoadAsync(u32 container,
+ {
+     (void)container; (void)dialogParam;
+ 
++    /* The libsysutil_oskdialog the titles link has no Init call (the NID
++     * registered as cellOskDialogInit is not one they import): J-Stars goes
++     * straight to LoadAsync, which then failed with NOT_INITIALIZED and its
++     * deck-rename screen waited forever. Treat LoadAsync as the start. */
++    if (!s_osk_initialized && osk_dialog_on())
++        s_osk_initialized = 1;
+     if (!s_osk_initialized)
+         return CELL_OSK_ERROR_NOT_INITIALIZED;
+ 
+@@ -174,6 +482,29 @@ s32 cellOskDialogLoadAsync(u32 container,
+         s_result_length = 0;
+     }
+ 
++    if (osk_dialog_on()) {
++#ifdef _WIN32
++        u32 lim = info_ea ? vm_read32(info_ea + OSKIF_O_LIMIT_LENGTH) : 0;
++        s_osk_limit = (lim && lim < CELL_OSK_MAX_TEXT_LENGTH) ? lim : CELL_OSK_MAX_TEXT_LENGTH;
++        s_osk_title[0] = 0;
++        if (message_ea) {
++            static CellOskDialogChar t[CELL_OSK_MAX_TEXT_LENGTH + 1];
++            u32 n = osk_guest_utf16(message_ea, t, CELL_OSK_MAX_TEXT_LENGTH);
++            for (u32 i = 0; i <= n; i++) s_osk_title[i] = (wchar_t)t[i];
++        }
++        s_osk_result = CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK;
++        InterlockedExchange(&s_osk_state, 1);
++        osk_queue_event(CELL_SYSUTIL_OSKDIALOG_LOADED);
++        if (osk_mode() == 2) {
++            osk_overlay_open();                      /* drawn by the backend */
++        } else {
++            HANDLE th = (HANDLE)_beginthreadex(NULL, 0, osk_thread, NULL, 0, NULL);
++            if (th) CloseHandle(th);
++            else InterlockedExchange(&s_osk_state, 2);   /* no window: answer with the current text */
++        }
++#endif
++    }
++
+     return CELL_OK;
+ }
+ 
+@@ -190,7 +521,7 @@ s32 cellOskDialogUnloadAsync(CellOskDialogCallbackReturnParam* result)
+     if (result) {
+         u32 res_ea = GUEST_EA(result);
+         vm_write32(res_ea + OSKRET_O_RESULT,
+-                   CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK);
++                   osk_dialog_on() ? (u32)s_osk_result : CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK);
+         vm_write32(res_ea + OSKRET_O_NUMCHARS, s_result_length);
+         u32 str_ea = vm_read32(res_ea + OSKRET_O_PRESULTSTRING);
+         if (str_ea && s_result_length > 0) {
+@@ -201,6 +532,10 @@ s32 cellOskDialogUnloadAsync(CellOskDialogCallbackReturnParam* result)
+     }
+ 
+     s_osk_loaded = 0;
++    if (osk_dialog_on()) {
++        InterlockedExchange(&s_osk_state, 0);
++        osk_queue_event(CELL_SYSUTIL_OSKDIALOG_UNLOADED);
++    }
+     return CELL_OK;
+ }
+ 
+diff --git a/libs/system/cellSysutil.c b/libs/system/cellSysutil.c
+index c4eb87db..b43be83f 100644
+--- a/libs/system/cellSysutil.c
++++ b/libs/system/cellSysutil.c
+@@ -219,6 +219,8 @@ s32 cellSysutilCheckCallback(void)
+      * its dismissal. Done before the drain so the callback it queues is
+      * delivered on this same poll. */
+     { extern void cellMsgDialog_tick(void); cellMsgDialog_tick(); }
++    /* An on-screen-keyboard text box the user just closed: queue its FINISHED. */
++    { extern void cellOskDialog_tick(void); cellOskDialog_tick(); }
+     /* Turn psnr replies and pushes into queued NP callbacks first, so this
+      * same poll delivers them. A no-op when no psnr server is configured. */
+     { extern void np_psnr_pump(void); np_psnr_pump(); }
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c84e6a35..9004b3ae 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -792,8 +792,30 @@ static void win_set_fullscreen(HWND h, int on)
+     s_win_full = on;
+ }
+ 
++/* In-game text panel for the on-screen keyboard (cellOskDialog, OSK_DIALOG=2). */
++extern int      cellOskDialog_overlay_active(void);
++extern unsigned cellOskDialog_overlay_gen(void);
++extern void     cellOskDialog_overlay_get(wchar_t* prompt, int pmax, wchar_t* text, int tmax);
++extern void     cellOskDialog_overlay_char(unsigned ch);
++extern int      cellOskDialog_overlay_key(unsigned vk);
++extern int      cellOskDialog_overlay_sel(void);
++extern int      cellOskDialog_overlay_mode(void);   /* 1 = Yes/No confirmation, 2 = choice */
++extern const wchar_t* cellOskDialog_choice_label(int b);
++
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
++    /* While the text panel is up, the keyboard types into it (and Esc cancels
++     * it instead of closing the game). */
++    if (cellOskDialog_overlay_active()) {
++        if (msg == WM_CHAR) {
++            char c = (char)wp; wchar_t w = 0;
++            if (MultiByteToWideChar(CP_ACP, 0, &c, 1, &w, 1) == 1) cellOskDialog_overlay_char(w);
++            return 0;
++        }
++        /* auto-repeat of Enter/Esc must not answer the panel a second time */
++        if (msg == WM_KEYDOWN && (lp & 0x40000000) && (wp == VK_RETURN || wp == VK_ESCAPE)) return 0;
++        if (msg == WM_KEYDOWN && cellOskDialog_overlay_key((unsigned)wp)) return 0;
++    }
+     switch (msg) {
+     case WM_MOUSEWHEEL: {   /* 2501: cellPad mouse menus (INPUT_MODE=kbm, patch 6500): wheel = up/down */
+         extern volatile long g_pad_wheel;
+@@ -5956,6 +5978,324 @@ static float rs_draw_sc(const D3D12DrawRecord* dr)
+     return rs_tiny(dr->rt_w, dr->rt_h) ? 1.0f : s_rs;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * On-screen-keyboard text panel (cellOskDialog, OSK_DIALOG=2)
++ *
++ * The PS3 draws its keyboard itself, so the game has no text-entry screen. This
++ * panel stands in for it inside the game window, drawn like the game's own
++ * message box (the shop's "Purchase this item?"): a dark frame, a metal
++ * gradient panel with halftone corners, and a button strip whose highlighted
++ * button is yellow. It shows the prompt, the text being typed with a caret, and
++ * OK / Cancel. Measured from a 1280x720 frame and scaled to the back buffer.
++ * The panel is rendered on the CPU (gradients by hand, text by GDI) when the
++ * text changes; each frame the bitmap is copied over the back buffer before
++ * present (an opaque box, so a plain copy, no blending).
++ * -----------------------------------------------------------------------*/
++#define OSKP_W720 778    /* box size at 1280x720 */
++#define OSKP_H720 307
++static ID3D12Resource* s_oskp_upload[FRAME_COUNT];
++static u32 s_oskp_pitch, s_oskp_w, s_oskp_h, s_oskp_alloc[FRAME_COUNT];
++static unsigned s_oskp_gen[FRAME_COUNT];
++
++/* Grey level along a list of (position, level) points, linear in between. */
++static float oskp_ramp(const float (*k)[2], int n, float v)
++{
++    if (v <= k[0][0]) return k[0][1];
++    for (int i = 1; i < n; i++)
++        if (v <= k[i][0]) return k[i-1][1] + (k[i][1] - k[i-1][1]) * (v - k[i-1][0]) / (k[i][0] - k[i-1][0]);
++    return k[n-1][1];
++}
++
++/* The swirl in the panel's lower right corner, drawn here (not game art) into a
++ * mask: red the upper shape, green the lower one, blue their outlines. Points in
++ * 720p box units. */
++static void oskp_swirl_mask(HDC dc, float sc)
++{
++#define SP(x, y) { (LONG)(((1650 + (x)) / 3.0f) * sc), (LONG)(((280 + (y)) / 3.0f + 2.0f) * sc) }
++    const POINT a[] = { SP(0,60),
++        SP(5,30), SP(45,20), SP(75,28),      SP(110,36), SP(122,70), SP(128,105),
++        SP(134,140), SP(150,168), SP(175,165), SP(210,160), SP(240,118), SP(295,118),
++        SP(345,118), SP(380,150), SP(392,195), SP(420,170), SP(460,145), SP(505,145),
++        SP(565,145), SP(605,195), SP(605,250), SP(605,320), SP(560,390), SP(475,392),
++        SP(420,392), SP(365,365), SP(330,320), SP(300,275), SP(265,238), SP(210,235),
++        SP(185,235), SP(160,240), SP(140,242), SP(100,232), SP(65,210), SP(65,160),
++        SP(65,130), SP(70,105), SP(50,90),   SP(30,80), SP(10,75), SP(0,60) };
++    const POINT b[] = { SP(80,295),
++        SP(115,255), SP(165,235), SP(210,235), SP(265,238), SP(300,275), SP(330,320),
++        SP(365,365), SP(420,392), SP(475,405), SP(420,430), SP(340,452), SP(280,447),
++        SP(225,440), SP(205,400), SP(190,360), SP(175,315), SP(140,285), SP(80,295) };
++    const POINT c[] = { SP(400,215), SP(385,270), SP(425,325), SP(480,335) };
++#undef SP
++    HBRUSH br = CreateSolidBrush(RGB(255, 0, 0)), bg = CreateSolidBrush(RGB(0, 255, 0));
++    HPEN pen = CreatePen(PS_SOLID, (int)(1.5f * sc + 0.5f), RGB(0, 0, 255));
++    HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pen);
++    BeginPath(dc); PolyBezier(dc, a, sizeof a / sizeof a[0]); CloseFigure(dc); EndPath(dc); FillPath(dc);
++    SelectObject(dc, bg);
++    BeginPath(dc); PolyBezier(dc, b, sizeof b / sizeof b[0]); CloseFigure(dc); EndPath(dc); FillPath(dc);
++    BeginPath(dc); PolyBezier(dc, a, sizeof a / sizeof a[0]); CloseFigure(dc); EndPath(dc); StrokePath(dc);
++    BeginPath(dc); PolyBezier(dc, b, sizeof b / sizeof b[0]); CloseFigure(dc); EndPath(dc); StrokePath(dc);
++    BeginPath(dc); PolyBezier(dc, c, 4); EndPath(dc); StrokePath(dc);
++    SelectObject(dc, ob); SelectObject(dc, op);
++    DeleteObject(br); DeleteObject(bg); DeleteObject(pen);
++}
++
++/* White text with the dark edge the game's own boxes have. */
++static void oskp_text(HDC dc, const wchar_t* t, RECT r, UINT fmt, COLORREF col, int edge)
++{
++    SetTextColor(dc, RGB(0x12, 0x12, 0x12));
++    if (edge > 0)
++        for (int dy = -edge; dy <= edge; dy++)
++            for (int dx = -edge; dx <= edge; dx++) {
++                if (!dx && !dy) continue;
++                RECT q = { r.left + dx, r.top + dy, r.right + dx, r.bottom + dy };
++                DrawTextW(dc, t, -1, &q, fmt);
++            }
++    SetTextColor(dc, col);
++    DrawTextW(dc, t, -1, &r, fmt);
++}
++
++static void oskp_render(u8* dst_rgba, u32 pitch, u32 W, u32 H)
++{
++    wchar_t prompt[600], text[600];
++    cellOskDialog_overlay_get(prompt, 600, text, 600);
++    const int sel = cellOskDialog_overlay_sel();
++    const int confirm = cellOskDialog_overlay_mode() != 0;   /* Yes/No or choice: no text field */
++    const int choice = cellOskDialog_overlay_mode() == 2;
++    const float sc = (float)H / OSKP_H720;          /* 720p units -> pixels */
++#define S(v) ((int)((v) * sc + 0.5f))
++    BITMAPINFO bi; memset(&bi, 0, sizeof bi);
++    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
++    bi.bmiHeader.biWidth = (LONG)W; bi.bmiHeader.biHeight = -(LONG)H;   /* top-down */
++    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
++    void* bits = NULL;
++    HDC dc = CreateCompatibleDC(NULL);
++    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
++    if (!bmp || !bits) { if (bmp) DeleteObject(bmp); DeleteDC(dc); return; }
++    HGDIOBJ old = SelectObject(dc, bmp);
++    u8* px = (u8*)bits;   /* BGRX */
++
++    /* Box background by row (720p units): grey at the top, near black through
++     * the middle, the button strip brightening towards a light bottom edge. */
++    static const float frame[][2] = { {0,40},{1,49},{9,55},{10,29},{11,55},{132,6},{252,34},{253,24},{255,33},
++                                       {306,55},{307,40} };
++    /* Inner panel (x 15..760, y 12..252): a metal gradient, light at the top
++     * and bottom edges, dark in the middle. */
++    static const float panel[][2] = { {12,101},{13,110},{14,102},{15,93},{16,85},{17,82},{128,19},{247,82},{249,96},{251,112},{252,75} };
++    const int px0 = S(15), px1 = S(760), py0 = S(12), py1 = S(252);
++    void* mbits = NULL;
++    HDC mdc = CreateCompatibleDC(NULL);
++    HBITMAP mbmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &mbits, NULL, 0);
++    HGDIOBJ mold = mbmp ? SelectObject(mdc, mbmp) : NULL;
++    if (mbmp && mbits) { memset(mbits, 0, (size_t)W * H * 4); oskp_swirl_mask(mdc, sc); GdiFlush(); }
++    const u8* mask = (const u8*)mbits;
++    for (u32 y = 0; y < H; y++) {
++        const float fy = y / sc;
++        const float fr = oskp_ramp(frame, sizeof frame / sizeof frame[0], fy);
++        const float pa = oskp_ramp(panel, sizeof panel / sizeof panel[0], fy);
++        for (u32 x = 0; x < W; x++) {
++            float g;
++            const int ix = (int)x, iy = (int)y;
++            if (ix >= px0 && ix < px1 && iy >= py0 && iy < py1) {
++                g = pa;
++                /* inner edge light on the left and right, fading over 5 units */
++                const float e = (ix - px0 < px1 - 1 - ix ? ix - px0 : px1 - 1 - ix) / sc;
++                if (e < 5.0f) g += (5.0f - e) * 9.0f * (1.0f - g / 120.0f);
++                /* halftone dots in the top left corner */
++                const float dx = (float)(ix - px0) / sc, dy = (float)(iy - py0) / sc;
++                if (dx < 215 && dy < 145) {
++                    const float k = (1.0f - dx / 215.0f) * (1.0f - dy / 145.0f);
++                    const float cx = fmodf(dx, 8.33f) - 4.17f, cy = fmodf(dy, 8.33f) - 4.17f;
++                    const float r = 1.25f + 0.5f * k;
++                    if (cx * cx + cy * cy < r * r) g += 90.0f * k + 3.0f;
++                }
++                /* the swirl: lit from above, shaded below, with a dark outline */
++                if (mask) {
++                    const u8* m = mask + ((size_t)y * W + x) * 4;   /* BGRX */
++                    const float v = (fy - 100.0f) / 150.0f;
++                    if (m[0]) g -= 7.0f;
++                    else if (m[2]) g += 8.0f - 6.0f * v;
++                    else if (m[1]) g += 3.0f - 13.0f * v;
++                }
++            } else {
++                g = fr;
++                const float lx = x / sc, rx = (W - 1 - x) / sc;   /* outer bevel, left and right */
++                const float ed = lx < rx ? lx : rx;
++                if (ed < 1.0f) g = 118; else if (ed < 2.0f) g = g + 40;
++                /* dark line around the panel */
++                if (ix >= px0 - S(1) && ix < px1 + S(1) && iy >= py0 - S(1) && iy < py1 + S(1)) g = 16;
++            }
++            if (g > 255) g = 255;
++            if (g < 0) g = 0;
++            u8* d = px + ((size_t)y * W + x) * 4;
++            d[0] = d[1] = d[2] = (u8)g; d[3] = 0;
++        }
++    }
++
++    /* Text field: a dark inset bar with a thin light outline. */
++    const int fx0 = S(110), fx1 = S(668), fy0 = S(106), fy1 = S(158);
++    if (!confirm)
++    for (int y = fy0; y < fy1; y++)
++        for (int x = fx0; x < fx1; x++) {
++            u8* d = px + ((size_t)y * W + x) * 4;
++            const int edge = (x == fx0 || x == fx1 - 1 || y == fy0 || y == fy1 - 1);
++            const u8 g = edge ? 0x78 : (y < fy0 + S(4) ? 0x06 : 0x0E);
++            d[0] = d[1] = d[2] = g;
++        }
++
++    /* Buttons on the strip (y 258..305), centred at x 265 (left) and 500 (right):
++     * a bar of vertical stripes that fades out towards its ends, with a thin light
++     * line along the top and bottom; the highlighted one is yellow. */
++    const int by0 = S(258), by1 = S(305);
++    for (int b = 0; b < 2; b++) {
++        const float cxu = b ? 500.0f : 265.0f, half = 104.0f, stripe = 9.0f;
++        const int hi = (b == sel);
++        for (int y = by0; y < by1; y++) {
++            const float yv = (y - by0) / (float)(by1 - by0);
++            const int line = (y - by0) < S(1.5f) || (by1 - 1 - y) < S(1.5f);
++            for (int x = S(cxu - half); x < S(cxu + half); x++) {
++                if (x < 0 || x >= (int)W) continue;
++                const int si = (int)floorf((x / sc - cxu) / stripe);   /* stripes, each one flat */
++                const float sc0 = (si + 0.5f) * stripe;
++                const float t = 1.0f - fabsf(sc0) / half;              /* 1 at the centre, 0 at the ends */
++                if (t <= 0) continue;
++                const float tl = 1.0f - fabsf(x / sc - cxu) / half;    /* the line fades smoothly */
++                const float vary = ((si * 7) & 3) * 0.022f - 0.033f;
++                u8* d = px + ((size_t)y * W + x) * 4;
++                float r, g, bl, a;
++                if (hi) {
++                    const float k = t * 1.35f > 1 ? 1 : t * 1.35f;
++                    a = t * 2.6f > 1 ? 1 : t * 2.6f;
++                    r  = (72 + (252 - 72) * k) * (1 + vary);
++                    g  = (70 + (228 - 70) * k) * (1 + vary);
++                    bl = 66 + (78 - 66) * k;
++                    if (line) { const float q = tl * 2 > 1 ? 1 : tl * 2; r += (255 - r) * q; g += (248 - g) * q; bl += (110 - bl) * q; }
++                } else {
++                    const float k = t * 2.2f > 1 ? 1 : t * 2.2f;
++                    a = k;
++                    r = g = bl = (62 + 12 * yv) * (1 + vary) * (0.82f + 0.18f * k);
++                    if (line) { const float q = tl * tl * 1.6f; r = g = bl = r + (170 - r) * (q > 1 ? 1 : q); }
++                }
++                if (r > 255) r = 255;
++                if (g > 255) g = 255;
++                d[2] = (u8)(d[2] + (r  - d[2]) * a);
++                d[1] = (u8)(d[1] + (g  - d[1]) * a);
++                d[0] = (u8)(d[0] + (bl - d[0]) * a);
++            }
++        }
++    }
++
++    GdiFlush();
++    SetBkMode(dc, TRANSPARENT);
++    HFONT fp = CreateFontW(S(31), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
++                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
++    HFONT fx = CreateFontW(S(30), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
++                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
++    HFONT fh = CreateFontW(S(19), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
++                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
++    const int edge = S(1) > 0 ? S(1) : 1;
++    SelectObject(dc, fp);
++    RECT tr = {S(30), confirm ? S(84) : S(40), (LONG)W - S(30), confirm ? S(154) : S(96)};
++    oskp_text(dc, prompt[0] ? prompt : L"Enter text", tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
++              RGB(0xFA, 0xFA, 0xFA), edge);
++    if (!confirm) {
++        SelectObject(dc, fx); SetTextColor(dc, RGB(0xFF, 0xFF, 0xFF));
++        wchar_t shown[602]; _snwprintf(shown, 602, L"%ls|", text); shown[601] = 0;   /* caret */
++        RECT xr = {fx0 + S(16), fy0, fx1 - S(16), fy1};
++        DrawTextW(dc, shown, -1, &xr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
++    }
++    /* The game's own boxes have no key hints; only the typing panel needs them. */
++    if (!confirm) {
++        SelectObject(dc, fh); SetTextColor(dc, RGB(0xB4, 0xB4, 0xB4));
++        RECT hr = {S(30), S(176), (LONG)W - S(30), S(220)};
++        DrawTextW(dc, L"Type with the keyboard    Backspace: Delete    \x2190 \x2192: Choose    Enter: Confirm    Esc: Cancel",
++                  -1, &hr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
++    }
++    SelectObject(dc, fp);
++    for (int b = 0; b < 2; b++) {
++        const int c = b ? S(500) : S(265);
++        RECT br = {c - S(100), by0, c + S(100), by1};
++        oskp_text(dc, choice ? cellOskDialog_choice_label(b)
++                             : b ? (confirm ? L"No" : L"Cancel") : (confirm ? L"Yes" : L"OK"), br,
++                  DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(0xFA, 0xFA, 0xFA), edge);
++    }
++    GdiFlush();
++#undef S
++    for (u32 y = 0; y < H; y++)                            /* BGRX -> RGBA */
++        for (u32 x = 0; x < W; x++) {
++            const u8* s = px + ((size_t)y * W + x) * 4;
++            u8* d = dst_rgba + (size_t)y * pitch + x * 4;
++            d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = 0xFF;
++        }
++    SelectObject(dc, old); DeleteObject(bmp); DeleteDC(dc);
++    if (mold) SelectObject(mdc, mold);
++    if (mbmp) DeleteObject(mbmp);
++    DeleteDC(mdc);
++    DeleteObject(fp); DeleteObject(fx); DeleteObject(fh);
++}
++
++
++/* Record the panel copy into back buffer `fi` (in RENDER_TARGET state; left in
++ * RENDER_TARGET). No-op unless the panel is up. */
++static void oskp_draw(u32 fi)
++{
++    if (!cellOskDialog_overlay_active()) return;
++    u32 H = s_d3d.bb_h * OSKP_H720 / 720, W = H * OSKP_W720 / OSKP_H720;
++    if (W > s_d3d.bb_w) { W = s_d3d.bb_w; H = W * OSKP_H720 / OSKP_W720; }
++    if (W < 64 || H < 32) return;
++    if (W != s_oskp_w || H != s_oskp_h) {    /* new size: every buffer redraws */
++        s_oskp_w = W; s_oskp_h = H; s_oskp_pitch = (W * 4 + 255) & ~255u;
++        for (int i = 0; i < FRAME_COUNT; i++) s_oskp_gen[i] = ~0u;
++    }
++    const u32 need = s_oskp_pitch * H;
++    if (s_oskp_upload[fi] && s_oskp_alloc[fi] < need) {   /* frame fi's GPU use is done */
++        s_oskp_upload[fi]->lpVtbl->Release(s_oskp_upload[fi]); s_oskp_upload[fi] = NULL;
++    }
++    if (!s_oskp_upload[fi]) {
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
++        D3D12_RESOURCE_DESC rd = {0};
++        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        rd.Width = need;
++        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
++        rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
++                D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&s_oskp_upload[fi])))
++            return;
++        s_oskp_alloc[fi] = need;
++        s_oskp_gen[fi] = ~0u;
++    }
++    const unsigned gen = cellOskDialog_overlay_gen();
++    if (s_oskp_gen[fi] != gen) {             /* this buffer's GPU use finished: frame fi is reused */
++        void* p = NULL; D3D12_RANGE none = {0, 0};
++        if (FAILED(s_oskp_upload[fi]->lpVtbl->Map(s_oskp_upload[fi], 0, &none, &p)) || !p) return;
++        oskp_render((u8*)p, s_oskp_pitch, W, H);
++        s_oskp_upload[fi]->lpVtbl->Unmap(s_oskp_upload[fi], 0, NULL);
++        s_oskp_gen[fi] = gen;
++    }
++    D3D12_RESOURCE_BARRIER b = {0};
++    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = s_d3d.render_targets[fi];
++    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++    D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
++    dst.pResource = s_d3d.render_targets[fi];
++    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    src.pResource = s_oskp_upload[fi];
++    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    src.PlacedFootprint.Footprint.Width = W;
++    src.PlacedFootprint.Footprint.Height = H;
++    src.PlacedFootprint.Footprint.Depth = 1;
++    src.PlacedFootprint.Footprint.RowPitch = s_oskp_pitch;
++    s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst,
++        (s_d3d.bb_w - W) / 2, s_d3d.bb_h * 201 / 720, 0, &src, NULL);   /* where the game puts its box */
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++}
++
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -7402,6 +7742,7 @@ skip_dump_consider: ;
+         /* End-of-frame fallback snapshot: used when the frame never contained a
+          * reduced-viewport pass to capture mid-frame. */
+         screen_copy_capture(fi);
++        oskp_draw(fi);           /* on-screen-keyboard text panel, if one is up */
+         /* Transition render target to PRESENT state */
+         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+@@ -10439,6 +10780,13 @@ void rsx_d3d12_backend_shutdown(void)
+     printf("[D3D12] Backend shut down\n");
+ }
+ 
++/* Close the game window as if its close button were clicked (the port's
++ * Exit Game option). Safe from any thread. */
++void rsx_d3d12_request_close(void)
++{
++    if (s_d3d.hwnd) PostMessageA(s_d3d.hwnd, WM_CLOSE, 0, 0);
++}
++
+ int rsx_d3d12_backend_pump_messages(void)
+ {
+     MSG msg;

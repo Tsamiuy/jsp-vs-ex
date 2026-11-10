@@ -1,0 +1,108 @@
+Patch 2510: g_rsx_ui_scale (patch 2509 defines it), from the v0.15 backend. The vertex-program cache marks programs
+that pass positions through (clip-space o[0].xyw = v[0].xyw, or the pixel-space text program reading c464/c466);
+for a non-indexed, non-pulled draw with such a program the backend works out the draw's screen box from attribute 0
+and asks the hook for a scale and an anchor; the draw's position scale/offset (vpx) is then shrunk toward the anchor:
+    ndc' = a + (ndc - a) * s.
+Such draws keep their own constant slot (no VCB_SHARE) while the hook is set. UI_SCALE_DBG=<hex target> logs the
+classified programs and every draw into that target. J-Stars: the HUD size option (UI_SCALE).
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3e2e5b4e..a914c75b 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -266,6 +266,9 @@ typedef struct {
+     ID3DBlob* vs;
+     int uses_c03;
+     int pull;               /* VPULL: decompiled in pulling mode (no input layout) */
++    int pos_passthru;       /* 2510: 1 = o[0].xyw = v[0].xyw (positions arrive in clip space), 2 = the pixel-space
++                             * text program; either way the CPU can work out a draw's screen box from attribute 0
++                             * (g_rsx_ui_scale). 0: unknown. */
+ } VPVSEntry;
+ #define VP_VS_CACHE 1024 /* wave uses 5+ distinct VPs; at 4 the cache
+                          * thrashed every frame and eviction shifted slots
+@@ -2481,6 +2484,12 @@ static int vp_get_vs(const rsx_state* st)
+     s_d3d.vp_vs[slot].uses_c03 =
+         (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
+          strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
++    s_d3d.vp_vs[slot].pos_passthru = s_vs_pull_req ? 0 :
++        (strstr(hlsl, "float4 _v = (float4)((v[0]).xyxw);") && strstr(hlsl, "o[0].xyw = _v.xyw;")) ? 1 :
++        (strstr(hlsl, "(1.0/((vp_c[466]).xxxx).x)") && strstr(hlsl, "(1.0/((vp_c[466]).yyyy).x)") &&
++         strstr(hlsl, "vp_mul(((v[0]).xyxx),((r[1]).xyxx))") && strstr(hlsl, "(-(r[0]).wwww)")) ? 2 : 0;
++    { static int n = 0; if (s_d3d.vp_vs[slot].pos_passthru && getenv("UI_SCALE_DBG") && n++ < 32)
++        fprintf(stderr, "[UIDBG] VS slot %d hash 0x%08X passthru %d%c", slot, hash, s_d3d.vp_vs[slot].pos_passthru, 10); }
+     { static int _n=0; if (PS3_LOG_FIRST(_n, 6)) printf("[VP] per-draw VS cached (hash=0x%08X, %d instrs, slot %d)\n", hash, ni, slot); }
+     /* Build the base VP pipeline here if it does not exist yet. render_frame's
+      * trigger reads s_d3d.current_rsx_state, which by frame end no longer has
+@@ -4681,7 +4690,9 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+     { static int share = -1; if (share < 0) { const char* e = getenv("VCB_SHARE"); share = (e && *e == '0') ? 0 : 1; }
+       static u32 l_slot = 0xFFFFFFFFu; static u64 l_batch = ~0ull; static int l_vs = -2, l_par = -1;
+       static float l_z[2];
+-      if (share && dr && !st->vertex_constants_dirty && l_slot < slot && l_batch == s_d3d.frame_count &&
++      extern float (*g_rsx_ui_scale)(u32 rt_off, const float box[4], float* ax, float* ay);
++      const int ui_own = g_rsx_ui_scale && vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n && s_d3d.vp_vs[vs_idx].pos_passthru;
++      if (share && dr && !ui_own && !st->vertex_constants_dirty && l_slot < slot && l_batch == s_d3d.frame_count &&
+           l_par == (int)s_d3d.vp_parity && l_vs == vs_idx &&
+           l_z[0] == st->viewport_scale[2] && l_z[1] == st->viewport_offset[2]) {
+           ((D3D12DrawRecord*)dr)->vcb_slot = l_slot;
+@@ -4760,6 +4771,59 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+                if (lock && s_lock_valid) { ux = s_lock_x; uy = s_lock_y; }
+                vpx[0] = k; vpx[1] = k; vpx[4] = -ux * k; vpx[5] = -uy * k; } }
+ 
++    /* UI_SCALE (2510, from the v0.15 backend): for each draw into a title's HUD target, the backend works out
++     * the draw's screen box (NDC, y up) and asks the title port's hook g_rsx_ui_scale for a scale and an anchor
++     * point; the draw is then shrunk toward that anchor, so a corner cluster stays in its corner:
++     *     ndc' = a + (ndc - a) * s  ->  scale *= s, offset = offset * s + a * (1 - s).
++     * The box is known for two program shapes: clip-space passthrough (o[0].xyw = v[0].xyw, pos_passthru = 1)
++     * and the pixel-space text program (x = v.x / c466.x * c464.x - c464.y, y = -(same for y),
++     * pos_passthru = 2). UI_SCALE_DBG=<hex target>: log every draw into that target. */
++    { extern float (*g_rsx_ui_scale)(u32 rt_off, const float box[4], float* ax, float* ay);
++      const int pk = (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n) ? s_d3d.vp_vs[vs_idx].pos_passthru : 0;
++      static u32 ui_dbg = 0xFFFFFFFFu; static int ui_dbg_n = 0;
++      if (ui_dbg == 0xFFFFFFFFu) { const char* e = getenv("UI_SCALE_DBG"); ui_dbg = e ? (u32)strtoul(e, NULL, 16) : 0; }
++      const int ui_ok = g_rsx_ui_scale && dr && dr->is_vp && pk && s_d3d.vp_vb_mapped && !dr->is_clear &&
++                        dr->vertex_count >= 3 && dr->vertex_count <= 4096 && !dr->indexed && !dr->vpull;
++      const int ui_log = ui_dbg && dr && (dr->rt_off & 0x0FFFFFFFu) == ui_dbg && ui_dbg_n < 900000;
++      if (ui_log && !ui_ok) {
++          ui_dbg_n++;
++          fprintf(stderr, "[UIDBG] f=%llu SKIP vs=%d pk=%d is_vp=%d n=%u ix=%d vpull=%d fp=0x%08X%c",
++                  (unsigned long long)s_d3d.frame_count, vs_idx, pk, dr->is_vp, dr->vertex_count,
++                  dr->indexed, dr->vpull, dr->fp_addr, 10);
++      }
++      if (ui_ok) {
++          const float* vv = (const float*)((const u8*)s_d3d.vp_vb_mapped
++              + (u64)s_d3d.vp_parity * MAX_VERTICES * 256u + dr->vb_byte_offset);   /* 256-byte vertices */
++          const float* k464 = st->vertex_constants[464];
++          const float* k466 = st->vertex_constants[466];
++          float box[4] = { 1e9f, 1e9f, -1e9f, -1e9f };
++          for (u32 i = 0; i < dr->vertex_count; i++) {
++              const float* a = vv + (u64)i * 64u;   /* attribute 0 of vertex i */
++              float x, y;
++              if (pk == 1) { const float w = a[3] != 0.0f ? a[3] : 1.0f; x = a[0] / w; y = a[1] / w; }
++              else {
++                  if (k466[0] == 0.0f || k466[1] == 0.0f) { box[0] = 1e9f; break; }
++                  x = a[0] / k466[0] * k464[0] - k464[1];
++                  y = -(a[1] / k466[1] * k464[0] - k464[1]);
++              }
++              if (x < box[0]) box[0] = x;
++              if (x > box[2]) box[2] = x;
++              if (y < box[1]) box[1] = y;
++              if (y > box[3]) box[3] = y;
++          }
++          float ax = 0.0f, ay = 0.0f;
++          const float sc = box[0] < 1e8f ? g_rsx_ui_scale(dr->rt_off, box, &ax, &ay) : 1.0f;
++          if (ui_log) { ui_dbg_n++;
++              fprintf(stderr, "[UIDBG] f=%llu vs=%d pk=%d n=%u box=%.3f,%.3f..%.3f,%.3f sc=%.2f fp=0x%08X%c",
++                      (unsigned long long)s_d3d.frame_count, vs_idx, pk, dr->vertex_count,
++                      box[0], box[1], box[2], box[3], sc, dr->fp_addr, 10); }
++          if (sc > 0.0f && sc < 1.0f) {
++              vpx[0] *= sc; vpx[1] *= sc;
++              vpx[4] = vpx[4] * sc + ax * (1.0f - sc);
++              vpx[5] = vpx[5] * sc + ay * (1.0f - sc);
++          }
++      } }
++
+     /* Garbage-projection fallback (vkcube; see the original comment). */
+     int uses_c03 = (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n)
+                        ? s_d3d.vp_vs[vs_idx].uses_c03 : s_d3d.vp_uses_c03;
