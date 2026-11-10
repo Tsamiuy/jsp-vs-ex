@@ -1,0 +1,32 @@
+Patch 0500: g_ppu_icall_hook, a title-port hook on every guest indirect call (from the v0.15 port): it sees the target
+and the argument registers (gpr[3] = the object of a virtual call) before the call runs, may change them, and a
+nonzero return skips the call (the hook has put the result in gpr[3]; leaf getters only).
+
+NULL by default: one test per indirect call, nothing else changes. J-Stars' host code uses it for its screen tracking,
+mouse-driven menus and Training mode, as in the v0.15 port.
+
+Tested (US disc): builds and runs with the hook unset (feature build).
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index fb105b71..6cc75093 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2615,8 +2615,18 @@ extern "C" void ps3_indirect_call_to(ppu_context* ctx, uint32_t target)
+     ps3_indirect_call(ctx);
+ }
+ 
++/* Patch 0500 (from the v0.15 port): set by a title port, sees every indirect call's target and the argument registers
++ * (gpr[3] is the object for a virtual call) before it runs, and may change them. A nonzero return skips the call: the
++ * hook has set gpr[3] to the result (only for leaf getters). J-Stars' screen tracking, mouse menus and Training mode
++ * work through it. NULL (the default) costs one test per indirect call. */
++extern "C" { int (*g_ppu_icall_hook)(uint32_t target, uint64_t* gpr) = 0; }
++
+ extern "C" void ps3_indirect_call(ppu_context* ctx)
+ {
++    if (g_ppu_icall_hook) {
++        const uint32_t tgt = g_icall_target_set ? g_icall_target : (uint32_t)ctx->ctr;
++        if (g_ppu_icall_hook(tgt, ctx->gpr)) { g_icall_target_set = 0; return; }
++    }
+     static int on = -1;
+     if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
+     { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;

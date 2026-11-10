@@ -1,0 +1,141 @@
+Patch 2500: the window options of the v0.15 port: WINDOW_SIZE=<w>x<h>, FULLSCREEN=1 (borderless, F11 toggles),
+aspect-locked resizing, WINDOW_ICON=<file.ico> and TITLE_STATS=0.
+
+The client area defaults to the render size and is shrunk to the monitor's work area with the aspect kept; the swap
+chain keeps the render size and is stretched. Fullscreen turns the window into a popup over its monitor and back.
+Dragging the frame keeps the game's aspect ratio. TITLE_STATS=0 leaves only the title (no FPS, draws and size). Esc
+no longer quits on key auto-repeat. All unset: as before, except the aspect-locked drag.
+
+Tested (US disc, attract demo): WINDOW_SIZE=1600x900 TITLE_STATS=0 gives a 1600x900 client (screenshot size), no
+errors (bench/feature/2026-11-09_1553-win1). Fullscreen/F11 left for a hands-on check.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1e487fd6..779766a0 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -734,6 +734,30 @@ static u32    s_lock_n  = 0;
+  * Win32 window
+  * -----------------------------------------------------------------------*/
+ 
++/* 2066: borderless fullscreen (FULLSCREEN=1 at start, F11 toggles): the window becomes a popup covering its monitor
++ * and the swap chain is stretched to it. The windowed placement is remembered for the way back. */
++static int s_win_full = 0;
++static WINDOWPLACEMENT s_win_place = { sizeof(WINDOWPLACEMENT) };
++static void win_set_fullscreen(HWND h, int on)
++{
++    if (on == s_win_full) return;
++    if (on) {
++        MONITORINFO mi = { sizeof mi };
++        GetWindowPlacement(h, &s_win_place);
++        if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY), &mi)) return;
++        SetWindowLongPtrA(h, GWL_STYLE, WS_POPUP | WS_VISIBLE);
++        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
++                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
++                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
++    } else {
++        SetWindowLongPtrA(h, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
++        SetWindowPlacement(h, &s_win_place);
++        SetWindowPos(h, NULL, 0, 0, 0, 0,
++                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
++    }
++    s_win_full = on;
++}
++
+ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
+     switch (msg) {
+@@ -745,11 +769,30 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+         PostQuitMessage(0);
+         return 0;
+     case WM_KEYDOWN:
+-        if (wp == VK_ESCAPE) {
++        /* not on auto-repeat: Esc held after answering a game prompt would quit */
++        if (wp == VK_ESCAPE && !(lp & 0x40000000)) {
+             s_d3d.window_closed = 1;
+             DestroyWindow(hwnd);
+         }
++        if (wp == VK_F11 && !(lp & 0x40000000)) win_set_fullscreen(hwnd, !s_win_full);
+         return 0;
++    case WM_SIZING: {   /* 2066: keep the game's aspect ratio while the frame is dragged */
++        RECT* r = (RECT*)lp;
++        RECT fr = {0, 0, 0, 0};
++        AdjustWindowRect(&fr, WS_OVERLAPPEDWINDOW, FALSE);
++        const LONG fw = fr.right - fr.left, fh = fr.bottom - fr.top;
++        const LONG gw = s_d3d.width ? (LONG)s_d3d.width : 16, gh = s_d3d.height ? (LONG)s_d3d.height : 9;
++        if (wp == WMSZ_TOP || wp == WMSZ_BOTTOM) {
++            const LONG ch = r->bottom - r->top - fh;
++            r->right = r->left + ch * gw / gh + fw;
++        } else {
++            const LONG cw = r->right - r->left - fw;
++            const LONG nh = cw * gh / gw + fh;
++            if (wp == WMSZ_TOPLEFT || wp == WMSZ_TOPRIGHT) r->top = r->bottom - nh;
++            else r->bottom = r->top + nh;
++        }
++        return TRUE;
++    }
+     }
+     return DefWindowProcA(hwnd, msg, wp, lp);
+ }
+@@ -762,21 +805,49 @@ static HWND create_window(u32 width, u32 height, const char* title)
+     wc.lpfnWndProc = d3d12_wndproc;
+     wc.hInstance = GetModuleHandle(NULL);
+     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
++    /* 2066 WINDOW_ICON=<file.ico>: the window's title-bar and taskbar icon; unset keeps Windows' default. */
++    { const char* ico = getenv("WINDOW_ICON");
++      if (ico && *ico) {
++          wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXICON),
++                                       GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE);
++          wc.hIconSm = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
++                                         GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
++          printf("[D3D12] window icon %s: %s\n", wc.hIcon ? "loaded" : "NOT loaded", ico);
++      } }
+     wc.lpszClassName = "ps3recomp_d3d12";
+     RegisterClassExA(&wc);
+ 
+-    RECT wr = {0, 0, (LONG)width, (LONG)height};
++    /* 2066: client size WINDOW_SIZE=<w>x<h> when given, else the render size; shrunk (aspect kept) to fit the
++     * monitor's work area. The swap chain keeps the render size and is stretched to the client area. */
++    u32 cw = width, ch = height;
++    { const char* e = getenv("WINDOW_SIZE"); unsigned a = 0, b = 0;
++      if (e && sscanf(e, "%ux%u", &a, &b) == 2 && a >= 320 && b >= 180) { cw = a; ch = b; } }
++    RECT wa;
++    if (SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0)) {
++        RECT fr = {0, 0, 0, 0};
++        AdjustWindowRect(&fr, WS_OVERLAPPEDWINDOW, FALSE);
++        const LONG maxw = (wa.right - wa.left) - (fr.right - fr.left);
++        const LONG maxh = (wa.bottom - wa.top) - (fr.bottom - fr.top);
++        if (maxw > 0 && maxh > 0 && ((LONG)cw > maxw || (LONG)ch > maxh)) {
++            const double k = (double)maxw / cw < (double)maxh / ch ? (double)maxw / cw : (double)maxh / ch;
++            cw = (u32)(cw * k); ch = (u32)(ch * k);
++        }
++    }
++    RECT wr = {0, 0, (LONG)cw, (LONG)ch};
+     AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+ 
+     /* Keep the display awake (see rsx_null_backend.c). */
+     SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+-    return CreateWindowExA(
++    HWND h = CreateWindowExA(
+         0, "ps3recomp_d3d12",
+         title ? title : "ps3recomp (D3D12)",
+         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+         CW_USEDEFAULT, CW_USEDEFAULT,
+         wr.right - wr.left, wr.bottom - wr.top,
+         NULL, NULL, GetModuleHandle(NULL), NULL);
++    { const char* fs = getenv("FULLSCREEN");   /* 2066 */
++      if (h && fs && fs[0] == '1') win_set_fullscreen(h, 1); }
++    return h;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -7323,6 +7394,10 @@ skip_dump_consider: ;
+                      g_rsx_title_base,
+                      s_tframes * 1000.0 / (double)(tnow - s_tt0),
+                      s_dbg_last_draws, s_d3d.width, s_d3d.height);
++            /* 2066 TITLE_STATS=0: the title alone, without FPS, draws and size. */
++            { static int s_tstats = -1;
++              if (s_tstats < 0) { const char* e = getenv("TITLE_STATS"); s_tstats = (e && *e == '0') ? 0 : 1; }
++              if (!s_tstats) snprintf(tb, sizeof(tb), "%s", g_rsx_title_base); }
+             SetWindowTextA(s_d3d.hwnd, tb);
+             s_tframes = 0;
+             s_tt0 = tnow;

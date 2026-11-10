@@ -1,0 +1,108 @@
+Patch 2502: shadow maps rendered at SHADOW_SCALE times the guest size (1-4, default 2; 1 = the game's own size).
+
+Depth surfaces the title samples through a depth comparison are flagged as shadow maps; their depth-only passes size
+them at the scale and the replay viewport scales the guest rect. Receivers sample with normalised coordinates and the
+comparison helper takes the size from the bound texture, so only the surface, its colour copy and the passes'
+viewports change. At J-Stars' own 2048x1024 the shadow texels are large next to thin parts (sleeves, shoulder plates)
+and showed as grey stair-step lines moving with the camera; RPCS3 at a 300% resolution scale draws them at 3x. The
+launcher's Shadows option (Low/Medium/High/Ultra = 1/2/3/4).
+
+Tested (US disc, quick Free Battle route): SHADOW_SCALE=2 29.94 flips/s (bench/exp/2026-11-09_0246-shscale2),
+SHADOW_SCALE=3 29.75 (bench/feature/2026-11-09_1604-shadow3); intros and fight look right.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b5e3366d..4deb39d1 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -200,8 +200,21 @@ typedef struct {
+     u32                   gen;         /* bumped by every draw or clear that writes it */
+     u32                   conv_gen;    /* gen its colour copy was made from */
+     u64                   last_frame;  /* frame_count of the last pass that bound it */
++    int                   shadow;      /* 2502: sampled through a depth comparison (a shadow map) */
+ } OffDS;
+ #define MAX_OFF_DS   6
++/* SHADOW_SCALE=<1-4> (default 2; patch 2502): depth surfaces the title samples through a depth comparison (its shadow
++ * maps) are rendered at this multiple of the guest size; 1 = the guest size. RPCS3's resolution scale does the same to
++ * them. At J-Stars' own 2048x1024 the shadow texels are large next to thin parts (sleeves, shoulder plates), and with
++ * the shadow map refitted to the camera each frame they showed as grey stair-step lines that moved whenever the camera
++ * or the character moved. Receivers sample with normalised coordinates and the comparison helper takes the size from
++ * the bound texture, so only the surface, its colour copy and the passes' viewports change. */
++static int shadow_scale(void)
++{
++    static int k = -1;
++    if (k < 0) { const char* e = getenv("SHADOW_SCALE"); k = e ? atoi(e) : 2; if (k < 1) k = 1; if (k > 4) k = 4; }
++    return k;
++}
+ #define RT_SRV_BASE  5   /* SRV heap slots 5..68 hold offscreen-RT SRVs */
+ #define DS_SRV_BASE  70  /* SRV heap slots 70..81 hold depth + stencil SRVs (2 per OffDS) */
+ /* Per-draw SRV windows: each VP draw gets 16 consecutive descriptors (t0-t15)
+@@ -2809,11 +2822,14 @@ static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 un
+             if (txp_units & (1u << u)) { /* judged as the DEPTH24_D8 view it stands for */
+                 rsx_fp_shadow_desc_from_texture(&d, (dr->tex[u].fmt & ~0x9Fu) | 0x92u, 2, dr->tex[u].cube,
+                                                 dr->tex[u].mips, dr->tex[u].filter, dr->tex[u].addr, dr->tex[u].ctrl0);
+-                if (d.enabled) { sh[u] = (u8)((d.enabled & 3) | (d.func << 2) | (d.linear << 5) | (d.unnormalized << 6) | 0x80u); continue; }
++                if (d.enabled) { sh[u] = (u8)((d.enabled & 3) | (d.func << 2) | (d.linear << 5) | (d.unnormalized << 6) | 0x80u);
++                                 { const int sds = off_ds_find(dr->tex[u].raw); if (sds >= 0) s_d3d.off_ds[sds].shadow = 1; }
++                                 continue; }
+             }
+         }
+         if (!d.enabled) continue;
+         sh[u] = (u8)((d.enabled & 3) | (d.func << 2) | (d.linear << 5) | (d.unnormalized << 6));
++        { const int sds = off_ds_find(dr->tex[u].raw); if (sds >= 0) s_d3d.off_ds[sds].shadow = 1; }
+     }
+ }
+ 
+@@ -5169,6 +5185,7 @@ static int off_ds_get(u32 off, u32 w, u32 h)
+             s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
+             &IID_ID3D12Resource, (void**)&z->res)))
+         return -1;
++    if (z->off != off) z->shadow = 0;   /* 2502: the slot now holds another surface */
+     z->off = off; z->w = w; z->h = h;
+     z->st = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+     z->cleared = 0; z->gen = 0; z->conv_gen = 0xFFFFFFFFu;
+@@ -6098,8 +6115,12 @@ static void render_frame(void)
+         for (int _m = 0; _m < 3; _m++)
+             if (dr->is_vp && dr->rt_mrt[_m])
+                 off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
+-        if (dr->is_vp && dr->zeta_off && (dr->rt_off || dr->no_color))
+-            off_ds_get(dr->zeta_off, dr->rt_w, dr->rt_h);
++        if (dr->is_vp && dr->zeta_off && (dr->rt_off || dr->no_color)) {
++            /* 2502: a shadow map's depth-only passes draw it at SHADOW_SCALE x */
++            const int zi = off_ds_find(dr->zeta_off);
++            const u32 k = (dr->no_color && !dr->rt_off && zi >= 0 && s_d3d.off_ds[zi].shadow) ? (u32)shadow_scale() : 1u;
++            off_ds_get(dr->zeta_off, dr->rt_w * k, dr->rt_h * k);
++        }
+         for (int _u = 0; _u < 16; _u++) dr->tex_ds[_u] = -1;   /* set below for draws */
+     }
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+@@ -6786,18 +6807,24 @@ static void render_frame(void)
+                 {
+                     float tw = (cur_rt >= 0) ? (float)s_d3d.off_rt[cur_rt].w : (float)s_d3d.width;
+                     float th = (cur_rt >= 0) ? (float)s_d3d.off_rt[cur_rt].h : (float)s_d3d.height;
++                    float zsx = 1.0f, zsy = 1.0f;   /* 2502: a scaled shadow map's guest rect, in its own pixels */
+                     if (cur_nc && cur_z >= 0) {
+                         tw = (float)s_d3d.off_ds[cur_z].w;
+                         th = (float)s_d3d.off_ds[cur_z].h;
++                        if (s_d3d.off_ds[cur_z].shadow && shadow_scale() > 1 && dr->rt_w && dr->rt_h) {
++                            zsx = tw / (float)dr->rt_w; zsy = th / (float)dr->rt_h;
++                            if (zsx < 1.0f) zsx = 1.0f;
++                            if (zsy < 1.0f) zsy = 1.0f;
++                        }
+                     }
+                     D3D12_VIEWPORT dvp = {0, 0, tw, th, 0.0f, 1.0f};
+                     if (dr->vp_w >= 2 && dr->vp_h >= 2 &&
+-                        (float)(dr->vp_x + dr->vp_w) <= tw + 0.5f &&
+-                        (float)(dr->vp_y + dr->vp_h) <= th + 0.5f) {
+-                        dvp.TopLeftX = (float)dr->vp_x;
+-                        dvp.TopLeftY = (float)dr->vp_y;
+-                        dvp.Width    = (float)dr->vp_w;
+-                        dvp.Height   = (float)dr->vp_h;
++                        (float)(dr->vp_x + dr->vp_w) * zsx <= tw + 0.5f &&
++                        (float)(dr->vp_y + dr->vp_h) * zsy <= th + 0.5f) {
++                        dvp.TopLeftX = (float)dr->vp_x * zsx;
++                        dvp.TopLeftY = (float)dr->vp_y * zsy;
++                        dvp.Width    = (float)dr->vp_w * zsx;
++                        dvp.Height   = (float)dr->vp_h * zsy;
+                     }
+                     D3D12_RECT dsc = {(LONG)dvp.TopLeftX, (LONG)dvp.TopLeftY,
+                                       (LONG)(dvp.TopLeftX + dvp.Width),
