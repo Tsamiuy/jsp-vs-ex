@@ -72,6 +72,41 @@ sub('''            // UI_SCALE=0.50..1.00 for the game; the bar counts in 5 % st
                 Text = "Sharper, steadier shadows on characters and stages. Higher costs a little GPU;\\r\\nyour RPCS3 setup (300% scale) draws them like High.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 48;
+            // SHADOW_RANGE for the game: how far from the fighters shadows reach (1 Normal, 2 Far).
+            p.Controls.Add(new Label { Text = "Shadow distance", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            shadowRangeBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            shadowRangeBox.Items.AddRange(new object[] { "Normal   (the game's own)", "Far      (2x: shadows reach further)" });
+            shadowRangeBox.SelectedIndex = 0;
+            shadowRangeBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(shadowRangeBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Far keeps buildings', plants' and other fighters' shadows sharp further away.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
+            // MODEL_DETAIL / OBJECT_DISTANCE for the game: the map models' detail switch distances and how far map
+            // objects are drawn (jsp_game.cpp lod_select_hook).
+            p.Controls.Add(new Label { Text = "Model detail", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            modelDetailBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            modelDetailBox.Items.AddRange(new object[] { "Normal   (the game's own)", "High     (full detail 2x further)", "Ultra    (full detail 4x further)" });
+            modelDetailBox.SelectedIndex = 0;
+            modelDetailBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(modelDetailBox);
+            y += 36;
+            p.Controls.Add(new Label { Text = "Object draw distance", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            objectDistBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            objectDistBox.Items.AddRange(new object[] { "Near     (a little closer than the game)", "Normal   (the game's own)", "Far      (2x)", "Max      (objects never disappear)" });
+            objectDistBox.SelectedIndex = 1;
+            objectDistBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(objectDistBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Map objects (plants, props) that the game hides when the camera is far from them.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
 
             // UI_SCALE=0.50..1.00 for the game; the bar counts in 5 % steps (10..20).''')
 sub('''            p.Controls.Add(fpsBox);
@@ -86,7 +121,9 @@ sub('''        ComboBox resBox, winBox, modeBox, aaBox;''', '''        TabPage d
         ComboBox resBox, winBox, modeBox, aaBox;''')
 sub('''        TabPage displayTab, graphicsTab;
         ComboBox resBox, winBox, modeBox, aaBox;''', '''        TabPage displayTab, graphicsTab;
-        ComboBox resBox, winBox, modeBox, aaBox, shadowBox;
+        ComboBox resBox, winBox, modeBox, aaBox, shadowBox, shadowRangeBox, modelDetailBox, objectDistBox;
+        static readonly string[] ModelDetailIds = { "1", "2", "4" };
+        static readonly string[] ObjectDistIds = { "0.75", "1", "2", "0" };
         static readonly string[] ShadowNames = {
             "Low      (the game's own: 2048 x 1024)",
             "Medium   (2x)",
@@ -95,14 +132,20 @@ sub('''        TabPage displayTab, graphicsTab;
         };''')
 
 # settings
-sub('''                    if (k == "RES_SCALE" || k == "FULLSCREEN"''', '''                    if (k == "RES_SCALE" || k == "SHADOW_SCALE" || k == "FULLSCREEN"''')
+sub('''                    if (k == "RES_SCALE" || k == "FULLSCREEN"''', '''                    if (k == "RES_SCALE" || k == "SHADOW_SCALE" || k == "SHADOW_RANGE" || k == "MODEL_DETAIL" || k == "OBJECT_DISTANCE" || k == "FULLSCREEN"''')
 sub('''            bool full = cur.TryGetValue("FULLSCREEN", out s) && s == "1";''',
 '''            int sh;
             if (!cur.TryGetValue("SHADOW_SCALE", out s) || !int.TryParse(s, out sh)) sh = 2;
             shadowBox.SelectedIndex = Math.Max(1, Math.Min(4, sh)) - 1;
+            shadowRangeBox.SelectedIndex = cur.TryGetValue("SHADOW_RANGE", out s) && s.Trim() == "2" ? 1 : 0;
+            { int i1 = cur.TryGetValue("MODEL_DETAIL", out s) ? Array.IndexOf(ModelDetailIds, s.Trim()) : 0; modelDetailBox.SelectedIndex = i1 < 0 ? 0 : i1;
+              int i2 = cur.TryGetValue("OBJECT_DISTANCE", out s) ? Array.IndexOf(ObjectDistIds, s.Trim()) : 1; objectDistBox.SelectedIndex = i2 < 0 ? 1 : i2; }
             bool full = cur.TryGetValue("FULLSCREEN", out s) && s == "1";''')
 sub('''            lines.Add("FULLSCREEN=" + (rbFull.Checked ? "1" : "0"));''',
 '''            lines.Add("SHADOW_SCALE=" + (shadowBox.SelectedIndex + 1));
+            lines.Add("SHADOW_RANGE=" + (shadowRangeBox.SelectedIndex == 1 ? "2" : "1"));
+            lines.Add("MODEL_DETAIL=" + ModelDetailIds[modelDetailBox.SelectedIndex]);
+            lines.Add("OBJECT_DISTANCE=" + ObjectDistIds[objectDistBox.SelectedIndex]);
             lines.Add("FULLSCREEN=" + (rbFull.Checked ? "1" : "0"));''')
 sub('''            lines.Add("# Written by the J-Stars launcher (also read by Play J-Stars.bat).");''',
     '''            lines.Add("# Written by the J-Stars v19 launcher.");''')
