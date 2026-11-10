@@ -1,0 +1,72 @@
+Patch 2066: the D3D12 backend never frees or reuses GPU objects under a batch that may still be running: the GPU wait
+only gives up on a removed device, and the deferred-release table grows instead of freeing its oldest entry early.
+
+Two places in rsx_d3d12_backend.c acted on "the GPU has surely finished" without knowing it:
+- wait_for_gpu() stopped waiting after three 2 s timeouts while GetDeviceRemovedReason still said S_OK, and
+  render_frame() then reset the command allocator, rewrote the upload rings and texture ring, and released evicted
+  objects under a batch that was still executing: a corrupted command stream on a GPU that was merely slow (a loaded,
+  shared GPU; a first-use shader-cache flush). It now waits as long as the device is alive (a [D3D12] STUCK line every
+  2 s) and only a removed device, whose fence never signals, is given up on (the TDR case the bounded wait was for).
+- The grave of patch 2028 (pipelines and shader blobs evicted from the caches, released two frames later after the
+  drain) was a fixed table of 512; when full it released the oldest entry at once. After a mid-frame flush (patch 2003
+  leaves that batch running) the oldest can still be in use: the GPU use-after-free the grave exists to prevent. The
+  table now grows (realloc, doubling from 512); if memory runs out the object is kept, never freed early.
+
+Found by reading code during a device-loss hunt; neither path was caught in the act. Every device loss seen on the test
+PC was an NVIDIA Xid 69 class error, so this patch removes two latent faults, not that one. No behaviour change on a healthy run:
+the wait returns on the first try and the grave never held more than a few hundred entries.
+
+Source: written for v0.19.0 (2026-11-09). Upstream candidate (general: no title-specific code).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1534,15 +1534,20 @@
+  * frame, or a command list still on the GPU, can use them. They wait here and go once render_frame has drained the
+  * GPU two frames later (patch 2028). */
+ typedef struct { IUnknown* obj; u64 frame; } D3DGrave;
+-static D3DGrave s_grave[512];
+-static int s_grave_n = 0;
++static D3DGrave* s_grave = NULL;
++static int s_grave_n = 0, s_grave_cap = 0;
+ static void grave_add(IUnknown* o, u64 frame)
+ {
+     if (!o) return;
+-    if (s_grave_n == (int)(sizeof s_grave / sizeof s_grave[0])) {   /* full: the oldest has surely finished by now */
+-        s_grave[0].obj->lpVtbl->Release(s_grave[0].obj);
+-        memmove(&s_grave[0], &s_grave[1], sizeof(D3DGrave) * (size_t)(s_grave_n - 1));
+-        s_grave_n--;
++    if (s_grave_n == s_grave_cap) {
++        /* Patch 2066: grow, never release early. The old fixed table freed its oldest entry at once when full ("has
++         * surely finished"), which is false after a mid-frame flush (patch 2003 leaves that batch running on the GPU)
++         * and is exactly the GPU use-after-free the grave exists to prevent. Out of memory: keep the object (a leak,
++         * never a free under the GPU). */
++        int ncap = s_grave_cap ? s_grave_cap * 2 : 512;
++        D3DGrave* ng = (D3DGrave*)realloc(s_grave, sizeof(D3DGrave) * (size_t)ncap);
++        if (!ng) return;
++        s_grave = ng; s_grave_cap = ncap;
+     }
+     s_grave[s_grave_n].obj = o; s_grave[s_grave_n].frame = frame; s_grave_n++;
+ }
+@@ -1580,7 +1585,11 @@
+          * Degrade loudly instead: bounded waits + the removal reason, then
+          * carry on (subsequent D3D calls fail visibly but the game keeps
+          * running headless). */
+-        for (int tries = 0; tries < 3; tries++) {
++        /* Patch 2066: wait as long as the device is alive. The old loop gave up after three 2 s waits and the
++         * callers then reset the command allocator, rewrote the upload rings and released evicted objects under a
++         * batch that was still running: a corrupted command stream on a GPU that was merely slow (a loaded,
++         * shared GPU; a first-use cache flush). Only a removed device (its fence never signals) is given up on. */
++        for (int tries = 0;; tries++) {
+             if (WaitForSingleObject(s_d3d.fence_event, 2000) != WAIT_TIMEOUT)
+                 return;
+             HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
+@@ -1590,7 +1599,7 @@
+                    (unsigned long long)s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence),
+                    (long)rr);
+             fflush(stdout);
+-            if (rr != 0 /* S_OK: device still alive, keep waiting a bit */)
++            if (rr != 0 /* removed: nothing will ever signal, carry on headless */)
+                 break;
+         }
+     }

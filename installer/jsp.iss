@@ -254,10 +254,33 @@ end;
 { '' when Path is a decrypted PowerPC64 ELF (7F 45 4C 46, 64-bit, big endian, machine 21), else the message. An
   encrypted EBOOT.BIN (SELF, "SCE") gets its own message. Reads 20 bytes. When the file is not there and the disc folder is on a
   read-only drive, the message says how to get the file (no steps: the decryption itself is RPCS3's documentation). }
+{ Disc id of a known 1.00 EBOOT.elf by its whole-file SHA-256 (the table in eboot_ids.json beside firstrun.py; firstrun_selftest.py checks
+  that both list the same hashes), '' when not known. Only the wizard's quick region check: firstrun.py check E3 also knows the
+  program-code hash, so an EBOOT.elf laid out differently by another tool is judged there, with the result in the log. }
+function KnownEbootId(Path: String): String;
+var
+  Hash: String;
+begin
+  Result := '';
+  try
+    Hash := Lowercase(GetSHA256OfFile(Path));
+  except
+    Exit;
+  end;
+  if Hash = 'a8a1543b914b70aa87a83e50c6d90c216d9ed1b60c49c629ddad5590874d7716' then Result := 'BLUS31519'
+  else if Hash = '719e4cd4d8925cd27c541370efe3b8cfdd3d948346f4db0848704dbce0afa352' then Result := 'BLES02136';
+end;
+
+function RegionName(Id: String): String;
+begin
+  if Id = 'BLUS31519' then Result := 'US' else if Id = 'BLES02136' then Result := 'EU' else Result := Id;
+end;
+
 function EbootProblem(Path: String): String;
 var
   F: TFileStream;
   H: AnsiString;
+  Known: String;
 begin
   if not FileExists(Path) then begin
     Result := 'Select your decrypted EBOOT.elf.';
@@ -288,8 +311,14 @@ begin
     Result := 'This file is not an ELF program, so it is not a decrypted EBOOT.elf (see RPCS3 and its documentation).'
   else if (Ord(H[5]) <> 2) or (Ord(H[6]) <> 2) or (Ord(H[19]) <> 0) or (Ord(H[20]) <> 21) then
     Result := 'This ELF is not a PlayStation 3 (PowerPC64) program.'
-  else
+  else begin
     Result := '';
+    { A known EBOOT.elf of the other region: the build takes the code range of the disc's region, so it would lift wrong. }
+    Known := KnownEbootId(Path);
+    if (Known <> '') and (DiscId <> '') and (Known <> DiscId) then
+      Result := 'This EBOOT.elf is from the ' + RegionName(Known) + ' disc (' + Known + '), but the disc folder is the ' +
+        RegionName(DiscId) + ' disc (' + DiscId + '). Select the EBOOT.elf made from the same copy as the disc folder.';
+  end;
 end;
 
 { '' when Dir is the dev_flash folder of an RPCS3 install (it holds sys), else the message. Only for /DEVFLASH=: the game reads

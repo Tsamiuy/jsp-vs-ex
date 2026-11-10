@@ -207,7 +207,7 @@ def sfo_field(path, key):
 
 
 # Preflight codes (one line each: "OK code text", "WARN code text" or "FAIL code text"):
-#   D1 PARAM.SFO  D2 title id  D3 PS3_GAME\\USRDIR   E1 decrypted ELF  E2 ELF size   T1-T3 bundled toolchain   F1 dev_flash
+#   D1 PARAM.SFO  D2 title id  D3 PS3_GAME\\USRDIR   E1 decrypted ELF  E2 ELF size  E3 known build   T1-T3 bundled toolchain   F1 dev_flash
 #   P1 install folder path  P2 disc folder path       S1 free space    R1 install folder moved (build tree reset)
 BAD_PATH_CHARS = "[];"          # break CMake's configure (list separators); refused in the install and disc paths
 BAD_SCRIPT_CHARS = '&^%!"'      # break the generated .cmd files (cmd.exe metacharacters); refused in the install path
@@ -343,7 +343,68 @@ READONLY_HINT = ("the disc folder is on a read-only drive (a disc or a mounted i
                  "and its documentation), then pass it as --eboot")
 
 
-def check_eboot(path, disc=None):
+def known_eboots():
+    """The entries of eboot_ids.json beside this file (shared EBOOT id table format); [] when it is missing or unreadable."""
+    try:
+        return json.loads((pathlib.Path(__file__).resolve().parent / "eboot_ids.json").read_text(encoding="utf-8"))["entries"]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def segment_hash(data):
+    """sha256 over the ELF's loadable segments, the bytes the lifter reads: for each program header in file order with p_type
+    PT_LOAD (1) and a non-zero p_filesz or p_memsz, the 8-byte big-endian p_vaddr, p_filesz and p_memsz, then its p_filesz bytes at
+    p_offset (the shared EBOOT id table definition). Another tool may pad or lay out the file differently; the program stays the same. '' if the headers are bad."""
+    try:
+        phoff, = struct.unpack_from(">Q", data, 0x20)
+        phentsize, phnum = struct.unpack_from(">HH", data, 0x36)
+        if phentsize != 56 or phnum > 64:
+            return ""
+        h = hashlib.sha256()
+        for i in range(phnum):
+            p_type, _fl, off, va, _pa, fs, ms, _al = struct.unpack_from(">IIQQQQQQ", data, phoff + 56 * i)
+            if p_type != 1 or not (fs or ms):
+                continue
+            if off + fs > len(data):
+                return ""
+            h.update(struct.pack(">QQQ", va, fs, ms))
+            h.update(data[off:off + fs])
+        return h.hexdigest()
+    except struct.error:
+        return ""
+
+
+def identify_eboot(data, tid=None):
+    """Check E3: which known build the ELF bytes are. OK: a known EBOOT of the disc's region. WARN: the same program as a known one in a
+    file laid out differently (another tool), it should work. FAIL: a known EBOOT of the other region (the lift takes the code
+    range of the disc's region, so it would lift wrong), or a build this port does not know: its hooks sit at fixed addresses of the
+    1.00 code, so an update, another edition or a changed file would not run. The message names only the region, id and a hash prefix."""
+    whole = hashlib.sha256(data).hexdigest()
+    known = known_eboots()
+    if not known:
+        return ("FAIL", "E3", "eboot_ids.json, the list of known EBOOT builds, is missing beside firstrun.py: the install is incomplete, run setup again")
+    hit = next((e for e in known if e["sha256"] == whole), None)
+    how = "the file"
+    if hit is None:
+        seg = segment_hash(data)
+        hit = next((e for e in known if seg and e["segment_sha256"] == seg), None)
+        how = "the program code"
+    if hit is None:
+        return ("FAIL", "E3", f"this EBOOT.elf is not a build this port knows (SHA-256 {whole[:12]}): it may be from game update 1.02, a "
+                              "digital edition or a changed file. Setup supports the 1.00 disc EBOOT of " + " or ".join(TITLE_IDS) +
+                              ", made without the update installed, because the port's hooks sit at fixed places in that program")
+    name = f"J-Stars Victory VS+ {hit['app_ver'].lstrip('0')}, {hit['region']} disc ({hit['title_id']})"
+    if tid and tid != hit["title_id"]:
+        return ("FAIL", "E3", f"this EBOOT.elf is from the {hit['region']} disc ({hit['title_id']}), but the disc folder is the "
+                              f"{TITLE_IDS.get(tid, '?')} disc ({tid}). Use the EBOOT.elf made from the same copy as the disc folder")
+    if how == "the file":
+        return ("OK", "E3", name + (" (matches the disc folder)" if tid else ""))
+    return ("WARN", "E3", f"{name}: the program code matches, but the file differs from the known one (SHA-256 {whole[:12]}), for "
+                          "example padded or laid out differently by another tool. It should work; if the build fails, make the EBOOT.elf "
+                          "again from your own copy")
+
+
+def check_eboot(path, disc=None, tid=None):
     p = pathlib.Path(path)
     if not p.is_file():
         return [("FAIL", "E1", f"{p} is missing" + (f": {READONLY_HINT}" if disc_read_only(disc) else ""))]
@@ -357,6 +418,8 @@ def check_eboot(path, disc=None):
         lvl = "OK" if ELF_MIN_BYTES <= size <= ELF_MAX_BYTES else "FAIL"
         out.append((lvl, "E2", f"size {size / 1e6:.1f} MB" + ("" if lvl == "OK" else
                     f" is outside {ELF_MIN_BYTES / 1e6:.1f} to {ELF_MAX_BYTES / 1e6:.0f} MB: cut off or not this game's EBOOT")))
+        if lvl == "OK":
+            out.append(identify_eboot(p.read_bytes(), tid))
     return out
 
 
@@ -771,7 +834,7 @@ def interactive(a, root, ask=input, out=None):
     if d is None:
         return False
     e = ask_valid(ask, out, "Your decrypted EBOOT.elf, from your own copy (see RPCS3 and its documentation)", saved["eboot"],
-                  check_eboot, "Type the path of your decrypted EBOOT.elf.")
+                  lambda x: check_eboot(x, d, check_disc(d)[1]), "Type the path of your decrypted EBOOT.elf.")
     if e is None:
         return False
     a.disc, a.eboot = str(disc_root(d)), e
@@ -857,7 +920,7 @@ def main(argv=None, ask=input):
     loc.write_text(str(root) + "\n")
     checks = check_paths(a.root, a.disc)
     disc_checks, tid = check_disc(a.disc) if not path_problems(a.disc, "disc folder") else ([], "")
-    checks += disc_checks + check_eboot(a.eboot, a.disc) + check_space(a.root)
+    checks += disc_checks + check_eboot(a.eboot, a.disc, tid) + check_space(a.root)
     if a.until in ("build", "all"):
         checks += check_toolchain(a.toolchain)
     if a.until == "all" and a.devflash:

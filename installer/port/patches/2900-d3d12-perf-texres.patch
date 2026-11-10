@@ -1,0 +1,58 @@
+Patch 2900: the [PERF] line counts texture re-creations as `texres N` (diagnostic, read only with PERF=1).
+
+`texres N` is the number of committed texture and upload resources vp_upload_tex_slot created in that 20-frame `[PERF]`
+window. With the slots of patch 2024 a run can show whether the texture working set still churns: near 0 in a steady
+fight means the slots hold it, a steady high count means textures are being evicted and created again.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 3c2f9b5..66b43db 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -611,6 +611,7 @@ static u32 s_duck_off = 0;   /* as RESOLVED (what the uploader sees)   */
+ static double s_perf_tex = 0.0, s_perf_frame = 0.0, s_perf_vtx = 0.0, s_perf_rf = 0.0;
+ static double s_perf_gpu = 0.0, s_perf_pre = 0.0, s_perf_srv = 0.0, s_perf_pso = 0.0;
+ static int s_perf_pso_calls = 0, s_perf_pso_miss = 0, s_perf_pso_hashbytes = 0;
++static int s_perf_texres = 0;   /* J-Stars patch 2900: committed texture/upload resources created in this PERF window */
+ static u64    s_perf_nverts = 0;
+ static u64    s_perf_texbytes = 0;
+ static int    s_perf_ntex = 0;
+@@ -4004,6 +4005,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+                 D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+                 &IID_ID3D12Resource, (void**)&t->res)))
+             return -1;
++        s_perf_texres++;
+         fresh = 1;
+     }
+     /* Stage the decoded image in the ring, or in the slot's own upload
+@@ -4048,6 +4050,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+                     D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                     &IID_ID3D12Resource, (void**)&t->up)))
+                 return -1;
++            s_perf_texres++;
+         }
+         up_res = t->up;
+     }
+@@ -6946,7 +6949,7 @@ static void render_frame(void)
+             double fr = s_perf_frame > 0 ? s_perf_frame : 1;
+             fprintf(stderr, "[PERF] %.2f fps | tex %.2fs (%.0f%%, %d calls) | vtx %.2fs"
+                             " (%.0f%%, %.0fk verts) | render_frame %.2fs (%.0f%%)"
+-                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | guest %.2fs (%.0f%%)%c",
++                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | texres %d | guest %.2fs (%.0f%%)%c",
+                     20.0 / fr,
+                     s_perf_tex, 100.0 * s_perf_tex / fr, s_perf_ntex,
+                     s_perf_vtx, 100.0 * s_perf_vtx / fr,
+@@ -6955,12 +6958,12 @@ static void render_frame(void)
+                     s_perf_pre, 100.0 * s_perf_pre / fr,
+                     s_perf_srv, 100.0 * s_perf_srv / fr,
+                     s_perf_pso, 100.0 * s_perf_pso / fr,
+-                    s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
++                    s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024, s_perf_texres,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
+             s_perf_pso_calls = 0; s_perf_pso_miss = 0; s_perf_pso_hashbytes = 0;
+-            s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0;
++            s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0; s_perf_texres = 0;
+         }
+     }
+     { static int dt = -1;

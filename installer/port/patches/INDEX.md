@@ -66,6 +66,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2062 | fix | a display-sized texture with data in guest memory, that is not a display buffer, is not swapped for the frame | rsx_d3d12_backend.c | draw_filter_tex, render_frame | SCREEN_TEX_DATA | J-Stars |
 | 2064 | fix | the per-draw fragment constants of patch 2056 cover programs with up to 128 inline constants (was 64). | rsx_d3d12_backend.c | vp_fp_compile_blob, vp_record_cb, render_frame |  | J-Stars |
 | 2065 | fix | when the async pipeline queue of patch 2057 is full, finished builds that no draw came back for are freed | rsx_d3d12_backend.c | fp_async_queue | FPA_RECLAIM | J-Stars |
+| 2066 | fix | the D3D12 backend never frees or reuses GPU objects under a batch that may still be running: the GPU wait | rsx_d3d12_backend.c |  |  | candidate |
 | 2500 | feature | the window options of the v0.15 port: WINDOW_SIZE=<w>x<h>, FULLSCREEN=1 (borderless, F11 toggles), | rsx_d3d12_backend.c | d3d12_wndproc, create_window | WINDOW_ICON, WINDOW_SIZE, FULLSCREEN, TITLE_STATS | J-Stars |
 | 2501 | feature | the game window hides the cursor where cellPad says so (g_pad_cursor_hidden, patch 6500) and adds mouse | rsx_d3d12_backend.c | win_set_fullscreen |  | J-Stars |
 | 2502 | feature | shadow maps rendered at SHADOW_SCALE times the guest size (1-4, default 2; 1 = the game's own size). | rsx_d3d12_backend.c | vp_shadow_pack, off_ds_get, render_frame | SHADOW_SCALE | J-Stars |
@@ -81,9 +82,12 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2512 | feature | FX_FULL=1, from the v0.15 backend (after the RES_SCALE patches 2503/2504). A title's half-size effect | rsx_d3d12_backend.c | vp_fp_compile_blob, rtread_finish, rsx_d3d12_backend_init | FX_NOBLUR, FX_FULL, FX_FULL_TARGETS | J-Stars |
 | 2513 | feature | Patch 2513 (after 2502 SHADOW_SCALE and 2506): SHADOW_SOFT=<n> makes the bilinear shadow compare work on a grid of n | rsx_fp_decompiler.c | fp_shadow_helper | SHADOW_RPDB, SHADOW_SOFT, SHADOW_SCALE | J-Stars |
 | 2514 | feature | Patch 2514 (after 2048): a shadow map compared through an A8R8G8B8 view (J-Stars' two maps) is read as the depth | rsx_d3d12_backend.c | fp_txp_units_at, vp_fp_compile_blob, render_frame | SHADOW_DEPTH_DIRECT | J-Stars |
+| 2515 | feature | Patch 2515 (after 2502 SHADOW_SCALE): J-Stars softens its shadow edges with several lookups per shadow map around the | rsx_d3d12_backend.c | vp_fp_compile_blob | SHADOW_TAP_SCALE | J-Stars |
+| 2900 | experiment | the [PERF] line counts texture re-creations as `texres N` (diagnostic, read only with PERF=1). | rsx_d3d12_backend.c | RESOLVED, vp_upload_tex_slot_impl, render_frame |  | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
 | 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
+| 3900 | experiment | AUDIO_SILENCE=1 counts the mixed cellAudio blocks that are all zero (diagnostic, off by default). | cellAudio.c | audio_mix_thread_func | AUDIO_SILENCE | J-Stars |
 | 6001 | fix | export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.) | ppu_loader.cpp | ppu_resv_register |  | J-Stars |
 | 6002 | fix | g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.) | ppu_hle.cpp | ps3_hle_call |  | J-Stars |
 | 6003 | fix | PAD_SCRIPT takes an optional hold length, "<t>:<mask>:<polls>". (Upstream candidate.) | cellPad.c |  |  | J-Stars |

@@ -565,7 +565,7 @@ volatile bool g_training_mode = false;
 
 /* The port's own screen tracking. The menu objects are on the heap and move
  * (after Online Mode the main menu was at 0x48FEF150 instead of 0x48FAD1A0, pv1;
- * the maintainer's log had another object at the old address), and the menu state values
+ * The maintainer's log had another object at the old address), and the menu state values
  * change with what was opened before. What does not change is the code: each
  * screen calls its own virtual methods every frame, and they are seen in the
  * indirect-call hook with the object in r3. A screen is up while its method was
@@ -895,6 +895,9 @@ uint32_t setup_field(int slot, uint32_t off) { return 0x009540E4u + 0x2Cu * (uin
 /* 0-star choice: the slots whose CPU is a training dummy. The game keeps COM
  * level 0 (1 star); the port draws it as 0 stars and empties that CPU's pad. */
 volatile bool g_dummy[4] = { false, false, false, false };
+/* Set when Training Mode is chosen: the first character select of the session puts the CPU opponent (slot 2) at
+ * 0 stars, the training dummy (TRAINING_STARS_DEFAULT=0: off, the game's own level as before). */
+volatile bool g_zero_star_pending = false;
 volatile int g_dummy_live = 0;
 
 /* In a fight the pads number the fighters that take part, in setup order
@@ -2343,8 +2346,56 @@ void six_watch_tick(bool picking)
         std::fflush(stdout);
     }
 }
+/* MODEL_DETAIL / OBJECT_DISTANCE ("Model detail" and "Object draw distance" in the launcher). Map objects placed by
+ * locators each own a LOD object (vtable 0x008843D0, 0x70 bytes, at instance+0x80C) whose virtual select method
+ * func_003959C8 runs every frame with the object in r3: squared distance to the camera against +0x50 (LOD 0 up to,
+ * default 30), +0x54 (LOD 1 up to, 60), and when +0x58 != 0 a cull distance +0x5C (100) beyond which nothing is
+ * drawn; the chosen level goes to +0x60. Defaults from func_003955B4, per-object values from the stage's
+ * LODModelInfo chunk (func_00366398 -> func_003629E4). Each object's own values are kept and scaled here, just before
+ * the game reads them. jstars-notes/GRAPHICS_MAP.md. */
+struct LodOrig { float d0, d1, cull; uint32_t w0, w1, wc, flag; };
+std::unordered_map<uint32_t, LodOrig> g_lod_orig;
+void lod_select_hook(uint32_t o)
+{
+    static const float md = [] { const char* e = std::getenv("MODEL_DETAIL"); float v = e ? (float)std::atof(e) : 1.0f;
+                                  return v < 0.25f ? 0.25f : v > 100.0f ? 100.0f : v; }();
+    static const float od = [] { const char* e = std::getenv("OBJECT_DISTANCE"); float v = e ? (float)std::atof(e) : 1.0f;
+                                  return v < 0.0f ? 1.0f : v > 100.0f ? 100.0f : v; }();
+    /* VEGETATION=<f> ("Vegetation" in the launcher: 1 Normal, 0.66 Medium, 0.33 Low, 0 Off): plants are the map
+     * objects with their own cull distance (+0x58 set by the stage's LODModelInfo; the maintainer saw them follow
+     * OBJECT_DISTANCE). A share of them, picked by address so the same ones stay hidden, is culled at distance 0. */
+    static const float veg = [] { const char* e = exp_env("VEGETATION");   /* experiment: also hid buildings and props (11-10) */
+                                   float v = e ? (float)std::atof(e) : 1.0f;
+                                   return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }();
+    if (md == 1.0f && od == 1.0f && veg >= 1.0f) return;
+    if (o < 0x10000u || o >= 0xF0000000u || vm_read32(o) != 0x008843D0u) return;
+    const uint32_t r0 = vm_read32(o + 0x50), r1 = vm_read32(o + 0x54), rc = vm_read32(o + 0x5C);
+    auto it = g_lod_orig.find(o);
+    if (it == g_lod_orig.end() || r0 != it->second.w0 || r1 != it->second.w1 || rc != it->second.wc) {
+        LodOrig lo; std::memcpy(&lo.d0, &r0, 4); std::memcpy(&lo.d1, &r1, 4); std::memcpy(&lo.cull, &rc, 4);
+        lo.flag = it != g_lod_orig.end() ? it->second.flag : vm_read32(o + 0x58);
+        if (it != g_lod_orig.end() && r0 == it->second.w0) lo = it->second;   /* only part rewritten: keep */
+        const float n0 = lo.d0 * md, n1 = lo.d1 * md, nc = od > 0.0f ? lo.cull * od : lo.cull;
+        std::memcpy(&lo.w0, &n0, 4); std::memcpy(&lo.w1, &n1, 4); std::memcpy(&lo.wc, &nc, 4);
+        g_lod_orig[o] = lo;
+        static int nlog = 0;
+        if (nlog++ < 6) std::printf("[lod] %08X: detail %g/%g -> %g/%g, cull %s %g -> %g\n", o, lo.d0, lo.d1, n0, n1,
+                                    vm_read32(o + 0x58) ? "on" : "off", lo.cull, nc);
+        it = g_lod_orig.find(o);
+    }
+    vm_write32(o + 0x50, it->second.w0);
+    vm_write32(o + 0x54, it->second.w1);
+    vm_write32(o + 0x5C, it->second.wc);
+    if (od == 0.0f) vm_write32(o + 0x58, 0);   /* never stop drawing */
+    if (veg < 1.0f && it->second.flag) {
+        const uint32_t h = (o >> 4) * 2654435761u;
+        if ((float)(h >> 8) / 16777216.0f >= veg) { vm_write32(o + 0x58, 1); vm_write32(o + 0x5C, 0); }   /* hidden */
+    }
+}
+
 int training_icall(uint32_t target, uint64_t* gpr)
 {
+    if (target == 0x003959C8u) { lod_select_hook((uint32_t)gpr[3]); return 0; }
     if (g_probe_on == 1) probe_icall(target, (uint32_t)gpr[3], (uint32_t)gpr[4]);
     /* SIX_ICALL=1 (test only): calls into the setup-table functions (0x00183528..0x00186E00) while the match loads,
      * each target with its first arguments, the first 6 times each, to find what asks which slot is a Support. */
@@ -2660,6 +2711,17 @@ void training_unlock_slots()
  * port watches the level rather than single presses. */
 void training_charsel(uint16_t* b, uint16_t* lx)
 {
+    if (g_zero_star_pending) {   /* the opponent starts as the 0-star training dummy */
+        g_zero_star_pending = false;
+        static const bool on = [] { const char* e = std::getenv("TRAINING_STARS_DEFAULT"); return !(e && *e == '0'); }();
+        if (on && vm_read32(setup_field(2, 0x00)) == 2) {   /* slot 2 is a CPU */
+            const uint32_t screen = g_seen_charsel.obj;
+            const uint32_t bases[3] = { 0x009540E4u, screen + 0x38, screen + 0x168 };   /* the setup and the screen's copies */
+            for (uint32_t base : bases) vm_write32(base + 0x2Cu * 2u + 0x18u, 0);   /* the game's 1 star */
+            g_dummy[2] = true;                                                     /* shown and played as 0 */
+            std::printf("[training] slot 2: 0 stars by default (training dummy)\n");
+        }
+    }
     const uint16_t LEFT = 0x0080, RIGHT = 0x0020, SELECT = 0x0001;
     static uint16_t prev_dir = 0;
     static bool hold = false;       /* swallow left/right until they are let go */
@@ -2742,7 +2804,8 @@ void stage_slide_tick()
  * positions measured on screenshots cs2/cs3). */
 int training_copy_rects(short (*r)[6], int max)
 {
-    if (training_active() && screen_up(g_seen_stage_time, 0x00880018u)) {
+    static const bool lock_pic = [] { const char* e = std::getenv("TRAINING_LOCK_PICTURE"); return e && *e == '1'; }();
+    if (lock_pic && training_active() && screen_up(g_seen_stage_time, 0x00880018u)) {   /* with the port's padlock only */
         stage_slide_tick();
         const int off = g_slide_drawn;
         if (off < 0 || 1065 + off + 24 > 1280) return 0;
@@ -2781,6 +2844,9 @@ void stage_lock(uint16_t* b, uint16_t* lx)
     if (!on_stagesel()) return;
     vm_write32(g_seen_stage.obj + 0x78, 0);
     vm_write32(g_seen_stage_time.obj + 0x40, 0);
+    /* The game's own lock, as Victory Road shows it: the Time Limit box's word +0x38 = 1 draws the gold padlock
+     * badge on the box (Victory Road vs Free Battle dumps, bench\exp\stage-dumps; poke runs pokeB/pokeC). */
+    vm_write32(g_seen_stage_time.obj + 0x38, 1);
     const uint16_t CROSS = 0x4000, LEFT = 0x0080, RIGHT = 0x0020;
     if (stage_focus() == 3) {   /* the time limit can't be opened or changed */
         *b = (uint16_t)(*b & ~(CROSS | LEFT | RIGHT));
@@ -2859,6 +2925,9 @@ const uint32_t* stage_lock_stamp(short* x, short* y, short* w, short* h, short* 
 {
     if (const uint32_t* menu = tb_stamp(x, y, w, h, show_w, show_h)) return menu;
     if (!training_active() || !on_stagesel()) return nullptr;
+    /* the game draws its own lock badge now (stage_lock); TRAINING_LOCK_PICTURE=1: the port's padlock as before */
+    static const bool pic = [] { const char* e = std::getenv("TRAINING_LOCK_PICTURE"); return e && *e == '1'; }();
+    if (!pic) return nullptr;
     static uint32_t px[24 * 24];
     static bool made = false;
     if (!made) {
@@ -3128,7 +3197,7 @@ void free_battle_box(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
             if (r == 1 || r == 0) {
                 if (g_training_mode && r != 0) training_unlock_slots();
                 g_training_mode = r == 0; left_menu = false;
-                if (r == 0) for (int k = 0; k < 4; k++) g_dummy[k] = false;
+                if (r == 0) { for (int k = 0; k < 4; k++) g_dummy[k] = false; g_zero_star_pending = true; }
                 std::printf("[training] Free Battle box: %s\n", r == 0 ? "Training Mode" : "Free Battle");
                 state = 2; pulse = 0;
             } else {
@@ -3283,8 +3352,30 @@ void two_player_watch(uint16_t b)   /* port 0, every poll */
     g_two_players = two;
 }
 
+/* SHADOW_RANGE=<f> ("Shadow distance" in the launcher: 1 Normal, 2 Far; 1-2): the game keeps shadows within a range
+ * of its ShadowServer (the singleton func_003CD9E4 returns, *(*(r2 + 0x464C))): +0xF0 = 0.5 near, +0xF4 = far (150 in
+ * a fight, 10 in the intros). Far scales the far end each poll, so shadows reach further from the fighter. More than
+ * x2 spreads the shadow map's depth too thin: speckled self-shadow patches and a line that moves with the camera,
+ * and from about x8 other fighters' shadows drop out (the maintainer's test, 11-10). jstars-notes/GRAPHICS_MAP.md. */
+void shadow_range_tick()
+{
+    static const float f = [] { const char* e = std::getenv("SHADOW_RANGE"); float v = e ? (float)std::atof(e) : 1.0f;
+                                 return v < 1.0f ? 1.0f : v > 2.0f ? 2.0f : v; }();
+    if (f <= 1.0f) return;
+    const uint32_t srv = vm_read32(vm_read32(0x008D3888u + 0x464Cu));
+    if (srv < 0x10000u || srv >= 0xF0000000u) return;
+    static float base = 0.0f, written = -1.0f;
+    const uint32_t raw = vm_read32(srv + 0xF4); float cur; std::memcpy(&cur, &raw, 4);
+    if (cur != written) base = cur;   /* the game set a new value */
+    if (!(base > 0.0f && base < 100000.0f)) return;
+    const float want = base * f;
+    if (want != cur) { uint32_t w; std::memcpy(&w, &want, 4); vm_write32(srv + 0xF4, w); }
+    written = want;
+}
+
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
+    if (port == 0) shadow_range_tick();
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
     else if (port == 1 && !g_two_players) {
         static const bool always = [] { const char* e = std::getenv("PAD_P2_ALWAYS"); return e && *e == '1'; }();

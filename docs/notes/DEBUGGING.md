@@ -42,6 +42,7 @@ run per hop (addresses were stable between runs).
 | `GCM_DRAINDBG=1` | FIFO walker passes: get/put, why it stopped |
 | `GCM_CIRCLE_DUMP=1` | last 64 non-zero FIFO words when the walker circles (local edit) |
 | `GCM_FIFO_SNAP=N` | raw words at get and put for N drains |
+| `AUDIO_SILENCE=1` | toolkit patch 3900: `[audio-silence]` running total of all-zero mixed audio blocks, every 1000 blocks (crackling shows as silent blocks) |
 | `PS3_FSLOG_EOF=fd,bytes` | fake EOF on a descriptor (J-Stars' movie player just retries — not useful) |
 
 `docs\DIAGNOSTICS.md` in ps3recomp lists ~470 more.
@@ -97,7 +98,8 @@ RPCS3. Its log (`RPCS3\log\RPCS3.log`, copied to `jstars\run\rpcs3_reference.log
   - Convert BMPs with System.Drawing (see the session's commands) to view them.
 - Screenshots of the game window: `jstars\snap_window.ps1 -At "60,90" [-Out dir]`. It uses
   PrintWindow, so it works while covered. A 1x1 PNG means the window was gone or hung.
-- `PERF=1`: per-second `[PERF]` line showing fps, texture/vertex upload, pipeline time and misses.
+- `PERF=1`: per-second `[PERF]` line showing fps, texture/vertex upload, pipeline time and misses, and (toolkit patch
+  2900) `texres N`, the texture resources created in that window.
 - Shader tools:
   - `FP_LIST=1`: every FP compile;
   - `FP_PICK=<hex>`: writes `run\duck_fp.hlsl`;

@@ -1,0 +1,27 @@
+Patch 3900: AUDIO_SILENCE=1 counts the mixed cellAudio blocks that are all zero (diagnostic, off by default).
+
+Counts each mixed block that is all zero, before the clip, so exactly what the backend receives, and logs
+"[audio-silence] blocks= silent= window=" every 1000 blocks (~5.3 s): the running total since start and the last window.
+AUDIO_RATE=1 reports a windowed silent share only; the running total lets two runs of the same route be compared
+(crackling shows as silent blocks). Windows mix thread only.
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 7845843..ecfc475 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -650,6 +650,15 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+           if (_ap) { static unsigned _n = 0; const float pk = audio_mix_peak();
+             if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
+                 fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
++        /* J-Stars patch 3900 (diagnostic, off by default): AUDIO_SILENCE=1 counts mixed blocks that are all zero
++         * (before the clip, so exactly what the backend receives) and prints the running total and the last window
++         * every 1000 blocks (~5.3 s). AUDIO_RATE=1 gives the windowed share only. */
++        { static int _as = -1; if (_as < 0) _as = getenv("AUDIO_SILENCE") ? 1 : 0;
++          if (_as) { static unsigned long _t, _z, _lt, _lz; int nz = 0;
++            for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
++            _t++; if (!nz) _z++;
++            if ((_t % 1000) == 0) { fprintf(stderr, "[audio-silence] blocks=%lu silent=%lu window=%lu/%lu\n", _t, _z, _z - _lz, _t - _lt);
++                _lt = _t; _lz = _z; } } }
+         audio_dump_mix();
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+         /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
