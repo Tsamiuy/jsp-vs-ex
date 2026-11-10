@@ -1,0 +1,200 @@
+Patch 6503: the DualSense (PS5 controller, also the Edge) over USB or Bluetooth, from the v0.15 port. Windows has no
+XInput driver for it, so with INPUT_MODE=controller the game fell back to the keyboard. A reader thread opens it as a
+raw HID device (vendor 054C, product 0CE6 / 0DF2; Bluetooth is switched to the full report by reading feature report
+0x05) and keeps the newest input report; port 0 uses it when XInput has no controller there, turned into an
+XINPUT_STATE so the PAD_BTN_* rebinds apply (Cross = A, Circle = B, Square = X, Triangle = Y, Create = BACK,
+Options = START). Also while port 0's empty-slot recheck is pending. PAD_NO_DUALSENSE=1 turns it off. Links setupapi
+and hid (system DLLs). No rumble or lightbar.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d68ec3ee..24c0fd6f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -141,6 +141,8 @@ if(WIN32)
+         ws2_32      # Winsock for network modules
+         ole32       # COM for WASAPI audio
+         bcrypt      # BCryptGenRandom for SSL RNG
++        setupapi    # 6503: cellPad DualSense (HID device list)
++        hid         # 6503: cellPad DualSense (HID reports)
+     )
+ else()
+     # cellPad and cellAudio select their SDL2 backends unconditionally off
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 885c95f8..e12ae460 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -61,6 +61,11 @@ static double pad_clock(unsigned long long t0_ms)
+    * so on a stock Windows 10/11 the exe did not start (0xC0000135). The DLL is
+    * loaded at run time instead, see pad_xinput_load(). */
+   #include <xinput.h>
++  /* 6503: the DualSense is read as a raw HID device (hid.dll and setupapi.dll ship with every Windows). */
++  #include <setupapi.h>
++  #include <hidsdi.h>
++  #pragma comment(lib, "setupapi.lib")
++  #pragma comment(lib, "hid.lib")
+ #endif
+ 
+ #if PAD_BACKEND_SDL2
+@@ -641,26 +646,147 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+ #define PAD_EMPTY_RECHECK_MS 1000
+ static unsigned long long s_pad_empty_until[PAD_MAX_HOST_PORTS];
+ 
++/* DualSense (PS5) over USB or Bluetooth, read as a raw HID device: Windows
++ * has no XInput driver for it. A reader thread keeps the newest input report;
++ * pad_dualsense_state() turns it into an XINPUT_STATE so port 0 goes through
++ * the same mapping (and PAD_BTN_* rebinds, with Cross = A position, Circle = B,
++ * Square = X, Triangle = Y, Create = BACK, Options = START). Used only when
++ * XInput has no controller on port 0. PAD_NO_DUALSENSE=1 turns it off. (Patch 6503, from the v0.15 port.) */
++static SRWLOCK s_ds_lock = SRWLOCK_INIT;
++static unsigned char s_ds_report[80];
++static volatile LONG s_ds_ok = 0;          /* 1 while a DualSense is open and reporting */
++static volatile LONG s_ds_len = 0;         /* length of the newest report */
++
++static HANDLE ds_open(int* bt)
++{
++    GUID g; HidD_GetHidGuid(&g);
++    HDEVINFO set = SetupDiGetClassDevsA(&g, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
++    if (set == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
++    HANDLE found = INVALID_HANDLE_VALUE;
++    SP_DEVICE_INTERFACE_DATA ifd; ifd.cbSize = sizeof ifd;
++    for (DWORD k = 0; found == INVALID_HANDLE_VALUE && SetupDiEnumDeviceInterfaces(set, NULL, &g, k, &ifd); k++) {
++        DWORD need = 0;
++        SetupDiGetDeviceInterfaceDetailA(set, &ifd, NULL, 0, &need, NULL);
++        SP_DEVICE_INTERFACE_DETAIL_DATA_A* d = (SP_DEVICE_INTERFACE_DETAIL_DATA_A*)malloc(need);
++        if (!d) continue;
++        d->cbSize = sizeof *d;
++        if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, d, need, NULL, NULL)) {
++            HANDLE h = CreateFileA(d->DevicePath, GENERIC_READ | GENERIC_WRITE,
++                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
++            if (h != INVALID_HANDLE_VALUE) {
++                HIDD_ATTRIBUTES a; a.Size = sizeof a;
++                PHIDP_PREPARSED_DATA pp; HIDP_CAPS caps;
++                if (HidD_GetAttributes(h, &a) && a.VendorID == 0x054C &&
++                    (a.ProductID == 0x0CE6 || a.ProductID == 0x0DF2) &&       /* DualSense, DualSense Edge */
++                    HidD_GetPreparsedData(h, &pp)) {
++                    HidP_GetCaps(pp, &caps); HidD_FreePreparsedData(pp);
++                    *bt = caps.InputReportByteLength > 64;                       /* USB 64, Bluetooth 78 */
++                    found = h;
++                } else CloseHandle(h);
++            }
++        }
++        free(d);
++    }
++    SetupDiDestroyDeviceInfoList(set);
++    return found;
++}
++
++static DWORD WINAPI ds_reader(LPVOID unused)
++{
++    (void)unused;
++    for (;;) {
++        int bt = 0;
++        HANDLE h = ds_open(&bt);
++        if (h == INVALID_HANDLE_VALUE) { Sleep(2000); continue; }
++        /* Bluetooth starts in a short DS4-style report; reading feature report
++         * 0x05 (calibration) switches it to the full 0x31 report. */
++        if (bt) { unsigned char f[64] = {0x05}; HidD_GetFeature(h, f, 41); }
++        printf("[cellPad] DualSense connected (%s)\n", bt ? "Bluetooth" : "USB"); fflush(stdout);
++        unsigned char buf[96];
++        for (;;) {
++            DWORD n = 0;
++            if (!ReadFile(h, buf, sizeof buf, &n, NULL) || n < 10) break;
++            AcquireSRWLockExclusive(&s_ds_lock);
++            memcpy(s_ds_report, buf, n < sizeof s_ds_report ? n : sizeof s_ds_report);
++            s_ds_len = (LONG)n;
++            ReleaseSRWLockExclusive(&s_ds_lock);
++            InterlockedExchange(&s_ds_ok, 1);
++        }
++        InterlockedExchange(&s_ds_ok, 0);
++        CloseHandle(h);
++        printf("[cellPad] DualSense disconnected\n"); fflush(stdout);
++        Sleep(1000);
++    }
++}
++
++static int pad_dualsense_state(XINPUT_STATE* st)
++{
++    static int started = 0;
++    if (!started) {
++        started = 1;
++        if (getenv("PAD_NO_DUALSENSE")) return 0;
++        CreateThread(NULL, 64 * 1024, ds_reader, NULL, 0, NULL);
++    }
++    if (!s_ds_ok) return 0;
++    unsigned char r[80];
++    AcquireSRWLockShared(&s_ds_lock);
++    memcpy(r, s_ds_report, sizeof r);
++    ReleaseSRWLockShared(&s_ds_lock);
++    /* d = sticks/triggers/buttons as laid out in the full report:
++     * 0 LX 1 LY 2 RX 3 RY 4 L2 5 R2 6 counter 7 hat|Sq/X/O/Tri 8 L1 R1 L2 R2 Create Options L3 R3 9 PS. */
++    unsigned char d[10];
++    if (r[0] == 0x31) memcpy(d, r + 2, 10);               /* Bluetooth, full report */
++    else if (r[0] == 0x01 && s_ds_len >= 64) memcpy(d, r + 1, 10);   /* USB */
++    else if (r[0] == 0x01) {   /* Bluetooth short report (switch not taken): DS4 order */
++        d[0] = r[1]; d[1] = r[2]; d[2] = r[3]; d[3] = r[4];
++        d[7] = r[5]; d[8] = r[6]; d[9] = r[7]; d[4] = r[8]; d[5] = r[9]; d[6] = 0;
++    } else return 0;
++    memset(st, 0, sizeof *st);
++    XINPUT_GAMEPAD* gp = &st->Gamepad;
++    static const WORD hat[8] = {
++        XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_RIGHT,
++        XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_RIGHT,
++        XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT,
++        XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_LEFT };
++    if ((d[7] & 15) < 8) gp->wButtons |= hat[d[7] & 15];
++    if (d[7] & 0x10) gp->wButtons |= XINPUT_GAMEPAD_X;          /* Square */
++    if (d[7] & 0x20) gp->wButtons |= XINPUT_GAMEPAD_A;          /* Cross */
++    if (d[7] & 0x40) gp->wButtons |= XINPUT_GAMEPAD_B;          /* Circle */
++    if (d[7] & 0x80) gp->wButtons |= XINPUT_GAMEPAD_Y;          /* Triangle */
++    if (d[8] & 0x01) gp->wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
++    if (d[8] & 0x02) gp->wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
++    if (d[8] & 0x10) gp->wButtons |= XINPUT_GAMEPAD_BACK;       /* Create */
++    if (d[8] & 0x20) gp->wButtons |= XINPUT_GAMEPAD_START;      /* Options */
++    if (d[8] & 0x40) gp->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
++    if (d[8] & 0x80) gp->wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
++    gp->bLeftTrigger = d[4]; gp->bRightTrigger = d[5];
++    gp->sThumbLX = (SHORT)(((int)d[0] - 128) * 256);
++    gp->sThumbLY = (SHORT)((128 - (int)d[1]) * 256 - (d[1] == 0));   /* HID: 0 = up */
++    gp->sThumbRX = (SHORT)(((int)d[2] - 128) * 256);
++    gp->sThumbRY = (SHORT)((128 - (int)d[3]) * 256 - (d[3] == 0));
++    return 1;
++}
++
+ static void pad_poll_xinput(void)
+ {
+     const unsigned long long now = pad_now_ms();
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+-        if (s_pad_empty_until[i] && now < s_pad_empty_until[i]) {
+-            s_host_state[i].connected = 0;
+-            continue;
+-        }
+         XINPUT_STATE state;
+         memset(&state, 0, sizeof(state));
+-
+-        DWORD result = p_xi_get_state ? p_xi_get_state((DWORD)i, &state)
+-                                      : ERROR_DEVICE_NOT_CONNECTED;
++        const int skip = s_pad_empty_until[i] && now < s_pad_empty_until[i];
++        DWORD result = skip ? ERROR_DEVICE_NOT_CONNECTED
++                     : p_xi_get_state ? p_xi_get_state((DWORD)i, &state) : ERROR_DEVICE_NOT_CONNECTED;
+         if (result != ERROR_SUCCESS) {
+-            pad_host_release(&s_host_state[i]);
+-            s_pad_empty_until[i] = now + PAD_EMPTY_RECHECK_MS
+-                                 + (unsigned long long)i * (PAD_EMPTY_RECHECK_MS / PAD_MAX_HOST_PORTS);
+-            continue;
+-        }
+-        s_pad_empty_until[i] = 0;
++            if (!skip)
++                s_pad_empty_until[i] = now + PAD_EMPTY_RECHECK_MS
++                                     + (unsigned long long)i * (PAD_EMPTY_RECHECK_MS / PAD_MAX_HOST_PORTS);
++            /* 6503: no XInput controller on port 0: a DualSense stands in */
++            if (!(i == 0 && pad_dualsense_state(&state))) {
++                if (skip) s_host_state[i].connected = 0;
++                else pad_host_release(&s_host_state[i]);
++                continue;
++            }
++        } else s_pad_empty_until[i] = 0;
+ 
+         s_host_state[i].connected = 1;
+         XINPUT_GAMEPAD* gp = &state.Gamepad;

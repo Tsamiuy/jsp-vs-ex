@@ -93,3 +93,6 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 6007 | fix | PAD_SCRIPT events "+N:mask" (N clock units after the previous event fired) and "~N:mask" (once the | cellPad.c, ppu_fs.cpp |  |  | J-Stars |
 | 6008 | fix | PAD_SCRIPT "^N:mask" fires N clock units after a save-data load or save finishes, and "*N:mask" | cellPad.c, cellSaveData.c | savedata_execute_run |  | J-Stars |
 | 6009 | fix | a thread polling with back-to-back tiny sys_timer_usleep calls really sleeps (USLEEP_SPIN=1 off). | sys_timer.c | sys_timer_usleep | USLEEP_SPIN, USLEEP_AFTER_US, USLEEP_REAL_US, USLEEP_GAP_US | J-Stars |
+| 6500 | feature | input modes and bindings of the v0.15 port, on the Windows (XInput) backend: INPUT_MODE=keyboard/kbm/ | cellPad.c | pad_key_down, pad_poll_keyboard, pad_poll_xinput, pad_poll_backend | INPUT_MODE, MOUSE_SENS, PAD_NO_KEYBOARD, PAD_KEYS_SPLIT ... | J-Stars |
+| 6501 | feature | title-port hooks from the v0.15 port: g_spu_put_hook_img (every SPU PUT with the SPU image that issued it, | cellPad.c, spu_channels.c, spu_dma.h | cellPad_poll, void, mfc_do_transfer |  | J-Stars |
+| 6503 | feature | the DualSense (PS5 controller, also the Edge) over USB or Bluetooth, from the v0.15 port. Windows has no | CMakeLists.txt, cellPad.c | pad_clock, pad_xinput_stick_to_u8 | PAD_NO_DUALSENSE | J-Stars |
