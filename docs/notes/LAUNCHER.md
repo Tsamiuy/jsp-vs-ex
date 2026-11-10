@@ -195,3 +195,5 @@ Rebuilt; `--screenshots` check shows the slider at 100 % and left the settings f
 2026-11-02: Display page has Full-size smoke and effects (FX_FULL in play_settings.txt, default on).
 
 2026-11-04: Display tab has "FPS counter (bottom left)" (FPS_COUNTER=1 in play_settings.txt); the window is 24 px taller for it.
+
+2026-11-10: v19 launcher has an Online tab (Off / re-psn / Community server) that edits `repsn.ini` and `community.ini` in the shared folder (`PS3RECOMP_SHARED_DIR`, else `<install>\shared` when `jsp-install.ini` says portable=1, else `%APPDATA%\PS3Recomp`). Keys `enabled`, `server`, `name`; community `active` and `[preset LABEL]` `address`, `name`. Writes go to a temp file in the same folder, flushed, then `File.Replace`; files are re-read before each save, limited to 64 KB and 512-byte lines, and unknown lines are kept. Checked by `installer/tools/online_option_test.py` and a mono harness of the INI class; the tab was not shown on a screen.

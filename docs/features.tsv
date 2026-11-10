@@ -6,7 +6,7 @@ split-screen-layout	port	Display	Split-screen layout	Larger views and a solo-sty
 brightness-glare	port	Display	Brightness and glare	Brightness and glare options	planned	-	Parked in the notes
 dlss	port	Display	DLSS	DLSS upscaling	planned	-	Parked in the notes
 fps-counter	port	Display	FPS counter	The game's own frames per second, bottom left, fading in with the title screen	available	off	FPS_COUNTER=1 or the launcher's “FPS counter (bottom left)” box
-launcher	port	Input and launcher	Launcher	A window to start the game, pick resolution and window size, choose how to play, rebind keys and set the fight HUD size	available	on	[LAUNCHER.md](docs/notes/LAUNCHER.md)
+launcher	port	Input and launcher	Launcher	A window to start the game, pick resolution and window size, choose how to play, rebind keys, set the fight HUD size and pick the online method (off, re-psn or a community server)	available	on	[LAUNCHER.md](docs/notes/LAUNCHER.md)
 input-modes	port	Input and launcher	Keyboard, mouse or controller	Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings	available	controller	Hands-on tests of mouse mode and rebinds are pending in the notes
 dualsense	port	Input and launcher	DualSense	A DualSense or DualSense Edge over USB or Bluetooth is read directly	in progress	on	Hands-on tests of the buttons are pending
 second-player	port	Input and launcher	Second player	A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before	available	on	

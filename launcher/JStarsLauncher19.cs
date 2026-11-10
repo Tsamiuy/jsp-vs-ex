@@ -59,6 +59,206 @@ namespace JStarsLauncher
         public PadButton(string id, string label, string def) { Id = id; Label = label; Default = def; Value = def; }
     }
 
+    // The two online settings files shared by the ports, in the shared folder (see SharedDir): repsn.ini ([repsn]
+    // enabled, server, name) and community.ini ([community] enabled, active; [preset LABEL] address, name). The
+    // launcher only writes the keys it owns and keeps every other line (comments, unknown keys) as it was.
+    // Files are untrusted input: at most 64 KB, lines of at most 512 bytes; a file outside that is not read and not
+    // overwritten. Saves go to a temp file in the same folder, flushed to disk, then replace the old file in one step.
+    class OnlineIni
+    {
+        public const int MaxFileBytes = 64 * 1024, MaxLineBytes = 512, MaxPresets = 64;
+
+        class Sec { public string Name; public List<string> Lines = new List<string>(); }   // Name == null: lines before the first header
+        readonly List<Sec> secs = new List<Sec>();
+        public readonly string FilePath;
+        public bool Exists;
+
+        public OnlineIni(string path) { FilePath = path; secs.Add(new Sec()); }
+
+        // Returns null when read, else why the file cannot be used.
+        public static string Load(string path, out OnlineIni ini)
+        {
+            ini = new OnlineIni(path);
+            if (!File.Exists(path)) return null;
+            string fn = Path.GetFileName(path);
+            if (new FileInfo(path).Length > MaxFileBytes) return fn + " is larger than 64 KB; not read.";
+            string text;
+            try { text = File.ReadAllText(path, Encoding.UTF8); }
+            catch (Exception e) { return "Cannot read " + fn + ": " + e.Message; }
+            ini.Exists = true;
+            Sec cur = ini.secs[0];
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                if (Encoding.UTF8.GetByteCount(line) > MaxLineBytes) return fn + " has a line longer than 512 bytes; not read.";
+                string t = line.Trim();
+                if (t.Length > 2 && t[0] == '[' && t[t.Length - 1] == ']')
+                {
+                    cur = new Sec { Name = t.Substring(1, t.Length - 2).Trim() };
+                    ini.secs.Add(cur);
+                }
+                cur.Lines.Add(line);
+            }
+            // a trailing newline made one empty last line: drop it so a rewrite does not grow the file
+            Sec last = ini.secs[ini.secs.Count - 1];
+            if (last.Lines.Count > 0 && last.Lines[last.Lines.Count - 1].Length == 0) last.Lines.RemoveAt(last.Lines.Count - 1);
+            return null;
+        }
+
+        Sec Find(string name)
+        {
+            foreach (Sec s in secs)
+                if (s.Name != null && string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)) return s;
+            return null;
+        }
+
+        static bool KeyLine(string line, string key)
+        {
+            string t = line.Trim();
+            if (t.Length == 0 || t[0] == ';' || t[0] == '#' || t[0] == '[') return false;
+            int eq = t.IndexOf('=');
+            return eq > 0 && string.Equals(t.Substring(0, eq).Trim(), key, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public string Get(string section, string key)
+        {
+            Sec s = Find(section);
+            if (s == null) return null;
+            string v = null;
+            foreach (string l in s.Lines)
+                if (KeyLine(l, key)) v = l.Substring(l.IndexOf('=') + 1).Trim();   // the last one wins
+            return v;
+        }
+
+        public void Set(string section, string key, string value)
+        {
+            Sec s = Find(section);
+            if (s == null) { s = new Sec { Name = section }; s.Lines.Add("[" + section + "]"); secs.Add(s); }
+            for (int i = s.Lines.Count - 1; i >= 0; i--)   // the last one wins, so that is the one to change
+                if (KeyLine(s.Lines[i], key)) { s.Lines[i] = key + "=" + value; return; }
+            int at = s.Lines.Count;
+            while (at > 1 && s.Lines[at - 1].Trim().Length == 0) at--;   // before the blank lines that end the section
+            s.Lines.Insert(at, key + "=" + value);
+        }
+
+        // A comment at the top of a file that does not exist yet.
+        public void SetPreamble(string comment)
+        {
+            if (!Exists && secs[0].Lines.Count == 0) secs[0].Lines.Add(comment);
+        }
+
+        public List<string> PresetLabels()
+        {
+            var r = new List<string>();
+            foreach (Sec s in secs)
+                if (s.Name != null && s.Name.StartsWith("preset ", StringComparison.OrdinalIgnoreCase)) r.Add(s.Name.Substring(7).Trim());
+            return r;
+        }
+
+        public void RemovePreset(string label)
+        {
+            for (int i = secs.Count - 1; i > 0; i--)
+                if (secs[i].Name != null && string.Equals(secs[i].Name, PresetSection(label), StringComparison.OrdinalIgnoreCase)) secs.RemoveAt(i);
+        }
+
+        public static string PresetSection(string label) { return "preset " + label; }
+
+        string Render()
+        {
+            var sb = new StringBuilder();
+            foreach (Sec s in secs) foreach (string l in s.Lines) sb.Append(l).Append("\r\n");
+            return sb.ToString();
+        }
+
+        // Temp file beside the target, flushed to disk, then File.Replace (or a move for a new file). On any failure
+        // the temp file is removed and the old file stays as it was. Returns null or an error text.
+        public string Save()
+        {
+            string fn = Path.GetFileName(FilePath);
+            string text = Render();
+            if (Encoding.UTF8.GetByteCount(text) > MaxFileBytes) return fn + " would be larger than 64 KB; not saved.";
+            string tmp = FilePath + ".tmp" + Process.GetCurrentProcess().Id;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                byte[] data = new UTF8Encoding(false).GetBytes(text);
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                {
+                    fs.Write(data, 0, data.Length);
+                    fs.Flush(true);
+                }
+                if (File.Exists(FilePath)) File.Replace(tmp, FilePath, null);
+                else File.Move(tmp, FilePath);
+                Exists = true;
+                return null;
+            }
+            catch (Exception e)
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                return "Cannot save " + fn + ": " + e.Message;
+            }
+        }
+
+        // The shared folder: PS3RECOMP_SHARED_DIR, else <install root>\shared when jsp-install.ini says portable=1,
+        // else %APPDATA%\PS3Recomp.
+        public static string SharedDir(string installRoot)
+        {
+            string env = Environment.GetEnvironmentVariable("PS3RECOMP_SHARED_DIR");
+            if (!string.IsNullOrEmpty(env)) return env;
+            try
+            {
+                string ini = Path.Combine(installRoot, "jsp-install.ini");   // same rule as the settings window
+                if (File.Exists(ini))
+                    foreach (string line in File.ReadAllLines(ini))
+                        if (line.Replace(" ", "").ToLowerInvariant() == "portable=1") return Path.Combine(installRoot, "shared");
+            }
+            catch { }
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PS3Recomp");
+        }
+
+        static bool Alnum(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'); }
+
+        // host[:port]: letters, digits, '.', '-' or '_' in the host, a port of 1..65535 when given.
+        public static bool ValidAddress(string a)
+        {
+            if (a == null || a.Length == 0 || a.Length > 260) return false;
+            string host = a;
+            int c = a.LastIndexOf(':');
+            if (c >= 0)
+            {
+                host = a.Substring(0, c);
+                string ps = a.Substring(c + 1);
+                int port;
+                if (ps.Length == 0 || ps.Length > 5) return false;
+                foreach (char ch in ps) if (ch < '0' || ch > '9') return false;
+                if (!int.TryParse(ps, out port) || port < 1 || port > 65535) return false;
+            }
+            if (host.Length == 0 || host.Length > 253) return false;
+            foreach (char ch in host)
+                if (!(Alnum(ch) || ch == '.' || ch == '-' || ch == '_')) return false;
+            return true;
+        }
+
+        // Online name: 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.
+        public static bool ValidName(string n)
+        {
+            if (n == null || n.Length < 3 || n.Length > 16) return false;
+            if (!Alnum(n[0]) || (n[0] >= '0' && n[0] <= '9')) return false;
+            foreach (char ch in n) if (!(Alnum(ch) || ch == '_' || ch == '-')) return false;
+            return true;
+        }
+
+        // Preset label: 1 to 32 of A-Z a-z 0-9 _ -.
+        public static bool ValidLabel(string n)
+        {
+            if (n == null || n.Length < 1 || n.Length > 32) return false;
+            foreach (char ch in n) if (!(Alnum(ch) || ch == '_' || ch == '-')) return false;
+            return true;
+        }
+    }
+
+    class Preset { public string Label, Address, Name; }
+
     class LauncherForm : Form, IMessageFilter
     {
         // ---- paths (the launcher sits in the PS3Recomp folder) ----
@@ -156,6 +356,7 @@ namespace JStarsLauncher
             BuildUi();
             loading = true;
             LoadSettings();
+            LoadOnline();
             loading = false;
             RefreshKeyBoxes();
             RefreshPadBoxes();
@@ -174,6 +375,7 @@ namespace JStarsLauncher
             Shot("controls_keyboard", 1, 0);
             Shot("controls_kbm", 1, 1);
             Shot("controls_controller", 1, 2);
+            Shot("online", tabs.TabPages.Count - 1, -1);
             modeBox.SelectedIndex = mode;
             Close();
         }
@@ -259,6 +461,7 @@ namespace JStarsLauncher
             tabs.TabPages.Add(BuildDisplayTab());
             tabs.TabPages.Add(graphicsTab);
             tabs.TabPages.Add(BuildControlsTab());
+            tabs.TabPages.Add(BuildOnlineTab());
             Controls.Add(tabs);
 
             // Bottom bar
@@ -751,6 +954,281 @@ namespace JStarsLauncher
         }
 
         // =====================================================================
+        // Online tab: repsn.ini and community.ini in the shared folder (OnlineIni). Not part of play_settings.txt, and
+        // the launcher sets no online environment variable for the game: the game reads the files itself (a variable
+        // set by hand still wins there). Keys that belong to the game itself are never shown or written here.
+        // =====================================================================
+        RadioButton rbOnOff, rbOnRepsn, rbOnComm;
+        TextBox repsnServerBox, repsnNameBox, presetLabelBox, presetAddrBox, presetNameBox;
+        ListBox presetList;
+        Button presetAddBtn, presetUpdBtn, presetDelBtn, presetActiveBtn, onlineSaveBtn;
+        Label onlineMsg, onlineWhere;
+        Panel repsnPanel, commPanel;
+        readonly List<Preset> presets = new List<Preset>();
+        readonly List<string> loadedLabels = new List<string>();
+        string activeLabel = "";
+        bool onlineDirty;
+
+        string RepsnPath() { return Path.Combine(OnlineIni.SharedDir(root), "repsn.ini"); }
+        string CommunityPath() { return Path.Combine(OnlineIni.SharedDir(root), "community.ini"); }
+
+        TabPage BuildOnlineTab()
+        {
+            var p = new TabPage("Online") { Padding = new Padding(12), AutoScroll = true };
+            int y = 16;
+            p.Controls.Add(new Label { Text = "Online play", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 24;
+            rbOnOff = new RadioButton { Text = "Off", Location = P(16, y), AutoSize = true, Checked = true };
+            rbOnRepsn = new RadioButton { Text = "re-psn", Location = P(90, y), AutoSize = true };
+            rbOnComm = new RadioButton { Text = "Community server", Location = P(180, y), AutoSize = true };
+            EventHandler pick = delegate { OnlineChanged(); };
+            rbOnOff.CheckedChanged += pick; rbOnRepsn.CheckedChanged += pick; rbOnComm.CheckedChanged += pick;
+            p.Controls.Add(rbOnOff); p.Controls.Add(rbOnRepsn); p.Controls.Add(rbOnComm);
+            y += 26;
+            p.Controls.Add(new Label {
+                Text = "Only one is used. Choosing one turns the other off when you save.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 34;
+
+            repsnPanel = new Panel { Location = P(0, y), Size = Z(730, 130) };
+            repsnPanel.Controls.Add(new Label { Text = "re-psn server", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            repsnPanel.Controls.Add(new Label { Text = "Server", Location = P(16, 28), Size = Z(110, 20) });
+            repsnServerBox = new TextBox { Location = P(130, 25), Width = S(260), MaxLength = 260 };
+            repsnServerBox.TextChanged += delegate { OnlineChanged(); };
+            repsnPanel.Controls.Add(repsnServerBox);
+            repsnPanel.Controls.Add(new Label { Text = "host or host:port, port 36100 when left out", Location = P(400, 28), AutoSize = true, ForeColor = SystemColors.GrayText });
+            repsnPanel.Controls.Add(new Label { Text = "Online name", Location = P(16, 60), Size = Z(110, 20) });
+            repsnNameBox = new TextBox { Location = P(130, 57), Width = S(160), MaxLength = 16 };
+            repsnNameBox.TextChanged += delegate { OnlineChanged(); };
+            repsnPanel.Controls.Add(repsnNameBox);
+            repsnPanel.Controls.Add(new Label { Text = "3 to 16 of A-Z a-z 0-9 _ -, starting with a letter", Location = P(300, 60), AutoSize = true, ForeColor = SystemColors.GrayText });
+            p.Controls.Add(repsnPanel);
+            y += 140;
+
+            commPanel = new Panel { Location = P(0, y), Size = Z(730, 300) };
+            commPanel.Controls.Add(new Label { Text = "Community server", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            commPanel.Controls.Add(new Label {
+                Text = "Features that exist only in this port do not work on a community server.",
+                Location = P(16, 22), AutoSize = true, ForeColor = SystemColors.GrayText });
+            presetList = new ListBox { Location = P(16, 50), Size = Z(330, 150), Font = new Font("Consolas", 9F) };
+            presetList.SelectedIndexChanged += delegate { PresetPicked(); };
+            commPanel.Controls.Add(presetList);
+            commPanel.Controls.Add(new Label { Text = "Preset name", Location = P(366, 53), Size = Z(90, 20) });
+            presetLabelBox = new TextBox { Location = P(460, 50), Width = S(200), MaxLength = 32 };
+            commPanel.Controls.Add(presetLabelBox);
+            commPanel.Controls.Add(new Label { Text = "Address", Location = P(366, 85), Size = Z(90, 20) });
+            presetAddrBox = new TextBox { Location = P(460, 82), Width = S(200), MaxLength = 260 };
+            commPanel.Controls.Add(presetAddrBox);
+            commPanel.Controls.Add(new Label { Text = "Online name", Location = P(366, 117), Size = Z(90, 20) });
+            presetNameBox = new TextBox { Location = P(460, 114), Width = S(160), MaxLength = 16 };
+            commPanel.Controls.Add(presetNameBox);
+            presetAddBtn = new Button { Text = "Add", Location = P(366, 150), Size = Z(70, 28) };
+            presetUpdBtn = new Button { Text = "Update", Location = P(442, 150), Size = Z(70, 28) };
+            presetDelBtn = new Button { Text = "Delete", Location = P(518, 150), Size = Z(70, 28) };
+            presetActiveBtn = new Button { Text = "Use this one", Location = P(366, 184), Size = Z(110, 28) };
+            presetAddBtn.Click += delegate { PresetAdd(); };
+            presetUpdBtn.Click += delegate { PresetUpdate(); };
+            presetDelBtn.Click += delegate { PresetDelete(); };
+            presetActiveBtn.Click += delegate { PresetUse(); };
+            commPanel.Controls.Add(presetAddBtn); commPanel.Controls.Add(presetUpdBtn);
+            commPanel.Controls.Add(presetDelBtn); commPanel.Controls.Add(presetActiveBtn);
+            commPanel.Controls.Add(new Label {
+                Text = "The preset marked * is the one used. Presets are kept in community.ini;\r\nthe launcher ships none.",
+                Location = P(16, 208), AutoSize = true, ForeColor = SystemColors.GrayText });
+            p.Controls.Add(commPanel);
+            y += 296;
+
+            onlineSaveBtn = new Button { Text = "Save online settings", Location = P(16, y), Size = Z(170, 30) };
+            onlineSaveBtn.Click += delegate {
+                string err = SaveOnline();
+                if (err != null) MessageBox.Show(this, err, Text);
+            };
+            p.Controls.Add(onlineSaveBtn);
+            onlineMsg = new Label { Location = P(196, y + 2), Size = Z(520, 40), ForeColor = Color.FromArgb(170, 90, 0) };
+            p.Controls.Add(onlineMsg);
+            onlineWhere = new Label { Location = P(16, y + 44), Size = Z(700, 20), ForeColor = SystemColors.GrayText };
+            p.Controls.Add(onlineWhere);
+            return p;
+        }
+
+        int OnlineMethod() { return rbOnRepsn.Checked ? 1 : rbOnComm.Checked ? 2 : 0; }
+
+        void OnlineChanged()
+        {
+            repsnPanel.Enabled = rbOnRepsn.Checked;
+            commPanel.Enabled = rbOnComm.Checked;
+            if (loading) return;
+            onlineDirty = true;
+            onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
+            onlineMsg.Text = "Not saved yet.";
+        }
+
+        void RefreshPresetList()
+        {
+            int sel = presetList.SelectedIndex;
+            presetList.Items.Clear();
+            foreach (Preset q in presets)
+                presetList.Items.Add((string.Equals(q.Label, activeLabel, StringComparison.OrdinalIgnoreCase) ? "* " : "  ") + q.Label + "  " + q.Address);
+            if (sel >= 0 && sel < presetList.Items.Count) presetList.SelectedIndex = sel;
+        }
+
+        void PresetPicked()
+        {
+            int i = presetList.SelectedIndex;
+            if (i < 0 || i >= presets.Count) return;
+            presetLabelBox.Text = presets[i].Label; presetAddrBox.Text = presets[i].Address; presetNameBox.Text = presets[i].Name;
+        }
+
+        // null when the three boxes hold a good preset, else what is wrong; except = index being edited
+        string PresetFieldsProblem(int except)
+        {
+            string l = presetLabelBox.Text.Trim(), a = presetAddrBox.Text.Trim(), n = presetNameBox.Text.Trim();
+            if (!OnlineIni.ValidLabel(l)) return "The preset name is 1 to 32 of A-Z a-z 0-9 _ -.";
+            if (!OnlineIni.ValidAddress(a)) return "The address is a host name or IP address, optionally :port (1 to 65535).";
+            if (!OnlineIni.ValidName(n)) return "The online name is 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.";
+            for (int i = 0; i < presets.Count; i++)
+                if (i != except && string.Equals(presets[i].Label, l, StringComparison.OrdinalIgnoreCase)) return "A preset with that name exists.";
+            return null;
+        }
+
+        void PresetMsg(string s) { onlineMsg.ForeColor = Color.FromArgb(170, 90, 0); onlineMsg.Text = s; }
+
+        void PresetAdd()
+        {
+            string why = PresetFieldsProblem(-1);
+            if (why == null && presets.Count >= OnlineIni.MaxPresets) why = "At most " + OnlineIni.MaxPresets + " presets.";
+            if (why != null) { PresetMsg(why); return; }
+            presets.Add(new Preset { Label = presetLabelBox.Text.Trim(), Address = presetAddrBox.Text.Trim(), Name = presetNameBox.Text.Trim() });
+            RefreshPresetList();
+            presetList.SelectedIndex = presets.Count - 1;
+            OnlineChanged();
+        }
+
+        void PresetUpdate()
+        {
+            int i = presetList.SelectedIndex;
+            if (i < 0 || i >= presets.Count) { PresetMsg("Pick a preset in the list first."); return; }
+            string why = PresetFieldsProblem(i);
+            if (why != null) { PresetMsg(why); return; }
+            bool wasActive = string.Equals(presets[i].Label, activeLabel, StringComparison.OrdinalIgnoreCase);
+            presets[i].Label = presetLabelBox.Text.Trim(); presets[i].Address = presetAddrBox.Text.Trim(); presets[i].Name = presetNameBox.Text.Trim();
+            if (wasActive) activeLabel = presets[i].Label;
+            RefreshPresetList();
+            OnlineChanged();
+        }
+
+        void PresetDelete()
+        {
+            int i = presetList.SelectedIndex;
+            if (i < 0 || i >= presets.Count) { PresetMsg("Pick a preset in the list first."); return; }
+            if (string.Equals(presets[i].Label, activeLabel, StringComparison.OrdinalIgnoreCase)) activeLabel = "";
+            presets.RemoveAt(i);
+            presetList.SelectedIndex = -1;
+            RefreshPresetList();
+            OnlineChanged();
+        }
+
+        void PresetUse()
+        {
+            int i = presetList.SelectedIndex;
+            if (i < 0 || i >= presets.Count) { PresetMsg("Pick a preset in the list first."); return; }
+            activeLabel = presets[i].Label;
+            RefreshPresetList();
+            OnlineChanged();
+        }
+
+        // Reads both files into the controls. A file that cannot be used is reported and left alone.
+        void LoadOnline()
+        {
+            bool was = loading; loading = true;
+            string dir = OnlineIni.SharedDir(root);
+            onlineWhere.Text = "Files: " + dir;
+            OnlineIni ri, ci;
+            string e1 = OnlineIni.Load(RepsnPath(), out ri), e2 = OnlineIni.Load(CommunityPath(), out ci);
+            string note = e1 != null ? e1 : e2;
+            bool on1 = ri.Get("repsn", "enabled") == "1", on2 = ci.Get("community", "enabled") == "1";
+            if (on1 && on2) { note = "Both files were switched on; saving turns one off."; on1 = on2 = false; }
+            rbOnRepsn.Checked = on1; rbOnComm.Checked = on2; rbOnOff.Checked = !on1 && !on2;
+            repsnServerBox.Text = ri.Get("repsn", "server") ?? "";
+            repsnNameBox.Text = ri.Get("repsn", "name") ?? "";
+            presets.Clear(); loadedLabels.Clear();
+            foreach (string l in ci.PresetLabels())
+            {
+                string sec = OnlineIni.PresetSection(l);
+                string a = ci.Get(sec, "address") ?? "", n = ci.Get(sec, "name") ?? "";
+                if (!OnlineIni.ValidLabel(l) || presets.Count >= OnlineIni.MaxPresets) continue;
+                presets.Add(new Preset { Label = l, Address = a, Name = n });
+                loadedLabels.Add(l);
+            }
+            activeLabel = ci.Get("community", "active") ?? "";
+            presetLabelBox.Text = presetAddrBox.Text = presetNameBox.Text = "";
+            RefreshPresetList();
+            repsnPanel.Enabled = rbOnRepsn.Checked; commPanel.Enabled = rbOnComm.Checked;
+            onlineDirty = false;
+            onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
+            onlineMsg.Text = note ?? "";
+            loading = was;
+        }
+
+        // Writes both files in one step: the one being switched off first, then the one switched on, so that never
+        // both say enabled=1 on disk. Both files are read again just before; only the keys owned here change.
+        // Returns null when saved, else the reason.
+        string SaveOnline()
+        {
+            int m = OnlineMethod();
+            string server = repsnServerBox.Text.Trim(), rname = repsnNameBox.Text.Trim();
+            if (m == 1)
+            {
+                if (!OnlineIni.ValidAddress(server)) return "re-psn: the server is a host name or IP address, optionally :port (1 to 65535).";
+                if (!OnlineIni.ValidName(rname)) return "re-psn: the online name is 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.";
+            }
+            Preset act = null;
+            foreach (Preset q in presets) if (string.Equals(q.Label, activeLabel, StringComparison.OrdinalIgnoreCase)) act = q;
+            if (m == 2 && act == null) return "Community server: pick a preset and press \"Use this one\" (add one first if the list is empty).";
+
+            OnlineIni ri, ci;
+            string e = OnlineIni.Load(RepsnPath(), out ri);
+            if (e != null) return e;
+            e = OnlineIni.Load(CommunityPath(), out ci);
+            if (e != null) return e;
+
+            bool writeR = ri.Exists || m == 1, writeC = ci.Exists || m == 2 || presets.Count > 0;
+            if (writeR)
+            {
+                ri.SetPreamble("; re-psn server settings. Written by the launcher; the game reads it.");
+                ri.Set("repsn", "enabled", m == 1 ? "1" : "0");
+                if (m == 1 || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname)))
+                { ri.Set("repsn", "server", server); ri.Set("repsn", "name", rname); }
+            }
+            if (writeC)
+            {
+                ci.SetPreamble("; Community server settings. Features that exist only in this port do not work on a community server.");
+                ci.Set("community", "enabled", m == 2 ? "1" : "0");
+                ci.Set("community", "active", act != null ? act.Label : "");
+                foreach (string old in loadedLabels)
+                {
+                    bool kept = false;
+                    foreach (Preset q in presets) if (string.Equals(q.Label, old, StringComparison.OrdinalIgnoreCase)) kept = true;
+                    if (!kept) ci.RemovePreset(old);
+                }
+                foreach (Preset q in presets)
+                {
+                    ci.Set(OnlineIni.PresetSection(q.Label), "address", q.Address);
+                    ci.Set(OnlineIni.PresetSection(q.Label), "name", q.Name);
+                }
+            }
+            // the side being switched off goes to disk first
+            string err = null;
+            if (m == 1) { if (writeC) err = ci.Save(); if (err == null && writeR) err = ri.Save(); }
+            else { if (writeR) err = ri.Save(); if (err == null && writeC) err = ci.Save(); }
+            if (err != null) { onlineMsg.ForeColor = Color.Firebrick; onlineMsg.Text = err; return err; }
+            LoadOnline();
+            onlineMsg.ForeColor = SystemColors.GrayText;
+            onlineMsg.Text = m == 0 ? "Saved. Online is off." : m == 1 ? "Saved. re-psn is on." : "Saved. The community server is on.";
+            return null;
+        }
+
+        // =====================================================================
         // Settings file (jstars\play_settings.txt, KEY=VALUE lines; play.ps1
         // turns every line into an environment variable for the game)
         // =====================================================================
@@ -895,6 +1373,11 @@ namespace JStarsLauncher
             if (!File.Exists(exe)) { MessageBox.Show(this, "The game is not built yet:\n" + exe, Text); return; }
             if (!File.Exists(iso)) { MessageBox.Show(this, "The game disc image was not found:\n" + iso, Text); return; }
             if (Process.GetProcessesByName("jsp").Length > 0) { MessageBox.Show(this, "The game is already running.", Text); return; }
+            if (onlineDirty)
+            {
+                string oerr = SaveOnline();   // unsaved Online tab edits are saved with the rest, or the start waits
+                if (oerr != null) { tabs.SelectedIndex = tabs.TabPages.Count - 1; MessageBox.Show(this, oerr, Text); return; }
+            }
             SaveSettings();
             gameRunning = true;
             startBtn.Enabled = false;

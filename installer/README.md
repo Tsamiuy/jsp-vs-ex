@@ -200,7 +200,15 @@ present. Setting up the server: download it from the [re-psn releases](https://g
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.
 
-Add to the settings file (see above) of each player:
+The launcher's Online tab sets this up without editing files: Off, re-psn (server and online name) or Community server
+(a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
+not work on a community server). Choosing one turns the other off in the same save. It writes `repsn.ini` and
+`community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a
+portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. Keys that belong to the game itself
+are never changed by the launcher. The launcher sets no online environment variable; the game reads the files, and
+the variables below, when set by hand, still win over them.
+
+Or add to the settings file (see above) of each player:
 
     PS3_NET_ONLINE=1
     PSNR_SERVER=192.168.1.20:36100

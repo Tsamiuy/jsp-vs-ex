@@ -23,7 +23,7 @@ Port features: 11 available, 2 in progress, 15 planned.
 
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
-| <a id="launcher"></a>Launcher | A window to start the game, pick resolution and window size, choose how to play, rebind keys and set the fight HUD size | available | on | [LAUNCHER.md](notes/LAUNCHER.md) |
+| <a id="launcher"></a>Launcher | A window to start the game, pick resolution and window size, choose how to play, rebind keys, set the fight HUD size and pick the online method (off, re-psn or a community server) | available | on | [LAUNCHER.md](notes/LAUNCHER.md) |
 | <a id="input-modes"></a>Keyboard, mouse or controller | Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings | available | controller | Hands-on tests of mouse mode and rebinds are pending in the notes |
 | <a id="dualsense"></a>DualSense | A DualSense or DualSense Edge over USB or Bluetooth is read directly | in progress | on | Hands-on tests of the buttons are pending |
 | <a id="second-player"></a>Second player | A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before | available | on |  |
