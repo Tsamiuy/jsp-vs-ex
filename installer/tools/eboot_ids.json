@@ -1,0 +1,25 @@
+{
+ "comment": "Known decrypted EBOOTs of J-Stars Victory VS+ for installer check E3 (firstrun.py), in the shared EBOOT id table format: ids, sizes and SHA-256 hashes only, never game files or keys. sha256 and size: the decrypted EBOOT.elf, whole file. self_sha256: the disc's encrypted EBOOT.BIN. segment_sha256: firstrun.segment_hash(). status tested: the port was built and run on this build. Measured on the 1.00 discs of both regions; game update 1.02 is not listed (its EBOOT has not been measured). installer/jsp.iss repeats the two sha256 values for the wizard's region check (firstrun_selftest.py checks they match).",
+ "entries": [
+  {
+   "title_id": "BLUS31519",
+   "region": "US",
+   "app_ver": "01.00",
+   "size": 9723064,
+   "sha256": "a8a1543b914b70aa87a83e50c6d90c216d9ed1b60c49c629ddad5590874d7716",
+   "status": "tested",
+   "self_sha256": "1e71ce86047f7cf99f29904a9fd045e818730425be76b4c780f42a3d8d8975f1",
+   "segment_sha256": "eb43c5d6ebabba67c037bbf49159ef7e1e4f19eba083c1269e603a7f3520488e"
+  },
+  {
+   "title_id": "BLES02136",
+   "region": "EU",
+   "app_ver": "01.00",
+   "size": 9723080,
+   "sha256": "719e4cd4d8925cd27c541370efe3b8cfdd3d948346f4db0848704dbce0afa352",
+   "status": "tested",
+   "self_sha256": "ddd05205d4a4f40ed5510a84cc5ea07813bea43e02ac58014307021f51130fbd",
+   "segment_sha256": "c5ea9e28086884e002163b1ffb5850c7d9182a9b3dccb6c72fd58926b15e116c"
+  }
+ ]
+}
