@@ -41,10 +41,11 @@ To turn online off again, choose **Off**.
 - **Online Battle shows a connection error:** online is off or the server is not reachable. Check that the Online tab shows re-psn and
   that the server address is right. The game's log lists its online decisions on lines that start with `[online]`.
 - **Both methods on:** if re-psn and a community server are both enabled (by a hand edit), the game refuses online
-  play and says so in the log. Pick one in the Online tab.
+  play and says so in the log (`[online] ERROR: re-psn and community are both enabled`). Pick one in the Online tab.
+  An address given by hand (see below) is not affected.
 - **The room is found but the battle does not start, or freezes:** the direct link between two players failed. Ask the
   host to start the server with `-relay`, or open UDP for the game on both PCs. The game's default peer port is 3658,
-  and two copies on one PC need different ports.
+  and two copies on one PC need different ports (see below).
 - **Name refused:** use 3 to 16 letters, digits, `-` or `_`, starting with a letter, and not a name another player
   already uses on that server.
 
@@ -61,9 +62,22 @@ server = 192.0.2.10:36100
 name = yourname
 ```
 
-Online values set by hand in the settings file (`PS3_NET_ONLINE`, `PSNR_SERVER`, `PS3_NP_ONLINE_ID`) still win over these
-files.
+The game reads these files when it starts, so changes apply on the next start. Each decision is written to the game's
+log on a line that starts with `[online]`. The game's own `repsn.ini` can also set `p2p_port`, in the game folder:
+`<install folder>` for a portable install, else `%APPDATA%\JSP Fan Revival\`:
+
+```ini
+[repsn]
+p2p_port = 3659
+```
+
+What wins, strongest first: the command-line options `--psnr` and `--username`, then the environment variables
+(`PSNR_SERVER` for the server, `PS3_NP_ONLINE_ID` for the name, `PS3_NET_P2P_PORT` for the peer port, also when set in the
+launcher's settings file), then the files. Setting `PS3_NET_ONLINE` alone changes nothing here: the server address
+decides. An address given by hand also skips the "both methods on" refusal.
+
+The peer port is 3658 unless `p2p_port` or `PS3_NET_P2P_PORT` says otherwise.
 
 A community server, set up through the Community server presets, runs only the base game's online features. Features
 that exist only in this port do not work there. This build has no client for a community server yet, so choosing one
-keeps the game offline.
+keeps the game offline (the log says so).

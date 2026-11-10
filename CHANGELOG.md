@@ -12,6 +12,9 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
   be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
 - Launcher: an Online tab edits the shared online settings files (`repsn.ini`, `community.ini`): off, re-psn or a
   community server preset, one method at a time, written atomically; the launcher sets no online environment variable.
+- Game: reads `repsn.ini` and `community.ini` at startup and sets the runtime's online variables from them (re-psn
+  server and name, peer port; both methods on is refused, a community preset keeps the game offline, `--psnr`,
+  `--username` and environment variables win), logging on `[online]` lines; host test in CI.
 - D3D12: the GPU wait only gives up on a removed device, and the deferred-release table grows instead of freeing its
   oldest entry early (toolkit patch 2066).
 - RPCS3 save import stages incoming files before replacing progress, restores the old files after an I/O error,
