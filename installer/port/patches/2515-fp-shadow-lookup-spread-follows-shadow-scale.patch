@@ -1,0 +1,52 @@
+Patch 2515 (after 2502 SHADOW_SCALE): J-Stars softens its shadow edges with several lookups per shadow map around the
+receiver's shadow coordinate, offset by w * fp_k[m].xy (a fixed spread of about one texel of its own 2048 / 1024
+maps; two maps, blended near the cascade boundary). On a map SHADOW_SCALE times finer each lookup is sharp while the
+spread stays as wide, so the edge showed as stepped copies or a lighter rim (the maintainer's High/Ultra shots).
+In programs that compare a shadow map, the 2D products "(r).wwww * (fp_k[m]).xyxx / .xxxy" the lookups are offset by
+are scaled by SHADOW_TAP_SCALE (default 1/SHADOW_SCALE; 1 = off), so the game's soft edge stays the same number of
+texels wide on the finer map. [SHTAP] logs the first programs changed.
+
+Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 881cbb8a..8988bdca 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2978,6 +2978,37 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+               memmove(cb + new_len, cb + old_len, used - (size_t)(cb + old_len - hlsl) + 1);
+               memcpy(cb, decl, new_len);
+               hlsl_replace_all(hlsl, sizeof hlsl, "fp_constants[", "fp_k[");
++              /* SHADOW_TAP_SCALE=<f> (patch 2515; default 1/SHADOW_SCALE, 1 = off): J-Stars softens its shadow edges
++               * with several lookups per map around the receiver's shadow coordinate, offset by w * fp_k[m].xy (a
++               * fixed spread of about one texel of its own 2048 / 1024 maps). On a map SHADOW_SCALE times finer each
++               * lookup is sharp and the spread stays as wide as before, so the edge showed as stepped copies or a
++               * lighter rim (the maintainer's Ultra shots). Scaling the spread with the map keeps the game's soft edge
++               * the same number of texels wide: sharper, with no rim. Only in programs that compare a shadow map, and
++               * only the 2D products "(r).wwww * (fp_k[m]).xyxx / .xxxy" the lookups are offset by. */
++              if (any_sh && shadow_scale() > 1) {
++                  static float ts = -1.0f;
++                  if (ts < 0.0f) { const char* e = getenv("SHADOW_TAP_SCALE"); ts = e ? (float)atof(e) : 1.0f / (float)shadow_scale();
++                                   if (!(ts > 0.0f) || ts > 1.0f) ts = 1.0f; }
++                  if (ts < 1.0f) {
++                      char mul[32]; snprintf(mul, sizeof mul, " * %.6f", ts);
++                      const size_t ml = strlen(mul);
++                      int nsc = 0;
++                      for (char* q = strstr(hlsl, ".wwww) * ((fp_k["); q; q = strstr(q + 1, ".wwww) * ((fp_k[")) {
++                          char* sw = strstr(q, "]).");
++                          if (!sw || sw - q > 24) continue;
++                          sw += 3;   /* the swizzle */
++                          if (strncmp(sw, "xyxx)", 5) && strncmp(sw, "xxxy)", 5)) continue;
++                          char* at = sw + 4;   /* the ')' closing (fp_k[m]).swz */
++                          const size_t used = strlen(hlsl);
++                          if (used + ml + 1 >= sizeof hlsl) break;
++                          memmove(at + ml, at, used - (size_t)(at - hlsl) + 1);
++                          memcpy(at, mul, ml);
++                          nsc++;
++                      }
++                      { static int _n = 0; if (nsc && PS3_LOG_FIRST(_n, 8))
++                          fprintf(stderr, "[SHTAP] fp=0x%08X %d shadow lookup offsets scaled by %g%c", fp_addr, nsc, ts, 10); }
++                  }
++              }
+               cb = NULL;   /* done: skip the literal inlining below */
+               /* ALPHA_TEST (default on, =0 off; patch 2061, as v15's ALPHA_TEST): the RSX alpha test, which the
+                * decompiler leaves out. render_frame already fills rsx_alphatest per draw (x enable, y ref/255,

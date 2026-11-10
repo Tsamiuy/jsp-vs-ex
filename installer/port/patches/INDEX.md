@@ -82,6 +82,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2512 | feature | FX_FULL=1, from the v0.15 backend (after the RES_SCALE patches 2503/2504). A title's half-size effect | rsx_d3d12_backend.c | vp_fp_compile_blob, rtread_finish, rsx_d3d12_backend_init | FX_NOBLUR, FX_FULL, FX_FULL_TARGETS | J-Stars |
 | 2513 | feature | Patch 2513 (after 2502 SHADOW_SCALE and 2506): SHADOW_SOFT=<n> makes the bilinear shadow compare work on a grid of n | rsx_fp_decompiler.c | fp_shadow_helper | SHADOW_RPDB, SHADOW_SOFT, SHADOW_SCALE | J-Stars |
 | 2514 | feature | Patch 2514 (after 2048): a shadow map compared through an A8R8G8B8 view (J-Stars' two maps) is read as the depth | rsx_d3d12_backend.c | fp_txp_units_at, vp_fp_compile_blob, render_frame | SHADOW_DEPTH_DIRECT | J-Stars |
+| 2515 | feature | Patch 2515 (after 2502 SHADOW_SCALE): J-Stars softens its shadow edges with several lookups per shadow map around the | rsx_d3d12_backend.c | vp_fp_compile_blob | SHADOW_TAP_SCALE | J-Stars |
 | 2900 | experiment | the [PERF] line counts texture re-creations as `texres N` (diagnostic, read only with PERF=1). | rsx_d3d12_backend.c | RESOLVED, vp_upload_tex_slot_impl, render_frame |  | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
