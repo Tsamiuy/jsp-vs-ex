@@ -192,6 +192,8 @@ With none of them the defaults apply (`settings: none found`). The installed gam
 
 ## Online Battle (experimental)
 
+Quick start for players: [docs/ONLINE.md](../docs/ONLINE.md).
+
 The game's own Online Battle can run against a [re-psn](https://github.com/undecuple/re-psn) server instead of PSN: a small
 matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
 match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in

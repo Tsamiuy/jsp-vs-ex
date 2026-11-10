@@ -45,7 +45,7 @@ first build takes a while and needs several GB of free space, and `Build again` 
 | Higher resolutions, a resizable window and borderless fullscreen | [Features: Display](docs/FEATURES.md#resolution) |
 | Keyboard, mouse or controller, with a launcher to rebind keys | [Features: Input](docs/FEATURES.md#input-modes) |
 | Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
-| The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [installer/README.md, "Online Battle"](installer/README.md#online-battle-experimental) |
+| The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [docs/ONLINE.md](docs/ONLINE.md) (quick start) |
 
 ## Coming soon
 
