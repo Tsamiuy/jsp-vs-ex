@@ -8,6 +8,8 @@ All notable changes are listed here, newest first. The format follows
 
 What `main` has so far; `docs/FEATURES.md` lists each item with how it was tested.
 
+- Setup checks the decrypted EBOOT against the known 1.00 builds and refuses the other region's. An unknown build can
+  be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
 - D3D12: the GPU wait only gives up on a removed device, and the deferred-release table grows instead of freeing its
   oldest entry early (toolkit patch 2066).
 - RPCS3 save import stages incoming files before replacing progress, restores the old files after an I/O error,
