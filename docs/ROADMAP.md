@@ -39,6 +39,10 @@ v0.19.0 toolkit is on main in `installer/port` (#2, merged); it is an opt-in ins
   engine allows it); all three online too, see section 4 ([details](FEATURES.md#match-sizes))
 - 📋 Your own music files in place of the game's tracks (your files, never shipped) ([details](FEATURES.md#own-music))
 - 📋 An unlock-all switch for the progression bars and J-Points, as a save edit with a backup ([details](FEATURES.md#unlock-all))
+- 📋 **Cross-Save with RPCS3, without PSN:** one save that moves both ways between the port and RPCS3 as a plain copy,
+  since RPCS3 keeps this game's save unencrypted. Setup can already import an RPCS3 save once; not tested yet: an RPCS3
+  save in the newer tree (`--tree v18`) and a port save in RPCS3. Saves from a real PS3 are encrypted and are a separate
+  question ([issue #30](https://github.com/Tsamiuy/jsp-vs-ex/issues/30))
 
 ## 4. Online with rollback netcode  📋
 
@@ -73,8 +77,8 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 - Distributing any game files: no disc image, EBOOT, firmware, recompiled game code or game assets. You bring your own
   copy of the game, and the port is built from it on your PC
-- Anything that needs PSN: Cross-Save stays unavailable, and online play goes through a re-psn server (section 4), never
-  PSN
+- Anything that needs PSN: the PSN Cross-Save stays unavailable (Cross-Save with RPCS3 is planned, section 3), and online
+  play goes through a re-psn server (section 4), never PSN
 
 ## In short
 
