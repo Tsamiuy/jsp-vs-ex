@@ -1,0 +1,40 @@
+Patch 6010 (fix line): the FIFO walker force-recycles a title's own command ring only after the title has stayed
+past the ring's end for 500 ms (GCM_OVERRUN_HOLD_MS, 0 = the old immediate behaviour).
+
+The walker recycles a title's ring itself (JUMP at the write head, current/put/get to begin) once it has seen the
+title's write head past `end`: a title whose buffer-full callback declines (AMGL) stays there for good, and that is
+the only way on. J-Stars recycles its own ring in its callback; on a slow PC (no boost, 8 threads, Radeon 610M) one
+fight load in about ten saw the write head past `end` for a moment, the walker recycled under the title's own
+callback, `get` jumped to `begin` past commands it had not read (fence and label writes among them) and the game
+stopped for good (bench/exp/2026-11-10_2025-memo-off-lowend: "recycled the title's own ring", then no flip). A
+declining callback is wedged for good, so waiting half a second costs such a title one short pause; a title that is
+only passing through gets to finish its own recycle.
+
+Tested (US disc): see the bench runs named in STATUS (6010).
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 3457a309..4a805bf3 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -3177,8 +3177,20 @@ static void gcm_rsx_process_fifo_unlocked(void)
+          * overruns first, so the first overrun is recycled by the path above
+          * and near-end recycling is enabled from then on. */
+         static int s_title_overran = 0;
++        static double s_overrun_since = 0;   /* patch 6010: when the write head was first seen past `end` */
+         if (s_fifo_recycle_waiting) head_consumed = 0;   /* its callback is recycling */
+-        else if (begin && end > begin && cur > end) { head_consumed = 1; s_title_overran = 1; }   /* `end` is the last word: cur == end is full, not overrun */
++        else if (begin && end > begin && cur > end) {   /* `end` is the last word: cur == end is full, not overrun */
++            /* Patch 6010: only once the title has STAYED past `end` (GCM_OVERRUN_HOLD_MS, default 500; 0 = at once).
++             * A title whose callback recycles its own ring can be past `end` for a moment; recycling under it then
++             * drops the tail it has not read yet (J-Stars froze at a fight load on a slow PC). */
++            static int hold_ms = -1;
++            if (hold_ms < 0) { const char* e = getenv("GCM_OVERRUN_HOLD_MS"); hold_ms = e ? atoi(e) : 500; }
++            const double now = ftl_now();
++            if (s_overrun_since == 0) s_overrun_since = now;
++            if (hold_ms == 0 || now - s_overrun_since >= (double)hold_ms) { head_consumed = 1; s_title_overran = 1; }
++            else head_consumed = 0;
++        }
++        if (!(begin && end > begin && cur > end)) s_overrun_since = 0;   /* patch 6010 */
+         if (begin && end > begin && cur >= begin && cur + GCM_RECYCLE_SLACK >= end
+                 && head_consumed && s_title_overran) {
+             u32 io_begin = gcm_ea2io(begin);
