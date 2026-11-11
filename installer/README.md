@@ -220,7 +220,7 @@ game's own `repsn.ini` (in the install folder when portable, else `%APPDATA%\JSP
 Or add to the settings file (see above) of each player:
 
     PS3_NET_ONLINE=1
-    PSNR_SERVER=192.168.1.20:36100
+    PSNR_SERVER=192.0.2.10:36100
     PS3_NP_ONLINE_ID=yourname
 
 `PSNR_SERVER` is the server's address and port; `PS3_NP_ONLINE_ID` is the name other players see (up to 16 characters).
