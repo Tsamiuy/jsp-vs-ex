@@ -10,10 +10,10 @@ change without the scale.
 Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 55cb37ad..687059a4 100644
+index e20f7f25..527586e2 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -477,6 +477,23 @@ static float s_rs = 1.0f;   /* 2504: any factor 1-4 (1.25 = 900p, 1.5 = 1080p, 2
+@@ -478,6 +478,23 @@ static float s_rs = 1.0f;   /* 2504: any factor 1-4 (1.25 = 900p, 1.5 = 1080p, 2
  /* A guest size in resource pixels at scale sc (rounded). */
  static u32 RSZ(u32 v, float sc) { return (u32)((float)v * sc + 0.5f); }
  static int s_rs_zfull = 0;
@@ -37,7 +37,7 @@ index 55cb37ad..687059a4 100644
  static u32 rs_tiny(u32 w, u32 h) { return w && h && (w < 32u || h < 32u); }
  char g_rsx_title_base[128] = "ps3recomp";
  static u32 s_dbg_last_draws = 0;
-@@ -3257,6 +3274,15 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+@@ -3267,6 +3284,15 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
          char* rp = strstr(hlsl, "return r[0];");
          if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
      }
@@ -53,7 +53,7 @@ index 55cb37ad..687059a4 100644
      if (t_fp_defer) { *t_fp_defer = _strdup(hlsl); return NULL; }   /* 2057 */
      ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
      hr = sc_compile(hlsl, "guest_fp", "ps_5_0", &pb, &e);
-@@ -6392,8 +6418,45 @@ static void rtread_finish(void)
+@@ -6493,8 +6519,45 @@ static void rtread_finish(void)
   * target and its zeta must match, or the draw is clipped to the smaller), a
   * new depth-only surface 1 unless it is display-sized (shadow maps stay at
   * guest size), otherwise s_rs, 1 for a target under 32 pixels on a side. */
@@ -99,7 +99,7 @@ index 55cb37ad..687059a4 100644
      if (s_rs <= 1.0f) return 1.0f;
      if (dr->zeta_off && (dr->rt_off || dr->no_color)) {
          const int zi = off_ds_find(dr->zeta_off);
-@@ -11285,7 +11348,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -11387,7 +11450,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
          if (n > 4.0f) n = 4.0f;
          s_rs = n;
          const char* zf = getenv("ZCOPY_FULL");

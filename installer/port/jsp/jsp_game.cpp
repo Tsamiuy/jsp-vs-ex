@@ -565,7 +565,7 @@ volatile bool g_training_mode = false;
 
 /* The port's own screen tracking. The menu objects are on the heap and move
  * (after Online Mode the main menu was at 0x48FEF150 instead of 0x48FAD1A0, pv1;
- * The maintainer's log had another object at the old address), and the menu state values
+ * the maintainer's log had another object at the old address), and the menu state values
  * change with what was opened before. What does not change is the code: each
  * screen calls its own virtual methods every frame, and they are seen in the
  * indirect-call hook with the object in r3. A screen is up while its method was
@@ -3051,12 +3051,13 @@ void auto_press(uint16_t button, unsigned long long now, unsigned hold_ms, unsig
 
 void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
-    if (!kExp) return;   /* experiment */
+    /* In the Features build too since 11-10 (the maintainer: test with the auto-pilot from now on); it only runs when
+     * AUTO_FIGHT or AUTO_MENU is set (Test Fight v19.bat, bench), never in normal play. */
     static bool read = false;
     static int menu_row = -1;
     if (!read) {
         read = true;
-        if (const char* e = exp_env("AUTO_FIGHT")) {
+        if (const char* e = std::getenv("AUTO_FIGHT")) {
             int me = -1, opp = -1, sup = -1, stage = -1;
             if (std::sscanf(e, "%d %d %d %d", &me, &opp, &sup, &stage) >= 3) {
                 force_me = me; force_opp = opp; force_sup = sup;
@@ -3066,7 +3067,7 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
         }
         /* AUTO_MENU="<row>" (test only): the same walk, stopping on that main menu row (from 0)
          * and handing the pad back. Off in normal play. */
-        if (const char* e = exp_env("AUTO_MENU")) {
+        if (const char* e = std::getenv("AUTO_MENU")) {
             menu_row = std::atoi(e);
             g_auto.on = true; g_auto.t0 = GetTickCount64();
             auto_log("started");

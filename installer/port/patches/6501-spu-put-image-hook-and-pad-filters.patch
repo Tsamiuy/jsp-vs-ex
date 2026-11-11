@@ -8,10 +8,10 @@ PS3-only text in unpacked files, the Exit Game option, Free Battle boxes and the
 Tested (US disc): builds and runs with the hooks unset (feature build).
 
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5ab5614d..885c95f8 100644
+index 0a1540e2..06a3cd33 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
-@@ -1126,6 +1126,11 @@ void cellPad_poll(void)
+@@ -869,6 +869,11 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -23,7 +23,7 @@ index 5ab5614d..885c95f8 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -1425,6 +1430,21 @@ skip_inject: ;
+@@ -1168,6 +1173,21 @@ skip_inject: ;
      data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = hs->analog_lx;
      data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]  = hs->analog_ly;
  

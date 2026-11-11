@@ -410,10 +410,10 @@ index c4eb87db..b43be83f 100644
       * same poll delivers them. A no-op when no psnr server is configured. */
      { extern void np_psnr_pump(void); np_psnr_pump(); }
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index c84e6a35..9004b3ae 100644
+index e93ca483..a8a691c0 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -792,8 +792,30 @@ static void win_set_fullscreen(HWND h, int on)
+@@ -793,8 +793,30 @@ static void win_set_fullscreen(HWND h, int on)
      s_win_full = on;
  }
  
@@ -444,7 +444,7 @@ index c84e6a35..9004b3ae 100644
      switch (msg) {
      case WM_MOUSEWHEEL: {   /* 2501: cellPad mouse menus (INPUT_MODE=kbm, patch 6500): wheel = up/down */
          extern volatile long g_pad_wheel;
-@@ -5956,6 +5978,324 @@ static float rs_draw_sc(const D3D12DrawRecord* dr)
+@@ -6057,6 +6079,324 @@ static float rs_draw_sc(const D3D12DrawRecord* dr)
      return rs_tiny(dr->rt_w, dr->rt_h) ? 1.0f : s_rs;
  }
  
@@ -769,7 +769,7 @@ index c84e6a35..9004b3ae 100644
  static void render_frame(void)
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
-@@ -7402,6 +7742,7 @@ skip_dump_consider: ;
+@@ -7504,6 +7844,7 @@ skip_dump_consider: ;
          /* End-of-frame fallback snapshot: used when the frame never contained a
           * reduced-viewport pass to capture mid-frame. */
          screen_copy_capture(fi);
@@ -777,7 +777,7 @@ index c84e6a35..9004b3ae 100644
          /* Transition render target to PRESENT state */
          barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
          barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-@@ -10439,6 +10780,13 @@ void rsx_d3d12_backend_shutdown(void)
+@@ -10541,6 +10882,13 @@ void rsx_d3d12_backend_shutdown(void)
      printf("[D3D12] Backend shut down\n");
  }
  
