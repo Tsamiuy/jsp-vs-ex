@@ -656,18 +656,11 @@ pass_flags=0x3F aux=0` on all samples. So the gate passes every frame; the quest
   falls into the main pass at `loc_003A4684`.
 - Main pass (`loc_003A4684` .. `loc_003A4E30`): set colour target `[server+0x18A38]` and depth `[server+0x18A40]`
   (inlined "set target if changed" blocks: compare, flush matrices, `func_00527BE4`), set surface flags, then the
-  **draw loop** at `loc_003A4CC4`/`loc_003A4D14`:
-  ```
-  node = [server+0x1880C] - 164          // head of the active-emitter list (link at node+0xA4/+0xA8,
-  if (!node) goto end                     //  count at server+0x18814)
-  do {
-      vt = [node]; render = [vt+0x24]     // virtual slot 9
-      render(node, r25, 0, 0, params); render(node, r25, 2, 0, params);
-      render(node, r25, 0, 1, params); render(node, r25, 2, 1, params); render(node, r25, 3, 1, params);
-      node = [node+0xA8] - 164
-  } while (node);
-  end: func_005259CC(ctx)                 // end pass
-  ```
+  **draw loop** (`loc_003A4CC4`/`loc_003A4D14`):
+  it walks the active-emitter list, whose head is at `server+0x1880C`
+  (link at `node+0xA8`, count at `server+0x18814`). For each emitter it calls the emitter's own virtual `render`
+  (slot 9) five times, with the (pass, layer) pairs (0,0), (2,0), (0,1), (2,1) and (3,1), and then ends the pass
+  with `func_005259CC`.
   `params = server+0x18A50`, `r25` = the function's second argument (the game passes it through
   `func_0039C7FC` -> `func_0039DBA8`; callers `func_0002FAA4`-area lr 0x0002FB64 and `func_0024A4B4` lr 0x0024A584).
   `RenderLuminance` itself issues **no draw commands**: every draw comes from the emitter's virtual `render`.
