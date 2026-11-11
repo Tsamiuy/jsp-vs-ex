@@ -87,8 +87,7 @@ jobs:
           Copy-Item (Join-Path $dl 'plex\ibm-plex-mono\fonts\complete\ttf\IBMPlexMono-Bold.ttf') build\installer\fonts\
 
       - name: Inno Setup (pinned)
-        # Always the pinned version, the same approach as the release workflow of
-        # undecuple's Killzone 3 port (Project Helghast). ISCC.exe carries no
+        # Always the pinned version. ISCC.exe carries no
         # version resource (it reads 0.0.0.0); the uninstaller (unins000.exe) next to it does, padded with spaces.
         shell: pwsh
         run: |
