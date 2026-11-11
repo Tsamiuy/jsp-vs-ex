@@ -17,9 +17,9 @@ on:
         type: number
         default: 7
       tree:
-        description: Which port to build (v18 is the ps3recomp v0.19.0 port, the default; v15 is the earlier one)
+        description: Which port to build (current is the default; legacy is the earlier v0.15 port)
         type: string
-        default: v18
+        default: current
   workflow_call:
     inputs:
       portable:
@@ -31,9 +31,9 @@ on:
         type: number
         default: 7
       tree:
-        description: Which port to build (v18 is the ps3recomp v0.19.0 port, the default; v15 is the earlier one)
+        description: Which port to build (current is the default; legacy is the earlier v0.15 port)
         type: string
-        default: v18
+        default: current
 
 permissions:
   contents: read
@@ -130,7 +130,7 @@ jobs:
       - name: Payload and setup
         shell: pwsh
         env:
-          TREE: ${{ inputs.tree || 'v18' }}
+          TREE: ${{ inputs.tree || 'current' }}
         run: |
           python installer\tools\assemble_payload.py --tree $env:TREE
           if ($LASTEXITCODE -ne 0) { exit 1 }

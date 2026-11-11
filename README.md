@@ -14,7 +14,7 @@
 
 | ~30 fps | ~29 fps | 34,092 | 0 |
 |:---:|:---:|:---:|:---:|
-| fights, v19 tree (the default) | fights, earlier v15 tree (`--tree v15`) | game functions recompiled | game files in this repository |
+| fights, current tree (the default) | fights, earlier v15 tree (`--tree legacy`) | game functions recompiled | game files in this repository |
 
 The frame rates were measured on one Windows machine; see [Status](#status).
 
@@ -58,9 +58,9 @@ first build takes a while and needs several GB of free space, and `Build again` 
 ## Status
 
 > **Work in progress, not a release.** The default build (the v19 tree, built on ps3recomp v0.19.0; the installer switch is
-> still called `--tree v18`) lifts and builds on Windows (Direct3D 12) and boots, plays the opening movie, the menus and fights
+> `--tree current`) lifts and builds on Windows (Direct3D 12) and boots, plays the opening movie, the menus and fights
 > with sound, at about 30 frames per second in the demo and in Free Battle on one Windows machine (its earlier v18 build, on
-> toolkit v0.18.0, ran at 16 to 22). It has had fewer tests than the earlier v15 tree (`--tree v15`, about 29 frames per second):
+> toolkit v0.18.0, ran at 16 to 22). It has had fewer tests than the earlier v15 tree (`--tree legacy`, about 29 frames per second):
 > the EU disc, the first-start window and long runs are not re-checked on it, and it has known problems (see Known problems
 > below and [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)). The game port was run on one Windows PC (see #9); this
 > installer and zip are untested on native Windows and were exercised only under Proton on Linux.

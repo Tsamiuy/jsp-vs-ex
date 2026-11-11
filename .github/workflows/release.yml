@@ -61,7 +61,7 @@ jobs:
     uses: ./.github/workflows/installer.yml
     with:
       portable: true
-      tree: v18
+      tree: current
       keep_days: 30
 
   draft:

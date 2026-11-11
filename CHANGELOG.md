@@ -8,8 +8,10 @@ All notable changes are listed here, newest first. The format follows
 
 What `main` has so far; `docs/FEATURES.md` lists each item with how it was tested.
 
-- Installer and CI: the port on ps3recomp v0.19.0 (`installer/port`, switch `--tree v18`) is now the default tree of
-  `assemble_payload.py`, `installer.yml` (new `tree` input) and `release.yml`; the earlier v15 tree stays selectable with `--tree v15`.
+- Installer and CI: the port on ps3recomp v0.19.0 (`installer/port`) is now the default tree of
+  `assemble_payload.py`, `installer.yml` (new `tree` input) and `release.yml`. The switch is `--tree current` (the default) or
+  `--tree legacy` (the earlier v0.15 port); the names do not change with the toolkit version. The older `v18`, `v19` and `v15`
+  are still accepted.
 
 - Setup checks the decrypted EBOOT against the known 1.00 builds and refuses the other region's. An unknown build can
   be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
