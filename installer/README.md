@@ -202,7 +202,7 @@ present. Setting up the server: download it from the [re-psn releases](https://g
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.
 
-The settings window's Online tab (the same tab is in the v19 launcher) sets this up without editing files: Off, re-psn (server and online name) or Community server
+The settings window's Online tab (the same tab is also in `launcher/JStarsLauncher19.cs`) sets this up without editing files: Off, re-psn (server and online name) or Community server
 (a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
 not work on a community server). Choosing one turns the other off in the same save. It writes `repsn.ini` and
 `community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a

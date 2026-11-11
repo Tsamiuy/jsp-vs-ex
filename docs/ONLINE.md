@@ -6,8 +6,8 @@ re-psn is a small matchmaking server that one player, or anyone else, hosts.
 - **Peer to peer:** the match itself goes directly between the players' games. If a direct link fails, it goes through
   the server's relay, but only when the host turned the relay on.
 
-Online is experimental and off by default. It needs the v19 build (an installer assembled with `--tree v18`, see
-[installer/README.md](../installer/README.md#online-battle-experimental)).
+Online is experimental and off by default. It needs the `v18` tree of the installer (an installer assembled with
+`--tree v18`, which builds the port on ps3recomp v0.19.0; see [installer/README.md](../installer/README.md#online-battle-experimental)).
 
 ## 1. One player hosts a server
 
@@ -54,6 +54,7 @@ Limits:
   allow UDP port 36100 as well as the TCP port.
 - If nothing is found, the Server field can still be filled by hand.
 - Discovery needs re-psn 0.5.0 or later. Older releases do not answer and Find on LAN finds nothing.
+- Find on LAN shows whatever answers on the local network. A reply is not authenticated, so pick the server you know.
 - The launcher sends one small broadcast and shows only what answers; it does not connect to anything until you start
   the game.
 
