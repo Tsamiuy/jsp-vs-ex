@@ -1,10 +1,19 @@
 name: pages
 
 # Builds the fan page from README.md and NOTICE.md and publishes it with GitHub Pages.
-# Run by hand (Actions > pages > Run workflow) once Settings > Pages > Source is set to GitHub Actions; without
-# Pages the deploy job fails, so it does not run on pushes. A push trigger can be added when Pages is on.
+# Run by hand (Actions > pages > Run workflow) once Settings > Pages > Source is set to GitHub Actions.
+# On pushes that change README.md, NOTICE.md or the generator, the build job always runs (it checks the page); the
+# deploy job runs on a push only when the repository variable PAGES_ENABLED is "true" (Settings > Secrets and
+# variables > Actions > Variables), because without Pages the deploy fails and a workflow cannot read whether Pages is on.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - NOTICE.md
+      - tools/site/**
+      - .github/workflows/pages.yml
 
 permissions:
   contents: read
@@ -29,6 +38,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.event_name == 'workflow_dispatch' || vars.PAGES_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

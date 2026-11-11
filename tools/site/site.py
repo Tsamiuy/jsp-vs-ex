@@ -426,7 +426,8 @@ def build(readme, notice, out):
     _, nsecs = sections(notice)
     ids = {slug(t) for t, _ in secs}
     intro = list(blocks(pre))
-    intro = [(k, v) for k, v in intro if k in ("p", "quote") and not (k == "quote" and "status" in ids)]
+    # The placeholder sample repeated its status as a leading quote; the README's leading quote is the own-copy notice: keep that.
+    intro = [(k, v) for k, v in intro if k in ("p", "quote") and not (k == "quote" and "status" in ids and "own copy" not in str(v).lower())]
     parts = [box("About", intro, "about")] if intro else []
     for title, body in secs:
         parts.append(box(title, list(blocks(body)), slug(title)))
@@ -511,16 +512,20 @@ def check(page, css):
             errs.append("internal path or word: " + lab)
     ids = set(re.findall(r'<section id="([^"]+)" class="nfo"', page))
     # The real README has "No game data" (own copy, no files here) where the placeholder sample had "Getting it".
-    for need in ("status", "requirements", "licence"):
-        if not any(need in i for i in ids):
+    # The README carries the requirements under "How to play" (Windows version, tools, disk space).
+    for need, alts in (("status", ("status",)), ("requirements", ("requirements", "how-to-play")), ("licence", ("licence",))):
+        if not any(a in i for i in ids for a in alts):
             errs.append("missing section: " + need)
-    if not ids & {"getting-it", "no-game-data"}:
+    # Own-copy notice: a section of its own, or the leading notice in the About box.
+    about = re.search(r'<section id="about" class="nfo">(.*?)<!--/flat-->', page, re.S)
+    about_txt = re.sub(r"<[^>]+>", " ", about.group(1)) if about else ""
+    if not (ids & {"getting-it", "no-game-data"}) and not re.search(r"\bno game (code|data|files)\b", about_txt, re.I):
         errs.append("missing section: getting-it or no-game-data")
     sm = re.search(r'<section id="status" class="nfo">(.*?)<!--/flat-->', page, re.S)
     if sm:
         body = sm.group(1).split('<div class="flat">', 1)[-1]
-        if not re.search(r"\bas of\b[^.]{0,40}?\d{4}-\d{2}-\d{2}", re.sub(r"<[^>]+>", " ", body), re.I):
-            errs.append("status section lacks 'As of YYYY-MM-DD'")
+        if not re.search(r"\b(as of|refreshed|updated)\b[^.]{0,40}?\d{4}-\d{2}-\d{2}", re.sub(r"<[^>]+>", " ", body), re.I):
+            errs.append("status section lacks a date ('As of', 'refreshed' or 'updated' YYYY-MM-DD)")
     if "nfo" not in page or "Unofficial fan site" not in page or TAGLINE not in page:
         errs.append("missing unofficial label or tagline")
     size = len(page.encode()) + len(css.encode())
