@@ -11,7 +11,8 @@ The full steps are in `docs/notes/SETUP.md`; this page lists what you need and t
 - The ps3recomp toolkit: a submodule at `third_party/ps3recomp`, pinned to `v0.15.0`, plus this repository's
   changes to it in `toolkit/ps3recomp-local.patch` (see [Toolkit](#toolkit) below). The port has not yet been
   built from that folder on a clean machine; the notes build from a local checkout with the same changes.
-- An RPCS3 installation; the port reads its `dev_flash` folder at run time (read only).
+- Optional: an RPCS3 installation, only if you want to set `PS3_DEV_FLASH` to its `dev_flash` folder; the game reads nothing from
+  `dev_flash` in testing.
 
 ## Steps
 
@@ -52,7 +53,7 @@ machine: [SCRIPTS.md](SCRIPTS.md).
 
 ## Installer
 
-An installer that runs the steps above on a player's PC (disc folder, decrypted EBOOT.elf and `dev_flash` folder chosen in the
-wizard) is built with Inno Setup on Windows: see [installer/README.md](../installer/README.md). It carries a pinned llvm-mingw,
+An installer that runs the steps above on a player's PC (disc folder and decrypted EBOOT.elf chosen in the wizard; a
+`dev_flash` folder is optional and only accepted as the silent `/DEVFLASH=` argument) is built with Inno Setup on Windows: see [installer/README.md](../installer/README.md). It carries a pinned llvm-mingw,
 CMake and Ninja, so the player needs no Visual Studio. The same payload is also packed as a portable zip. Its build step has
 not been run on a real Windows PC yet.

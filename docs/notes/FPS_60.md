@@ -10,10 +10,11 @@ a smoother one. The realistic route to smoother motion is frame generation outsi
   it is the thread seen ~95% busy in flip/vblank polls). Per frame:
   1. wait for the previous flip to complete: `func_00733650` (flip status) polled with `sys_timer_usleep(200)`
      (syscall 0x8D, r3 = 0xC8);
-  2. SetFlip + flush, then, when its second argument N ≥ 1, wait until a vblank counter at
-     `*(*(TOC−0x4A80))` reaches N (it is counted up by a vblank handler), and reset it to 0.
+  2. SetFlip + flush, then, when its second argument is 1, wait until a vblank counter at
+     `*(*(TOC−0x4A80))` is at least 1 (it is counted up by a vblank handler), and reset it to 0
+     (jstars-notes/patches/frame-pacing/README.md).
 - Flip mode is VSYNC (`cellGcmSetFlipMode(2)`, FINDINGS "frames lock to vblanks"), flips complete on 60 Hz ticks,
-  and measured frames are 2 vblanks (30 fps) or 3 (20 fps) (CPU_PROFILE §37-41: 29-30 fps on most stages at best).
+  and measured frames are 2 vblanks (30 fps) or 3 (20 fps) (CPU_PROFILE §42: 29.1-29.6 f/s on all tested maps without PERF; the 20-fps frames of §37-41 were PERF's own overhead and late ticks).
   So the game itself never asks for more than one frame per 2 vblanks.
 
 ## 2. The simulation step is per frame, for 30 fps
@@ -39,8 +40,8 @@ From the skill-effects work (VFX.md, FINDINGS tscale/track):
 1. **Frame generation outside the game (recommended, no code risk).** Keep the game at a steady 30 and let a
    frame-generation tool create the in-between frames. On this PC (NVIDIA RTX laptop GPU), "Lossless
    Scaling" (works on any window) or a driver-level frame generator can show 60 or more. Cost: a little
-   latency and occasional artefacts on fast motion/HUD. It works best once the port holds 30 without 20-fps
-   dips (the current pacing work).
+   latency and occasional artefacts on fast motion/HUD. It works best when the port holds 30 without 20-fps
+   dips (measured about 29-30 f/s on the tested maps without PERF, CPU_PROFILE §42; the frame-pacing work is paused).
 2. **Interpolation inside the port (high effort, high risk).** Our port would draw an extra frame between two game
    frames with blended object transforms. The game's frames arrive as baked GPU command streams with
    SPU-skinned vertices, so there is no clean "object list" to interpolate; it would mean matching draws across
@@ -51,7 +52,7 @@ From the skill-effects work (VFX.md, FINDINGS tscale/track):
 
 ## 5. Cheap checks the AI assistant could run later (logging only), if we want certainty
 
-- Log `func_006507DC`'s second argument N and the value of the vblank counter at return. N = 1 with an extra
-  vblank from the flip wait vs N = 2 tells exactly how 30 is reached.
+- Log `func_006507DC`'s second argument N and the value of the vblank counter at return. check that the `interval == 1` path is taken every frame and how many vblanks pass
+  between two returns; that tells exactly how 30 is reached.
 - Find the writer of the timing object's 30.0 (a guard on `Q + 4` from boot). If it is computed from a frame-rate
   setting (e.g. 60 / N), there may be a hidden mode worth a test. If it is a constant, option 3 is ruled out.

@@ -1,8 +1,8 @@
 # Instructions for AI coding agents
 
 Read this before changing anything in this repository. It applies to every automated contributor (Claude Code,
-Codex, Copilot, Cursor and the like) and to the people who run them. The same rules for people are in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Codex, Copilot, Cursor and the like) and to the people who run them. The rules for people are in
+[CONTRIBUTING.md](CONTRIBUTING.md); this file adds the details for automated contributors.
 
 ## How a change reaches `main`
 
@@ -14,7 +14,8 @@ Codex, Copilot, Cursor and the like) and to the people who run them. The same ru
    one easy to read. As a guide, keep a pull request under about 400 changed lines, or say in its description why
    it has to be larger.
 3. **Run the checks before you push:** `python3 tools/ci/repo_checks.py --commits origin/main..HEAD`
-   (Python 3 and git only). CI runs the same checks on every pull request (`.github/workflows/ci.yml`).
+   (Python 3 and git only). CI runs these and more on every pull request (`.github/workflows/ci.yml`: the features page, the installer and release
+   scripts, shell and PowerShell parsing, the launcher and toolkit builds); run the relevant ones too when you touch those areas.
 4. **Open the pull request and wait for CI.** All checks must be green. If one fails, push a fix to the same
    branch; do not open a new pull request for the same change.
 5. **A maintainer merges.** Ask for a review and stop. Do not merge your own pull request, even when you have

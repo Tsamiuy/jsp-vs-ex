@@ -71,7 +71,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 - Windows 11, x64, with Direct3D 12: the target today (Windows 10 partly: the menu fix is not yet confirmed there)
 - Linux through Proton or Wine: not supported yet. The default build has not been run under Proton since the
-  thread-local fix (installer patch 0003); the v0.18.0 port (`--tree v18`) reaches fights under Proton in its tests
+  thread-local fix (installer patch 0003); the `--tree v18` port reached fights under Proton in tests of its earlier v0.18.0 build
 
 ## Not planned
 
