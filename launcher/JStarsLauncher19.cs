@@ -419,6 +419,11 @@ namespace JStarsLauncher
         };
         CheckBox fxFullBox;
         CheckBox fpsBox;
+        CheckBox unlockBox;                  // ENHANCEMENT (opt-in): one start with everything unlocked; never saved to the settings file
+        volatile bool unlockThisRun;
+        string backupNote = "";              // what BackupSave did, written to the log once RunGame has opened it
+        const string SaveName = "NPUB31647-B0";                          // US save folder (BLUS31519)
+        static readonly string[] SaveNames = { SaveName, "NPEB02204-B0" };   // US, EU (BLES02136): the launcher does not know the disc's region
         static readonly string[] AaIds = { "off", "fxaa", "fxaa2", "smaa" };
         Panel kbPanel, kbmPanel, padPanel;
         TabControl tabs;
@@ -579,6 +584,7 @@ namespace JStarsLauncher
             tabs.TabPages.Add(graphicsTab);
             tabs.TabPages.Add(BuildControlsTab());
             tabs.TabPages.Add(BuildOnlineTab());
+            tabs.TabPages.Add(BuildCheatsTab());
             Controls.Add(tabs);
 
             // Bottom bar
@@ -736,6 +742,103 @@ namespace JStarsLauncher
             // v19: the fight HUD size, edge smoothing, full-size effects and FPS counter live in the J-Stars game code,
             // which is not ported to v19 yet.
             return displayTab;
+        }
+
+        // ENHANCEMENT (opt-in, off by default): "Unlock everything". JSP_UNLOCK_ALL=1 makes the game edit its loaded save
+        // (see installer\port\jsp\jsp_unlock.cpp). The game writes the unlocks into the save itself and cannot undo them,
+        // so Start Game first copies the save folder, refuses to start if that fails, and the box unticks after one start.
+        TabPage BuildCheatsTab()
+        {
+            var p = new TabPage("Cheats") { Padding = new Padding(12) };
+            int y = 16;
+            unlockBox = new CheckBox { Text = "Unlock everything (cheat)", Location = P(16, y), AutoSize = true, Checked = false };
+            p.Controls.Add(unlockBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Next start only: backs up your save first; cannot be undone except by restoring the backup.",
+                Location = P(34, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 34;
+            p.Controls.Add(new Label {
+                Text = "All cards, J-Points, characters, supports, titles, icons, decks and coins are unlocked in the save\r\n" +
+                       "the game has loaded, and the game writes them out itself at its next save. The backup is the save folder\r\n" +
+                       "(" + string.Join(" or ", SaveNames) + ") copied beside it as BACKUP-<folder>-<date>-<time>. Unlocked titles and icons\r\n" +
+                       "are visible to online opponents; accepted online for now, which may change when online play is ready. To undo it,\r\n" +
+                       "close the game and put the backup folder back under the original name.",
+                Location = P(34, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            return p;
+        }
+
+        // The save folders this port may use (the game's data folder is <hdd0>_gamedata; the plain hdd0 layout is checked too).
+        string[] SaveFolders()
+        {
+            string hdd0 = Path.Combine(appData, "hdd0");
+            var l = new System.Collections.Generic.List<string>();
+            foreach (string n in SaveNames)
+            {
+                l.Add(Path.Combine(hdd0 + "_gamedata", @"dev_hdd0\home\00000001\savedata\" + n));
+                l.Add(Path.Combine(hdd0, @"home\00000001\savedata\" + n));
+            }
+            return l.ToArray();
+        }
+
+        // True when the game has run here before: it wrote its own data, the <hdd0>_gamedata folder (created by the game's runtime,
+        // not by this launcher) or its first-boot data install <hdd0>\game\<id>-INSTALL.
+        bool GameRanBefore()
+        {
+            string hdd0 = Path.Combine(appData, "hdd0");
+            if (Directory.Exists(hdd0 + "_gamedata")) return true;
+            string g = Path.Combine(hdd0, "game");
+            return Directory.Exists(g) && Directory.GetDirectories(g, "*-INSTALL").Length > 0;
+        }
+
+        static void CopyTree(string from, string to)
+        {
+            Directory.CreateDirectory(to);
+            foreach (string f in Directory.GetFiles(from)) File.Copy(f, Path.Combine(to, Path.GetFileName(f)), false);
+            foreach (string d in Directory.GetDirectories(from)) CopyTree(d, Path.Combine(to, Path.GetFileName(d)));
+        }
+
+        static long TreeBytes(string dir, out int files)
+        {
+            long n = 0; files = 0;
+            foreach (string f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories)) { n += new FileInfo(f).Length; files++; }
+            return n;
+        }
+
+        // Copies every existing save folder to a dated folder beside it and checks the copy (file count and bytes).
+        // Returns null when the backup is made (or the game has never run here, so there is no save yet), otherwise the reason it
+        // failed: the game must not start then. Also refused: the game has run before (GameRanBefore) but no save folder is found.
+        // The folder names are the US and the EU save folder (NPEB02204-B0, the string in the EU program).
+        string BackupSave()
+        {
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            bool any = false;
+            backupNote = "";
+            foreach (string src in SaveFolders())
+            {
+                if (!Directory.Exists(src)) continue;
+                string dst = Path.Combine(Path.GetDirectoryName(src), "BACKUP-" + Path.GetFileName(src) + "-" + stamp);
+                try
+                {
+                    if (Directory.Exists(dst)) throw new IOException("the folder " + dst + " exists already");
+                    CopyTree(src, dst);
+                    int fa, fb;
+                    long a = TreeBytes(src, out fa), b = TreeBytes(dst, out fb);
+                    if (fa != fb || a != b) throw new IOException("the copy differs from the save (" + fa + " files, " + a + " bytes; copy " + fb + ", " + b + ")");
+                    backupNote += "Save backup: " + dst + " (" + fb + " files, " + b + " bytes). ";
+                    any = true;
+                }
+                catch (Exception ex)
+                {
+                    try { if (Directory.Exists(dst)) Directory.Delete(dst, true); } catch { }
+                    return "Could not back up the save (" + src + "): " + ex.Message;
+                }
+            }
+            if (!any && GameRanBefore())
+                return "The game has been run before, but no save folder was found, so there is nothing to back up and the cheat is not started. Looked for:\n" +
+                       string.Join("\n", SaveFolders()) + "\n\nStart the game without the cheat and let it save once, or put your save folder there.";
+            if (!any) backupNote = "Save backup: the game has not run here yet, no save folder, nothing to back up.";
+            return null;
         }
 
         TabPage BuildControlsTab()
@@ -1564,6 +1667,15 @@ namespace JStarsLauncher
                 if (oerr != null) { tabs.SelectedIndex = tabs.TabPages.Count - 1; MessageBox.Show(this, oerr, Text); return; }
             }
             SaveSettings();
+            unlockThisRun = false;
+            if (unlockBox.Checked)
+            {
+                string why = BackupSave();
+                if (why != null) { Status("Not started: no save backup."); MessageBox.Show(this, why + "\n\nThe game was not started.", Text); return; }
+                unlockThisRun = true;
+                unlockBox.Checked = false;   // one start only: the unlocks are written into the save and cannot be undone
+                Status("Save backed up. Unlock everything is on for this start only.");
+            }
             gameRunning = true;
             startBtn.Enabled = false;
             var t = new Thread(RunGame); t.IsBackground = false; t.Start();
@@ -1576,6 +1688,7 @@ namespace JStarsLauncher
             Directory.CreateDirectory(Path.Combine(appData, "hdd0"));
             try { log = new StreamWriter(Path.Combine(runDir, "launcher_log.txt"), false); } catch { log = null; }
             Log("Launcher start. Settings: " + string.Join(" | ", File.ReadAllLines(settingsFile)));
+            if (unlockThisRun) Log(backupNote);
 
             bool mountedHere = false, boostOff = true;
             Process boostOn = null;
@@ -1631,6 +1744,8 @@ namespace JStarsLauncher
                     if (k.Length > 0) psi.EnvironmentVariables[k] = v;
                 }
                 boostOff = psi.EnvironmentVariables["BOOST_OFF_ON_EXIT"] != "0";
+                psi.EnvironmentVariables.Remove("JSP_UNLOCK_ALL");   // never from the settings file: only the Cheats box, after its backup
+                if (unlockThisRun) { psi.EnvironmentVariables["JSP_UNLOCK_ALL"] = "1"; Log("Unlock everything: on for this start (save backed up)."); }
 
                 Status("Starting the game...");
                 game = Process.Start(psi);

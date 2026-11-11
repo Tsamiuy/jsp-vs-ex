@@ -33,4 +33,5 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
 - Keyboard, keyboard and mouse, or controller, each with its own bindings; a second player on keyboard or a second
   controller.
 - Fight HUD size, Exit Game in Options, Training Mode, a Hide HUD row in Training and an FPS counter.
+- Opt-in "Unlock everything" cheat (launcher Cheats tab, `JSP_UNLOCK_ALL=1`): save backup first, one start only.
 - The features page (`docs/FEATURES.md`), generated from `docs/features.tsv`.
