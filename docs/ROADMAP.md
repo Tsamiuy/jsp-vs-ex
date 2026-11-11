@@ -3,8 +3,8 @@
 What is planned, in rough order. ✅ done · 🔧 in progress · 📋 planned. No dates: the order is the plan, the timing is
 not promised. Options that change gameplay are opt-in; display and input improvements may default on.
 What the port adds today: [FEATURES.md](FEATURES.md). Dated state and evidence: [notes/STATUS.md](notes/STATUS.md).
-The ✅ items describe the default build, the port in `jstars/port` on the ps3recomp v0.15 toolkit. A second port on the
-v0.19.0 toolkit is on main in `installer/port` (#2, merged); it is an opt-in installer choice (`--tree v18`).
+The ✅ items were first checked on the earlier port in `jstars/port` on the ps3recomp v0.15 toolkit (`--tree v15`). The default
+build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree v18`, #2); items not yet re-checked on it are said so in [FEATURES.md](FEATURES.md).
 
 ## 1. Playable on Windows from your own copy  🔧
 

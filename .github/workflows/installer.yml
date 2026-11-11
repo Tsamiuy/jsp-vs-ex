@@ -16,6 +16,10 @@ on:
         description: Days to keep the files (1-90)
         type: number
         default: 7
+      tree:
+        description: Which port to build (v18 is the ps3recomp v0.19.0 port, the default; v15 is the earlier one)
+        type: string
+        default: v18
   workflow_call:
     inputs:
       portable:
@@ -26,6 +30,10 @@ on:
         description: Days to keep the files (1-90)
         type: number
         default: 7
+      tree:
+        description: Which port to build (v18 is the ps3recomp v0.19.0 port, the default; v15 is the earlier one)
+        type: string
+        default: v18
 
 permissions:
   contents: read
@@ -122,8 +130,10 @@ jobs:
 
       - name: Payload and setup
         shell: pwsh
+        env:
+          TREE: ${{ inputs.tree || 'v18' }}
         run: |
-          python installer\tools\assemble_payload.py
+          python installer\tools\assemble_payload.py --tree $env:TREE
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & $env:ISCC "/DPayload=$PWD\build\installer\payload" "/O$PWD\build\installer\out" "$PWD\installer\jsp.iss"
           if ($LASTEXITCODE -ne 0) { exit 1 }

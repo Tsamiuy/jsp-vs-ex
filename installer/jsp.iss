@@ -2,7 +2,7 @@
 ; Layout (PARAM.SFO reader, per-user install, portable task) adapted by hand from the installer of undecuple's Killzone 2 PS3
 ; port (same MIT licence), without its update page, RPCS3 import, ISO reading, version check, crash report or any online
 ; piece: this installer and the program it installs contact no server and send nothing anywhere, unless the player
-; turns on Online Battle (experimental, v18 tree only) and gives a re-psn server (installer/README.md).
+; turns on Online Battle (experimental) and gives a re-psn server (installer/README.md).
 ;
 ; Per-user, no admin. It copies nothing of the game and downloads nothing. Wizard: welcome, "Use your RPCS3 install?" (optional: pre-fills
 ; the next pages from the player's RPCS3, read only; may offer to import the RPCS3 save after a shown dry run), your disc folder (PS3_GAME

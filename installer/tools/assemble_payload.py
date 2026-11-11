@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Assemble the installer payload (what jsp.iss copies into {app}): a port of the game, built on the player's PC.
 
-Two trees (--tree): "v15" (default) is this repository's earlier port (jstars/port) on the v0.15 toolkit as described below;
-"v18" is installer/port, the glue for the ps3recomp v0.19.0 toolkit, with installer/port/patches applied to the exported toolkit
-(installer/tools/export_toolkit.py). v18 stays opt-in until its open issues (sound, fight speed, fight graphics) are fixed. firstrun.py reads <payload>/tree.txt to know which recipe to run.
+Two trees (--tree): "v18" (default; the name is kept, it is the port on ps3recomp v0.19.0) is installer/port, the glue for that
+toolkit, with installer/port/patches applied to the exported toolkit (installer/tools/export_toolkit.py);
+"v15" is this repository's earlier port (jstars/port) on the v0.15 toolkit as described below, still selectable with --tree v15.
+firstrun.py reads <payload>/tree.txt to know which recipe to run.
 
 Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). The payload holds only code that
 is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
@@ -201,7 +202,7 @@ def main(argv=None):
                     help="an FFmpeg source or headers folder (libavcodec/avcodec.h ...) whose majors match the RPCS3 DLLs (default: "
                          "the ffmpeg-headers entry of fetch_toolchain.py's cache): the payload gets libavcodec/ and libavutil/ "
                          "headers so the game is built with the opening-movie decoder (skipped with a warning when absent)")
-    ap.add_argument("--tree", choices=("v15", "v18"), default="v15", help="which port to build on the player's PC (v18: opt-in)")
+    ap.add_argument("--tree", choices=("v15", "v18"), default="v18", help="which port to build on the player's PC (v18 = ps3recomp v0.19.0, the default; v15 = the earlier port)")
     ap.add_argument("--toolkit-repo", default=str(ROOT / "third_party/ps3recomp"), help="git checkout the v18 toolkit is exported from")
     ap.add_argument("--no-fetch", action="store_true", help="do not fetch the v18 toolkit tag when the checkout lacks it")
     a = ap.parse_args(argv)

@@ -14,7 +14,7 @@
 
 | ~30 fps | ~29 fps | 34,092 | 0 |
 |:---:|:---:|:---:|:---:|
-| fights, newer v19 tree (opt-in) | fights, default v15 tree | game functions recompiled | game files in this repository |
+| fights, v19 tree (the default) | fights, earlier v15 tree (`--tree v15`) | game functions recompiled | game files in this repository |
 
 The frame rates were measured on one Windows machine; see [Status](#status).
 
@@ -50,24 +50,21 @@ first build takes a while and needs several GB of free space, and `Build again` 
 ## Coming soon
 
 - A published installer and portable zip.
-- The newer v19 tree as the default, once it has had the tests the v15 tree had ([issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
+- Closing the open problems of the v19 tree, now the default ([issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
 - Online matches with rollback netcode, spectating and lobbies ([Roadmap, section 4](docs/ROADMAP.md)).
 - More match options and Training options ([Roadmap, section 3](docs/ROADMAP.md)).
 - Linux through Proton ([Roadmap, Platforms](docs/ROADMAP.md#platforms)).
 
 ## Status
 
-> **Work in progress, not a release.** The default build (the v15 tree) lifts and builds on Windows (Direct3D 12) and
-> runs through the opening movie, the title screen, the menus and fights, with sound, at about 29 frames per second on
-> the maps that were tested. It has a launcher and a Training mode. These runs were made on one Windows machine.
+> **Work in progress, not a release.** The default build (the v19 tree, built on ps3recomp v0.19.0; the installer switch is
+> still called `--tree v18`) lifts and builds on Windows (Direct3D 12) and boots, plays the opening movie, the menus and fights
+> with sound, at about 30 frames per second in the demo and in Free Battle on one Windows machine (its earlier v18 build, on
+> toolkit v0.18.0, ran at 16 to 22). It has had fewer tests than the earlier v15 tree (`--tree v15`, about 29 frames per second):
+> the EU disc, the first-start window and long runs are not re-checked on it, and it has known problems, such as washed-out
+> lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)). The frame rates were measured on one Windows machine; the installer was exercised under Proton on Linux.
 >
-> An opt-in newer tree (v19, built on ps3recomp v0.19.0; the installer switch is still called `--tree v18`) also boots and plays fights with sound
-> and the opening movie, at about 30 frames per second in the demo and in Free Battle on the same machine (its earlier
-> v18 build, on toolkit v0.18.0, ran at 16 to 22). It is not the
-> default yet: it has had far fewer tests (the EU disc, the first-start window and long runs are not re-checked on it)
-> and has known problems, such as washed-out lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
->
-> Dated table (top refreshed 2026-10-30, for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md).
+> Dated table (top refreshed 2026-10-30, mostly for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md).
 
 **How it works:** the installer lifts the game's PowerPC and SPU code from your `EBOOT.elf` to C, compiles it with a
 bundled compiler and links it against the ps3recomp runtime, which provides the PS3 system libraries and draws through
@@ -75,7 +72,7 @@ Direct3D 12. Details: [installer/README.md](installer/README.md) and [docs/LAYOU
 
 ## Known problems
 
-- Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The v19 tree (`--tree v18`) has
+- Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The default (v19) tree has
   an experimental Online Battle over a re-psn server, off unless turned on: see [installer/README.md](installer/README.md).
 - A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `toolkit/ps3recomp-local.patch`, see
   [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine; the notes build from a local checkout

@@ -58,7 +58,7 @@ README = """J-Stars Victory VS-EX: Fan Revival, portable
 ============================================
 An unofficial fan project. Nothing of the game is included or downloaded: the port is built on your PC from your own copy.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental, v18 tree only), which is off unless you turn it on and give a re-psn server (see the installer README).
+(experimental), which is off unless you turn it on and give a re-psn server (see the installer README).
 
 1. Unpack the whole zip to a folder you can write to (not Program Files). Keep the folders as they are.
 2. Double-click run.cmd. It asks for:
