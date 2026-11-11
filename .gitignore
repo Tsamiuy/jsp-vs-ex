@@ -187,6 +187,8 @@ __pycache__/
 !/installer/tools/port_menu_test.cpp
 !/installer/tools/port_menu_test.sh
 !/installer/tools/port_overlay_test.c
+!/installer/tools/overlay_font_test.cpp
+!/installer/tools/overlay_font_test.sh
 !/installer/patches/
 /installer/patches/*
 !/installer/patches/*.patch

@@ -21,7 +21,7 @@ new file mode 100644
 index 0000000..2b8599e
 --- /dev/null
 +++ b/libs/video/jsp_overlay.h
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,262 @@
 +/* J-Stars patch 2517: a present-time overlay for the port's own pages (ENHANCEMENT, off and free unless a page is open).
 + *
 + * Like 2508's oskp_draw (a CPU-drawn RGBA panel in an upload buffer copied onto the back
@@ -247,11 +247,18 @@ index 0000000..2b8599e
 +    if (!jov.font_ok) return;
 +    if (style < 0 || style >= (int)jov.fstyles) style = 0;
 +    float by = y + jov.fcap * scale;                /* y = top of the capitals */
-+    for (; *s; s++) {
-+        unsigned c = (unsigned char)*s; if (c < jov.ffirst || c >= jov.ffirst + jov.fcount) c = '?';
-+        const uint16_t* m = jov.fmet + (size_t)(c - jov.ffirst) * 8;
-+        if (m[2]) jov_glyph(m, style, x, by, scale, rgba);
-+        x += m[4] / 16.0f * scale;
++    /* Two passes per string when the atlas has the split planes (nstyles 6: 2+2k rim/glow, 3+2k body, k = style): every rim first,
++     * then every body, so a glyph's rim never covers the previous glyph's body and letters can sit at the font's own spacing. */
++    int passes = (style < 2 && jov.fstyles >= 6) ? 2 : 1;
++    for (int pass = 0; pass < passes; pass++) {
++        float px = x;
++        int plane = passes == 2 ? 2 + 2 * style + pass : style;
++        for (const char* t = s; *t; t++) {
++            unsigned c = (unsigned char)*t; if (c < jov.ffirst || c >= jov.ffirst + jov.fcount) c = '?';
++            const uint16_t* m = jov.fmet + (size_t)(c - jov.ffirst) * 8;
++            if (m[2]) jov_glyph(m, plane, px, by, scale, rgba);
++            px += m[4] / 16.0f * scale;
++        }
 +    }
 +}
 +void jsp_overlay_text(float x, float y, const char* s, float scale, uint32_t rgba) { jsp_overlay_text_style(x, y, s, scale, rgba, 0); }

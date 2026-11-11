@@ -88,6 +88,34 @@ def styles(m, w=None, h=None, base=None):
         res.append(np.clip(np.concatenate([rgb, al], axis=2) + 0.5, 0, 255).astype(np.uint8))
     return res
 
+def _down(arr, w, h):
+    """Premultiplied box downsample of a supersampled straight-alpha array, back to straight alpha RGBA8."""
+    a = arr[..., 3:4] / 255
+    pm = np.concatenate([arr[..., :3] * a, arr[..., 3:4]], axis=2)
+    pm = pm.reshape(h, SS, w, SS, 4).mean(axis=(1, 3))
+    al = pm[..., 3:4]
+    rgb = np.where(al > 0.5, pm[..., :3] / np.maximum(al, 1e-6) * 255, 0)
+    return np.clip(np.concatenate([rgb, al], axis=2) + 0.5, 0, 255).astype(np.uint8)
+
+def planes(m, w, h, base):
+    """ENHANCEMENT: the two label styles split into a rim plane and a body plane for the overlay's two-pass text blit:
+    [off_rim, off_body, on_glow, on_body], straight-alpha RGBA8 (h, w, 4). Drawing rim then body of one glyph over each other gives
+    the styles() picture; drawing all rims of a string first and then all bodies keeps a rim from covering a neighbour's body."""
+    rim = m.filter(ImageFilter.MaxFilter(2 * int(2.5 * SS) + 1)).filter(ImageFilter.GaussianBlur(SS * 0.5))
+    ys = np.arange(h * SS)[:, None] / SS
+    g = np.clip((ys - (base - CAP)) / CAP, 0, 1)
+    shade = np.broadcast_to(np.where(g < 0.45, 255.0, 255.0 - (g - 0.45) / 0.55 * 70.0), (h * SS, w * SS))
+    fill_a = np.asarray(m.filter(ImageFilter.GaussianBlur(SS * 0.35)), dtype=float) / 255
+    rim_a = np.asarray(rim, dtype=float) / 255
+    z = np.zeros((h * SS, w * SS, 4))
+    off_rim = z.copy(); off_rim[..., 3] = rim_a * 255                         # black
+    off_body = z.copy(); off_body[..., :3] = shade[..., None]; off_body[..., 3] = fill_a * 255
+    glow = m.filter(ImageFilter.MaxFilter(SS * 2 + 1)).filter(ImageFilter.GaussianBlur(SS * 1.6))
+    glow_a = np.clip(np.asarray(glow, dtype=float) / 255 * 1.5, 0, 1) * 0.85
+    on_glow = z.copy(); on_glow[..., :3] = 255; on_glow[..., 3] = glow_a * 255
+    on_body = z.copy(); on_body[..., 3] = fill_a * 255                         # black
+    return [_down(a, w, h) for a in (off_rim, off_body, on_glow, on_body)]
+
 def main():
     args = [a for a in sys.argv[1:]]
     prev = None

@@ -105,6 +105,96 @@ int main()
     reset(); wr("shared/community.ini", "[community]\nenabled=1\nactive=\n[PRESET lbl-1]\naddress=example.invalid\n[preset " + std::string(33, 'a') + "]\naddress=x\n");
     run();
     check("preset label 1-32, 'preset ' case-insensitive", logged("bad preset label") && !logged("unknown section"));
+
+    // ---- the in-game page's writer (edit_load / edit_check / edit_save) ----
+    auto rd = [&](const std::string& rel) { std::string out; FILE* f = fopen((root + "/" + rel).c_str(), "rb"); if (!f) return std::string("<none>"); char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) out.append(b, n); fclose(f); return out; };
+    auto sh = [&]() { return root + "/shared"; };
+    {   // write then read back: the reader (apply) sees exactly what was written
+        reset();
+        EditState w; w.rep_enabled = 1; w.server = "example.invalid:36200"; w.name = "Tester_1";
+        check("edit_save: fresh folder written", edit_save(sh(), w).empty());
+        check("fresh repsn.ini: CRLF, preamble, keys", rd("shared/repsn.ini") == "; re-psn server settings. Written by the launcher; the game reads it.\r\n[repsn]\r\nenabled=1\r\nserver=example.invalid:36200\r\nname=Tester_1\r\n");
+        check("fresh: no community.ini, no temp file left", rd("shared/community.ini") == "<none>" && system(("ls " + root + "/shared | grep -q tmp").c_str()) != 0);
+        EditState r; check("edit_load reads it back equal", edit_load(sh(), r).empty() && r.rep_enabled == 1 && !r.com_enabled && r.server == w.server && r.name == w.name);
+        L.clear(); E.clear(); int on = run();
+        check("reader accepts the file the page wrote: online, nothing rejected", on == 1 && g("PSNR_SERVER") == "example.invalid:36200" && g("PS3_NP_ONLINE_ID") == "Tester_1" && !logged("rejected (") && !logged("setting(s) rejected"));
+    }
+    {   // invalid values are refused before anything is written
+        reset(); wr("shared/repsn.ini", "[repsn]\nenabled=0\nserver=old.invalid\nname=OldName\n");
+        const std::string before = rd("shared/repsn.ini");
+        EditState w; w.rep_enabled = 1; w.server = "bad host!"; w.name = "Tester_1";
+        check("bad server refused, file untouched", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == before);
+        w.server = "example.invalid:70000"; check("port 70000 refused", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == before);
+        w.server = "example.invalid"; w.name = "9bad"; check("name starting with a digit refused", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == before);
+        w.name = "ab"; check("name of 2 refused", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == before);
+        w.name = std::string(17, 'a'); check("name of 17 refused", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == before);
+        w.name = "ok name"; check("space in name refused", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == before);
+        EditState c; c.com_enabled = 1; c.presets = {"a"}; c.active = "zzz";
+        check("community with no valid active preset refused", !edit_save(sh(), c).empty() && rd("shared/community.ini") == "<none>");
+    }
+    {   // both methods on: refused, nothing written
+        reset(); wr("shared/repsn.ini", "[repsn]\nenabled=0\n");
+        const std::string before = rd("shared/repsn.ini");
+        EditState w; w.rep_enabled = 1; w.com_enabled = 1; w.server = "example.invalid"; w.name = "Tester_1"; w.presets = {"a"}; w.active = "a";
+        std::string why = edit_save(sh(), w);
+        check("both methods on refused, nothing written", why.find("both") != std::string::npos && rd("shared/repsn.ini") == before && rd("shared/community.ini") == "<none>");
+        reset(); wr("shared/repsn.ini", SHR); wr("shared/community.ini", "[community]\nenabled=1\nactive=a\n[preset a]\naddress=example.invalid\nname=Comm_1\n");
+        EditState l; edit_load(sh(), l);
+        check("both on disk loads as Off with a note", l.rep_enabled == 0 && l.com_enabled == 0 && !l.note.empty());
+        l.rep_enabled = 1;   // the player picks re-psn: saving turns community off on disk, so the files never both say 1
+        check("choosing one side writes both files consistently", edit_save(sh(), l).empty() && rd("shared/community.ini").find("enabled=0") != std::string::npos && rd("shared/repsn.ini").find("enabled=1") != std::string::npos);
+        L.clear(); E.clear(); check("and the reader then goes online (not refused)", run() == 1 && !logged("both enabled"));
+    }
+    {   // unknown keys, comments, presets, other sections survive; only the owned keys change; order kept
+        reset();
+        const std::string orig = "# my notes\r\n[repsn]\r\n; keep me\r\nenabled=0\r\nfuture_key=7\r\nserver=old.invalid\r\n\r\n[other]\r\nx=1\r\n";
+        wr("shared/repsn.ini", orig);
+        const std::string corig = "; top\n[community]\nenabled=0\nactive=a\nnote=1\n[preset a]\naddress=example.invalid\nname=Comm_1\nextra=2\n[preset b]\naddress=192.0.2.5\nname=Comm_2\n";
+        wr("shared/community.ini", corig);
+        EditState w; edit_load(sh(), w);
+        w.rep_enabled = 1; w.server = "192.0.2.7:1234"; w.name = "New-Name"; w.active = "b";
+        check("save over existing files", edit_save(sh(), w).empty());
+        check("repsn.ini: comments, unknown key and section kept, owned keys changed in place",
+              rd("shared/repsn.ini") == "# my notes\r\n[repsn]\r\n; keep me\r\nenabled=1\r\nfuture_key=7\r\nserver=192.0.2.7:1234\r\nname=New-Name\r\n\r\n[other]\r\nx=1\r\n");
+        check("community.ini: only enabled/active changed (presets, extra keys kept)",
+              rd("shared/community.ini") == "; top\r\n[community]\r\nenabled=0\r\nactive=b\r\nnote=1\r\n[preset a]\r\naddress=example.invalid\r\nname=Comm_1\r\nextra=2\r\n[preset b]\r\naddress=192.0.2.5\r\nname=Comm_2\r\n");
+        EditState r; edit_load(sh(), r);
+        check("presets listed, active read back", r.presets.size() == 2 && r.active == "b" && r.server == "192.0.2.7:1234");
+    }
+    {   // files over the limits are neither read nor overwritten
+        reset(); std::string big(70 * 1024, 'x'); wr("shared/repsn.ini", big);
+        EditState w; w.rep_enabled = 1; w.server = "example.invalid"; w.name = "Tester_1";
+        check("64 KB file: refused, not overwritten", !edit_save(sh(), w).empty() && rd("shared/repsn.ini") == big);
+        reset(); wr("shared/repsn.ini", "[repsn]\n" + std::string(600, 'y') + "\n");
+        check("512-byte line file: refused", !edit_save(sh(), w).empty());
+    }
+    {   // the in-game run's seed (run_port_menu_edit.sh) ends exactly as check_port_menu_edit.py expects
+        reset(); wr("shared/repsn.ini", "; seeded by run_port_menu_edit.sh\r\n[repsn]\r\nenabled=0\r\nkeep_me=1\r\n"); wr("shared/community.ini", "[community]\r\nenabled=0\r\nactive=\r\n");
+        EditState w; edit_load(sh(), w); w.rep_enabled = 1; w.server = "ab.io:99"; w.name = "Pad_Test";
+        check("run seed: repsn.ini as the checker expects", edit_save(sh(), w).empty() && rd("shared/repsn.ini") == "; seeded by run_port_menu_edit.sh\r\n[repsn]\r\nenabled=1\r\nkeep_me=1\r\nserver=ab.io:99\r\nname=Pad_Test\r\n" && rd("shared/community.ini").find("enabled=0") != std::string::npos);
+    }
+    {   // the API as the page calls it
+        reset(); g_shared = sh(); char b[300];
+        wr("shared/community.ini", "[community]\nenabled=0\nactive=\n[preset a]\naddress=example.invalid\nname=Comm_1\n[preset b]\naddress=192.0.2.5\nname=Comm_2\n");
+        check("begin ok", jsp_online_edit_begin(b, sizeof b) == 0);
+        jsp_online_edit_cycle(0, 1); jsp_online_edit_row(0, b, sizeof b);
+        check("method Left/Right cycles Off -> re-psn", std::string(b) == "Method: re-psn");
+        jsp_online_edit_cycle(0, 1); jsp_online_edit_cycle(0, 1); jsp_online_edit_row(0, b, sizeof b);
+        check("method wraps back to Off", std::string(b) == "Method: Off");
+        jsp_online_edit_cycle(0, -1); jsp_online_edit_row(0, b, sizeof b);
+        check("method Left from Off wraps to Community", std::string(b) == "Method: Community server");
+        jsp_online_edit_cycle(3, 1); jsp_online_edit_row(3, b, sizeof b);
+        check("preset cycles through the saved ones", std::string(b) == "Community preset: a");
+        jsp_online_edit_cycle(3, 1); jsp_online_edit_row(3, b, sizeof b);
+        check("... then b", std::string(b) == "Community preset: b");
+        check("server hint for an invalid value", jsp_online_edit_set(1, "no good", b, sizeof b) == 1 && b[0]);
+        check("valid server stored", jsp_online_edit_set(1, "example.invalid:1", b, sizeof b) == 0);
+        check("save in the API with community on", jsp_online_edit_save(b, sizeof b) == 1 && std::string(b) == "Saved. Applies on the next start." && rd("shared/community.ini").find("enabled=1") != std::string::npos);
+        jsp_online_edit_cycle(0, 1);   // community -> Off
+        jsp_online_edit_cycle(0, 1);   // -> re-psn with the stored server but no name
+        jsp_online_edit_set(2, "", b, sizeof b);
+        check("save refused through the API when server or name is missing; message says why", jsp_online_edit_save(b, sizeof b) == 0 && std::string(b).find("re-psn:") != std::string::npos);
+    }
     system(("rm -rf " + root).c_str());
     printf("%s: %d/%d\n", fails ? "FAIL" : "PASS", total - fails, total);
     return fails != 0;

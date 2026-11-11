@@ -23,7 +23,7 @@
 //      the page reads the raw one: Up/Down select, Cross opens, Circle goes back / closes. After Circle closes the page
 //      the report stays empty until every button has been released, so the held Circle is no press on the panel.
 //   4. The page is drawn with jsp_overlay_* (1280x720 layout space). Sub-page "Online": the settings jsp_online.cpp
-//      read at start (read only; changing them is not part of this page yet).
+//      read at start; editable (Method, Server, Online name, Community preset, Save, Discard) through the backend of jsp_online.cpp. JSP_PORT_MENU_EDIT=0 keeps it read only.
 //
 // The game's own row count: @0x001E6E98 sets the count r25 from the menu id (id 8: `li r25,5` at 0x001E71C0) and then hides the parts of every
 // row >= count at each update (loop 0x001E6FC4) and passes the count on to the label binder. The lifter's --insn-patches option (firstrun.py
@@ -49,6 +49,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #ifndef JSP_PORT_MENU_TEST
 #include <mutex>
@@ -61,15 +63,36 @@ extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
 extern "C" void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly);
 extern "C" void (*g_cellpad_rstick_filter)(uint32_t port_no, uint16_t* rx, uint16_t* ry);
 extern "C" int jsp_online_describe(int line, char* out, int n);                  // jsp_online.cpp
+extern "C" int jsp_online_edit_begin(char* err, int n);                            // jsp_online.cpp: the page's editing API
+extern "C" int jsp_online_edit_row(int field, char* out, int n);
+extern "C" int jsp_online_edit_get(int field, char* out, int n);
+extern "C" int jsp_online_edit_set(int field, const char* v, char* hint, int n);
+extern "C" void jsp_online_edit_cycle(int field, int dir);
+extern "C" int jsp_online_edit_save(char* msg, int n);
 #endif
 
 namespace jpm {
 
 // Digital buttons as one mask: (DIGITAL2 << 8) | DIGITAL1 (cellPad.h CELL_PAD_CTRL_*; the same masks PAD_SCRIPT uses).
 enum : uint16_t { BTN_START = 0x0008, BTN_UP = 0x0010, BTN_RIGHT = 0x0020, BTN_DOWN = 0x0040, BTN_LEFT = 0x0080,
-                  BTN_CIRCLE = 0x2000, BTN_CROSS = 0x4000 };
+                  BTN_L1 = 0x0400, BTN_R1 = 0x0800, BTN_CIRCLE = 0x2000, BTN_CROSS = 0x4000, BTN_SQUARE = 0x8000 };
 enum Page { CLOSED = 0, MAIN = 1, ONLINE = 2 };
 constexpr int kMainRows = 2;   // 0 "Online", 1 "Close"
+// the Online page's rows: 0 Method, 1 Server, 2 Online name, 3 Community preset, 4 Save, 5 Discard changes.
+enum : int { ROW_METHOD = 0, ROW_SERVER = 1, ROW_NAME = 2, ROW_PRESET = 3, ROW_SAVE = 4, ROW_DISCARD = 5, kEditRows = 6 };
+
+// What the Online page edits (jsp_online.cpp's working copy in the game; a fake in the host test). Fields: 0 method, 1 server, 2 name, 3 preset.
+struct Backend {
+    virtual ~Backend() {}
+    virtual bool begin(std::string& note) = 0;                         // (re)read the files; false: note says why
+    virtual std::string row_text(int field) = 0;                       // display line of rows 0..3
+    virtual std::string get_text(int field) = 0;                       // raw text of field 1 / 2
+    virtual std::string set_text(int field, const std::string& v) = 0; // store; "" valid, else the hint
+    virtual void cycle(int field, int dir) = 0;                        // method / preset, wraps
+    virtual bool save(std::string& msg) = 0;                           // writes the files; msg: confirmation or reason
+    virtual const char* charset(int field) = 0;                        // the letters the picker offers, in order
+    virtual size_t max_len(int field) = 0;
+};
 
 // The Options panel's cursor struct (func_001C07F0: [0] total, [4] cursor, [8] visible, [0xC] top, [0x10] last).
 // Returns true when it held the stock 5-row layout and was changed to 6 rows. The cursor is kept.
@@ -89,6 +112,16 @@ struct Menu {
     uint16_t prev = 0;
     bool wait_release = false;
     bool dirty = false;
+    // the editable Online page. be == nullptr keeps the page read only.
+    Backend* be = nullptr;
+    int osel = 0;                 // selected row of the Online page
+    bool editing = false;         // the character picker is open on field ef
+    int ef = 0;
+    std::string buf;              // picker text
+    size_t cpos = 0;              // picker position; == buf.size() is the empty slot after the last letter
+    std::string msg;              // line under the rows
+    bool msg_err = false, edited = false;
+    std::vector<std::string> events;   // for the log, drained by the glue
 
     bool active() const { return page != CLOSED || wait_release; }
 
@@ -109,12 +142,13 @@ struct Menu {
             if (in_port_row && (edge & BTN_CROSS)) { page = MAIN; sel = 0; dirty = true; return true; }
             return false;
         }
+        if (page == ONLINE && be) { feed_online(edge); return true; }
         const int rows = page == MAIN ? kMainRows : 0;
         if (rows && (edge & BTN_DOWN)) { sel = (sel + 1) % rows; dirty = true; }
         if (rows && (edge & BTN_UP)) { sel = (sel + rows - 1) % rows; dirty = true; }
         if (edge & BTN_CROSS) {
             if (page == MAIN) {
-                if (sel == 0) { page = ONLINE; dirty = true; }
+                if (sel == 0) { enter_online(); }
                 else close();
             }
         }
@@ -124,8 +158,86 @@ struct Menu {
         }
         return true;
     }
-    void close() { page = CLOSED; sel = 0; wait_release = true; dirty = true; }
+    void close() { page = CLOSED; sel = 0; editing = false; wait_release = true; dirty = true; }
     bool take_dirty() { const bool d = dirty; dirty = false; return d; }
+
+    void enter_online()
+    {
+        page = ONLINE; dirty = true; osel = 0; editing = false; edited = false; msg.clear(); msg_err = false;
+        if (be) { std::string note; const bool ok = be->begin(note); msg = note; msg_err = !ok; }
+    }
+    static bool field_is_text(int row) { return row == ROW_SERVER || row == ROW_NAME; }
+
+    // The Online page with a backend. Circle leaves without saving (the working copy is read again on the next visit: nothing changed on disk).
+    void feed_online(uint16_t edge)
+    {
+        if (editing) { feed_picker(edge); return; }
+        if (edge & BTN_DOWN) { osel = (osel + 1) % kEditRows; dirty = true; }
+        if (edge & BTN_UP) { osel = (osel + kEditRows - 1) % kEditRows; dirty = true; }
+        if ((edge & (BTN_LEFT | BTN_RIGHT)) && (osel == ROW_METHOD || osel == ROW_PRESET)) {
+            be->cycle(osel, (edge & BTN_LEFT) ? -1 : 1);
+            edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
+            events.push_back("online edit: " + be->row_text(osel));
+        }
+        if (edge & BTN_CROSS) {
+            if (field_is_text(osel)) {
+                editing = true; ef = osel; buf = be->get_text(osel); cpos = buf.size(); dirty = true;
+                events.push_back(std::string("online edit: picker opened on ") + (osel == ROW_SERVER ? "server" : "name"));
+            } else if (osel == ROW_SAVE) {
+                std::string m; const bool ok = be->save(m);
+                msg = m; msg_err = !ok; if (ok) edited = false; dirty = true;
+                events.push_back(std::string("online edit: save ") + (ok ? "ok: " : "refused: ") + m);
+            } else if (osel == ROW_DISCARD) {
+                std::string note; const bool ok = be->begin(note);
+                edited = false; msg = ok ? "Changes discarded." : note; msg_err = !ok; dirty = true;
+                events.push_back("online edit: discarded");
+            }
+        }
+        if (edge & BTN_CIRCLE) {
+            events.push_back(std::string("online edit: back") + (edited ? " (unsaved changes dropped)" : ""));
+            page = MAIN; sel = 0; dirty = true;
+        }
+    }
+
+    // The character picker: Up/Down the letter at the position (L1/R1 by ten), Left/Right the position, Square deletes,
+    // Cross accepts, Circle cancels. The empty slot after the last letter takes the first letter on Up/Down: that appends.
+    void feed_picker(uint16_t edge)
+    {
+        const char* cs = be->charset(ef); const int n = (int)std::strlen(cs);
+        const size_t mx = be->max_len(ef);
+        int step = 0;
+        if (edge & BTN_DOWN) step += 1;
+        if (edge & BTN_UP) step -= 1;
+        if (edge & BTN_R1) step += 10;
+        if (edge & BTN_L1) step -= 10;
+        if (step && n > 0) {
+            if (cpos >= buf.size()) {
+                if (buf.size() < mx) { buf.push_back(cs[step > 0 ? 0 : n - 1]); }
+            } else {
+                const char* at = std::strchr(cs, buf[cpos]);
+                int i = at ? (int)(at - cs) : 0;
+                i = ((i + step) % n + n) % n;
+                buf[cpos] = cs[i];
+            }
+            dirty = true;
+        }
+        if ((edge & BTN_LEFT) && cpos > 0) { cpos--; dirty = true; }
+        if ((edge & BTN_RIGHT) && cpos < buf.size()) { cpos++; dirty = true; }
+        if ((edge & BTN_SQUARE) && !buf.empty()) {
+            if (cpos >= buf.size()) { buf.pop_back(); cpos = buf.size(); }
+            else buf.erase(cpos, 1);
+            dirty = true;
+        }
+        if (edge & BTN_CROSS) {
+            const std::string hint = be->set_text(ef, buf);
+            editing = false; edited = true; dirty = true;
+            msg = hint.empty() ? "Not saved yet." : hint; msg_err = !hint.empty();
+            events.push_back(std::string("online edit: ") + (ef == ROW_SERVER ? "server" : "name") + " set to '" + buf + "'" + (hint.empty() ? " (valid)" : " (not valid yet)"));
+        } else if (edge & BTN_CIRCLE) {
+            editing = false; dirty = true;
+            events.push_back("online edit: picker cancelled");
+        }
+    }
 };
 
 }  // namespace jpm
@@ -147,6 +259,24 @@ bool port_menu_env()
 
 std::mutex g_mu;
 jpm::Menu g_menu;
+// The page's backend: jsp_online.cpp's working copy (what the launcher's Online tab edits: repsn.ini, community.ini).
+struct GameBackend : jpm::Backend {
+    static std::string call(int (*f)(int, char*, int), int field)
+    { char b[300] = ""; f(field, b, sizeof b); return b; }
+    bool begin(std::string& note) override { char b[300] = ""; const int r = jsp_online_edit_begin(b, sizeof b); note = b; return r == 0; }
+    std::string row_text(int f) override { return call(jsp_online_edit_row, f); }
+    std::string get_text(int f) override { return call(jsp_online_edit_get, f); }
+    std::string set_text(int f, const std::string& v) override { char b[300] = ""; return jsp_online_edit_set(f, v.c_str(), b, sizeof b) ? b : ""; }
+    void cycle(int f, int d) override { jsp_online_edit_cycle(f, d); }
+    bool save(std::string& m) override { char b[300] = ""; const int r = jsp_online_edit_save(b, sizeof b); m = b; return r == 1; }
+    // letters first in lower case (names and hosts are mostly lower case), then capitals, digits, then the punctuation each field allows:
+    // the reader's rules: host of A-Za-z0-9 . - _ and a :port; name of A-Za-z0-9 _ - (3..16, first a letter, checked at Save)
+    const char* charset(int f) override { return f == jpm::ROW_SERVER ? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_:"
+                                                                      : "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"; }
+    size_t max_len(int f) override { return f == jpm::ROW_SERVER ? 260 : 16; }
+};
+GameBackend g_backend;
+
 uint32_t g_obj = 0;            // the main-menu object (r3 of @0x001E0830)
 int g_last_panel = -1, g_last_open = -1, g_last_cursor = -1, g_last_top = -1;
 bool g_drawn = false;
@@ -203,6 +333,52 @@ void poll_panel(int* panel, int* open, int* row)
 
 // ---- drawing: 1280x720 layout space, the game's own look where cheap (Fira Sans Heavy Italic art; white-grey with
 // black rim = the menu's "off" label, black with white glow = "on" on the highlight bar) ----
+
+// the editable Online page (same panel, font and colours as before). Rows at y 190 + 48 i; the picker underlines the letter at its position.
+void draw_online_edit(uint32_t white, uint32_t gold)
+{
+    using namespace jpm;
+    jsp_overlay_text_style(260, 120, "Port Settings - Online", 1.4f, white, 0);
+    for (int i = 0; i < kEditRows; i++) {
+        const int y = 188 + i * 48;
+        const bool on = i == g_menu.osel;
+        if (on) jsp_overlay_fill_rect(250, y - 12, 780, 46, JSP_RGBA(255, 255, 255, 235));
+        std::string text;
+        if (i <= ROW_PRESET) text = g_backend.row_text(i); else text = i == ROW_SAVE ? "Save" : "Discard changes";
+        const bool pick = g_menu.editing && g_menu.ef == i;
+        std::string label;
+        if (pick) {
+            label = i == ROW_SERVER ? "Server: " : "Online name: ";
+            text = label + g_menu.buf;
+        }
+        jsp_overlay_text_style(290, (float)y, text.c_str(), 1.0f, white, on ? 1 : 0);
+        if (pick) {
+            const float x0 = 290 + jsp_overlay_text_width(label.c_str(), 1.0f);
+            const float cx = x0 + jsp_overlay_text_width(g_menu.buf.substr(0, g_menu.cpos).c_str(), 1.0f);
+            const bool slot = g_menu.cpos >= g_menu.buf.size();
+            const float cw = slot ? 22.0f : jsp_overlay_text_width(g_menu.buf.substr(g_menu.cpos, 1).c_str(), 1.0f);
+            jsp_overlay_fill_rect((int)cx, y + 28, (int)cw, 4, gold);
+        }
+    }
+    char line[200];
+    if (jsp_online_describe(5, line, sizeof line) >= 0) jsp_overlay_text_style(290, 480, line, 0.7f, white, 0);
+    // the message under the rows, wrapped at 60 characters (the launcher's refusal texts run to ~80) so it stays inside the panel
+    const std::string m = !g_menu.msg.empty() ? g_menu.msg : g_menu.edited ? std::string("Not saved yet.") : std::string();
+    const uint32_t mc = g_menu.msg_err ? JSP_RGBA(255, 150, 110, 255) : white;
+    size_t from = 0; int ly = 510;
+    while (from < m.size() && ly < 570) {
+        size_t to = from + 60;
+        if (to >= m.size()) to = m.size();
+        else { size_t sp = m.rfind(' ', to); if (sp != std::string::npos && sp > from) to = sp; }
+        jsp_overlay_text_style(260, (float)ly, m.substr(from, to - from).c_str(), 0.7f, mc, 0);
+        from = to; while (from < m.size() && m[from] == ' ') from++;
+        ly += 28;
+    }
+    jsp_overlay_text_style(260, 578, g_menu.editing ? "Up/Down: letter  Left/Right: place  Square: delete  Cross: ok  Circle: cancel"
+                                                    : "Left/Right: change  Cross: edit or save  Circle: back (unsaved changes are dropped)", 0.5f, white, 0);
+    jsp_overlay_text_style(260, 598, g_menu.editing ? "L1 / R1: ten letters at a time" : "Online play cannot change in a session: saved settings apply on the next start.", 0.5f, white, 0);
+}
+
 void draw_page()
 {
     using namespace jpm;
@@ -236,6 +412,8 @@ void draw_page()
             jsp_overlay_text_style(290, (float)y, rows[i], 1.2f, white, on ? 1 : 0);
         }
         jsp_overlay_text_style(260, 560, "Up/Down: select    Cross: open    Circle: close", 0.8f, white, 0);
+    } else if (g_menu.be) {
+        draw_online_edit(white, gold);
     } else {
         jsp_overlay_text_style(260, 130, "Port Settings - Online", 1.4f, white, 0);
         char line[200];
@@ -270,6 +448,8 @@ void pad_filter(uint32_t port, uint16_t* buttons, uint16_t* lx, uint16_t* ly)
     const bool swallow = g_menu.feed(*buttons, 1, in_row);
     if (g_menu.page != before)
         std::fprintf(stderr, "[portmenu] page %d -> %d (flip %u)\n", (int)before, (int)g_menu.page, (unsigned)cellGcm_flip_request_count());
+    for (auto& e : g_menu.events) std::fprintf(stderr, "[portmenu] %s\n", e.c_str());
+    g_menu.events.clear();
     if (swallow) { *buttons = 0; *lx = 0x80; *ly = 0x80; }
     const bool help = in_row && g_menu.page == jpm::CLOSED;
     const bool help_changed = help != g_help;
@@ -375,6 +555,8 @@ extern "C" void jsp_register_port_menu_overrides(void)
     if ((m && (std::atoi(m) & 1)) || (!m && t && std::atoi(t))) mask |= 1;
     jsp_menu_label_set(mask);
     g_port_menu_six_rows = 1;
+    g_menu.be = &g_backend;   // the Online page is editable (JSP_PORT_MENU_EDIT=0 keeps it read only)
+    if (const char* ed = std::getenv("JSP_PORT_MENU_EDIT")) if (ed[0] == '0') g_menu.be = nullptr;
     install_pad_filter();
     std::fprintf(stderr, "[portmenu] JSP_PORT_MENU set: Options gets a sixth row (hooks 0x%08X, 0x%08X), pad filter on, label mask %d\n",
                  k_build_options, k_panel_update, mask);
