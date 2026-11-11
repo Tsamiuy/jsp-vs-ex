@@ -3,8 +3,8 @@
 What is planned, in rough order. ✅ done · 🔧 in progress · 📋 planned. No dates: the order is the plan, the timing is
 not promised. Options that change gameplay are opt-in; display and input improvements may default on.
 What the port adds today: [FEATURES.md](FEATURES.md). Dated state and evidence: [notes/STATUS.md](notes/STATUS.md).
-The ✅ items were first checked on the earlier port in `jstars/port` on the ps3recomp v0.15 toolkit (`--tree v15`). The default
-build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree v18`, #2); what is not re-checked on it is listed in [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9).
+The ✅ items were first checked on the earlier port in `jstars/port` on the ps3recomp v0.15 toolkit (`--tree legacy`). The default
+build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree current`, #2); what is not re-checked on it is listed in [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9).
 
 ## 1. Playable on Windows from your own copy  🔧
 
@@ -41,7 +41,7 @@ build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree v18`, 
 - ✅ An unlock-all switch for cards, progression bars, J-Points, characters, titles and more, as a save edit with a backup (launcher: Cheats tab) ([details](FEATURES.md#unlock-all))
 - 📋 **Cross-Save with RPCS3, without PSN:** one save that moves both ways between the port and RPCS3 as a plain copy,
   since RPCS3 keeps this game's save unencrypted. Setup can already import an RPCS3 save once; not tested yet: an RPCS3
-  save in the newer tree (`--tree v18`) and a port save in RPCS3. Saves from a real PS3 are encrypted and are a separate
+  save in the newer tree (`--tree current`) and a port save in RPCS3. Saves from a real PS3 are encrypted and are a separate
   question ([issue #30](https://github.com/Tsamiuy/jsp-vs-ex/issues/30))
 
 ## 4. Online with rollback netcode  📋
@@ -71,7 +71,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 - Windows 11, x64, with Direct3D 12: the target today (Windows 10 partly: the menu fix is not yet confirmed there)
 - Linux through Proton or Wine: not supported yet. The default build has not been run under Proton since the
-  thread-local fix (installer patch 0003); the `--tree v18` port reached fights under Proton in tests of its earlier v0.18.0 build
+  thread-local fix (installer patch 0003); the `--tree current` port reached fights under Proton in tests of its earlier v0.18.0 build
 
 ## Not planned
 
