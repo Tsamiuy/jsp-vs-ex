@@ -6,6 +6,8 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-11
+
 First pre-release. J-Stars Victory VS+ for Windows: the game is built on your PC (ps3recomp, Direct3D 12) from your own copy of the disc, no game
 files are included. On the Windows PC it was tested on, it boots, plays the menus and fights with sound at about 30 frames
 per second, and the installer builds and starts it. It needs a 64-bit CPU with AVX2.
