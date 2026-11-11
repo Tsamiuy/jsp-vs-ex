@@ -30,7 +30,9 @@ Keep the list to names or handles you are happy to have public.
   import, music option, support bundle) and the workflow that builds it, the "EX" title logo, the banner and logo art, the project
   name with a hyphen, the roadmap and the features page, the layout page, CI and the issue forms, reviews of pull requests, the
   save-format findings in #30, and the public-readiness review (README, NOTICE, licence, community files, wording, removal of
-  personal details, `.recomp.json`).
+  personal details, `.recomp.json`); and the networking work: the game's own Online Battle over a
+  matchmaking server (#18), [re-psn](https://github.com/undecuple/re-psn), a maintained fork of psnr, as that server (#60), and the
+  ps3recomp fixes online play needed (voice-chat loading and peer connections for room members, sp00nznet/ps3recomp#689 and sp00nznet/ps3recomp#690).
 
 ## Activity (generated)
 
