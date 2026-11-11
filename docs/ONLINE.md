@@ -60,7 +60,7 @@ Limits:
 
 ## If it does not work
 
-- **Online Battle shows a connection error:** online is off or the server is not reachable. Check that the Online tab shows re-psn and
+- **Online Battle says: You have been signed out of "PSN". You cannot play online battles.** Online is off: no settings were found, or they were refused (the log says which). Check that the Online tab shows re-psn and
   that the server address is right. The game's log lists its online decisions on lines that start with `[online]`.
 - **Both methods on:** if re-psn and a community server are both enabled (by a hand edit), the game refuses online
   play and says so in the log (`[online] ERROR: re-psn and community are both enabled`). Pick one in the Online tab.
