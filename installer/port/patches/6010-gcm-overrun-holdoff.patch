@@ -3,7 +3,7 @@ past the ring's end for 500 ms (GCM_OVERRUN_HOLD_MS, 0 = the old immediate behav
 
 The walker recycles a title's ring itself (JUMP at the write head, current/put/get to begin) once it has seen the
 title's write head past `end`: a title whose buffer-full callback declines (AMGL) stays there for good, and that is
-the only way on. J-Stars recycles its own ring in its callback; on a slow PC (no boost, 8 threads, Radeon 610M) one
+the only way on. J-Stars recycles its own ring in its callback; on a slow PC (no boost, 8 threads, an integrated GPU) one
 fight load in about ten saw the write head past `end` for a moment, the walker recycled under the title's own
 callback, `get` jumped to `begin` past commands it had not read (fence and label writes among them) and the game
 stopped for good (bench/exp/2026-11-10_2025-memo-off-lowend: "recycled the title's own ring", then no flip). A

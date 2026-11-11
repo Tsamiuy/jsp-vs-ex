@@ -5,7 +5,7 @@ first guest-FP draw of the next run all noted pipelines are built once on severa
 title) and released, so the driver already has them when the game asks: no menu or HUD pieces skipped for frames while
 pipelines build (a tester's GTX 1080 showed an empty main menu on its second start). The first run of an install has nothing to
 warm up. PSO_WARMUP=0 turns it off; it follows SHADER_CACHE.
-Tested on Windows 11 (RTX 5080 Laptop): run 1 "no pipelines noted yet", 232 pipelines noted (5.4 MB) through the menus and a
+Tested on Windows 11 (an NVIDIA laptop GPU): run 1 "no pipelines noted yet", 232 pipelines noted (5.4 MB) through the menus and a
 fight; run 2 "warmed 232 of 232 noted pipelines in 0.1 s on 8 thread(s)", main menu complete.
 diff --git a/ps3recomp/libs/video/rsx_d3d12_backend.c b/ps3recomp/libs/video/rsx_d3d12_backend.c
 --- a/ps3recomp/libs/video/rsx_d3d12_backend.c
