@@ -2,6 +2,8 @@
 
 The full steps are in `docs/notes/SETUP.md`; this page lists what you need and the order.
 
+The hand build below is the earlier v15 tree (`jstars/port`, toolkit v0.15.0). The installer builds the v19 port (`installer/port`, ps3recomp v0.19.0, `--tree v18`) by default and the v15 tree with `--tree v15`.
+
 ## Requirements
 
 - Your own copy of the game (the notes use the US disc, BLUS31519).

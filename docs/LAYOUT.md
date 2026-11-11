@@ -6,7 +6,7 @@
 | `jstars/*.ps1`, `Play J-Stars.bat` | Run, test and play scripts ([SCRIPTS.md](SCRIPTS.md)) |
 | `launcher/` | Source of the launcher window (`JStarsLauncher.cs`) and `build_launcher.bat`; the built exe is not stored |
 | `installer/` | Windows installer (Inno Setup script, `jsp-launcher.exe` source, seven patches (`installer/patches/`) for the bundled compiler setup and the toolkit, and `installer/tools/` with the payload, portable zip, toolchain fetch, build-step and art scripts); [installer/README.md](../installer/README.md) |
-| `installer/port/` | The second port, on ps3recomp v0.19.0, which the installer builds with `--tree v18`: game code in `jsp/`, toolkit patches in `patches/`, scripted test routes in `test/`. `installer/tools/export_toolkit.py` exports the v0.19.0 commit and applies the patches |
+| `installer/port/` | The second port, on ps3recomp v0.19.0, which the installer builds by default (`--tree v18`): game code in `jsp/`, toolkit patches in `patches/`, scripted test routes in `test/`. `installer/tools/export_toolkit.py` exports the v0.19.0 commit and applies the patches |
 | `jstars/spu_jobs/*.py` | SPU job lifting pipeline |
 | `docs/notes/` | The notes (STATUS, FINDINGS, SETUP, ...). Start with `docs/notes/README.md` |
 | `third_party/ps3recomp` | The ps3recomp toolkit as a submodule, pinned to `v0.15.0` (the default port); only the pointer is stored here ([BUILDING.md](BUILDING.md#toolkit)) |
