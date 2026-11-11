@@ -10,14 +10,14 @@ Tested (US disc, attract demo): WINDOW_SIZE=1600x900 TITLE_STATS=0 gives a 1600x
 errors (bench/feature/2026-11-09_1553-win1). Fullscreen/F11 left for a hands-on check.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 1e487fd6..779766a0 100644
+index f340ec1a..df2860f7 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -734,6 +734,30 @@ static u32    s_lock_n  = 0;
+@@ -735,6 +735,30 @@ static u32    s_lock_n  = 0;
   * Win32 window
   * -----------------------------------------------------------------------*/
  
-+/* 2066: borderless fullscreen (FULLSCREEN=1 at start, F11 toggles): the window becomes a popup covering its monitor
++/* 2500: borderless fullscreen (FULLSCREEN=1 at start, F11 toggles): the window becomes a popup covering its monitor
 + * and the swap chain is stretched to it. The windowed placement is remembered for the way back. */
 +static int s_win_full = 0;
 +static WINDOWPLACEMENT s_win_place = { sizeof(WINDOWPLACEMENT) };
@@ -44,7 +44,7 @@ index 1e487fd6..779766a0 100644
  static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
  {
      switch (msg) {
-@@ -745,11 +769,30 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+@@ -746,11 +770,30 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          PostQuitMessage(0);
          return 0;
      case WM_KEYDOWN:
@@ -56,7 +56,7 @@ index 1e487fd6..779766a0 100644
          }
 +        if (wp == VK_F11 && !(lp & 0x40000000)) win_set_fullscreen(hwnd, !s_win_full);
          return 0;
-+    case WM_SIZING: {   /* 2066: keep the game's aspect ratio while the frame is dragged */
++    case WM_SIZING: {   /* 2500: keep the game's aspect ratio while the frame is dragged */
 +        RECT* r = (RECT*)lp;
 +        RECT fr = {0, 0, 0, 0};
 +        AdjustWindowRect(&fr, WS_OVERLAPPEDWINDOW, FALSE);
@@ -76,11 +76,11 @@ index 1e487fd6..779766a0 100644
      }
      return DefWindowProcA(hwnd, msg, wp, lp);
  }
-@@ -762,21 +805,49 @@ static HWND create_window(u32 width, u32 height, const char* title)
+@@ -763,21 +806,49 @@ static HWND create_window(u32 width, u32 height, const char* title)
      wc.lpfnWndProc = d3d12_wndproc;
      wc.hInstance = GetModuleHandle(NULL);
      wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-+    /* 2066 WINDOW_ICON=<file.ico>: the window's title-bar and taskbar icon; unset keeps Windows' default. */
++    /* 2500 WINDOW_ICON=<file.ico>: the window's title-bar and taskbar icon; unset keeps Windows' default. */
 +    { const char* ico = getenv("WINDOW_ICON");
 +      if (ico && *ico) {
 +          wc.hIcon = (HICON)LoadImageA(NULL, ico, IMAGE_ICON, GetSystemMetrics(SM_CXICON),
@@ -93,7 +93,7 @@ index 1e487fd6..779766a0 100644
      RegisterClassExA(&wc);
  
 -    RECT wr = {0, 0, (LONG)width, (LONG)height};
-+    /* 2066: client size WINDOW_SIZE=<w>x<h> when given, else the render size; shrunk (aspect kept) to fit the
++    /* 2500: client size WINDOW_SIZE=<w>x<h> when given, else the render size; shrunk (aspect kept) to fit the
 +     * monitor's work area. The swap chain keeps the render size and is stretched to the client area. */
 +    u32 cw = width, ch = height;
 +    { const char* e = getenv("WINDOW_SIZE"); unsigned a = 0, b = 0;
@@ -122,17 +122,17 @@ index 1e487fd6..779766a0 100644
          CW_USEDEFAULT, CW_USEDEFAULT,
          wr.right - wr.left, wr.bottom - wr.top,
          NULL, NULL, GetModuleHandle(NULL), NULL);
-+    { const char* fs = getenv("FULLSCREEN");   /* 2066 */
++    { const char* fs = getenv("FULLSCREEN");   /* 2500 */
 +      if (h && fs && fs[0] == '1') win_set_fullscreen(h, 1); }
 +    return h;
  }
  
  /* ---------------------------------------------------------------------------
-@@ -7323,6 +7394,10 @@ skip_dump_consider: ;
+@@ -7425,6 +7496,10 @@ skip_dump_consider: ;
                       g_rsx_title_base,
                       s_tframes * 1000.0 / (double)(tnow - s_tt0),
                       s_dbg_last_draws, s_d3d.width, s_d3d.height);
-+            /* 2066 TITLE_STATS=0: the title alone, without FPS, draws and size. */
++            /* 2500 TITLE_STATS=0: the title alone, without FPS, draws and size. */
 +            { static int s_tstats = -1;
 +              if (s_tstats < 0) { const char* e = getenv("TITLE_STATS"); s_tstats = (e && *e == '0') ? 0 : 1; }
 +              if (!s_tstats) snprintf(tb, sizeof(tb), "%s", g_rsx_title_base); }

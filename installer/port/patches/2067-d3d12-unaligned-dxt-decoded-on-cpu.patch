@@ -1,0 +1,184 @@
+Patch 2067: DXT1/23/45 textures whose width or height is not a multiple of 4 are decoded to RGBA8 on the CPU
+(BC_NATIVE=1 keeps them compressed, test only).
+
+Windows 10's D3D12 runtime can't create block-compressed resources of such sizes (CreateCommittedResource fails,
+debug-layer message 597); Windows 11 allows them, so it never failed on Windows 11 machines. J-Stars' menus use
+512x78 DXT5 pieces, so on Windows 10 the menus showed without their art, entries or text. They are decoded on every
+machine, so everyone sees the same image. Unaligned DXT already kept one mip level (patch 2012). This is the v0.15
+installer patch 0005, which fixed a tester's Windows 10 PC, ported to v0.19. Log: [TEX] DXT ... decoded to RGBA8.
+
+Tested on Windows 11 (US disc): main menu decodes four 512x78 textures and looks the same as with BC_NATIVE=1
+(bench/fix/2026-11-10_1637-dxt2067 vs 2026-11-10_1638-dxtnative), no crash lines.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1e487fd6..72fe44c2 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -229,6 +229,7 @@ typedef struct {
+     int used;           /* referenced this frame */
+     u32 last_frame;     /* frame_count when last referenced: the slot least
+                          * recently used is the one given to a new texture */
++    int bc_rgba;        /* a DXT texture held decoded as RGBA8 (patch 2067, bc_decode_rgba) */
+ } VPTexSlot;
+ /* Distinct textures uploadable per frame. J-Stars' fights churned ~4,500 texture re-creations per 5 s through
+  * the LRU at 192 slots; 1024 keeps every fight texture resident (patch 2024). */
+@@ -3741,6 +3742,87 @@ static int tex_hint_on(void)
+     if (on < 0) { const char* e = getenv("TEX_HINT"); on = (e && *e == '0') ? 0 : 1; }
+     return on;
+ }
++/* Patch 2067: block-compressed (DXT1/23/45) textures whose width or height is
++ * not a multiple of 4 can't be created as BC resources on Windows 10's D3D12
++ * runtime (CreateCommittedResource fails, debug-layer message 597; Windows 11
++ * allows them). J-Stars' menus use 512x78 DXT5 pieces, so on Windows 10 the
++ * menus showed without art, entries or text (v0.15 tester, installer patch
++ * 0005). Those textures are decoded here to RGBA8 instead, on every machine,
++ * so everyone sees the same image. BC_NATIVE=1 keeps them as BC (test only). */
++static int bc_cpu_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("BC_NATIVE"); on = (e && *e && *e != '0') ? 0 : 1; }
++    return on;
++}
++
++static void bc_color_block(const u8* b, u8 rgba[16][4], int four_always)
++{
++    const u32 c0 = (u32)b[0] | ((u32)b[1] << 8), c1 = (u32)b[2] | ((u32)b[3] << 8);
++    u8 pal[4][4];
++    for (int k = 0; k < 2; k++) {
++        const u32 c = k ? c1 : c0;
++        const u32 r = (c >> 11) & 31u, g = (c >> 5) & 63u, bl = c & 31u;
++        pal[k][0] = (u8)((r << 3) | (r >> 2)); pal[k][1] = (u8)((g << 2) | (g >> 4));
++        pal[k][2] = (u8)((bl << 3) | (bl >> 2)); pal[k][3] = 255;
++    }
++    for (int ch = 0; ch < 3; ch++) {
++        if (four_always || c0 > c1) {
++            pal[2][ch] = (u8)((2u * pal[0][ch] + pal[1][ch]) / 3u);
++            pal[3][ch] = (u8)((pal[0][ch] + 2u * pal[1][ch]) / 3u);
++        } else {
++            pal[2][ch] = (u8)((pal[0][ch] + pal[1][ch]) / 2u);
++            pal[3][ch] = 0;
++        }
++    }
++    pal[2][3] = 255; pal[3][3] = (four_always || c0 > c1) ? 255 : 0;
++    const u32 idx = (u32)b[4] | ((u32)b[5] << 8) | ((u32)b[6] << 16) | ((u32)b[7] << 24);
++    for (int p = 0; p < 16; p++) memcpy(rgba[p], pal[(idx >> (2 * p)) & 3u], 4);
++}
++
++/* src: block rows src_row bytes apart; dst: RGBA8 rows dst_pitch apart. */
++static void bc_decode_rgba(u8* dst, u32 dst_pitch, const u8* src, u32 w, u32 h,
++                           u32 src_row, rsx_texfmt kind)
++{
++    const u32 bs = (kind == RSX_TEXFMT_BC1) ? 8u : 16u;
++    for (u32 by = 0; by < (h + 3u) / 4u; by++) {
++        for (u32 bx = 0; bx < (w + 3u) / 4u; bx++) {
++            const u8* b = src + (u64)by * src_row + (u64)bx * bs;
++            u8 px[16][4];
++            if (kind == RSX_TEXFMT_BC1) {
++                bc_color_block(b, px, 0);
++            } else {
++                bc_color_block(b + 8, px, 1);
++                if (kind == RSX_TEXFMT_BC2) {
++                    for (int p = 0; p < 16; p++) {
++                        const u32 a4 = (b[p >> 1] >> ((p & 1) * 4)) & 15u;
++                        px[p][3] = (u8)(a4 * 17u);
++                    }
++                } else {
++                    const u32 a0 = b[0], a1 = b[1];
++                    u8 ap[8]; ap[0] = (u8)a0; ap[1] = (u8)a1;
++                    if (a0 > a1) for (u32 k = 1; k < 7; k++) ap[k + 1] = (u8)(((7u - k) * a0 + k * a1) / 7u);
++                    else { for (u32 k = 1; k < 5; k++) ap[k + 1] = (u8)(((5u - k) * a0 + k * a1) / 5u);
++                           ap[6] = 0; ap[7] = 255; }
++                    u64 bits = 0;
++                    for (int k = 0; k < 6; k++) bits |= (u64)b[2 + k] << (8 * k);
++                    for (int p = 0; p < 16; p++) px[p][3] = ap[(bits >> (3 * p)) & 7u];
++                }
++            }
++            for (u32 py = 0; py < 4u; py++) {
++                const u32 y = by * 4u + py;
++                if (y >= h) break;
++                u8* row = dst + (u64)y * dst_pitch;
++                for (u32 qx = 0; qx < 4u; qx++) {
++                    const u32 x = bx * 4u + qx;
++                    if (x >= w) break;
++                    memcpy(row + (u64)x * 4u, px[py * 4u + qx], 4);
++                }
++            }
++        }
++    }
++}
++
+ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 pitch_arg);
+ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 pitch_arg)
+ {
+@@ -3794,6 +3876,13 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+      * 16-bit colour formats arrive here unpacked to RGBA8, and DEPTH24_D8 as a
+      * float. rsx_texture_layout.h says which class each format byte lands in. */
+     DXGI_FORMAT dxfmt = vp_tex_dxgi(fmt);
++    /* Patch 2067: unaligned DXT is decoded to RGBA8 here (bc_decode_rgba, Windows 10). */
++    const int bc_cpu = dxt && !cube && ((w & 3u) || (h & 3u)) && bc_cpu_on();
++    if (bc_cpu) {
++        dxfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
++        static int _n = 0;
++        if (_n < 4) { _n++; fprintf(stderr, "[TEX] DXT %ux%u (not a multiple of 4) decoded to RGBA8%c", w, h, 10); }
++    }
+     /* DXT data is stored as linear 4x4 block rows (compressed formats are
+      * never Morton-swizzled on RSX). Row of blocks = (w/4)*blocksize. */
+     u32 blkrow  = dxt ? tl.row_bytes : 0;
+@@ -3951,7 +4040,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     /* The upload buffer's rows hold the DECODED image, so they are sized from
+      * dst_row_bytes -- w * bpp is the source row, which is narrower for any
+      * format rsx_texture_decode unpacks. */
+-    u32 pitch = (tl.dst_row_bytes + 255) & ~255u;
++    u32 pitch = ((bc_cpu ? w * 4u : tl.dst_row_bytes) + 255) & ~255u;
+     int fresh = 0;
+     /* Mip chain (from the v0.15 tex-mips patch, jstars-notes/patches/tex-mips): RSX
+      * level layout from rsx_texture_mip_chain, D3D placement from
+@@ -4003,7 +4092,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     }
+     /* Stage the decoded image in the ring, or in the slot's own upload
+      * buffer when the ring is full or could not be made. */
+-    u64 up_bytes = (u64)pitch * (dxt ? blkrows : h) * (cube ? 6 : 1);
++    u64 up_bytes = (u64)pitch * ((dxt && !bc_cpu) ? blkrows : h) * (cube ? 6 : 1);
+     if (levels > 1) up_bytes = mtotal;   /* whole chain */
+     const u32 fi = s_d3d.frame_index;
+     if (!s_d3d.tex_ring) {
+@@ -4069,7 +4158,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     /* Cube textures store their 6 faces consecutively. Convert each into its own
+      * slice of the upload buffer; the conversion below is unchanged and simply
+      * runs once per face with off/mapped rebased. */
+-    const u32 _face_rows  = dxt ? blkrows : h;
++    const u32 _face_rows  = (dxt && !bc_cpu) ? blkrows : h;
+     /* The face stride is NOT one mip-0 image: RSX stores each cube face as its
+      * own complete mip pyramid, so face f starts a whole pyramid (128-byte
+      * aligned) in. Assuming mip-0-sized strides made face 1 land inside face 0's
+@@ -4098,8 +4187,11 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     /* Pixel conversion -- deswizzle, channel order, block copy -- is RSX
+      * semantics and lives in rsx_texture_layout.c, so a second backend gets
+      * it by calling this rather than porting the loops again. */
+-    rsx_texture_decode(mapped, pitch, vm_base + off, w, h, &tl,
+-                       rsx_texture_argb_is_rgba());
++    if (bc_cpu)
++        bc_decode_rgba((u8*)mapped, pitch, vm_base + off, w, h, tl.row_bytes, tl.fmt);
++    else
++        rsx_texture_decode(mapped, pitch, vm_base + off, w, h, &tl,
++                           rsx_texture_argb_is_rgba());
+ 
+     /* The diagnostics below only apply to the linear 8-bit case (Bink video
+      * planes); they used to sit inside that branch of the conversion. */
+@@ -4422,7 +4514,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     }
+ 
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+-    t->cube = cube; t->used = 1; t->levels = levels;
++    t->cube = cube; t->used = 1; t->levels = levels; t->bc_rgba = bc_cpu;
+     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+       t->csum = TEX_CSUM(vm_base + off, nb); }
+     #undef TEX_CSUM
+@@ -6257,6 +6349,7 @@ static void render_frame(void)
+                         /* The upload's own format: an X16 font atlas bound
+                          * as R8 over an R16 resource sampled nothing. */
+                         DXGI_FORMAT sf = vp_tex_dxgi(dr->tex[_u].fmt);
++                        if (s_d3d.vp_tex[ts].bc_rgba) sf = DXGI_FORMAT_R8G8B8A8_UNORM;   /* patch 2067 */
+                         /* TEXTURE_ADDRESS bits 20..22 = per-channel gamma (sRGB->linear on read, RGB only).
+                          * Unhandled before: the texture was read as plain UNORM, so dark parts of gamma-flagged
+                          * albedos came out lifted. RSX_TEX_GAMMA=0 restores the old read; log: [tex-gamma]. */

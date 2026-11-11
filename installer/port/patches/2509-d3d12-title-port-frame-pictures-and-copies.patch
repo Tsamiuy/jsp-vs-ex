@@ -11,10 +11,10 @@ see-through scenery). All NULL by default.
 Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 9004b3ae..3e2e5b4e 100644
+index a8a691c0..e68f8b97 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -6234,6 +6234,77 @@ static void oskp_render(u8* dst_rgba, u32 pitch, u32 W, u32 H)
+@@ -6335,6 +6335,77 @@ static void oskp_render(u8* dst_rgba, u32 pitch, u32 W, u32 H)
  }
  
  
@@ -92,7 +92,7 @@ index 9004b3ae..3e2e5b4e 100644
  /* Record the panel copy into back buffer `fi` (in RENDER_TARGET state; left in
   * RENDER_TARGET). No-op unless the panel is up. */
  static void oskp_draw(u32 fi)
-@@ -6296,6 +6367,92 @@ static void oskp_draw(u32 fi)
+@@ -6397,6 +6468,92 @@ static void oskp_draw(u32 fi)
  }
  
  
@@ -185,7 +185,7 @@ index 9004b3ae..3e2e5b4e 100644
  static void render_frame(void)
  {
      double _rf0 = perf_on() ? perf_now() : 0.0;
-@@ -7742,6 +7899,8 @@ skip_dump_consider: ;
+@@ -7844,6 +8001,8 @@ skip_dump_consider: ;
          /* End-of-frame fallback snapshot: used when the frame never contained a
           * reduced-viewport pass to capture mid-frame. */
          screen_copy_capture(fi);

@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 11 available, 2 in progress, 15 planned.
+Port features: 11 available, 3 in progress, 15 planned.
 
 ## 1. What the port adds
 
@@ -23,7 +23,7 @@ Port features: 11 available, 2 in progress, 15 planned.
 
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
-| <a id="launcher"></a>Launcher | A window to start the game, pick resolution and window size, choose how to play, rebind keys and set the fight HUD size | available | on | [LAUNCHER.md](notes/LAUNCHER.md) |
+| <a id="launcher"></a>Launcher | A window to start the game, pick resolution and window size, choose how to play, rebind keys, set the fight HUD size and pick the online method (off, re-psn or a community server) | available | on | [LAUNCHER.md](notes/LAUNCHER.md) |
 | <a id="input-modes"></a>Keyboard, mouse or controller | Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings | available | controller | Hands-on tests of mouse mode and rebinds are pending in the notes |
 | <a id="dualsense"></a>DualSense | A DualSense or DualSense Edge over USB or Bluetooth is read directly | in progress | on | Hands-on tests of the buttons are pending |
 | <a id="second-player"></a>Second player | A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before | available | on |  |
@@ -53,6 +53,7 @@ Port features: 11 available, 2 in progress, 15 planned.
 
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
+| <a id="online-settings"></a>Online settings files | The game reads repsn.ini and community.ini at startup (re-psn server, online name, peer port); both methods on is refused and a community server keeps it offline until a client exists. Host-tested; not yet run in the game | in progress | opt-in | [ONLINE.md](ONLINE.md) |
 | <a id="online-rollback"></a>Online matches with rollback netcode | 1v1 first, then 2v2, and 3v3 if the engine allows it; direct connection first | planned | opt-in |  |
 | <a id="spectating"></a>Spectating | The host opens the lobby to watchers; each watcher's camera changes only what they see | planned | opt-in |  |
 | <a id="lobbies-ranked"></a>Lobbies, matchmaking, ranked | Lobbies, matchmaking and a ranked mode with one fixed rule set | planned | opt-in |  |

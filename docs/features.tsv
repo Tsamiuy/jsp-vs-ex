@@ -6,7 +6,7 @@ split-screen-layout	port	Display	Split-screen layout	Larger views and a solo-sty
 brightness-glare	port	Display	Brightness and glare	Brightness and glare options	planned	-	Parked in the notes
 dlss	port	Display	DLSS	DLSS upscaling	planned	-	Parked in the notes
 fps-counter	port	Display	FPS counter	The game's own frames per second, bottom left, fading in with the title screen	available	off	FPS_COUNTER=1 or the launcher's “FPS counter (bottom left)” box
-launcher	port	Input and launcher	Launcher	A window to start the game, pick resolution and window size, choose how to play, rebind keys and set the fight HUD size	available	on	[LAUNCHER.md](docs/notes/LAUNCHER.md)
+launcher	port	Input and launcher	Launcher	A window to start the game, pick resolution and window size, choose how to play, rebind keys, set the fight HUD size and pick the online method (off, re-psn or a community server)	available	on	[LAUNCHER.md](docs/notes/LAUNCHER.md)
 input-modes	port	Input and launcher	Keyboard, mouse or controller	Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings	available	controller	Hands-on tests of mouse mode and rebinds are pending in the notes
 dualsense	port	Input and launcher	DualSense	A DualSense or DualSense Edge over USB or Bluetooth is read directly	in progress	on	Hands-on tests of the buttons are pending
 second-player	port	Input and launcher	Second player	A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before	available	on	
@@ -21,6 +21,7 @@ match-sizes	port	Menus and modes	1v1 and 3v3 matches	1v1 and 3v3 beside the usua
 own-music	port	Menus and modes	Your own music	Your own music files in place of the game's tracks (your files, never shipped)	planned	off	
 unlock-all	port	Menus and modes	Unlock all	An unlock-all switch for the progression bars and J-Points, as a save edit with a backup	planned	off	
 fp-bem	port	Rendering	Bump-mapped texture instructions	The fp-bem instructions are decompiled instead of rejected, so the ground draws	available	on	FP_BEM=0 keeps the old reject
+online-settings	port	Online	Online settings files	The game reads repsn.ini and community.ini at startup (re-psn server, online name, peer port); both methods on is refused and a community server keeps it offline until a client exists. Host-tested; not yet run in the game	in progress	opt-in	[ONLINE.md](docs/ONLINE.md)
 online-rollback	port	Online	Online matches with rollback netcode	1v1 first, then 2v2, and 3v3 if the engine allows it; direct connection first	planned	opt-in	
 spectating	port	Online	Spectating	The host opens the lobby to watchers; each watcher's camera changes only what they see	planned	opt-in	
 lobbies-ranked	port	Online	Lobbies, matchmaking, ranked	Lobbies, matchmaking and a ranked mode with one fixed rule set	planned	opt-in	

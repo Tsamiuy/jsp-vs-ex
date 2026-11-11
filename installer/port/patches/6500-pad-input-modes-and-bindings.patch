@@ -14,7 +14,7 @@ Tested (US disc): quick Free Battle route reaches the fight as before (bench/fea
 rebinds, controller remaps and the modes left for a hands-on check with the launcher.
 
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 0a1540e2..5ab5614d 100644
+index 06a3cd33..885c95f8 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -303,6 +303,227 @@ static int pad_key_down(int key)
