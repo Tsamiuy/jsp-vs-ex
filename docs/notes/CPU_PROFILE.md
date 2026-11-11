@@ -547,7 +547,7 @@ fps = [PERF] batch rate (counts render batches, see §17), last 60 windows; CPU 
 The maintainer (18:16): when buildings or other things get destroyed in a fight, the game slows down or stutters.
 - **No log has a destruction moment marked yet**, so this is about what the existing runs can and
   can't tell. Every stall in the AI assistant's slow-map runs (perf\scratch\slowmaps, fight windows, a frame
-  over 70 ms in [PERF4]) falls into one of three kinds (scratchpad classify.awk):
+  over 70 ms in [PERF4]) falls into one of three kinds (scratch folder classify.awk):
   | run | pipeline builds | texture bursts (>=50 created) | "other" |
   |---|---|---|---|
   | Kameari | 5 windows (23 frames) | 2 (5) | 0 |
@@ -1096,7 +1096,7 @@ gave only -0.5 ms at 2000 draws, far below its estimate: the profile shares were
   costs ~3 ms per batch at equal draws: the helpers help, despite the per-job wake cost.
 - **vfa-wake** committed as d1ea59b (VFA_WAKE=0 = old), built. Only run old1 (VFA_WAKE=0) finished
   before the maintainer paused for the night; the batch (old/wake/inline/spin x2, thread_cpu2 per run) was
-  stopped during wake1. Next: rerun the 4 variants x2 (scratchpad batch145.sh logic, minus the
+  stopped during wake1. Next: rerun the 4 variants x2 (scratch folder batch145.sh logic, minus the
   commit/build steps), drawfit.py at equal draws, CPU% for VFA_SPIN=2000 from thread_cpu2
   (CPU temperature is not readable without admin; note GPU/CPU% only).
 

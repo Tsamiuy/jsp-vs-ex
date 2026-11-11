@@ -52,7 +52,7 @@ index 2d3c3e1d..4cdfcab1 100644
  
  static D3D12State s_d3d;
 +/* RES_SCALE=n (1-4): render n times the guest resolution (2 = 1440p, 3 = 4K
-+ * for DWGR's 1280x720). The guest keeps its own sizes everywhere (surface
++ * for a 1280x720 game). The guest keeps its own sizes everywhere (surface
 + * clips, viewports, texture sizes, s_d3d.width/height); only the D3D12
 + * resources are n times larger: the swap chain, every colour target, the
 + * scene depth surfaces, the shared depth buffer. Viewports, scissors and copy

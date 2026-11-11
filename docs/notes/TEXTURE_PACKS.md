@@ -3,7 +3,7 @@
 Read-only study. Nothing was edited or built. Code references are `ps3recomp-src` branch
 `jstars-port` at **29906e8**, file `libs/video/rsx_d3d12_backend.c` (the AI assistant owns it).
 Goal: a Dolphin/RPCS3-style "dump textures, edit or upscale them offline, load them back"
-feature, usable for J-Stars' environments now and for the next game (Gundam Reborn) later.
+feature, usable for J-Stars' environments now and for a second game later.
 
 **Short answer:** it fits our renderer well. Every guest texture the J-Stars draws sample goes
 through one function, `vp_upload_tex_slot_impl` (line ~4940). It already decodes guest memory into
@@ -151,7 +151,7 @@ Load time and hitches:
 Name = `<hash64 hex>_<guest w>x<guest h>_<RSX base fmt hex>` + extension. Guest size and format in
 the name make collisions practically impossible and make files sortable by type (86 = DXT1, 88 = DXT5,
 85 = A8R8G8B8). Subfolders (e.g. `stages\s01_kameari\`) are for people, so packs can be organised by
-stage without changing any code. Gundam Reborn would simply be `texpacks\BLES02057\`.
+stage without changing any code. A second game would simply get its own folder under `texpacks\`, named by its game id.
 
 Switches (proposal): `TEX_DUMP=1`, `TEX_DUMP_PNG=1`, `TEX_DUMP_TAG=<text>`, `TEXPACK=0/1`
 (default 1 if the folder exists), `TEXPACK_DIR=<path>`, `TEXPACK_BUDGET_MB=<n>`, `TEXPACK_HILITE=1`
@@ -181,8 +181,8 @@ Packs contain art derived from the game: keep them private, like the ISO.
 ## 8. Work plan and size
 
 Code split: a new **`libs/video/rsx_texpack.c/.h`** (hash, index scan, DDS read/write, writer and
-loader threads, RAM cache, budget). It knows nothing about D3D12, so it is reusable for Gundam
-Reborn and the Vulkan/Metal backends, and a thread that does not run the game can write and unit-test it. Only
+loader threads, RAM cache, budget). It knows nothing about D3D12, so it is reusable for a second game
+and the Vulkan/Metal backends, and a thread that does not run the game can write and unit-test it. Only
 the **hook** (~40 lines) and the `VPTexSlot` fields go into `rsx_d3d12_backend.c`, handed to
 The AI assistant as a patch per the project rules.
 
