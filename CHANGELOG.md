@@ -10,6 +10,19 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
 
 - Setup checks the decrypted EBOOT against the known 1.00 builds and refuses the other region's. An unknown build can
   be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
+- Portable first run: the last line points to `jsp-settings.exe` (settings, Online tab, then Start Game) and names
+  `jsp-launcher.exe` only as the direct start, or as the fallback when Windows has no C# compiler and the settings window was not built.
+- Installer: the settings window (`jsp-settings.exe`, built from `launcher/JStarsLauncher.cs`) now has the Online tab
+  (Off / re-psn / Community server, Find on LAN); before, only the v19 launcher had it. Start Game saves unsaved
+  Online edits first. The game's reader also finds `jsp-install.ini` one folder above its `game\` folder, so a portable
+  install uses `<install>\shared` as the tab does. Not yet run on Windows. `online_settings_test.sh` is now tracked, so CI can run it.
+- Launcher: a Find on LAN button in the Online tab looks for a re-psn server started with `-discover` on the same
+  network and fills the Server field (needs a re-psn build with LAN discovery; not tested across a real network yet).
+- Launcher: an Online tab edits the shared online settings files (`repsn.ini`, `community.ini`): off, re-psn or a
+  community server preset, one method at a time, written atomically; the launcher sets no online environment variable.
+- Game: reads `repsn.ini` and `community.ini` at startup and sets the runtime's online variables from them (re-psn
+  server and name, peer port; both methods on is refused, a community preset keeps the game offline, `--psnr`,
+  `--username` and environment variables win), logging on `[online]` lines; host test in CI.
 - D3D12: the GPU wait only gives up on a removed device, and the deferred-release table grows instead of freeing its
   oldest entry early (toolkit patch 2066).
 - RPCS3 save import stages incoming files before replacing progress, restores the old files after an I/O error,

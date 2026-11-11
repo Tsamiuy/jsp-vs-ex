@@ -182,6 +182,8 @@ __pycache__/
 !/installer/music/tracks.tsv
 !/installer/tools/*.json
 !/installer/tools/*.cmake
+!/installer/tools/online_settings_test.cpp
+!/installer/tools/online_settings_test.sh
 !/installer/patches/
 /installer/patches/*
 !/installer/patches/*.patch

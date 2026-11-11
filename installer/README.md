@@ -192,6 +192,8 @@ With none of them the defaults apply (`settings: none found`). The installed gam
 
 ## Online Battle (experimental)
 
+Quick start for players: [docs/ONLINE.md](../docs/ONLINE.md).
+
 The game's own Online Battle can run against a [re-psn](https://github.com/undecuple/re-psn) server instead of PSN: a small
 matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
 match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in
@@ -200,7 +202,21 @@ present. Setting up the server: download it from the [re-psn releases](https://g
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.
 
-Add to the settings file (see above) of each player:
+The settings window's Online tab (the same tab is also in `launcher/JStarsLauncher19.cs`) sets this up without editing files: Off, re-psn (server and online name) or Community server
+(a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
+not work on a community server). Choosing one turns the other off in the same save. It writes `repsn.ini` and
+`community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a
+portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. On the re-psn choice, **Find on LAN** broadcasts one small UDP request (port 36100) and fills the Server field from a server that
+answers; the host starts re-psn with `-discover` (a build with LAN discovery; see [docs/ONLINE.md](../docs/ONLINE.md#playing-on-the-same-network-lan)).
+It fills a normal `host:port`; nothing else is saved. Keys that belong to the game itself
+are never changed by the launcher. The launcher sets no online environment variable; the game reads the files at
+startup (`installer/port/jsp/jsp_online.cpp`, logging each decision on `[online]` lines) and sets the runtime's
+variables from them. Re-psn and community on together: online is refused. Community on: no client yet, offline. The
+game's own `repsn.ini` (in the install folder when portable, else `%APPDATA%\JSP Fan Revival\`) can also hold
+`p2p_port`. `--psnr`, `--username` and the variables below, when set by hand, win over the files. Host test:
+`bash installer/tools/online_settings_test.sh` (g++ only; CI runs it).
+
+Or add to the settings file (see above) of each player:
 
     PS3_NET_ONLINE=1
     PSNR_SERVER=192.168.1.20:36100
@@ -213,7 +229,7 @@ Two copies on one PC need a second settings file with another name and `PS3_NET_
 started with `jsp-launcher.exe --settings <file>`, and their own save data: `PS3_GAMEDATA_ROOT=<folder>` in that file,
 with a copy of your save folder in it.
 
-What has been tested, and what has not: two copies on one Linux PC under Proton, talking to a server on the same PC,
+What has been tested, and what has not (the settings reader has a host test, 21 checks; its first run in the game is not recorded here yet): two copies on one Linux PC under Proton, talking to a server on the same PC,
 reached a Friendly Match room together, started the battle and played into the fight with data going both ways; first
 with psnr, then with the re-psn v0.3.0 Linux release (same result). Both runs used a build of the port on ps3recomp
 v0.18.0; the tree on v0.19.0 has not been re-checked online yet. Not run: the re-psn Windows build.
