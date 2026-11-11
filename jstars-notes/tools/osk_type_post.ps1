@@ -1,10 +1,12 @@
 # Types into the game window with PostMessage (no focus change, nothing reaches other windows).
+# Usage: osk_type_post.ps1 [-Log <path to the game's stdout log>]  (default: stdout.txt in the current folder)
+param([string]$Log = (Join-Path (Get-Location) "stdout.txt"))
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class W { [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string t);
   [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l); }
 "@
-$log = Join-Path $env:USERPROFILE "Desktop\PS3Recomp\jstars\run\stdout.txt"
+$log = $Log
 for ($i = 0; $i -lt 900; $i++) { if ((Test-Path $log) -and (Select-String -Path $log -Pattern "LoadAsync" -Quiet)) { break }; Start-Sleep -Milliseconds 500 }
 "loadasync seen at try $i"; Start-Sleep -Seconds 3
 $h = (Get-Process JStarsRecomp | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1).MainWindowHandle; "hwnd $h"
