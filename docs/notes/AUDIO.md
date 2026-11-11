@@ -65,7 +65,7 @@ Our GetPortConfig layout matches what it reads: readIndexAddr @0, status @4, nCh
    `(u32 portNum, float* src, u32 samples, float volume)` and mixes into the port's current block.
    That is a code change, so it needs the maintainer's yes.
 
-## Round 2 (2026-10-27): the mix is silent, so what feeds it?
+## Pass 2 (2026-10-27): the mix is silent, so what feeds it?
 The AI assistant measured that the driver copies blocks from src 0x451730F0, and every one is zero (§ FINDINGS
 "Audio: silent").
 
@@ -93,7 +93,7 @@ Image 10 doesn't appear at all. The log keeps only the first lines, so counts ar
    - That decides whether to follow the SPU path (AsrVoice output) or the PPU path (the ASR server
      chain func_006C92D0 ... func_006F1998).
 
-## Round 3 (2026-10-27): decode jobs stop after 5
+## Pass 3 (2026-10-27): decode jobs stop after 5
 a7 (the AI assistant): img10 AtomDecoder = 5 in 130 s; img11 AsrVoice ~24.6k (~200/s, every one "0 dma"). No SPU
 PUT lands in 0x45170000-0x45180000, so the mix buffer 0x451730F0 is written PPU-side.
 
@@ -133,7 +133,7 @@ Hypotheses (*inferred*, need the push dump below):
   sizeDmaList is nonzero in the raw bytes but the line says 0, the dispatcher reads the header wrong
   (hypothesis 2), and that would also explain AsrVoice's "0 dma".
 
-## Round 4 (2026-10-27): the decoder runs 5 times on real HCA, then the voice stalls
+## Pass 4 (2026-10-27): the decoder runs 5 times on real HCA, then the voice stalls
 The AI assistant (JQ_DBG): the AtomDecoder is pushed 5x from tid 17 via Port2CopyPushJobBody.
 - The descriptor has no DMA list; this is genuine, not a parse bug.
 - sizeOut 0x18000. User data: p1 0x4512D3E0, p2 = the HCA voice context 0x4B7842D0.
@@ -166,7 +166,7 @@ Reading (*inferred*):
    Do any read/write cursors of the PCM ring move after the 5th decode? If none move, nothing
    consumes the decoded PCM.
 
-## Round 5 (2026-10-27): where the CRI jobs can exit before any DMA (lifted atomdec, read-only)
+## Pass 5 (2026-10-27): where the CRI jobs can exit before any DMA (lifted atomdec, read-only)
 The AI assistant: SPU_DMATRACE shows no GET/PUT at all from img10 (AtomDecoder) or img11 (AsrVoice). The
 interpreter gives the same result. The HCA stream is plain (ciph 0).
 
@@ -201,7 +201,7 @@ If ctx+0x14 is garbage or nonzero where the CRI JOBCRT expects 0 (or expects a v
 that field correctly in the dispatcher's CellSpursJobContext2 is the fix. That is a runtime change,
 so it needs the maintainer's yes.
 
-## Round 6 (2026-10-27): what the CRI JOBCRT wants at ctx+0x14
+## Pass 6 (2026-10-27): what the CRI JOBCRT wants at ctx+0x14
 Confirmed by the AI assistant (a11): AsrVoice exits with stop 0x3FFF at pc 0x3FF8 every time (373x); game jobs
 exit normally. Our dispatcher puts `(dsz/128 & 0xF) << 28` at ctx+0x14 (0x20000000 for 256 B
 descriptors), so the low 28 bits are 0.
@@ -238,9 +238,9 @@ Side note: the SMC message for AsrVoice ("word 0x28000000 at pc 0x3FF4") is the 
 being different at run time. 0x28000000 is `stopd`. It is a symptom of the same exit, not a separate
 problem (*inferred*).
 
-**Paused 2026-10-27 01:00.** State: ctx+0x14 fix handed to the AI assistant (round 6), untested. Next: read the AI assistant's result. If the jobs still exit, dump the 0x660/0x4060 return code and the first PCs after 0x5F8/0x3FF8. If they run but stay silent, follow the atomdec main (0x180) DMA list and the PUT targets against the voice context p2 (outA/outB) and the PPU mixer at 0x451730F0. Speed work (CPU_PROFILE §42-43) is waiting on the no-PERF survey per stage, Namek's slow stretch, and the perf-cheap/rec-dedup tests.
+**Paused 2026-10-27 01:00.** State: ctx+0x14 fix handed to the AI assistant (pass 6), untested. Next: read the AI assistant's result. If the jobs still exit, dump the 0x660/0x4060 return code and the first PCs after 0x5F8/0x3FF8. If they run but stay silent, follow the atomdec main (0x180) DMA list and the PUT targets against the voice context p2 (outA/outB) and the PPU mixer at 0x451730F0. Speed work (CPU_PROFILE §42-43) is waiting on the no-PERF survey per stage, Namek's slow stretch, and the perf-cheap/rec-dedup tests.
 
-## Round 7 (2026-10-27): why ~1 in 10 blocks are empty (read-only; fix 8d34572 now default on)
+## Pass 7 (2026-10-27): why ~1 in 10 blocks are empty (read-only; fix 8d34572 now default on)
 Code facts:
 - **The CRI writer treats W == R as "full"** (func_006A5BA4: fill = W-R if W > R, else nBlock-(R-W),
   so W == R gives nBlock = 8, which is >= lead 5, so it doesn't write).
@@ -276,9 +276,9 @@ Code facts:
 2. If ticks are late: run the CRI jobs off tid 17 (asynchronous push with a completion), or, if the
    tick sleep overshoots, make sys_timer_usleep for >= 1 ms waits precise (high-resolution timer).
 
-**Paused 2026-10-27 (project paused).** State: audio gap analysis (round 7) handed to the AI assistant; outcome in FINDINGS. Speed work: see CPU_PROFILE §42-43 (v4 tick off by default; perf-cheap, rec-dedup drafted).
+**Paused 2026-10-27 (project paused).** State: audio gap analysis (pass 7) handed to the AI assistant; outcome in FINDINGS. Speed work: see CPU_PROFILE §42-43 (v4 tick off by default; perf-cheap, rec-dedup drafted).
 
-## Round 8 (2026-10-27, after the AI assistant's CRI_LEAD=7): the remaining 0.9-2.6% gaps
+## Pass 8 (2026-10-27, after the AI assistant's CRI_LEAD=7): the remaining 0.9-2.6% gaps
 The AI assistant (FINDINGS "Audio glitches"):
 - CRI server ticks are mostly 10-18 ms, but 22-50 ms several times every ~2.7 s.
 - CRI_LEAD=7 (capped at nBlock-1) cut silent blocks from 12% to 0.9-2.6%.

@@ -1,7 +1,7 @@
 # VFX: skill and other effects, how hard to fix (2026-10-23, read-only)
 
 The maintainer asked whether the missing effects ("all the effects of skills and everything that is currently
-missing") are easy to fix. Nothing was changed. Sources: COLOR_EXPOSURE.md Rounds 7-11, FINDINGS §38/§45,
+missing") are easy to fix. Nothing was changed. Sources: COLOR_EXPOSURE.md Passes 7-11, FINDINGS §38/§45,
 the Athena and Yoshiwara pass captures, and the fight screenshots in `stages\`.
 
 ## What "effects" are made of in this game, and what our port does with each
@@ -22,7 +22,7 @@ bright core and halo, so beams, explosions and auras look flat and dim next to R
 
 ## The glow: how far the diagnosis is
 
-From Rounds 7-11 (static reading of the recompiled PPU code plus the AI assistant's logs):
+From Passes 7-11 (static reading of the recompiled PPU code plus the AI assistant's logs):
 - The game does enter luminance mode, and the glow particles do submit draw records into the `pe::luminance`
   pass. The renderer executes every pass at frame flush, with no filter.
 - So the glow draws die at one of three points: (a) the record's command descriptor is 0, so the record is
@@ -114,9 +114,9 @@ some effect geometry reaches the screen through quads and strips. Cause 1 above 
 Where a skill effect can still be lost, in pipeline order:
 
 1. **Before the FIFO (game side).** Effects are particle-server records executed at frame flush, in the
-   same executor as the glow (COLOR_EXPOSURE.md Round 11). A record is dropped silently if its command
+   same executor as the glow (COLOR_EXPOSURE.md Pass 11). A record is dropped silently if its command
    descriptor is 0, or if its eight vertex batches are empty. The glow records already die this way (or in
-   the backend). Effect types built by the same vertex-build path (`func_00631C24` / the inline path, Round 10)
+   the backend). Effect types built by the same vertex-build path (`func_00631C24` / the inline path, Pass 10)
    would vanish the same way. Visible streaks would then be a different element type. This fits "glow and
    most skill effects missing" with a single cause. SPU-built effect geometry (one of the 18 lifted jobs)
    coming out empty would look the same from here.
@@ -202,7 +202,7 @@ use vertex colour × texture. The glow layer stays separate.
   arrive as 0. The decisive run has been asked of the AI assistant but not done yet: Goku's laser with
   `VP_ATTRS=1 RSX_DBG_VP=04EEE600` (and optionally `DEPTH_OFF=1`). Read the `[VPATTR]` lines that appear
   when the laser fires, and `duck_vp.hlsl`, to see how COL0 is produced.
-- The glow layer is separate: run `lumflag-trace-5` (COLOR_EXPOSURE.md Round 11) when brightness work resumes.
+- The glow layer is separate: run `lumflag-trace-5` (COLOR_EXPOSURE.md Pass 11) when brightness work resumes.
 
 ## Update (2026-10-24 afternoon): the beam's vertex buffers are empty when we draw them; the RSX doesn't wait
 
@@ -297,7 +297,7 @@ What can explain it:
    location, our EA differs from the producer's. The junk being pointers into the same 0x48xxxxxx window
    suggests the right *region* but the wrong *slot*. That could also be the vertex data base offset or the
    frame allocator's view of which buffer belongs to this frame.
-3. **The producer never runs**: the particle vertex build (PPU `func_00631C24` / the inline path, Round 10,
+3. **The producer never runs**: the particle vertex build (PPU `func_00631C24` / the inline path, Pass 10,
    or an SPU job) fails or is skipped, and the buffer is allocated (and zeroed) but never filled. The glow
    would die the same way.
 

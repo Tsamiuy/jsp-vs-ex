@@ -20,7 +20,7 @@ Sources:
 4. **Nobody dies.** When health reaches 0 the fighter isn't KO'd and can keep moving. After 1-2 seconds without being
    hit, health refills to full.
 5. **No rewards**, since a Training fight can't be won.
-6. **1 Player / 2 Players (the maintainer, 20:05):** Training keeps Free Battle's own "1 Player / 2 Players" step before
+6. **1 Player / 2 Players (the maintainer):** Training keeps Free Battle's own "1 Player / 2 Players" step before
    character select. The maintainer confirmed that 2-player split screen works.
    - With 2 Players, a human Player 2 takes a slot exactly as in Free Battle.
    - Slot locks only apply to slots that are CPU in the chosen setup.

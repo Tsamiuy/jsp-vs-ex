@@ -1,4 +1,4 @@
-# Per-draw cost, round 2: VPULL_MEMO and TEX_HINT (2026-10-25)
+# Per-draw cost, pass 2: VPULL_MEMO and TEX_HINT (2026-10-25)
 
 `drawcost2.patch` (+57/-5 in rsx_commands.c, rsx_commands.h and rsx_d3d12_backend.c) applies to
 `ps3recomp-src` at 3f6d509 (`git apply --check` passes). It compiles with the same warnings as

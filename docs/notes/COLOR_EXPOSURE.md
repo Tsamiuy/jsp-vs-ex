@@ -135,7 +135,7 @@ template).
 5. If `[LUMRB]` prints but `c1.w` stays 7200: the game reads the target another way. Next step
    is a `GCM2D_DBG=64` run and an `NV3089_GATE` log to see the transfer it uses.
 
-## Round 2 (2026-10-21 ~15:00): what the AI assistant's runs showed, revised ranking, next test
+## Pass 2 (2026-10-21 ~15:00): what the AI assistant's runs showed, revised ranking, next test
 
 The AI assistant's runs are in `color\{base,tm05,tm1,tm2,lumrb,lumrb_xfer}` and FINDINGS §37 (second §37).
 
@@ -182,7 +182,7 @@ toward white: the sky gets a bright haze and bright grass desaturates. Without i
 exposure, the picture is darker and *more* saturated: neon grass, flat sky. That is our picture
 versus RPCS3's.
 
-### Ranking after round 2
+### Ranking after pass 2
 
 1. **The game never sees the luminance target** (medium-high confidence): pins exposure at its
    ceiling and, most likely, suppresses the glare passes. Test: lum-readback-2.
@@ -234,7 +234,7 @@ value; they need the game to run its glare passes.
 draws appearing, plus `c1.w` leaving 7200 on its own, closes both halves. Nothing in the backend
 can draw those passes for the game; they only appear if the game decides to issue them.
 
-## Round 3 (2026-10-21 ~16:30): the 20x11 target is in main memory; v2 wrote the wrong address
+## Pass 3 (2026-10-21 ~16:30): the 20x11 target is in main memory; v2 wrote the wrong address
 
 The AI assistant's lum-readback-2 run (`color\lumrb2`): `[LUMRB] off=0x039FFA40 20x11 (res 1280x720)
 ... meanRGB=0` eight times, `c1.w` 7200 throughout. Three findings:
@@ -275,7 +275,7 @@ the next step is a PPU-side read watch. If `dma=0xFEED0001` and `c1.w` still sta
 PPU reads the value but something else fixes the exposure; then the Yoshiwara exposure sweep
 decides whether to force it.
 
-## Round 4 (2026-10-21 ~17:30): the exposure sweep explained, the burn is in the scene alpha, and a FIFO-level test for the glare layer
+## Pass 4 (2026-10-21 ~17:30): the exposure sweep explained, the burn is in the scene alpha, and a FIFO-level test for the glare layer
 
 ### Revising the Yoshiwara note: the exposure value cannot un-burn the panels
 
@@ -329,7 +329,7 @@ cause; then the material FP for one panel draw is the next thing to read.
   320x180, composite into 0x0ED10000). They are object layers: the game draws selected objects
   (glow sources, moving things) into them, then blurs and composites.
 - Not MRT: no draw in either capture binds a second colour target.
-- Not occlusion queries, not NV3089/NV0039 (rounds 2-3).
+- Not occlusion queries, not NV3089/NV0039 (passes 2-3).
 - Two backend paths drop draws silently, so a capture cannot tell "never issued" from
   "dropped": `rsx_no_color_target()` (SET_SURFACE_COLOR_TARGET = NONE) and
   `d3d12_draw_indexed/arrays` ("other primitives are skipped rather than drawn wrong": POINTS,
@@ -351,7 +351,7 @@ attrib-0 enable, viewport) and draw batch that targets those surfaces, as `[RTDR
 - `begin`/`draw` lines with prim 5-8 and target set: they reach the backend and are lost later
   (vertex fetch, VBFULL); the `[RTDRAW]` fp/vp fields say which draw to trace.
 
-## Round 5 (2026-10-21 ~18:00): why lum-readback-3 logged dma=0
+## Pass 5 (2026-10-21 ~18:00): why lum-readback-3 logged dma=0
 
 The AI assistant's lum-readback-3 run (`color\lumrb3`): every `[LUMRB]` line has `dma=0x00000000`, the
 20x11 rect has real, scene-dependent means (92/111/124/82) after boot, `c1.w` stays 7200. The
@@ -373,7 +373,7 @@ CRLF tree with `--ignore-whitespace`; gcc syntax check passes. Expected with `LU
 fp=0x0FC9FC01 exposure c1.w=` leaving 7200. If `dma=0xFEED0000` prints instead, the target is
 local after all and the PPU reads it some other way (PPU read watch next).
 
-## Round 6 (2026-10-21 ~19:50): what the PPU does with the 20x11 target, why `[TONEMAP]` went quiet, `tonemap-log.patch`
+## Pass 6 (2026-10-21 ~19:50): what the PPU does with the 20x11 target, why `[TONEMAP]` went quiet, `tonemap-log.patch`
 
 The AI assistant's lum-readback-4 run (`color\lumrb4`, FINDINGS §40): `[LUMRB] off=0x039FFA40 dma=0xFEED0001 20x11
 ... -> guest 0x48CFFA40 (main) meanRGB=82..124`, the Ace/Goku cards darker and more contrasty than base,
@@ -456,7 +456,7 @@ E~ the exposure loop is complete and correct; the remaining gap to RPCS3 is the 
 (rt-drawlog, cap-alpha), not exposure. Optional A/B: `TONEMAP_EXPOSURE=<E~>` with the readback off should look
 the same as the settled readback.
 
-### Round 6 follow-up (2026-10-21 ~20:15): the AI assistant's Yoshiwara tonemap-log run explained
+### Pass 6 follow-up (2026-10-21 ~20:15): the AI assistant's Yoshiwara tonemap-log run explained
 
 The AI assistant (`color\yoshi_tmlog`): in the fight the logged `La` is 0.09-0.15 while `Lgeo` is 0.06-0.09, and
 `E x La = 0.36` on 387 of 388 lines, not 0.72. Both are the stage's HDR parameters, not a bug:
@@ -527,7 +527,7 @@ user liked (darker, more contrast on the characters) came from a lower E on ever
   (his skin/hat/cloth set); the stage comes later with other programs (`0x0FCA1E81`, `0x0FCA1801`,
   `0x0FCA0E01`, `0x0FCA0401`, texture 0B52BD80 / 01160C80). So characters are separate draws with their own
   fragment programs and textures; in fights each character/costume brings its own small set of programs.
-  The character programs are also the ones that sum PCF shadow taps (FINDINGS "Shadow passes round 2").
+  The character programs are also the ones that sum PCF shadow taps (FINDINGS "Shadow passes, pass 2").
 - Fragment-program addresses move between runs (the tone-map was 0x0FC9FC01 in the demo capture and 0x0FC00241
   in the AI assistant's run), so a hook must match programs by content (the backend already hashes the decompiled HLSL
   for the shader cache, `shcache_key`), or by a texture/constant signature, not by address.
@@ -594,7 +594,7 @@ Limits: works on single-output programs (all J-Stars scene shaders); with LUM_RE
 longer saturated and the two factors compound, so run the experiment with it off. Alpha-blended character parts
 (blend=1 draws, e.g. effects) are adjusted too if their program is selected.
 
-## Round 7 (2026-10-21 ~21:10): the glare pass is a particle pass that is never enabled; the alpha capture needs per-pass dumps
+## Pass 7 (2026-10-21 ~21:10): the glare pass is a particle pass that is never enabled; the alpha capture needs per-pass dumps
 
 The AI assistant's results (FINDINGS §45): `RT_DRAWLOG=0E590000` shows only bind / colour_target / clear for the glare layer,
 no BEGIN and no draw, so the game itself issues nothing into it. `RSX_CAP_ALPHA` BMPs are in `color\yoshi_alpha_cap`.
@@ -642,7 +642,7 @@ the glare layer with BEGIN lines, or a second gate deeper in the function, is ne
 capture the AI assistant took, with `RSX_CAP_PASSES=1 RSX_CAP_ALPHA=1`, for the burned panels (`pass_op0657_pre_rt_0ED10000_a.bmp`
 and the matching colour dump; the panels should sit where alpha <= 85/255).
 
-## Round 8 (2026-10-21 ~21:50): RenderLuminance past the gate, and the panels' alpha
+## Pass 8 (2026-10-21 ~21:50): RenderLuminance past the gate, and the panels' alpha
 
 **The AI assistant's reading** (`yoshi_lumflag`): `set_luminance_pass(1) lr=0x0002FB04` x200, `RenderLuminance:
 pass_flags=0x3F aux=0` on all samples. So the gate passes every frame; the question is what happens after it.
@@ -719,7 +719,7 @@ the *value* is right (vertex colour alpha, a material constant, or a texture alp
 draw that writes it: smallest test is a per-draw alpha dump of ops 281-498 into 0x0ED10000 (or `RSX_CAP_PASSES`
 with a finer boundary), then `fp_opNNNN.hlsl` of the draw covering (900, 210) shows how its `.a` is formed.
 
-## Round 9 (2026-10-21 ~22:40): the emitter render function, and FP_GAIN_KEYS
+## Pass 9 (2026-10-21 ~22:40): the emitter render function, and FP_GAIN_KEYS
 
 ### What `lumflag-trace-2` showed (the AI assistant, `color\yoshi_lumflag2`)
 Both passes walk the same emitters (nodes 0x492BE130, 0x492BED70..0x492C1540), vtable 0x00884488, and call the same
@@ -843,7 +843,7 @@ Suggested first runs: `FP_EXPOSURE=3 FP_GAIN_KEYS=<union> LUM_READBACK unset` on
 characters only, hall untouched), then `FP_EXPOSURE=5` and `FP_GAIN=1.5` for comparison; `FP_GAIN_LOG=1` prints
 `(adjusted)` only on the listed programs, which confirms the selection without looking.
 
-## Round 10 (2026-10-21 ~23:45): the luminance pass does not "stop" - the glow draws are prepared and deferred
+## Pass 10 (2026-10-21 ~23:45): the luminance pass does not "stop" - the glow draws are prepared and deferred
 
 Read-only decode after the AI assistant's lumflag-trace-3 run (`color\yoshi_lumflag3`, FINDINGS §50). Short version: the
 elements that produced no submit under a luminance context are the normal, non-glow children being skipped on
@@ -854,7 +854,7 @@ records are ever executed and whether the backend drops the resulting draws. Two
 ### Correction first: module 033 uses TOC 0x8E3858
 
 `ppu_recomp_033.cpp` (and 032) run with r2 = 0x8E3858, not the 0x8D3888 of the game modules (functions.json
-`toc`). Every "[toc-0x....]" constant quoted for 032/033 in Rounds 8-9 must be read from that base. Checked in
+`toc`). Every "[toc-0x....]" constant quoted for 032/033 in Passes 8-9 must be read from that base. Checked in
 `EBOOT.elf`: `toc-0x5144` = 0.0f (the intensity threshold), `toc-0x5148` = FLT_MAX, `toc-0x50A0` = 0.5f,
 `toc-0x513C` = 0x0096CF90 (pointer variable of the particle render state, "G" below), `toc-0x5138` = 0x00968F48
 (pointer variable of the renderer, the same object `[toc019+0x3F9C]` RenderLuminance uses), `toc-0x5134` =
@@ -944,7 +944,7 @@ records are ever executed and whether the backend drops the resulting draws. Two
   of the child pass, by setting r4 = `[renderer+0x58]` before the `func_00719B1C` calls in `func_0063A1AC`.
 - No candidate fix yet: the root cause is behind (c)/(d).
 
-## Round 11 (2026-10-22 ~00:45): the record executor, and why trace-4 misled
+## Pass 11 (2026-10-22 ~00:45): the record executor, and why trace-4 misled
 
 ### 1. Trace-4 (color\yoshi_lumflag4) re-read: "one glow record" is a logging artefact
 
@@ -971,7 +971,7 @@ same TOC) and `ppu_recomp_033.cpp` (libgcm static functions), plus the EBOOT dat
   (execute: mode 0 = `vt+0` then children; mode 1 = only zero the record list `+0x10/+0x14/+0x18`; mode 2 =
   execute, zero, children). There is no name, hash or flag test anywhere in this walk: `pe::luminance` is
   executed exactly like `pe::opaque`, as long as it hangs under a root at flush time (it does: child of
-  `Alpha::object` under `OpGameMain::DrawEntryTable_Alpha`, Round 10 §4).
+  `Alpha::object` under `OpGameMain::DrawEntryTable_Alpha`, Pass 10 §4).
 - Prepare `func_005260D8(renderer, pass)`: `count=[pass+0x18]`; `count<=0` -> `[pass+0x2C]=0`, done. Otherwise
   an array of `count` pointers from the frame allocator (`[renderer+0xC]+0x18`), `func_00525DE4(array,
   [pass+0x10] head, count, [pass+0x28] sort mode)` sorts the records; its result -> `[pass+0x30]` (64-bit, a sort
@@ -983,7 +983,7 @@ same TOC) and `ppu_recomp_033.cpp` (libgcm static functions), plus the EBOOT dat
   `[[renderer+0x50]+0x10]` made by `func_00528028`), `+0x8 extra` (= rec+0x20), `+0xC seq`, `+0x10 key`.
 - The command functions are the four descriptors in TOC words `0x8DED84..0x8DED90`: `0x8BBF10 func_00527C50`
   (clear, mask 0xF0), `0x8BBEF8 func_00527AF4` (clear, mask 3), `0x8BBE68 func_005270A8` (clear, mask 0xF3),
-  `0x8BBE50 func_00527008` (draw). So the "technique 0x8BBE50" that `func_00634968` writes (Round 10 §2) is the
+  `0x8BBE50 func_00527008` (draw). So the "technique 0x8BBE50" that `func_00634968` writes (Pass 10 §2) is the
   **draw command descriptor** stored at `state+0x38`, and `func_00527BE4` only builds the 16-byte clear parameter
   block (`{4, 1, 3, &colour}`) that a clear record points to. Each command calls `func_00529C60`,
   `func_00529ED0(snap)` (apply state: VP via stub `func_0071952C` -> `func_00575668` = cellGcmSetVertexProgram,
@@ -1004,7 +1004,7 @@ the pass tree is executed. The luminance draw records can therefore vanish at ex
   drawn). Candidate fix if seen: make the vertex-build path write the draw descriptor (`0x8BBE50`, TOC033-0x5134)
   into the state block before `func_00719B1C`, as `func_00634968` does.
 - (b) `fn` is the draw command but the 8 batch pointers are NULL or have `count 0` -> `func_00572E60` emits
-  nothing. Candidate fix if seen: the vertex build for these records (`func_00631C24` / inline path, Round 10 §3)
+  nothing. Candidate fix if seen: the vertex build for these records (`func_00631C24` / inline path, Pass 10 §3)
   does not attach its batches to the state block; compare with a `pe::opaque` record.
 - (c) the draw is emitted and the backend drops it (`rsx_no_color_target`, `pipeline_ready`, `count`), which
   `lum-rt-drawlog.patch` shows as `[LUMRT]` lines, once `LUM_RT` is really exported.
@@ -1039,17 +1039,17 @@ Parked by the maintainer on 2026-10-22: brightness, glare and per-character expo
 textures, shadows and other broken rendering come first.
 
 - State: the glare target `0x0E590000` is cleared every luminance frame but never drawn into, so the glow/glare
-  layer is missing and the HDR encode gets glare = 0 (Rounds 7-11). The particle server does enter luminance mode
-  and does append its glow records (Round 10 §1-3, Round 11 §1); the renderer's frame flush executes every pass
-  without any filter (Round 11 §2). The draw records of `pe::luminance` therefore die at one of three points:
+  layer is missing and the HDR encode gets glare = 0 (Passes 7-11). The particle server does enter luminance mode
+  and does append its glow records (Pass 10 §1-3, Pass 11 §1); the renderer's frame flush executes every pass
+  without any filter (Pass 11 §2). The draw records of `pe::luminance` therefore die at one of three points:
   command descriptor 0 in the record's state snapshot, empty vertex batches in `func_00572E60`, or a backend guard.
 - Patches ready, none applied or built yet by the AI assistant for this step: `lumflag-trace-5.patch` (PPU, logs the
   executor for `pe::lum*` passes), together with `lumflag-trace-4.patch` and `lum-rt-drawlog.patch`
   (`LUM_RT=0E590000`, must be echoed in the bat to prove it is exported). Expected: one Yoshiwara fight run, read
-  `[LUMEXEC]` lines with Round 11 §4; the fix is then one line on the PPU side (write descriptor `0x8BBE50` into the
+  `[LUMEXEC]` lines with Pass 11 §4; the fix is then one line on the PPU side (write descriptor `0x8BBE50` into the
   state block, or attach the batches) or a backend guard change.
-- Unrelated loose ends of this file: per-draw alpha dump of ops 281-498 for the burned panels (Round 9), and the
+- Unrelated loose ends of this file: per-draw alpha dump of ops 281-498 for the burned panels (Pass 9), and the
   FP_EXPOSURE/FP_GAIN runs with the union key list. The user also wants character-only brightness later, which
-  needs per-character tuning (menu Brightness slider notes in Rounds 5-6).
+  needs per-character tuning (menu Brightness slider notes in Passes 5-6).
 - Notes for whoever resumes: patches README rows list every patch in order; FINDINGS.md §38 has the one-paragraph
-  history per round; project memory `jstars-glare-layer` has the structure (passes, records, executor, draw path).
+  history per pass.

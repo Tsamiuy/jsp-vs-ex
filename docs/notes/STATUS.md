@@ -273,7 +273,7 @@ content.
 - Not ported yet (medium): primitive restart / vertex base decode and polygon offset decode in
   rsx_commands (upstream has them only in rsx_dispatch).
 
-## Brightness work parked (the maintainer, 2026-10-21 ~22:41): wait until near the end
+## Brightness work parked (the maintainer, 2026-10-21): wait until near the end
 - All colour/brightness switches stay off: LUM_READBACK, TONEMAP_EXPOSURE, FP_EXPOSURE/FP_GAIN
   (+ FP_GAIN_KEYS in color\capcode\fp_gain_keys.txt), TEX_EXPAND. Findings §37-§53.
 - The PPU glare traces (lumflag 1-5) are removed from jstars\port\recompiled again: originals put
@@ -402,7 +402,7 @@ stick 50 MB; nothing deleted.
   Next: the maintainer listens (perf\audio\a12\clip_*.wav) and decides default-on; A/B fps cost (Hidden Leaf 27.6 vs 29.1
   earlier, single run). Diagnostics left in: JQ_DBG (jstars\port\stubs.cpp), AUDIO_CRI_DBG
   (ppu_recomp_035.cpp, backups *.pre-*). Boost turned OFF (the maintainer). Nothing running, ISO unmounted.
-- The maintainer (2026-10-27 00:00Z) heard music and sound during the a13 run: "working but a bit glitchy". Measured 9-14%
+- The maintainer (2026-10-27) heard music and sound during the a13 run: "working but a bit glitchy". Measured 9-14%
   silent mix blocks in the fight (gaps / underruns, inferred cause). First task tomorrow: fix the glitches
   (CRI writes 5-block bursts per 16 ms tick; check underruns, read-index timing, WASAPI buffer), then default-on.
 - 2026-10-27 ~11:45 paused (the maintainer: audio finished). State: ps3recomp-src jstars-port HEAD d4a3f2f (audio switches;
@@ -425,7 +425,7 @@ stick 50 MB; nothing deleted.
 - 2026-10-27 18:40: leaf-shadow flicker fixed: ZPASS_LOD0=1 default in main.cpp (c1d6364 patch by an AI assistant; =0 off),
   no fps cost (28.5 vs 28.1). Keyboard 3/4 = L3/R3 (5896aa6). Probes kept opt-in: ZPASS_VPXY (b0ed18b),
   ZPASS_FPLOG (3ebcc8c), FP_KILL fix (ede600e). Awaiting the maintainer's play-test. RESOLUTION.md awaits the maintainer's OK.
-  Boost left on (the maintainer 15:39Z). Nothing running, ISO unmounted. perf\shadows_env ~0.7 GB.
+  Boost left on (the maintainer). Nothing running, ISO unmounted. perf\shadows_env ~0.7 GB.
 - 2026-10-27 21:40: RES_SCALE committed (0114cf0): 1440p 29.0 f/s, 4K 28.4 f/s. "J-Stars Settings.bat" picks
   720p/1440p/4K and window/fullscreen. Queue: fp-bem patch (the AI assistant, needs the maintainer's OK), PR #11 test, d-pad keys.
 - 2026-10-27 21:45: d-pad keys I/J/K/L, arrows = left stick only (073dc29, PAD_KEYS_SPLIT=1 default in main.cpp,
@@ -458,7 +458,7 @@ stick 50 MB; nothing deleted.
   instant main-menu hover (menu_jump); controller/keyboard as player 2; split screen parked (HUD stays full size
   there). Tests: INPUT_MODE=keyboard only. Commits 77b22a9 aaacd8e 9ccebda (+ cellPad P2 keyboard, uncommitted).
 - Training mode (10-30): all three steps built and tested in scripted runs (FINDINGS "Training mode step 1/2/3"); waiting for the maintainer to test it before any new work (the maintainer 10-29: "wait with the next thing"). Step 3 requirement (the maintainer 10-29): the Training flag must turn off when leaving Training, so a later Free Battle in the same session gets normal health/KOs (the maintainer will also test it).
-- Queued after Training mode (the maintainer via coordinator 10-29): try 3 fighters per team (third slot per team in the battle setup).
+- Queued after Training mode (the maintainer 10-29): try 3 fighters per team (third slot per team in the battle setup).
 - 2026-10-30 ~12:50 local: own screen tracking, padlocks, Exit Game step 5, box look (table at the top). Waiting on the maintainer's test; no new feature started. Nothing running, boost on, ISO unmounted, nothing pushed.
 - 2026-10-30 ~13:45 local: stuck box in 2-player Training fixed (table at the top). Nothing running, boost on, ISO unmounted, nothing pushed.
 - 2026-10-30 ~13:50 local: all characters unlocked on the save (table at the top). Nothing running, boost on, ISO unmounted, nothing pushed.

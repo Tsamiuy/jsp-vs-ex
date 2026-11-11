@@ -71,11 +71,11 @@ rocks. Only text draws over it.
 
 ### 3. Guest depth test, function and write mask are ignored for colour passes
 
-- Every colour draw gets LESS_EQUAL + write (the shadow-pass round 2 honours the guest state for
+- Every colour draw gets LESS_EQUAL + write (the shadow-pass pass 2 honours the guest state for
   depth-only passes only).
 - A backdrop drawn last at the far plane, or a surface drawn with writes off, behaves differently
   from RSX. This changes what wins only in unusual setups, so it ranks low for this symptom.
-- It is worth a switch later: the same `zstate` that round 2 records could feed colour PSOs.
+- It is worth a switch later: the same `zstate` that pass 2 records could feed colour PSOs.
 
 ### 4. Not occlusion, but the water's look
 
