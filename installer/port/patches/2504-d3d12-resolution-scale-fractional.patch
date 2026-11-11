@@ -9,7 +9,7 @@ Tested (US disc, quick Free Battle route, CPU boost on): RES_SCALE=1.5 renders a
 2026-11-09_1803-res15). Runs with the boost off were all ~20.8 flips/s, the fix build too (2026-11-09_1833-syscheck).
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index f7826444..46a60b4b 100644
+index 4cdfcab1..cfe61c21 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -185,7 +185,7 @@ typedef struct {
@@ -30,7 +30,7 @@ index f7826444..46a60b4b 100644
  } OffDS;
  #define MAX_OFF_DS   6
  /* SHADOW_SCALE=<1-4> (default 2; patch 2502): depth surfaces the title samples through a depth comparison (its shadow
-@@ -469,7 +469,9 @@ static D3D12State s_d3d;
+@@ -470,7 +470,9 @@ static D3D12State s_d3d;
   * 32 pixels on a side (luminance/exposure chain), and the colour copy of a
   * sampled depth surface (one depth sample per n x n block; ZCOPY_FULL=1 makes
   * it full size). Unset or 1: everything as before. Read once at backend init. */
@@ -41,7 +41,7 @@ index f7826444..46a60b4b 100644
  static int s_rs_zfull = 0;
  static u32 rs_tiny(u32 w, u32 h) { return w && h && (w < 32u || h < 32u); }
  char g_rsx_title_base[128] = "ps3recomp";
-@@ -586,7 +588,7 @@ static void subvp_capture(u32 fi)
+@@ -587,7 +589,7 @@ static void subvp_capture(u32 fi)
              D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
              D3D12_RESOURCE_DESC td = {0};
              td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -50,7 +50,7 @@ index f7826444..46a60b4b 100644
              td.DepthOrArraySize = 1; td.MipLevels = 1;
              td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
              td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-@@ -613,9 +615,9 @@ static void subvp_capture(u32 fi)
+@@ -614,9 +616,9 @@ static void subvp_capture(u32 fi)
          dstl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dstl.SubresourceIndex = 0;
          srcl.pResource = s_d3d.render_targets[fi];
          srcl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; srcl.SubresourceIndex = 0;
@@ -63,7 +63,7 @@ index f7826444..46a60b4b 100644
          if (box.right > s_d3d.bb_w)  box.right  = s_d3d.bb_w;
          if (box.bottom > s_d3d.bb_h) box.bottom = s_d3d.bb_h;
          s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dstl, 0, 0, 0, &srcl, &box);
-@@ -1073,8 +1075,8 @@ static int init_d3d12(u32 width, u32 height)
+@@ -1074,8 +1076,8 @@ static int init_d3d12(u32 width, u32 height)
           * this DSV is shared by every pass -- with a window-sized depth
           * buffer, draws into larger offscreen RTs (wave's 1920x1080 input
           * image) were silently cropped to the window rect. */
@@ -74,7 +74,7 @@ index f7826444..46a60b4b 100644
          depth_desc.DepthOrArraySize   = 1;
          depth_desc.MipLevels          = 1;
          depth_desc.Format             = DXGI_FORMAT_D24_UNORM_S8_UINT;
-@@ -2016,7 +2018,7 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+@@ -2026,7 +2028,7 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
          OffRT* r = &s_d3d.off_rt[i];
          if (!r->res || !r->used) continue;
          snprintf(path, sizeof path, "%s/rt_%08X.bmp", dir, r->off);
@@ -83,7 +83,7 @@ index f7826444..46a60b4b 100644
      }
      printf("[RSXCAP] frame %llu -> %s (%u ops)\n",
             (unsigned long long)s_d3d.frame_count, dir, ndraws);
-@@ -4896,7 +4898,7 @@ static int off_rt_find(u32 off)
+@@ -4997,7 +4999,7 @@ static int off_rt_find(u32 off)
   * rt_rtv_heap[i] and the SRV at srv_heap[RT_SRV_BASE+i]. w, h are GUEST
   * sizes; the resource is sc times larger (RES_SCALE). want_sc 0 = keep the
   * scale an existing target has (a new one: s_rs, 1 if tiny), else that scale. */
@@ -92,7 +92,7 @@ index f7826444..46a60b4b 100644
  {
      if (!off || !s_d3d.rt_rtv_heap || !s_d3d.srv_heap) return -1;
      if (!w) w = s_d3d.width;
-@@ -4917,7 +4919,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
+@@ -5018,7 +5020,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
              (!want_sc || r->sc == want_sc)) { r->used = 1; return slot; }
          if (!want_sc) want_sc = r->sc;
          if (r->sc != want_sc) { static int _n = 0; if (PS3_LOG_FIRST(_n, 32))
@@ -101,7 +101,7 @@ index f7826444..46a60b4b 100644
                      off, w, h, r->sc, want_sc, 10); }
          /* The frame in flight still references this resource -- releasing it here
           * is "was deleted prior to closing the command list" (D3D12 message 921),
-@@ -4944,12 +4946,13 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
+@@ -5045,12 +5047,13 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
          }
      }
      OffRT* r = &s_d3d.off_rt[slot];
@@ -118,7 +118,7 @@ index f7826444..46a60b4b 100644
      td.Format = want_fmt; td.SampleDesc.Count = 1;
      td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
      td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-@@ -4964,8 +4967,8 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
+@@ -5065,8 +5068,8 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
      r->st = D3D12_RESOURCE_STATE_COPY_DEST;
      r->used = 1;
      if (s_rs > 1) { static int _n = 0; if (PS3_LOG_FIRST(_n, 48))
@@ -129,7 +129,7 @@ index f7826444..46a60b4b 100644
      rdoc_name((ID3D12Object*)r->res, "rt 0x%08X %ux%u rsxfmt %02X", off, w, h, rsx_fmt);
  
      /* Populate the new RT from guest memory: titles CPU-initialise their
-@@ -4979,22 +4982,22 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
+@@ -5080,22 +5083,22 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
          u32 bpp = (want_fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8u :
                    (want_fmt == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16u :
                    (want_fmt == DXGI_FORMAT_R32_FLOAT) ? 4u : 4u;
@@ -161,7 +161,7 @@ index f7826444..46a60b4b 100644
              if (src != 0xFFFFFFFFu && SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(
                      s_d3d.device, &hu, D3D12_HEAP_FLAG_NONE, &bd,
                      D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
-@@ -5027,12 +5030,12 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
+@@ -5128,12 +5131,12 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
                                  drow[x*4+3] = srow[x*4+0];
                              }
                          }
@@ -180,7 +180,7 @@ index f7826444..46a60b4b 100644
                          }
                      }
                      r->up->lpVtbl->Unmap(r->up, 0, NULL);
-@@ -5042,8 +5045,8 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
+@@ -5143,8 +5146,8 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, u32 want_sc)
                      csrc.pResource = r->up;
                      csrc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                      csrc.PlacedFootprint.Footprint.Format   = want_fmt;
@@ -191,7 +191,7 @@ index f7826444..46a60b4b 100644
                      csrc.PlacedFootprint.Footprint.Depth    = 1;
                      csrc.PlacedFootprint.Footprint.RowPitch = pitch;
                      s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &cdst, 0, 0, 0, &csrc, NULL);
-@@ -5198,7 +5201,7 @@ static void off_ds_transition(int i, D3D12_RESOURCE_STATES to)
+@@ -5299,7 +5302,7 @@ static void off_ds_transition(int i, D3D12_RESOURCE_STATES to)
   * no pass bound this frame makes way. */
  /* w, h are guest sizes; new_sc is the RES_SCALE a NEW surface gets (one that
   * grows keeps its own). */
@@ -200,7 +200,7 @@ index f7826444..46a60b4b 100644
  {
      if (!off || !w || !h) return off_ds_find(off);
      int i = off_ds_find(off);
-@@ -5211,7 +5214,7 @@ static int off_ds_get(u32 off, u32 w, u32 h, u32 new_sc)
+@@ -5312,7 +5315,7 @@ static int off_ds_get(u32 off, u32 w, u32 h, u32 new_sc)
          if (!to_guest && w <= z->w && h <= z->h) return i;
          if (z->w > w) w = z->w;
          if (z->h > h) h = z->h;
@@ -209,7 +209,7 @@ index f7826444..46a60b4b 100644
      } else {
          for (i = 0; i < MAX_OFF_DS && s_d3d.off_ds[i].res; i++) {}
          if (i >= MAX_OFF_DS) {
-@@ -5236,8 +5239,8 @@ static int off_ds_get(u32 off, u32 w, u32 h, u32 new_sc)
+@@ -5337,8 +5340,8 @@ static int off_ds_get(u32 off, u32 w, u32 h, u32 new_sc)
      D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
      D3D12_RESOURCE_DESC td = {0};
      td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -220,7 +220,7 @@ index f7826444..46a60b4b 100644
      td.Format = DXGI_FORMAT_R24G8_TYPELESS; td.SampleDesc.Count = 1;
      td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
      D3D12_CLEAR_VALUE cv = {0};
-@@ -5251,8 +5254,8 @@ static int off_ds_get(u32 off, u32 w, u32 h, u32 new_sc)
+@@ -5352,8 +5355,8 @@ static int off_ds_get(u32 off, u32 w, u32 h, u32 new_sc)
      if (z->off != off) z->shadow = 0;   /* 2502: the slot now holds another surface */
      z->off = off; z->w = w; z->h = h; z->sc = new_sc;
      if (s_rs > 1) { static int _n = 0; if (PS3_LOG_FIRST(_n, 32))
@@ -231,7 +231,7 @@ index f7826444..46a60b4b 100644
      z->st = D3D12_RESOURCE_STATE_DEPTH_WRITE;
      z->cleared = 0; z->gen = 0; z->conv_gen = 0xFFFFFFFFu;
      z->last_frame = s_d3d.frame_count;
-@@ -5346,12 +5349,12 @@ static int dsconv_init(void)
+@@ -5447,12 +5450,12 @@ static int dsconv_init(void)
  /* RES_SCALE: the same copy from a depth surface k times the copy's size,
   * one depth sample (the block's centre) per k x k block. Uses dsconv_rs. */
  static ID3D12PipelineState* s_dsconv_pso_k;
@@ -248,7 +248,7 @@ index f7826444..46a60b4b 100644
      if (failed_k == k) return NULL;
      failed_k = k;
      static const char vs[] =
-@@ -5364,15 +5367,15 @@ static ID3D12PipelineState* dsconv_pso_for(u32 k)
+@@ -5465,15 +5468,15 @@ static ID3D12PipelineState* dsconv_pso_for(u32 k)
          "Texture2D<float> dz : register(t0);\n"
          "Texture2D<uint2> dst : register(t1);\n"
          "float4 main(float4 pos : SV_Position) : SV_Target {\n"
@@ -267,7 +267,7 @@ index f7826444..46a60b4b 100644
          return NULL;
      }
      D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
-@@ -5397,7 +5400,7 @@ static ID3D12PipelineState* dsconv_pso_for(u32 k)
+@@ -5498,7 +5501,7 @@ static ID3D12PipelineState* dsconv_pso_for(u32 k)
      vb->lpVtbl->Release(vb); pb->lpVtbl->Release(pb);
      if (!pso) return NULL;
      if (s_dsconv_pso_k) s_dsconv_pso_k->lpVtbl->Release(s_dsconv_pso_k);
@@ -276,7 +276,7 @@ index f7826444..46a60b4b 100644
      return pso;
  }
  
-@@ -5409,15 +5412,15 @@ static void ds_convert(int i, int rt)
+@@ -5510,15 +5513,15 @@ static void ds_convert(int i, int rt)
      ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
      OffRT* r = &s_d3d.off_rt[rt];
      /* RES_SCALE: the copy is usually guest-size while the depth is scaled. */
@@ -295,7 +295,7 @@ index f7826444..46a60b4b 100644
      cl->lpVtbl->RSSetViewports(cl, 1, &vp);
      cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
      cl->lpVtbl->SetGraphicsRootSignature(cl, s_d3d.dsconv_rs);
-@@ -5607,8 +5610,8 @@ static void composite_present(u32 fi)
+@@ -5708,8 +5711,8 @@ static void composite_present(u32 fi)
                      want, r->dxgi, 10);
          return;
      }
@@ -306,7 +306,7 @@ index f7826444..46a60b4b 100644
      if (!cw || !ch) return;
      { static int n = 0;
        if (PS3_LOG_FIRST(n, 3)) fprintf(stderr, "[COMPOSITE] RT 0x%08X %ux%u -> backbuffer%c",
-@@ -5933,19 +5936,19 @@ static void rtread_finish(void)
+@@ -6034,19 +6037,19 @@ static void rtread_finish(void)
   * target and its zeta must match, or the draw is clipped to the smaller), a
   * new depth-only surface 1 unless it is display-sized (shadow maps stay at
   * guest size), otherwise s_rs, 1 for a target under 32 pixels on a side. */
@@ -331,7 +331,7 @@ index f7826444..46a60b4b 100644
  }
  
  static void render_frame(void)
-@@ -6262,12 +6265,12 @@ static void render_frame(void)
+@@ -6363,12 +6366,12 @@ static void render_frame(void)
      for (int _i = 0; _i < MAX_OFF_RTS; _i++) s_d3d.off_rt[_i].used = 0;
      for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
          D3D12DrawRecord* dr = &s_d3d.draws[_d];
@@ -347,7 +347,7 @@ index f7826444..46a60b4b 100644
          if (dr->is_vp && dr->zeta_off && (dr->rt_off || dr->no_color)) {
              /* 2502: a shadow map's depth-only passes draw it at SHADOW_SCALE x */
              const int zi = off_ds_find(dr->zeta_off);
-@@ -6284,7 +6287,7 @@ static void render_frame(void)
+@@ -6385,7 +6388,7 @@ static void render_frame(void)
              s_d3d.off_ds[ds].last_frame = s_d3d.frame_count;
              /* RES_SCALE: guest-size (one depth sample per n x n block) unless ZCOPY_FULL=1. */
              off_rt_get(dr->tex[_u].raw, s_d3d.off_ds[ds].w, s_d3d.off_ds[ds].h, 0x08u,
@@ -356,7 +356,7 @@ index f7826444..46a60b4b 100644
          }
      }
  
-@@ -6755,7 +6758,7 @@ static void render_frame(void)
+@@ -6857,7 +6860,7 @@ static void render_frame(void)
              float dvp_x = 0, dvp_y = 0, dvp_w = 0, dvp_h = 0;  /* per-draw, for DRAWARGS */
              int cur_m[3] = {-1, -1, -1};           /* MRT B/C/D: -1 = unbound   */
              int cur_z = -1, cur_nc = 0, force_rebind = 0;   /* OffDS bound (-1 = shared buffer) */
@@ -365,7 +365,7 @@ index f7826444..46a60b4b 100644
              D3D12_CPU_DESCRIPTOR_HANDLE cur_dsv = dsv_handle;
              double _rec0 = perf_on() ? perf_now() : 0.0;
              int seen_small_vp = 0, captured = 0;
-@@ -6821,7 +6824,7 @@ static void render_frame(void)
+@@ -6923,7 +6926,7 @@ static void render_frame(void)
                      UINT nrt = 1;
                      rh[0] = rtv_handle;
                      D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
@@ -374,7 +374,7 @@ index f7826444..46a60b4b 100644
                      if (want >= 0) {
                          off_rt_transition(want, D3D12_RESOURCE_STATE_RENDER_TARGET);
                          rh[0] = off_rt_rtv(want);
-@@ -6843,7 +6846,7 @@ static void render_frame(void)
+@@ -6945,7 +6948,7 @@ static void render_frame(void)
                              bsc = s_d3d.off_ds[wantz].sc;
                          } else if (want >= 0 && s_d3d.off_ds[wantz].sc != bsc) {
                              static int _n = 0; if (PS3_LOG_FIRST(_n, 16))
@@ -383,7 +383,7 @@ index f7826444..46a60b4b 100644
                                          s_d3d.off_rt[want].off, bsc, s_d3d.off_ds[wantz].off,
                                          s_d3d.off_ds[wantz].sc, 10);
                          }
-@@ -7294,15 +7297,15 @@ static void render_frame(void)
+@@ -7396,15 +7399,15 @@ static void render_frame(void)
              OffRT* r = &s_d3d.off_rt[rt];
              u32 bpp = (r->dxgi == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 :
                        (r->dxgi == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16 : 4;
@@ -403,7 +403,7 @@ index f7826444..46a60b4b 100644
                  rd.MipLevels = 1; rd.SampleDesc.Count = 1;
                  rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
                  s_d3d.device->lpVtbl->CreateCommittedResource(
-@@ -7317,8 +7320,8 @@ static void render_frame(void)
+@@ -7419,8 +7422,8 @@ static void render_frame(void)
                  cdst.pResource = s_rtsave_buf;
                  cdst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
                  cdst.PlacedFootprint.Footprint.Format   = (DXGI_FORMAT)r->dxgi;
@@ -414,7 +414,7 @@ index f7826444..46a60b4b 100644
                  cdst.PlacedFootprint.Footprint.Depth    = 1;
                  cdst.PlacedFootprint.Footprint.RowPitch = pitch;
                  csrc.pResource = r->res;
-@@ -7326,10 +7329,10 @@ static void render_frame(void)
+@@ -7428,10 +7431,10 @@ static void render_frame(void)
                  s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &cdst, 0, 0, 0, &csrc, NULL);
                  off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                  s_rtsave_state = 1;
@@ -427,7 +427,7 @@ index f7826444..46a60b4b 100644
                  _done = 1;
              }
          }
-@@ -10335,18 +10338,18 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -10437,18 +10440,18 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
      /* RES_SCALE=n (see s_rs): read once, before the window and swap chain. */
      {
          const char* e = getenv("RES_SCALE");
