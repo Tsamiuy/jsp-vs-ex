@@ -3,7 +3,7 @@
 This page covers the default v15 tree (ps3recomp v0.15.0, `jstars\port`). The opt-in v19 tree (installer switch
 `--tree v18`) uses a different recipe; see [installer/README.md](../../installer/README.md).
 
-## Folder layout (`%USERPROFILE%\Desktop\PS3Recomp\`)
+## Folder layout (the maintainer's working folder)
 
 | Path | What |
 |---|---|
