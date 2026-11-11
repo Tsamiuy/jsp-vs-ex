@@ -7,7 +7,7 @@
  * The port's main() does not call np_psnr_setup itself, so no toolkit patch is needed.
  *
  * Files (untrusted input: 64 KB per file, 512 bytes per line, only known keys, nothing executed):
- *   shared folder: PS3RECOMP_SHARED_DIR, else <exe folder>\shared when jsp-install.ini [install] portable=1, else
+ *   shared folder: PS3RECOMP_SHARED_DIR, else <install folder>\shared when jsp-install.ini [install] portable=1, else
  *                  %APPDATA%\PS3Recomp. Never created here.
  *     repsn.ini      [repsn] enabled=0|1, server=host[:port], name=ONLINEID
  *     community.ini  [community] enabled=0|1, active=PRESET ; [preset NAME] address=, name=
@@ -294,12 +294,19 @@ static bool is_portable_ini(const std::string& iniPath)
 static void resolve_dirs(const Env& env, const std::string& exe_dir, const std::string& appdata,
                          std::string& shared, std::string& game)
 {
+    // The installer layout keeps jsp-install.ini in the install folder and the exe in its game\ subfolder, so the
+    // install root is the exe folder or its parent, whichever holds an ini saying portable=1 (the settings window's rule).
+    std::string root = exe_dir;
     bool portable = !exe_dir.empty() && is_portable_ini(join(exe_dir, "jsp-install.ini"));
+    if (!portable && !exe_dir.empty()) {
+        size_t sl = exe_dir.find_last_of("\\/");
+        if (sl != std::string::npos && sl > 0 && is_portable_ini(join(exe_dir.substr(0, sl), "jsp-install.ini"))) { portable = true; root = exe_dir.substr(0, sl); }
+    }
     const char* ov = env.get("PS3RECOMP_SHARED_DIR");
     if (ov && *ov) shared = ov;
-    else if (portable) shared = join(exe_dir, "shared");
+    else if (portable) shared = join(root, "shared");
     else shared = appdata.empty() ? "" : join(appdata, "PS3Recomp");
-    game = portable ? exe_dir : (appdata.empty() ? "" : join(appdata, "JSP Fan Revival"));
+    game = portable ? root : (appdata.empty() ? "" : join(appdata, "JSP Fan Revival"));
 }
 
 }  // namespace jsp_online

@@ -10,6 +10,10 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
 
 - Setup checks the decrypted EBOOT against the known 1.00 builds and refuses the other region's. An unknown build can
   be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
+- Installer: the settings window (`jsp-settings.exe`, built from `launcher/JStarsLauncher.cs`) now has the Online tab
+  (Off / re-psn / Community server, Find on LAN); before, only the v19 launcher had it. Start Game saves unsaved
+  Online edits first. The game's reader also finds `jsp-install.ini` one folder above its `game\` folder, so a portable
+  install uses `<install>\shared` as the tab does. Not yet run on Windows. `online_settings_test.sh` is now tracked, so CI can run it.
 - Launcher: a Find on LAN button in the Online tab looks for a re-psn server started with `-discover` on the same
   network and fills the Server field (needs a re-psn build with LAN discovery; not tested across a real network yet).
 - Launcher: an Online tab edits the shared online settings files (`repsn.ini`, `community.ini`): off, re-psn or a

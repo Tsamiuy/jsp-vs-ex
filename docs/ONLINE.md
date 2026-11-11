@@ -53,8 +53,7 @@ Limits:
 - A Windows firewall prompt may appear the first time; allow the launcher on private networks. The host's firewall must
   allow UDP port 36100 as well as the TCP port.
 - If nothing is found, the Server field can still be filled by hand.
-- Discovery needs a re-psn build made from its source after the LAN discovery change was merged. Until a release has
-  it, older releases do not answer and Find on LAN finds nothing.
+- Discovery needs re-psn 0.5.0 or later. Older releases do not answer and Find on LAN finds nothing.
 - The launcher sends one small broadcast and shows only what answers; it does not connect to anything until you start
   the game.
 

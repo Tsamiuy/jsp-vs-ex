@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wire-format test for the launcher's Find on LAN (LanDiscover in launcher/JStarsLauncher19.cs).
+"""Wire-format test for the launcher's Find on LAN (LanDiscover in launcher/JStarsLauncher.cs, the installer's settings window, and in the v19 launcher).
 
     python lan_discover_test.py [REPO_ROOT]
 
@@ -70,8 +70,13 @@ def check(name, ok):
     if not ok:
         fails.append(name)
 
-cs = (root / "launcher/JStarsLauncher19.cs").read_text(encoding="utf-8")
-code = cs[cs.index("    // LAN discovery for re-psn"):cs.index("    class Preset {")]
+def lan_code(rel):
+    t = (root / rel).read_text(encoding="utf-8")
+    return t[t.index("    // LAN discovery for re-psn"):t.index("    class Preset {")]
+
+# the installer's settings window (JStarsLauncher.cs) is the source; the v19 launcher must carry the same code
+code = lan_code("launcher/JStarsLauncher.cs")
+check("v19 launcher carries the same LanDiscover code", code == lan_code("launcher/JStarsLauncher19.cs"))
 tmp = pathlib.Path(tempfile.mkdtemp(prefix="lantest"))
 head = "using System;\nusing System.Collections.Generic;\nusing System.Diagnostics;\nusing System.Text;\nnamespace JStarsLauncher {\n"
 (tmp / "lan.cs").write_text(head + code + "\n}\n", encoding="utf-8")
