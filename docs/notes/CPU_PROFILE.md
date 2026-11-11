@@ -370,10 +370,10 @@ Size: ~600-900 lines plus the test. Medium risk.
 - vtx time on the drawing thread ~-43%; fps jumps from ~29 to ~49 with ~11k frames under 20 ms.
   NOT yet checked: whether game speed is still correct at ~49 fps (i.e. the game really renders more
   frames, vs. something presenting extra frames or the game running fast). Needs a person to watch.
-- The maintainer (2026-10-23 15:08) watched the VPULL demo runs: game speed normal. Hidden Leaf: ~30 fps
+- The maintainer (2026-10-23) watched the VPULL demo runs: game speed normal. Hidden Leaf: ~30 fps
   with VPULL vs just over 20 without. Leaf, Kameari and Alabasta still slow down at fight start when
   the camera faces a lot of scenery; the occasional freezes are unchanged.
-- The maintainer (15:08) said yes: VPULL default on since b7be61b (VPULL=0 off). Check run perf\vpull\default_check: '[VPULL] vertex pulling on' printed with no env set, no dropped draws.
+- The maintainer said yes: VPULL default on since b7be61b (VPULL=0 off). Check run perf\vpull\default_check: '[VPULL] vertex pulling on' printed with no env set, no dropped draws.
 
 ## 16. Slow maps (Hidden Leaf, Kameari, Alabasta) and the freezes (2026-10-23, read-only)
 
@@ -435,7 +435,7 @@ is not cached across runs (only the shader bytecode is).
    `pso create`, and check screenshots for missing objects.
 
 ## 17. The fps counters count render batches, not game frames (2026-10-23, read-only)
-The maintainer (15:43): on Hidden Leaf with VPULL the title-bar FPS stays ~30-40, yet the game itself slows
+The maintainer: on Hidden Leaf with VPULL the title-bar FPS stays ~30-40, yet the game itself slows
 down when the camera faces the city and runs at normal speed when it turns away.
 - **What the counters count:** the title-bar FPS (`s_tframes`, rsx_d3d12_backend.c ~8058) and the
   `[PERF]` fps (one per render_frame, ~7650) both count *render_frame calls*, i.e. batches,
@@ -474,7 +474,7 @@ down when the camera faces the city and runs at normal speed when it turns away.
 - Play observation (2026-10-23 15:49), Kameari run: slows down AND freezes much more than Hidden Leaf, feels worse to move around; the fps counter reached 89 in a character intro.
 
 ## 18. Kameari: more freezes than Hidden Leaf (2026-10-23, read-only)
-The maintainer (15:49): Kameari also slows down, freezes much more and is not nice to move around in; the
+The maintainer: Kameari also slows down, freezes much more and is not nice to move around in; the
 counter showed 89 fps in a character intro with VPULL (= batches, §17; an intro can have several
 batches per flip, so it does not show a real 89).
 Stage survey, fight windows only (stages\s01|s07|s11, [PERF] windows with >25k pso calls, 2026-10-21
@@ -544,7 +544,7 @@ fps = [PERF] batch rate (counts render batches, see §17), last 60 windows; CPU 
   30-50%). Try VPULL=1 in later speed tests too.
 
 ## 21. Destruction slow-downs (2026-10-23, read-only)
-The maintainer (18:16): when buildings or other things get destroyed in a fight, the game slows down or stutters.
+The maintainer: when buildings or other things get destroyed in a fight, the game slows down or stutters.
 - **No log has a destruction moment marked yet**, so this is about what the existing runs can and
   can't tell. Every stall in the AI assistant's slow-map runs (perf\scratch\slowmaps, fight windows, a frame
   over 70 ms in [PERF4]) falls into one of three kinds (scratch folder classify.awk):
@@ -1144,7 +1144,7 @@ Fight windows (ds1 35-41, ds2 37-43, ~48k samples each; ds_sym output ds1_sym.tx
 - Evidence the game side limits too: perf\drawsample\nods fight windows: drawing thread busy only ~18-22 ms per batch ([PERF6] render_frame 4.4-6.4 + drain 12.6-16.2), yet [PERF4] puts 3-9 of every 20 batches at 37-54 ms. perf6 leaf_pdb: main thread tid 44444 38-41% CPU, in 27/40 dumps waiting in func_006507DC (flip/vblank polls), 8/40 running (exe top: vmx_vmaddfp 32%, lane-by-lane fmaf, ~10 ns per op, CPU_PROFILE §26).
 - Not yet measured: B per frame and what it waits on (SPU jobs, labels). Proposed diagnostic FRAME_TL=1 (cellGcmSys.c): per frame the request time, first flip poll (= end of build), DONE seen, drain start/end; histograms per 60 frames. Then, if B is the cause, point the DRAW_SAMPLE sampler at the main thread.
 
-**Paused 2026-10-26 (the maintainer, 11:50).** State: waiting for the maintainer's yes on the FRAME_TL=1 per-frame timeline diagnostic (§37, not drafted yet). Next after a yes: draft it in cellGcmSys.c (request time, first flip poll = end of build, DONE seen, drain start/end; histograms per 60 frames), offline check, hand to the AI assistant. If build time >16.7 ms is the cause: sample the game main thread with the DRAW_SAMPLE code (needs a per-thread table) and fix what it shows (vmx_vmaddfp is a candidate). Open for the maintainer: VPULL_MEMO/TEX_HINT default-on; also §36 notes the PERF=1 vertex timers cost ~20% of the drawing thread's samples and the every-1000th-draw printf ~4% (cheap fixes, not drafted).
+**Paused 2026-10-26 (the maintainer).** State: waiting for the maintainer's yes on the FRAME_TL=1 per-frame timeline diagnostic (§37, not drafted yet). Next after a yes: draft it in cellGcmSys.c (request time, first flip poll = end of build, DONE seen, drain start/end; histograms per 60 frames), offline check, hand to the AI assistant. If build time >16.7 ms is the cause: sample the game main thread with the DRAW_SAMPLE code (needs a per-thread table) and fix what it shows (vmx_vmaddfp is a candidate). Open for the maintainer: VPULL_MEMO/TEX_HINT default-on; also §36 notes the PERF=1 vertex timers cost ~20% of the drawing thread's samples and the every-1000th-draw printf ~4% (cheap fixes, not drafted).
 
 - **Drafted 2026-10-26 (the maintainer yes): patches\frame-tl\game-wait.patch** = FRAME_TL=1 ([FTL] per 60 flips: interval, vbl, build incl. main-thread CPU, flip wait, walker/present lag; long frames split by cause) + GAME_SAMPLE=1 (DRAW_SAMPLE sampler on the frame-loop thread, one sampler thread for both). Offline model and two-thread checks in its README; same warnings; apply --check OK on edf0bad. Handed to the AI assistant.
 
@@ -1255,6 +1255,6 @@ Hidden Leaf FIXED_CHARS=1, 2 pairs: on 29.1 / 29.6 f/s, off 29.0 / 28.1. [PERF6]
 (on1 1861 vs off1 1857 draws/batch): 3.0 vs 2.9 ms; drawfit pooled busy@2000 on 20.0 vs off 19.6 ms.
 Neutral, pictures clean (rd_sheet.png). With perf-cheap, PERF=1 runs now show ~29 f/s and ~9 us/draw
 (was 11-14 with the cycle-time calls).
-- Paused 2026-10-27 01:00: audio ctx+0x14 fix with the AI assistant (AUDIO.md round 6); speed next steps in §43.
+- Paused 2026-10-27 01:00: audio ctx+0x14 fix with the AI assistant (AUDIO.md pass 6); speed next steps in §43.
 - Paused 2026-10-27 (project paused by the maintainer). Open speed items: §42-43.
 - Paused 2026-10-28 (the maintainer). Done today: patches\res-scale-speed (4K: already 27-30 f/s; ranked exact speed-ups, flat-ground rule). Nothing pending.

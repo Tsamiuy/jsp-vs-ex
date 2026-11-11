@@ -21,7 +21,7 @@ a qualitative comparison. Our shots are 1280x720.
 
 ## What this says
 - The camo blotches are **not in RPCS3**, so they are a port bug (FINDINGS "Shadow passes
-  round 2" already says they are not shadows: same blotches with the shadow passes off).
+  pass 2" already says they are not shadows: same blotches with the shadow passes off).
 - The pattern (large flat patches with hard edges, matching the skin region borders) fits the
   causes still open in `PALE_TEXTURES.md`: wrong texture sampling or lighting inputs, rather than
   gamma alone. In RPCS3 the soft shading shows the shadow/lighting term is smooth.

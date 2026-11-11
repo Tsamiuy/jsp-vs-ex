@@ -3,7 +3,7 @@
 Thread "AI assistant (hitches)", 2026-10-22. Analysis in FINDINGS §66/§68/§69 and STAGE_TEXTURES §11.
 
 Status: DONE. Fix committed as 3b68f46 (default on). Verified: tips page, Namek water reflection,
-boot logos (the maintainer, 19:02). Tips rotate per match within one session, as in RPCS3; not a bug.
+boot logos (the maintainer). Tips rotate per match within one session, as in RPCS3; not a bug.
 
 ## Cause (FINDINGS §69)
 

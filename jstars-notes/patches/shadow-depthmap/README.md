@@ -1,4 +1,4 @@
-# Shadows round 2: what ZPASS_SHOW says, and the next fix/diagnostic
+# Shadows pass 2: what ZPASS_SHOW says, and the next fix/diagnostic
 
 Patch: `shadow-depthmap.patch` (`libs/video/rsx_d3d12_backend.c`, +33), on de12d74
 (`git apply --check` passes; the main checkout was clean). Everything is opt-in. A syntax-only
@@ -58,7 +58,7 @@ different scale from the receivers' references. This is cause 1 from the first R
 4. If neither does: `ZPASS_SHOW=5` with `ZPASS_SHOW_UNIT=7`, then `=8`. A screenshot of each shows
    whether the reference or the stored depth is off, and in which cascade.
 
-## Round 3 (2026-10-21): casters are fine; the next suspects (read-only)
+## Pass 3 (2026-10-21): casters are fine; the next suspects (read-only)
 
 The AI assistant's `shadows\dbg` run logs one caster mapping, `scale.z=0.5 offset.z=0.5 clip=[0,1]`, with no
 polygon offset (zstate 0x113: test, write, LESS). So `ZPASS_CASTER_Z01` and `ZPASS_NO_POLYOFFSET`

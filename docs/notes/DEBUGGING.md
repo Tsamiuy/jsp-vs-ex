@@ -76,7 +76,7 @@ file for the edit — shell quoting turns `\n` into real newlines. A re-lift rem
 
 ## Second opinion
 
-When stuck, write a self-contained brief and have a second, read-only reviewer look at it. Round 1
+When stuck, write a self-contained brief and have a second, read-only reviewer look at it. Pass 1
 (2026-10-19) did two things:
 - It corrected a wrong premise: `_v.pak` was loaded, before `_m.pak`.
 - It mapped the resource-completion predicates, which the `res` console command then measured

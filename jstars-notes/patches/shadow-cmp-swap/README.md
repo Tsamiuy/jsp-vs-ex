@@ -1,4 +1,4 @@
-# Shadows round 4: unit 7's comparison runs in the wrong direction
+# Shadows pass 4: unit 7's comparison runs in the wrong direction
 
 Patch (drafted, not applied): `cmp-swap.patch` (`rsx_d3d12_backend.c`, +12), on 3cef758
 (`git apply --check` passes; syntax-only compile clean). Opt-in `ZPASS_CMP_SWAP=1`. Not run.
@@ -51,7 +51,7 @@ ALWAYS stay. Then the helper computes `reference < stored`, which is the RSX res
 4. Re-check the Goku and Naruto demo cards with the swap: character self-shadowing goes through the
    bitcast path and is unaffected; ground and plants use the compare path.
 
-## Round 5 (after §46): what is left, read-only
+## Pass 5 (after §46): what is left, read-only
 
 §46: the swap fixes the stairs view (even grey floor, soft shadows at the feet). The fight-start
 hall view still has a darker left half (57, between 48 "in shadow" and 76 "lit"). With swap +

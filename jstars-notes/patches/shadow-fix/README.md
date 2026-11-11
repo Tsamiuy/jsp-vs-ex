@@ -1,4 +1,4 @@
-# Shadow passes, round 2: read the maps as comparisons, use the casters' own depth state
+# Shadow passes, pass 2: read the maps as comparisons, use the casters' own depth state
 
 Patch: `shadow-fix.patch` (only `libs/video/rsx_d3d12_backend.c`, +110/-22). It goes on top of
 c3eaf8b (`git apply --check` passes there). Not built or run. Shadow passes stay opt-in

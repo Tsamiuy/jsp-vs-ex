@@ -18,7 +18,7 @@ So the list below is about headroom (weaker GPUs, heavier views, future texture 
 not breaking the picture. It isn't needed to reach 30 at 4K on this machine.
 
 ## What must not be repeated (the flat ground)
-- The floor's fragment program samples **t15 = the scene's own depth** (FINDINGS §43 round 3: it
+- The floor's fragment program samples **t15 = the scene's own depth** (FINDINGS §43 pass 3: it
   compares against it together with the shadow cascades). The AI assistant's first speed-up re-copied the depth
   less often, so the floor (and water) read an older depth and the ground went flat.
 - Rule: any depth a draw samples must equal the depth as it was just before that draw (or be provably

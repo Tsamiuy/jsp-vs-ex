@@ -3,7 +3,7 @@
 Written 2026-10-20 (notes only; RPCS3 and the game were not run for this file). Purpose: RPCS3
 already runs J-Stars correctly, so it is the reference for what our D3D12 port should look like
 and how fast the game can go. Use it for the open problems: shadow maps (FINDINGS §29 and
-"Shadow passes round 2"), pale / blotchy skin (`PALE_TEXTURES.md`), and speed (§29-30).
+"Shadow passes, pass 2"), pale / blotchy skin (`PALE_TEXTURES.md`), and speed (§29-30).
 
 > **Limit of the reference (user, 2026-10-20):** RPCS3's compatibility list rates J-Stars as
 > **"Ingame"**, not "Playable". Not everything works there, so the emulator is a reference only for
@@ -89,5 +89,5 @@ appear in RPCS3, and how; (b) texture formats / gamma / wrap bits of Ace's mater
 baseline; (d) any scene where RPCS3 differs from our render. Then link them from STATUS.md.
 
 ## Sources
-FINDINGS §17, §27-30 and "Shadow passes round 2"; PALE_TEXTURES.md; `patches\shadow-fix\README.md`;
+FINDINGS §17, §27-30 and "Shadow passes, pass 2"; PALE_TEXTURES.md; `patches\shadow-fix\README.md`;
 DEBUGGING.md "Reference run in RPCS3" and "Rendering".

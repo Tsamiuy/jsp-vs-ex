@@ -319,7 +319,7 @@ Fixes so far (runtime edits):
 9. **PS bytecode cache** keyed by the HLSL text, so one fragment program is compiled once,
    not once per pipeline.
 
-Still open (round-2 review):
+Still open (pass-2 review):
 - the match renders **black**;
 - it runs at **<1 fps**, spending most of the time creating ~700-1000 pipelines per report window;
 - the geometry in the captured RT was scrambled (before fix 7).
@@ -333,9 +333,9 @@ Diagnostics added:
   is not installed.
 - Port `main.cpp` now makes stdout unbuffered, so the end of a killed run's log is not lost.
 
-## 19. 3D match, review round 2 + bisect (2026-10-20) — IN PROGRESS, paused here
+## 19. 3D match, review pass 2 + bisect (2026-10-20) — IN PROGRESS, paused here
 
-A second AI assistant's round-2 review: its findings are mostly confirmed. All
+A second AI assistant's pass-2 review: its findings are mostly confirmed. All
 fixes below are runtime edits (uncommitted, `git diff` in `ps3recomp-src`).
 
 **Fixed / measured**
@@ -880,7 +880,7 @@ Patch + write-up + test: `patches/native-batch/`, for the AI assistant to apply.
 - `jstars\run_test.ps1` now defaults to `PS3_VERBOSE=0` (an already-set `PS3_VERBOSE` is kept;
   `-VerboseLog` sets it to 1). Old file: `run_test.ps1.pre-verbose0`.
 
-## Shadow passes round 2: comparison reading + caster depth state, patch not yet run (2026-10-20)
+## Shadow passes, pass 2: comparison reading + caster depth state, patch not yet run (2026-10-20)
 
 Patch + write-up: `patches/shadow-fix/` (`shadow-fix.patch`, `README.md`), on top of c3eaf8b.
 - **The skin blotches are not shadows:** they are identical in `shots_nbatch\shot_300s.png` (no
@@ -1218,7 +1218,7 @@ Closed-loop tours (`tools\menu_tour.sh`, `menu\tours\t0..t5`), random characters
 - `TEXFMT_SKIP=1`: no skipped formats logged on menus or Yoshiwara.
 - Verified defaults (`t5_newdefault`): menus and fight correct, fight ~23-26 fps.
 
-## Stage survey round 1: mipmaps patch, blocky edges and sky streaks (2026-10-21) — patch not yet run
+## Stage survey pass 1: mipmaps patch, blocky edges and sky streaks (2026-10-21) — patch not yet run
 
 See `patches/tex-mips/README.md`. Inferred from `stages\sNN` shots and the code:
 - Namek grainy ground/water (s06) and the night-ruins sky stripes (s03): no mipmaps, so level 0
@@ -1316,7 +1316,7 @@ Ace card at t200 (tools\demo_shots.sh).
   not a 20x11 target. The only small target read back is 80x45 at 0x0D6A0000. So the luminance
   path the study assumed is not what this build sees; needs another look before more runs.
 
-## 38. Colour round 2: readback never hit the 20x11 target; glare layer never drawn (2026-10-21, AI assistant thread)
+## 38. Colour pass 2: readback never hit the 20x11 target; glare layer never drawn (2026-10-21, AI assistant thread)
 
 - The `TONEMAP_EXPOSURE` result (lower = darker/browner) is the expected direction: with c1.w =
   7200 the tone-map `1-exp(-4*rgb*Lm)` is at its brightest, so exposure cannot explain our picture
@@ -1329,7 +1329,7 @@ Ace card at t200 (tools\demo_shots.sh).
 - Glare layer 0x0E590000 (added x2 by the HDR encode fp 0x0FC9F901) and 0x0DC20000 are cleared
   every frame and drawn in none of the 55 captured frames; occlusion-query gating ruled out
   (GET_REPORT only ZCULL stats). The game skips those passes; the luminance readback is the one
-  known CPU-visible input. Details, ranking and the test steps: `COLOR_EXPOSURE.md` "Round 2".
+  known CPU-visible input. Details, ranking and the test steps: `COLOR_EXPOSURE.md` "Pass 2".
 
 ## RPCS3 gameplay video: Yoshiwara Paradise, look comparison (2026-10-21)
 
@@ -1415,12 +1415,12 @@ and our Yoshiwara fight shots show no floor shadows, while the RPCS3 video does 
 240 s). Likely: the reference and stored depths are on different scales, or TEX9 is wired to the
 wrong vertex output. Diagnostic `ZPASS_SHOW=1..4` makes the comparison helpers return
 shadow / stored depth / reference depth / lit, to tell which.
-- Round 3 (~16:30): v2's "20x11 always 0" was a log-cadence artefact (only boot frames were
+- Pass 3 (~16:30): v2's "20x11 always 0" was a log-cadence artefact (only boot frames were
   printed) and the copy went to the local alias 0xC39FFA40. The target is at IO offset 0x039FFA40
   = the last 1.4 KB of the 0x3A00000 IO window, i.e. main memory, where the PPU reads it. The
   GPU draw itself is correct (capture dump of the 20x11 rect has data). `lum-readback-3.patch`
   records SET_CONTEXT_DMA_COLOR and resolves through it; applies to cc50482. `COLOR_EXPOSURE.md`
-  "Round 3".
+  "Pass 3".
 
 ## 38. Hitch patches tested; shader cache + texture pool default (2026-10-21)
 Commit d8de15f (patch), defaults eea13f6 (SHADER_CACHE=0 / TEX_POOL=0 turn them off). Namek tours
@@ -1435,7 +1435,7 @@ loading window).
   136 sibling; WAIT=8: 65 skipped; THREADS=4: 515 skipped (other characters). Nothing visibly missing
   in tour or demo shots. Stays opt-in (objects can appear a frame late).
 
-## 40. Color round 2/3 runs (2026-10-21)
+## 40. Color pass 2/3 runs (2026-10-21)
 - lum-readback-2 (92a51dd): `[LUMRB] off=0x039FFA40 20x11 (res 1280x720) ... meanRGB=0`; the AI assistant:
   wrote to local 0xC39FFA40 instead of main memory -> lum-readback-3 (1ef9684), test queued.
 - Yoshiwara TONEMAP_EXPOSURE=5/10/20/50 (color\yoshi_tm*): 10, 20, 50 look the same as the default
@@ -1445,12 +1445,12 @@ loading window).
 - RSX_CAP of the Yoshiwara fight (color\yoshi_lumrb2_cap, frames 10000-10900): 0x0E590000 is only
   CLEARed to (0,0,0,1) each frame and then sampled as t0 by the composite fp 0x0FD00281 (DRAW
   rt=0x0DE10000); no draw ever renders into it. The glare layer is black every frame.
-- Round 4 (~17:30): the exposure sweep is explained by the tone-map (`Lm` saturates above E~10);
+- Pass 4 (~17:30): the exposure sweep is explained by the tone-map (`Lm` saturates above E~10);
   the burned panels need scene.rgb/scene.a >= 3 before the tone-map, i.e. scene alpha <= 0.33 on
   them (the HDR encode divides by the scene alpha). `cap-alpha.patch` (RSX_CAP_ALPHA=1 dumps
   alpha as `<name>_a.bmp`) shows it. For the glare layer, `rt-drawlog.patch` (RT_DRAWLOG=...)
   logs FIFO-level binds/clears/begins/draws for given surfaces, which tells "never issued" from
-  "dropped by the backend" (two silent drop paths exist). `COLOR_EXPOSURE.md` "Round 4".
+  "dropped by the backend" (two silent drop paths exist). `COLOR_EXPOSURE.md` "Pass 4".
 
 ## 41. ZPASS_SHOW shadow diagnostic on Yoshiwara (2026-10-21)
 Commit cc50482. Tours shadows\show1..4 (16_fight_20s.png, same hall view in all four; characters
@@ -1474,23 +1474,23 @@ of the left floor (x 20-520, y 420-500), the dark half that ends in a sharp diag
   0xFEED0001), so the colour DMA context was never recorded and the copy still goes to local
   0xC39FFA40. The 20x11 rect now has non-zero means after boot (78-124, changing between scenes),
   so the draw does land there. c1.w stays 7200; picture unchanged.
-- Round 5 (~18:00): lum-readback-3 logged dma=0 because `rsx_process_method` only routes methods
+- Pass 5 (~18:00): lum-readback-3 logged dma=0 because `rsx_process_method` only routes methods
   0x200-0x23C / 0x280-0x28C to `process_surface_method`; the DMA handles (0x18C/0x194/0x1B4/
   0x1B8) never reached v3's cases. `lum-readback-4.patch` adds them to the range gate (7 lines,
-  applies to de12d74, syntax-checked). `COLOR_EXPOSURE.md` "Round 5".
-- Round 6 (~19:50): the PPU side is decoded (COLOR_EXPOSURE.md Round 6). func_0055C5A4 reads the 20x11
+  applies to de12d74, syntax-checked). `COLOR_EXPOSURE.md` "Pass 5".
+- Pass 6 (~19:50): the PPU side is decoded (COLOR_EXPOSURE.md Pass 6). func_0055C5A4 reads the 20x11
   as A8R8G8B8, decodes RGBM (rgb*0.25/A), takes the log-average luminance Lgeo, adapts La towards it by
   1-0.98^(15*dt) per frame; func_0055D1F8 builds c1 = (63.75, max(La,1e-4), clamp(La+0.5,0,63.75),
   0.72/max(La,1e-4)). So E = 0.72/La (~7-25 at the Ace card), darker than the 7200 ceiling by design, and
   RPCS3's extra brightness is not exposure (same code, same E) but the glare layer / scene term. `[TONEMAP]`
   went quiet because its match required c1.y < 0.001; `tonemap-log.patch` fixes the match, logs c1 periodically
   and prints the PPU's Lgeo / predicted E in `[LUMRB]`.
-- Round 6 follow-up: the AI assistant's Yoshiwara tonemap-log numbers are the stage's HDR parameters, not a bug:
+- Pass 6 follow-up: the AI assistant's Yoshiwara tonemap-log numbers are the stage's HDR parameters, not a bug:
   key = 0.36 (E x c1.y = 0.36) and a luminance offset of 0.06 (thr - c1.y = 0.44 = 0.5 - 0.06), so the logged
   La is La_real + 0.06 and E = 0.36/(Lgeo + 0.06) = 2.3-3.9, which the log shows; La_real tracks Lgeo. The
   demo/menus use key 0.72, offset 0. Brightness slider = the last pass (option_brightness, out = in^gamma),
   gamma 1.0 in all our captures; see COLOR_EXPOSURE.md 'Brightness slider' for the cheap tests.
-- Round 7/8 (~21:50): the glare layer 0x0E590000 is the particle server's RenderLuminance target
+- Pass 7/8 (~21:50): the glare layer 0x0E590000 is the particle server's RenderLuminance target
   (`func_003A45E0`, ppu_recomp_019.cpp). Its gate passes (the AI assistant: pass_flags=0x3F, aux=0; aux=0 is a normal
   pre-pass that does the bind+clear). After it, the pass walks the server's active-emitter list
   (`[server+0x1880C]`) and calls each emitter's virtual slot 9 `render(node, arg2, pass, layer, params)` for
@@ -1500,8 +1500,8 @@ of the left floor (x 20-520, y 420-500), the dark half that ends in a sharp diag
   logs the virtual's target and arg2 at both call sites to decide. Burned Yoshiwara panels confirmed from
   `color\yoshi_passes_cap` (encode = op678, scene = `pass_op0683_pre_rt_0ED10000`): scene alpha 43/70/255
   (5/50/95 pct) behind burned pixels, decoded value 0.91; written by the opaque stage geometry pass (ops 221-498),
-  so it is the stage material's own alpha, not particles or post. Details: COLOR_EXPOSURE.md Round 8.
-- Round 9 (~22:40): lumflag-trace-2 showed both particle passes call the same emitter render `func_00626790`
+  so it is the stage material's own alpha, not particles or post. Details: COLOR_EXPOSURE.md Pass 8.
+- Pass 9 (~22:40): lumflag-trace-2 showed both particle passes call the same emitter render `func_00626790`
   (vtable 0x884488), differing only in the render-pass descriptor (lum 0x48433A20, out 0x4843A6E0, obtained from
   `func_0052647C`). Decoded: `func_00626790` walks the node's elements through the server filter (mode 0 = all)
   and calls `func_0063A1AC(elem, rctx, .., pass, layer)`; there `layer` picks the element type (1 = type != 2,
@@ -1510,12 +1510,12 @@ of the left floor (x 20-520, y 420-500), the dark half that ends in a sharp diag
   element draws per ctx and the five submit entries. FP_GAIN_KEYS: the hashes cannot be mapped from the existing
   files (per-draw fp addresses are not stable, [FPGAIN] has no draw context); `cap-code.patch` adds `code=` to the
   capture manifest. Characters in yoshi_passes_cap = the 71 opaque draws with textures below 0x02000000 (67 of them
-  shadow casters), four groups of ops (171-190, 200-216, 332-350, 356-370 in frame_00). COLOR_EXPOSURE.md Round 9.
+  shadow casters), four groups of ops (171-190, 200-216, 332-350, 356-370 in frame_00). COLOR_EXPOSURE.md Pass 9.
 - FP_GAIN_KEYS picked (~23:10) from the AI assistant's cap-code captures (color\capcode): character programs = codes of
   opaque scene draws with textures below 0x0A000000 (96% shadow casters, zero overlap with stage codes over 11
   frames). Yoshiwara 47 programs, demo 38, union 73 (lines in color\capcode\fp_gain_keys.txt and COLOR_EXPOSURE.md);
   fp-gain-keys.patch raises the key cap to 128. Goku = the 8 programs shared by both scenes.
-- Round 10 (~23:45) from lumflag-trace-3 (color\yoshi_lumflag3): the luminance pass does not stop. The particle
+- Pass 10 (~23:45) from lumflag-trace-3 (color\yoshi_lumflag3): the luminance pass does not stop. The particle
   render state G=[[0x96CF90]] has flag bit 0x2 = luminance mode (set by RenderLuminance at loc_003A4CC4); in that
   mode func_0063A1AC draws only "glow" children (header flag 0x1000, intensity > 0) through func_00634968 (VP/FP
   from G+0x2D0/G+0x2F8, intensity constant) - the elem-draw lines without a submit are normal children being
@@ -1523,8 +1523,8 @@ of the left floor (x 20-520, y 420-500), the dark half that ends in a sharp diag
   (func_00719B1C -> func_00526374) only appends a deferred record to the game's per-frame "pe::luminance" child
   pass (func_0052647C from func_0002FAA4 stage 3); the capture has only the CLEAR on 0x0E590000 and the manifest
   cannot see draws the backend guards drop. Module 033 uses TOC 0x8E3858 (constants re-read). Next:
-  lumflag-trace-4.patch + lum-rt-drawlog.patch (LUM_RT=0E590000) in one run. COLOR_EXPOSURE.md Round 10.
-- Round 11 (2026-10-22 ~00:45): trace-4's "only one glow=1 record" was the 300-line log cap (303 of 305 record
+  lumflag-trace-4.patch + lum-rt-drawlog.patch (LUM_RT=0E590000) in one run. COLOR_EXPOSURE.md Pass 10.
+- Pass 11 (2026-10-22 ~00:45): trace-4's "only one glow=1 record" was the 300-line log cap (303 of 305 record
   lines are menu-era pre-pass quads; the glow=1 line is a 1-in-1000 sample) - glow records ARE appended. Found the
   executor: records run at frame flush (`func_0052577C` -> `func_00525488` prepare / `func_00525538` execute over
   the 11 root passes, recursing `pass+0x1C`), `func_00525FFC` calls the command descriptor stored in each record's
@@ -1533,7 +1533,7 @@ of the left floor (x 20-520, y 420-500), the dark half that ends in a sharp diag
   emitters (`func_00656F0C`/`func_00657248`), walking 8 vertex batches at `snap+0x20..0x3C`. No pass filter
   anywhere, so luminance draws vanish either as fn=0, as empty batches, or in the backend. Next test:
   `lumflag-trace-5.patch` (`[LUMEXEC]` exec/record/drawcmd/draw lines for `pe::lum*` passes) + confirm `LUM_RT`
-  is exported. COLOR_EXPOSURE.md Round 11.
+  is exported. COLOR_EXPOSURE.md Pass 11.
 
 ## §41 follow-up: the dark floor half is "always in shadow"; casters land near depth 0 (2026-10-21) — patch not yet run
 
@@ -1599,14 +1599,14 @@ v0.17.0 fetched from upgrade-0.17\*.bundle as tag v0.17.0 (no full upgrade).
   Lgeo = 0.060-0.092 (E~ 7.9-12.1). La does not settle on Lgeo; it stays ~1.5-2x higher.
   E x La = 0.36 on every line (387 of 388), so E = 0.36/La, half the 0.72 expected; logged E is
   2.3-3.9 vs E~ 8-12. So the loop runs, but neither La -> Lgeo nor E -> E~ matches.
-- **Round 3 (read-only):** casters are fine (`shadows\dbg`: 0.5/0.5, no polygon offset, ~107 caster
+- **Pass 3 (read-only):** casters are fine (`shadows\dbg`: 0.5/0.5, no polygon offset, ~107 caster
   draws per cascade, cleared to 1.0). The floor program compares **t15, the scene's own depth
   buffer**, as well as the cascades, and the earlier ZPASS_SHOW runs changed all three at once. Top
   suspect: the t15 self-comparison (our depth copy already holds the floor's own depth). Next runs:
   `ZPASS_SHOW=1 ZPASS_SHOW_UNIT=15`, `ZPASS_SHOW=2 ZPASS_SHOW_UNIT=7`. Details:
-  `patches/shadow-depthmap/README.md` "Round 3".
+  `patches/shadow-depthmap/README.md` "Pass 3".
 
-## 44. Shadow round 2 runs (2026-10-21, commits 8c85231, b14e960)
+## 44. Shadow pass 2 runs (2026-10-21, commits 8c85231, b14e960)
 Yoshiwara, shots in shadows\<run>\16_fight_20s.png (same hall view unless noted). Left floor =
 mean of x 20-520, y 420-500 (the dark half); normal = 48, all-units mode 1 = 76.
 - `ZPASS_DBG=1` (shadows\dbg): one mapping for the whole run: `[ZPASS] caster z map: viewport
@@ -1653,7 +1653,7 @@ README.
   `S_BORDER_UNITS=<hex>` (static sampler BORDER + opaque white) with `ZPASS_CMP_SWAP=1`, needing a
   small code change. The hall view's remaining darker half may be the gallery's real shadow drawn
   too hard and dark, or out-of-map lookups; t15 is the next check. See
-  `patches/shadow-cmp-swap/README.md` "Round 5".
+  `patches/shadow-cmp-swap/README.md` "Pass 5".
 
 ## 47. lumflag trace (jstars\port\recompiled\ppu_recomp_019.cpp, backup .pre-lumflag), Yoshiwara
 color\yoshi_lumflag: `[LUMFLAG] set_luminance_pass(1) lr=0x0002FB04` 200 times (cap), and
@@ -1836,7 +1836,7 @@ units, filter copy) and a five-step test plan.
   (also on Kameari). Exposure tests on Kameari (TONEMAP_EXPOSURE=24, LUM_READBACK=1) queued.
 - 2026-10-22 ~12:00: the maintainer reports the alpha-test build (e78f5c1, ALPHA_TEST default on) fixes the
   "Press any button" title screen: the correct textures now show behind the characters.
-- The maintainer (2026-10-22 12:12) prefers the T0_WRAP Namek look (namek_wrap_compare.png): keep T0_WRAP default on.
+- The maintainer (2026-10-22) prefers the T0_WRAP Namek look (namek_wrap_compare.png): keep T0_WRAP default on.
 
 ## 59. Leaf fix (alpha test, e78f5c1), Kameari exposure, Penguin sky burst (2026-10-22)
 Pictures: stages\labeled\leaf_fix.png, kameari_exposure.png, penguin_burst.png.
@@ -1852,7 +1852,7 @@ Pictures: stages\labeled\leaf_fix.png, kameari_exposure.png, penguin_burst.png.
 - Penguin sky burst (10 shots 0.2 s apart in the fight): frames 00, 01, 05, 09 have a completely
   WHITE sky, the others a normal blue sky with clouds. So the sky layer is missing on some frames,
   not overexposed.
-- The maintainer (2026-10-22 13:12): with T0_LINEAR (c3fe813) some small missing UI textures in the Main Menu and one in the in-game match UI now show.
+- The maintainer (2026-10-22): with T0_LINEAR (c3fe813) some small missing UI textures in the Main Menu and one in the in-game match UI now show.
 
 ## 60. T0_LINEAR (c3fe813, default on, T0_LINEAR=0 off), stages\labeled\smoothing.png
 - Namek ground smoother, far less grain than T0_WRAP alone. Athena sky still dark blue, no lines;
@@ -1860,7 +1860,7 @@ Pictures: stages\labeled\leaf_fix.png, kameari_exposure.png, penguin_burst.png.
 - The maintainer: Main Menu bottom bar now reaches the right edge, one in-match UI texture back
   (stages\labeled\menu_ui_t0lin.png).
 - fps: Namek 27.0, Penguin 27.8, Athena 27.6, Yoshiwara 27.7. No compile failures.
-- The maintainer (13:31): smoothing.png also shows the in-match HUD fixed (white patch at the bottom-left portrait area gone in Namek, Athena, Yoshiwara) and smoother character models. T0_LINEAR stays default on.
+- The maintainer: smoothing.png also shows the in-match HUD fixed (white patch at the bottom-left portrait area gone in Namek, Athena, Yoshiwara) and smoother character models. T0_LINEAR stays default on.
 
 ## 61. Penguin 10-frame capture and loading-screen texture log (2026-10-22)
 - RSX_CAP_PASSES=1 RSX_CAP=10000:10:1 on Penguin (stages\pv_flash\cap): only 6 frames written
@@ -1917,8 +1917,8 @@ Pictures: stages\labeled\depth_fix_hidden_leaf.png (with RPCS3), depth_fix_other
 - One capture program (fp_op0437) now has `_out.depth`. No compile failures.
 - fps: Hidden Leaf 28.4 (off 28.9), Penguin 28.9, Alabasta 22.6, Kameari 23.6 (27.1 in §58, other
   characters/camera), Yoshiwara 27.5, Athena 28.2.
-- The maintainer (2026-10-22 15:08): keep FP_DEPTH_EXPORT on by default.
-- The maintainer (15:12): FP_DEPTH_EXPORT also removed a black square behind text on a building in Penguin Village; likely fixes other decals/signs too. Look for sign/fence/window/decal differences in future stage pictures.
+- The maintainer (2026-10-22): keep FP_DEPTH_EXPORT on by default.
+- The maintainer: FP_DEPTH_EXPORT also removed a black square behind text on a building in Penguin Village; likely fixes other decals/signs too. Look for sign/fence/window/decal differences in future stage pictures.
 
 ## 64. Loading screen runs A and B for the AI assistant (2026-10-22)
 - Run A (stages\loading\runA, captures stages\loading\cap2): RSX_CAP=6400:2:100 RSX_CAP_PASSES=2
@@ -2051,7 +2051,7 @@ Penguin burst with FAN_LOG=0D7A0000 (stages\labeled\skyflash_burst_v2.png, stder
 stages\pv_flash\fanjoin2): **all 10 frames have a normal blue sky** (before: white wedge in 4 of 10).
 234 `JOINED why=0` lines (e.g. `f=7640 indexed prim=7 first=8 count=34 ... JOINED why=0 emitted=102
 rec=451 n=120 restart=1/0xFFFF dma=0x11`), 379 why=2 (other fans not continued).
-- The maintainer (16:29) watched the Penguin run live: no white sky flashes. FAN_JOIN stays default on.
+- The maintainer watched the Penguin run live: no white sky flashes. FAN_JOIN stays default on.
 - Kameari burst with FAN_JOIN v2 (stages\labeled\kameari_burst_v2.png): camera mostly looked down at
   the street, little sky in view; no white sky frames. fps Kameari 27.5, Yoshiwara 28.3.
 
@@ -2135,7 +2135,7 @@ bind, not the upload or the cache:
 - Fix check (3b68f46, stages\loading\fix, sheet stages\labeled\loading_fix_check.png): tips page
   shows on the loading screen; Namek water and demo cards look the same as before (reflection kept);
   Vegetable Sky fine. Boot logos not caught by the 20/40/60 s demo shots (white / black frames).
-- The maintainer (17:43): boot logos show with the fix (3b68f46). All three checks pass: logos, tips page, water reflection.
+- The maintainer: boot logos show with the fix (3b68f46). All three checks pass: logos, tips page, water reflection.
 - Tip variety (stages\loading\tips\s0,s1,s3,s7,s11, sheet stages\labeled\loading_tips_5runs.png):
   all five matches show the same "Victory Gauge" tip (RPCS3 shots show "Locking On" and "Dashing").
   Caveat: every tour is a fresh boot with identical inputs, so the game's random seed may simply be
@@ -2166,7 +2166,7 @@ tools\menu_tour_play.sh: tour to the fight, then a screenshot every 4 s for 240 
 shot the floor is brown dirt with darker rubble; no light-grey ring tiles appear anywhere (RPCS3
 014020 shows grey stone tiles under Goku). The minimap shows a lighter region on one side that may
 be the ring; not confirmed whether the character reached it.
-- The maintainer (20:47): was away at first; when moving, the ring floor got destroyed before it could be checked. The fight-start shot (p_000, nothing broken yet) also shows a brown floor near the stairs. Retry offered: move onto the ring right at fight start.
+- The maintainer: was away at first; when moving, the ring floor got destroyed before it could be checked. The fight-start shot (p_000, nothing broken yet) also shows a brown floor near the stairs. Retry offered: move onto the ring right at fight start.
 - Second try (stages\dt_ring2, every 2 s, sheet dt_ring2\sheet.png; labelled
   stages\labeled\dt_ring_tiles.png): with Toriko on the ring, the floor shows the light-grey stone
   tiles with joints and cracks, like RPCS3 014020. The ring is fine; the brown floor elsewhere is the
@@ -2208,7 +2208,7 @@ be the ring; not confirmed whether the character reached it.
   early, and wakes late by p50 ~0.3-0.5 ms, p99 ~1 ms, p99.9 3-7 ms. Risk: the main thread's flip
   wait wakes later, so watch `[PERF4]`; fallback `PS3_PRECISE_SLEEP_MAX_US=50`.
 
-## CPU round 2: function-level picture (2026-10-23) — read-only, `CPU_PROFILE.md` §10-11
+## CPU pass 2: function-level picture (2026-10-23) — read-only, `CPU_PROFILE.md` §10-11
 
 Run B's 30 thread dumps, resolved with the build-pdb PDB:
 - drawing thread: `rsx_fp_code_hash` (FP code hash per draw) and `vp_record_cb` (8 KB constant
@@ -2733,14 +2733,14 @@ SPU_DMATRACE_N=3000`) to see whether its inputs are empty or its output computat
   0x30A header, then 0x2AA frames), end 0x44E75200, output ptrs +0x20/+0x24 (0x600 apart). Input is real
   HCA ("HCA\0" header, then 0xFFFF frame syncs). Outputs after the job: 0/384, 0, 0, 128/384, 0 nonzero words.
   The job does not change p1/p2 itself. After 5 decodes no more are pushed.
-- Round 4 (perf\audio\a8-a10): HCA header 48434100 02000060 "fmt" 0200BB80 (2 ch, 48 kHz) frames 0x117B
+- Pass 4 (perf\audio\a8-a10): HCA header 48434100 02000060 "fmt" 0200BB80 (2 ch, 48 kHz) frames 0x117B
   (4475 frames = ~95 s: the opening movie's audio) "comp" 02AA010F 01008080, "ciph" 0000 (not encrypted).
   The voice context p2 (0x4B7842D0) is cleared to 0094E7CC 0 0 ... within the first second and stays so: the
   voice is released after the 5 decodes. **SPU_DMATRACE=10 and =11 print no DMA at all**: neither the
   AtomDecoder nor the AsrVoice job issues a single DMA (same with SPU_INTERP_IMG=10, so not a lift bug in the
   decoder). Both jobs seem to return without doing any work. AsrVoice also hits an SMC fallback 8x:
   "[spu-smc] microstep img=11 pc=0x03FF4 word 0x28000000 ... handing to the interpreter".
-- Round 5 (perf\audio\a11, SPURS_JOB_DUMP=1): the CRI AsrVoice job (desc 0x45187580) ends with stop=0x3FFF at
+- Pass 5 (perf\audio\a11, SPURS_JOB_DUMP=1): the CRI AsrVoice job (desc 0x45187580) ends with stop=0x3FFF at
   pc 0x03FF8 every time = CRI JOBCRT's error exit before its main (an AI assistant: entry 0xE0 -> 0x5D0 -> check 0x660 on
   ctx+0x14 & 0x0FFFFFFF). Game jobs end normally (stop 0, pc 0x3FF00). Our job context writes ctx+0x14 =
   sizeJobDescriptor<<28 only (0x20000000 for 256 B), low 28 bits 0. Waiting on an AI assistant for what 0x660 expects.
@@ -2763,7 +2763,7 @@ SPU_DMATRACE_N=3000`) to see whether its inputs are empty or its output computat
 - **Fix: CRI_LEAD=7** (jstars\port\recompiled\ppu_recomp_035.cpp, in func_006A5BA4 after GetPortConfig: writes
   CRI's lead obj+0x2008, capped at nBlock-1). Silent blocks 12% -> 0.9-2.6% (b8). Default via
   jstars\port\main.cpp (CRI_LEAD=0 keeps CRI's 5). Clip: perf\audio\clip_fight_lead7.wav.
-- **Round 8 (perf\audio\b9, b10):** AUDIO_NBLOCK=16 (cellAudio, opt-in in the runtime; e547f31)
+- **Pass 8 (perf\audio\b9, b10):** AUDIO_NBLOCK=16 (cellAudio, opt-in in the runtime; e547f31)
   + CRI_LEAD=12: 0.0% silent blocks in movie, title and fight (only loading screens are silent), Hidden Leaf
   29.0 f/s. Now the J-Stars default in jstars\port\main.cpp (AUDIO_NBLOCK=8 / CRI_LEAD=0 revert). Latency ~64 ms.
 

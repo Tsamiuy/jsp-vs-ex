@@ -7,7 +7,7 @@ syntax-only compile is clean, and the text rewrite was unit-tested offline. Not 
 ## Current state (from code, logs and notes; nothing run)
 
 - **Shadow passes are on by default** (`SHADOW_PASSES`, since zeta v5).
-- **The casters land.** Round-2 log: about 100-140 caster draws per cascade per batch, maps
+- **The casters land.** Pass-2 log: about 100-140 caster draws per cascade per batch, maps
   cleared to 1.0. They are drawn into per-zeta depth targets with the game's depth state and
   polygon offset.
 - **Materials do read the maps.** Since v3 the lookups have real coordinates (TEX8/TEX9).

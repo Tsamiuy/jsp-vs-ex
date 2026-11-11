@@ -22,4 +22,4 @@ Reading (VFX.md):
   - at the `[VPCODE] ea=` addresses: written after we drew (timing);
   - elsewhere: our fetch offset is wrong.
 - No PUTs into the window while the beam fires: the producer is PPU code or isn't running. Next would be the
-  PPU particle vertex build (`func_00631C24`, COLOR_EXPOSURE.md Round 10).
+  PPU particle vertex build (`func_00631C24`, COLOR_EXPOSURE.md Pass 10).

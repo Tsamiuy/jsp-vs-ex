@@ -331,7 +331,7 @@ alpha-tested draws (`alpha=(1,0.498,6,0)`) whose shaders have no `discard`.
 Patch drafted: `patches\alpha-test\` (default-on; `ALPHA_TEST=0` turns it off), with a test plan.
 This is now cause 1 for §7; A2C becomes cause 2 (test `MENU_A2C=1` on top of the patch).
 
-### RPCS3 Hidden Leaf Village shots (the maintainer, 2026-10-22 12:30): `reference\rpcs3\Screenshot 2026-10-22 123038/123103/123135.png`
+### RPCS3 Hidden Leaf Village shots (the maintainer, 2026-10-22): `reference\rpcs3\Screenshot 2026-10-22 123038/123103/123135.png`
 
 - **Forest (123038, 123103):** every tree is cut-out leaves with sky between them, bushes are
   cut-out, and the ground grass is a soft cut-out carpet. There are no black backgrounds and no
@@ -370,7 +370,7 @@ Ranked causes:
 3. **Exposure (Kameari only):** `LUM_READBACK=1` brings E down from 7200. If Kameari's flashes
    are clipped highlights that come and go with the camera, they should shrink.
 
-### Kameari screenshot from the maintainer (12:45): white sky with a blue wedge on the far left
+### Kameari screenshot from the maintainer: white sky with a blue wedge on the far left
 
 The Naruto intro card on Kameari shows the sky white. Only the far left is blue, and the border
 between them is a **stair-stepped diagonal**. Reading (inferred):
@@ -397,7 +397,7 @@ normal blue sky, so a burst capture is needed. Candidates, ranked:
      stats" rests on the `[GET_REPORT]` log, which prints just the first six reports of a run, all at
      boot. So it is not ruled out. `patches\zpass-report` (`REPORT_LOG=1`) settles it in one run.
    - **Depth sample:** our scene-depth copies are taken per draw and re-cleared twice per batch
-     (FINDINGS §41 round 3). A flare reading 0x0E960000 can see the cleared value (1.0 = "sun fully
+     (FINDINGS §41 pass 3). A flare reading 0x0E960000 can see the cleared value (1.0 = "sun fully
      visible") on some frames and real depth on others. That fits flashing on sunny stages only.
      **Check in the burst capture:** look for a small draw that samples 0x0E960000 or 0x8E960000 as
      a texture, typically a 1-4 vertex quad near the end of the scene. `ZPASS_DBG=1` lists draws that
@@ -407,7 +407,7 @@ normal blue sky, so a burst capture is needed. Candidates, ranked:
    view), a white layer over the sky appears and disappears. **Check:** in the burst, whether
    0x0E590000 gets draws, and `rt_0E590000.bmp` frame to frame.
 3. **The HDR alpha of the sky.** The scene stores brightness in alpha, and the HDR encode divides by
-   it (§40 round 4). A sky dome whose alpha varies between frames, for example a blend or colour-mask
+   it (§40 pass 4). A sky dome whose alpha varies between frames, for example a blend or colour-mask
    state left over from an earlier pass, would jump to white. **Check:** `RSX_CAP_ALPHA=1` in the
    burst, and compare the sky's alpha across frames.
 4. **Exposure:** steady on Penguin Village (E=24 in every logged fight frame), so it is unlikely
@@ -622,7 +622,7 @@ Ranked causes for the invisible art:
    **Test:** `TEXUP_DBG=1` (upload log) in the same run, looking for failures or odd footprints on
    those sizes.
 
-### §11, round 3: the art's source bytes are fine, so look at the draw's alpha (2026-10-22)
+### §11, pass 3: the art's source bytes are fine, so look at the draw's alpha (2026-10-22)
 
 The AI assistant's `TEX_SRCDBG` run (`stages\loading\srcdbg`) found the tips images populated, and
 `MENU_TEX_PITCH` made no difference. What is left:
