@@ -1,7 +1,7 @@
 # Instructions for AI coding agents
 
-Read this before changing anything in this repository. It applies to every automated contributor (Claude Code,
-Codex, Copilot, Cursor and the like) and to the people who run them. The rules for people are in
+Read this before changing anything in this repository. It applies to every automated contributor (automated
+coding tools of any kind) and to the people who run them. The rules for people are in
 [CONTRIBUTING.md](CONTRIBUTING.md); this file adds the details for automated contributors.
 
 ## How a change reaches `main`
