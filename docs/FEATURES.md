@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 11 available, 4 in progress, 14 planned.
+Port features: 12 available, 3 in progress, 14 planned.
 
 ## 1. What the port adds
 
@@ -41,7 +41,7 @@ Port features: 11 available, 4 in progress, 14 planned.
 | <a id="ko-count"></a>KO count | KO count up to 5 as a match option in every mode except Training | planned | off |  |
 | <a id="match-sizes"></a>1v1 and 3v3 matches | 1v1 and 3v3 beside the usual 2v2 (3v3 only if the engine allows it) | planned | off |  |
 | <a id="own-music"></a>Your own music | Your own music files in place of the game's tracks (your files, never shipped) | planned | off |  |
-| <a id="unlock-all"></a>Unlock all | ENHANCEMENT (opt-in, off by default): all cards, J-Points, gauges, characters, supports, titles, icons, decks and coins, written by the game into its own save at its next save. The launcher backs the save folder up first and the box unticks after one start. Titles and icons are visible to online opponents; the cheat is accepted online by the project's choice | in progress | off | JSP_UNLOCK_ALL=1 or the launcher's Cheats tab; a Windows 11 test with the switch on and off is pending, the launcher box is not yet built on Windows. [UNLOCK_ALL.md](notes/UNLOCK_ALL.md) |
+| <a id="unlock-all"></a>Unlock all | ENHANCEMENT (opt-in, off by default): all cards, J-Points, gauges, characters, supports, titles, icons, decks and coins, written by the game into its own save at its next save. The launcher backs the save folder up first and the box unticks after one start. Titles and icons are visible to online opponents; the cheat is accepted online by the project's choice | available | Windows test 2026-11-11 (#73) | JSP_UNLOCK_ALL=1 or the launcher's Cheats tab; tested on Windows with the switch on and off, and the launcher's backup and refusal were run. The EU save folder is not tested. [UNLOCK_ALL.md](notes/UNLOCK_ALL.md) |
 
 ### Rendering
 
