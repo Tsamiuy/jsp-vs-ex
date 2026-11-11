@@ -9,20 +9,20 @@ classified programs and every draw into that target. J-Stars: the HUD size optio
 Tested (US disc): see the J-Stars STATUS entry for the feature build with this patch.
 
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 3e2e5b4e..a914c75b 100644
+index 0bd8bd87..d7379565 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
-@@ -266,6 +266,9 @@ typedef struct {
-     ID3DBlob* vs;
+@@ -268,6 +268,9 @@ typedef struct {
      int uses_c03;
      int pull;               /* VPULL: decompiled in pulling mode (no input layout) */
+     volatile int pending;   /* patch 2070: compiling on a worker; draws using the slot are skipped until it is ready */
 +    int pos_passthru;       /* 2510: 1 = o[0].xyw = v[0].xyw (positions arrive in clip space), 2 = the pixel-space
 +                             * text program; either way the CPU can work out a draw's screen box from attribute 0
 +                             * (g_rsx_ui_scale). 0: unknown. */
  } VPVSEntry;
  #define VP_VS_CACHE 1024 /* wave uses 5+ distinct VPs; at 4 the cache
                           * thrashed every frame and eviction shifted slots
-@@ -2481,6 +2484,12 @@ static int vp_get_vs(const rsx_state* st)
+@@ -2751,6 +2754,12 @@ static int vp_get_vs(const rsx_state* st)
      s_d3d.vp_vs[slot].uses_c03 =
          (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
           strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
@@ -35,7 +35,7 @@ index 3e2e5b4e..a914c75b 100644
      { static int _n=0; if (PS3_LOG_FIRST(_n, 6)) printf("[VP] per-draw VS cached (hash=0x%08X, %d instrs, slot %d)\n", hash, ni, slot); }
      /* Build the base VP pipeline here if it does not exist yet. render_frame's
       * trigger reads s_d3d.current_rsx_state, which by frame end no longer has
-@@ -4681,7 +4690,9 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+@@ -5044,7 +5053,9 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
      { static int share = -1; if (share < 0) { const char* e = getenv("VCB_SHARE"); share = (e && *e == '0') ? 0 : 1; }
        static u32 l_slot = 0xFFFFFFFFu; static u64 l_batch = ~0ull; static int l_vs = -2, l_par = -1;
        static float l_z[2];
@@ -46,7 +46,7 @@ index 3e2e5b4e..a914c75b 100644
            l_par == (int)s_d3d.vp_parity && l_vs == vs_idx &&
            l_z[0] == st->viewport_scale[2] && l_z[1] == st->viewport_offset[2]) {
            ((D3D12DrawRecord*)dr)->vcb_slot = l_slot;
-@@ -4760,6 +4771,59 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+@@ -5123,6 +5134,59 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
                 if (lock && s_lock_valid) { ux = s_lock_x; uy = s_lock_y; }
                 vpx[0] = k; vpx[1] = k; vpx[4] = -ux * k; vpx[5] = -uy * k; } }
  

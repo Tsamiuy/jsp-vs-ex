@@ -1,0 +1,132 @@
+Patch 2070 (fix line): a vertex program seen for the first time is compiled on a worker thread instead of on the
+drawing thread (VS_ASYNC=0 off).
+
+vp_get_vs decompiled and compiled a new vertex program right where the draw was recorded, on the drawing thread, and
+D3DCompile takes 100-400 ms for J-Stars' programs: the game froze for a moment when something new appeared (the
+maintainer, 11-11: breaking things, turning the camera in a map with many buildings). HITCH and HZC logs of a 2v2 on
+Hidden Leaf: the two long frames (306 and 326 ms) were the frames right after a guest_vp2 shader-cache miss
+(bench/exp/2026-11-11_1632-breakhitch1); the second run, with those programs cached, had none
+(2026-11-11_1637-breakhitch2). Now a program whose text is not in shader_cache.bin gets its slot at once, marked
+pending, and two worker threads compile it; until it is ready the draws that use it are skipped (as patch 2057 does
+for fragment programs), so the game goes on. A slot reused before its compile ends drops the late result.
+
+Tested (US disc, auto-pilot 2v2 Free Battle on Hidden Leaf, empty shader cache): 57 vertex and 248 fragment programs compiled during the run, no drawing-thread stall over 55 ms in the fight (FTL draw max), picture normal (bench/exp/2026-11-11_1647-vsasync-cold).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 7fef86f4..ccacc089 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -252,6 +252,7 @@ typedef struct {
+     ID3DBlob* vs;
+     int uses_c03;
+     int pull;               /* VPULL: decompiled in pulling mode (no input layout) */
++    volatile int pending;   /* patch 2070: compiling on a worker; draws using the slot are skipped until it is ready */
+ } VPVSEntry;
+ #define VP_VS_CACHE 1024 /* wave uses 5+ distinct VPs; at 4 the cache
+                          * thrashed every frame and eviction shifted slots
+@@ -2422,6 +2423,70 @@ static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12Pipelin
+     return hr;
+ }
+ 
++/* Patch 2070: new vertex programs compiled on worker threads (VS_ASYNC=0 off). */
++static int vs_async_on(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("VS_ASYNC"); v = (e && *e == '0') ? 0 : 1; }
++    return v;
++}
++/* 1 when sc_compile would find this text in shader_cache.bin. */
++static int sc_has(const char* hlsl, const char* target)
++{
++    SCache* c = &s_sc_shader;
++    if (!sc_ready(c)) return 0;
++    const u64 key = sc_hash(sc_hash(14695981039346656037ull, hlsl, strlen(hlsl)), target, strlen(target)) | 1u;
++    AcquireSRWLockExclusive(&s_sc_lock);
++    const int has = sc_find(c, key)->key != 0;
++    ReleaseSRWLockExclusive(&s_sc_lock);
++    return has;
++}
++typedef struct VsJob { struct VsJob* next; int slot; u32 hash; int pull; char* hlsl; } VsJob;
++static VsJob* s_vsj_head; static VsJob** s_vsj_tail = &s_vsj_head;
++static CRITICAL_SECTION s_vsj_lock; static HANDLE s_vsj_sem;
++static DWORD WINAPI vs_async_worker(LPVOID arg)
++{
++    (void)arg;
++    for (;;) {
++        WaitForSingleObject(s_vsj_sem, INFINITE);
++        EnterCriticalSection(&s_vsj_lock);
++        VsJob* j = s_vsj_head;
++        if (j) { s_vsj_head = j->next; if (!s_vsj_head) s_vsj_tail = &s_vsj_head; }
++        LeaveCriticalSection(&s_vsj_lock);
++        if (!j) continue;
++        ID3DBlob* vb = NULL; ID3DBlob* e = NULL;
++        const HRESULT hr = sc_compile(j->hlsl, "guest_vp2", "vs_5_0", &vb, &e);
++        if (e) e->lpVtbl->Release(e);
++        if (FAILED(hr)) { static int _e = 0; if (PS3_LOG_FIRST(_e, 4)) printf("[VP] per-draw VS compile FAIL (hash=0x%08X, async)\n", j->hash); }
++        VPVSEntry* t = &s_d3d.vp_vs[j->slot];
++        if (t->pending && t->hash == j->hash && t->pull == j->pull) {
++            t->vs = SUCCEEDED(hr) ? vb : NULL; vb = NULL;
++            MemoryBarrier();
++            t->pending = 0;
++        }
++        if (vb) vb->lpVtbl->Release(vb);   /* the slot was reused meanwhile */
++        free(j->hlsl); free(j);
++    }
++    return 0;
++}
++static void vs_async_queue(int slot, u32 hash, int pull, const char* hlsl)
++{
++    static int started = 0;
++    if (!started) {
++        started = 1;
++        InitializeCriticalSection(&s_vsj_lock);
++        s_vsj_sem = CreateSemaphoreA(NULL, 0, 0x7FFFFFFF, NULL);
++        for (int i = 0; i < 2; i++) { HANDLE h = CreateThread(NULL, 0, vs_async_worker, NULL, 0, NULL); if (h) CloseHandle(h); }
++    }
++    VsJob* j = (VsJob*)calloc(1, sizeof *j);
++    if (!j || !(j->hlsl = _strdup(hlsl))) { free(j); s_d3d.vp_vs[slot].pending = 0; return; }
++    j->slot = slot; j->hash = hash; j->pull = pull;
++    EnterCriticalSection(&s_vsj_lock);
++    *s_vsj_tail = j; s_vsj_tail = &j->next;
++    LeaveCriticalSection(&s_vsj_lock);
++    ReleaseSemaphore(s_vsj_sem, 1, NULL);
++}
++
+ static u32 vp_hash_ucode(const u8* p, u32 n)
+ {
+     u32 h = 2166136261u;
+@@ -2518,12 +2583,16 @@ static int vp_get_vs(const rsx_state* st)
+         }
+     }
+     ID3DBlob* vb = NULL; ID3DBlob* e = NULL;
++    /* patch 2070: not in shader_cache.bin = a compile of 100-400 ms; a worker does it, the draws wait in the slot */
++    const int vs_pend = vs_async_on() && !sc_has(hlsl, "vs_5_0");
++    if (!vs_pend) {
+     HRESULT hr = sc_compile(hlsl, "guest_vp2", "vs_5_0", &vb, &e);
+     if (e) e->lpVtbl->Release(e);
+     if (FAILED(hr) || !vb) {
+         static int _e=0; if (PS3_LOG_FIRST(_e, 4)) printf("[VP] per-draw VS compile FAIL (hash=0x%08X)\n", hash);
+         return -1;
+     }
++    }
+     int slot;
+     if (s_d3d.vp_vs_n < VP_VS_CACHE) slot = s_d3d.vp_vs_n++;
+     else {  /* full: reuse a slot in turn; no shifting (recorded vs_idx values stay valid), released later */
+@@ -2537,6 +2606,8 @@ static int vp_get_vs(const rsx_state* st)
+     s_d3d.vp_vs[slot].hash = hash;
+     s_d3d.vp_vs[slot].vs   = vb;
+     s_d3d.vp_vs[slot].pull = s_vs_pull_req;
++    s_d3d.vp_vs[slot].pending = vs_pend;   /* patch 2070 */
++    if (vs_pend) vs_async_queue(slot, hash, s_vs_pull_req, hlsl);
+     s_d3d.vp_vs[slot].uses_c03 =
+         (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
+          strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
+@@ -3641,6 +3712,8 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     /* Resolve the VS: the draw's cached per-VP blob, else the primary. */
+     ID3DBlob* vsb = NULL; u32 vs_hash = 0;
+     if (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n) {
++        if (s_d3d.vp_vs[vs_idx].pending) { s_fp_pending = 1; return NULL; }   /* patch 2070: its VS is still compiling */
++        MemoryBarrier();
+         vsb = s_d3d.vp_vs[vs_idx].vs; vs_hash = s_d3d.vp_vs[vs_idx].hash;
+     }
+     if (!vsb) { vsb = s_d3d.vp_vs_blob; vs_idx = -1; }
