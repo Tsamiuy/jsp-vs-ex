@@ -4,7 +4,7 @@
 
 **J-Stars Victory VS+ running natively on Windows: the game's own code, recompiled to x64 on your PC from your own copy.**
 
-[![CI](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml) [![licence: MIT](https://img.shields.io/badge/licence-MIT-333333?labelColor=000000&style=flat-square)](LICENSE) [![status: work in progress](https://img.shields.io/badge/status-work%20in%20progress-333333?labelColor=000000&style=flat-square)](#status)
+[![CI](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml) [![licence: MIT](https://img.shields.io/badge/licence-MIT-333333?labelColor=000000&style=flat-square)](LICENSE) [![status: work in progress](https://img.shields.io/badge/status-work%20in%20progress-333333?labelColor=000000&style=flat-square)](#status) [![docs: DeepWiki](https://img.shields.io/badge/docs-DeepWiki-333333?labelColor=000000&style=flat-square)](https://deepwiki.com/Tsamiuy/jsp-vs-ex)
 
 **[Status](docs/notes/STATUS.md)** · **[Features](docs/FEATURES.md)** · **[Roadmap](docs/ROADMAP.md)** · **[Installer](installer/README.md)** · **[Building](docs/BUILDING.md)** · **[Notes](docs/notes/README.md)** · **[Contributing](CONTRIBUTING.md)**
 
