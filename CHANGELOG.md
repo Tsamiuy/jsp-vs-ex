@@ -6,13 +6,28 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
-What `main` has so far; `docs/FEATURES.md` lists each item with how it was tested.
+First pre-release. J-Stars Victory VS+ for Windows: the game is built on your PC (ps3recomp, Direct3D 12) from your own copy of the disc, no game
+files are included. On the Windows PC it was tested on, it boots, plays the menus and fights with sound at about 30 frames
+per second, and the installer builds and starts it. It needs a 64-bit CPU with AVX2.
+It is a pre-release with known problems and fewer tests than it needs:
+see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9). `docs/FEATURES.md` lists each feature with how it was tested.
+
+### What you get
+
+- A Windows installer (`jsp-setup.exe`) and a portable zip that do that build, and a launcher to start the game.
+- Higher resolutions, a resizable window and borderless fullscreen, and EX in the title logo.
+- Keyboard, keyboard and mouse, or controller, each with its own bindings; a second player on keyboard or a second
+  controller.
+- Fight HUD size, Exit Game in Options, Training Mode, a Hide HUD row in Training and an FPS counter.
+- Opt-in "Unlock everything" cheat (launcher Cheats tab, `JSP_UNLOCK_ALL=1`): save backup first, one start only.
+- The features page (`docs/FEATURES.md`), generated from `docs/features.tsv`.
+
+### Changes since the first builds
 
 - Installer and CI: the port on ps3recomp v0.19.0 (`installer/port`) is now the default tree of
   `assemble_payload.py`, `installer.yml` (new `tree` input) and `release.yml`. The switch is `--tree current` (the default) or
   `--tree legacy` (the earlier v0.15 port); the names do not change with the toolkit version. The older `v18`, `v19` and `v15`
   are still accepted.
-
 - Setup checks the decrypted EBOOT against the known 1.00 builds and refuses the other region's. An unknown build can
   be allowed with `--allow-unknown-eboot` (installer: `/ALLOWUNKNOWNEBOOT=1`); it is unsupported.
 - Portable first run: the last line points to `jsp-settings.exe` (settings, Online tab, then Start Game) and names
@@ -36,11 +51,3 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
   oldest entry early (toolkit patch 2066).
 - RPCS3 save import stages incoming files before replacing progress, restores the old files after an I/O error,
   and refuses linked destinations that could overwrite files outside the selected save.
-- The game is built on your PC from your own copy (ps3recomp, Direct3D 12); no game files are included.
-- A Windows installer (`jsp-setup.exe`) and a portable zip that do that build, and a launcher to start the game.
-- Higher resolutions, a resizable window and borderless fullscreen, and EX in the title logo.
-- Keyboard, keyboard and mouse, or controller, each with its own bindings; a second player on keyboard or a second
-  controller.
-- Fight HUD size, Exit Game in Options, Training Mode, a Hide HUD row in Training and an FPS counter.
-- Opt-in "Unlock everything" cheat (launcher Cheats tab, `JSP_UNLOCK_ALL=1`): save backup first, one start only.
-- The features page (`docs/FEATURES.md`), generated from `docs/features.tsv`.
