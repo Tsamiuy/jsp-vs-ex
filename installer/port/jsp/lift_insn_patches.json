@@ -1,0 +1,11 @@
+{
+ "patches": [
+  {
+   "addr": "0x001E71C0",
+   "orig": "0x3B200005",
+   "new": "0x3B200006",
+   "guard": "g_port_menu_six_rows",
+   "note": "id 8 (Options) row count in func_001E6E98: li r25,5 -> li r25,6. US 1.00 only; the switch is set by jsp_port_menu.cpp (JSP_PORT_MENU=1)"
+  }
+ ]
+}

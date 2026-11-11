@@ -203,6 +203,7 @@ add_executable(${PROJECT_NAME}
     jsp_game.cpp       # the v0.15 jstars_game.cpp: PC text, Exit Game, menus, HUD size, FPS counter, Training
     jsp_online.cpp     # ENHANCEMENT: reads repsn.ini / community.ini at startup, sets the runtime's online environment
     jsp_unlock.cpp     # ENHANCEMENT: unlock-everything cheat, JSP_UNLOCK_ALL=1 (the launcher's Cheats tab)
+    jsp_port_menu.cpp  # ENHANCEMENT: in-game Port Settings page, JSP_PORT_MENU=1 (needs toolkit patches 2516-2518 and 6501; US build only)
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}

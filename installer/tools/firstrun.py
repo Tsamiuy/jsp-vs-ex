@@ -68,6 +68,8 @@ TITLE_IDS = PROFILE["titles"]
 CODE_END = PROFILE["code_end"]
 EXE = PROFILE["exe"]
 TOC = "0x8d3888"          # r2 of the lifted code (both regions); the v18 lifter takes it as --toc
+INSN_PATCHES = "lift_insn_patches.json"   # in the port folder: instruction patches the v0.19 lifter emits behind a switch (US 1.00 code only)
+PORT_MENU_ART = ("menu_training_off.rgba", "menu_training_on.rgba", "menu_port_settings_off.rgba", "menu_port_settings_on.rgba", "menu_font.jmf")
 TREE_EXE = {"v15": EXE, "v18": "jsp.exe"}
 # ======================================================================================================================
 STEPS = ["checks", "lift", "spu", "build", "place"]
@@ -525,7 +527,8 @@ class Ctx:
         eb = self.cached("eboot", lambda: sha(self.eboot))
         tools = self.cached("tools", lambda: tree_hash(self.tools))
         if step == "lift":
-            return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, **({"tree": "v18"} if self.tree == "v18" else {})}
+            return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, **({"tree": "v18"} if self.tree == "v18" else {}),
+                    **({"insn_patches": self.cached("insn_patches", lambda: sha(insn_patches(self)))} if insn_patches(self) else {})}
         if step == "spu":
             if self.tree == "v18":
                 return {"eboot": eb, "toolkit_tools": tools, "lift_jobs": self.cached("lift_jobs", lambda: tree_hash(self.root / "tools" / "lift_jobs.py"))}
@@ -599,6 +602,13 @@ def tree_size(p):
 
 
 # ---------------------------------------------------------------- steps
+def insn_patches(c):
+    """The --insn-patches file of the v18 tree for the US 1.00 code, else None. Its addresses are that code's: the lifter stops when an
+    instruction word differs from the patch's `orig`, so the EU build lifts without it."""
+    f = c.root / "port" / INSN_PATCHES
+    return f if c.tree == "v18" and c.region == "US" and f.is_file() else None
+
+
 def step_lift(c):
     """@ docs/notes/SETUP.md of this repository: ppu_loader.py, then ppu_lifter.py with --code-end (about 25 s on the
     maintainer's PC). -X utf8: the tools open files without an encoding (Windows would write the generated C in the code page)."""
@@ -618,6 +628,8 @@ def step_lift(c):
         if not ok:
             return False
         jobs_args = ["--toc", TOC, "-j"]   # --toc goes before the job count; the pair is spliced in front of it
+        if insn_patches(c):
+            jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # JSP_PORT_MENU=1: the Options row count (see jsp_port_menu.cpp)
     ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", funcs,
                                       "--hle-stubs", an / "EBOOT.imports.json", "--code-end", CODE_END[c.region],
                                       "--chunks", "64", *jobs_args, str(c.a.jobs), "--output", out], out / "lift.log")
@@ -774,6 +786,9 @@ def step_place(c):
     shutil.copy2(c.eboot, game / "EBOOT.elf")   # the player's own decrypted file, copied into the player's own install
     if (c.root / "ex_logo_A.rgba").is_file():   # the "EX" in the title logo (toolkit patch 0006; JSP_EX_LOGO=0 turns it off)
         shutil.copy2(c.root / "ex_logo_A.rgba", game / "ex_logo_A.rgba")
+    for n in PORT_MENU_ART:   # the in-game Port Settings page (JSP_PORT_MENU=1; toolkit patches 2516-2518) reads these next to the exe
+        if (c.root / n).is_file():
+            shutil.copy2(c.root / n, game / n)
     inc = ffmpeg_include(c.root)
     if inc and getattr(c.a, "rpcs3", ""):   # FFmpeg DLLs from the player's RPCS3, beside the exe (Windows looks there first); see check_movie
         src = pathlib.Path(c.a.rpcs3)

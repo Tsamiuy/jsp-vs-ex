@@ -209,6 +209,14 @@ static std::string join(const std::string& d, const char* f)
     return d + ((last == '/' || last == '\\') ? "" : "/") + f;
 }
 
+/* What the page in the game shows (jsp_port_menu.cpp): a snapshot of what apply() read and decided at start.
+ * Read only; editing is not part of the page yet. method: 0 off, 1 re-psn, 2 community (not supported yet), 3 both enabled (refused). */
+struct View {
+    int files = 0, rejected = 0, rep_enabled = 0, com_enabled = 0, online = 0, presets = 0, method = 0, valid = 0;
+    char server[160] = "", name[64] = "", active[64] = "", via[24] = "file", name_via[24] = "file";   /* via/name_via: where the effective method+server / name came from: "--psnr flag", "environment", "--username flag", "file" */
+};
+static View g_view;
+
 /* argv: explicit --psnr/--username (the toolkit harness's flags) win over the files; they are set here because
  * this port's main() does not parse them. Returns 1 when online play ends up configured. */
 static int apply(const Env& env, const std::string& shared_dir, const std::string& game_dir,
@@ -225,16 +233,17 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
     bool env_online = has(env, "PSNR_SERVER");
     bool flag_online = !psnr_flag.empty();
     int online = 0;
+    const char* via = "file", *nvia = "file";
 
     if (flag_online) {
         if (valid_hostport(psnr_flag)) {
             env.set("PS3_NET_ONLINE", "1"); env.set("PSNR_SERVER", with_port(psnr_flag).c_str());
             env.log("[online] --psnr " + psnr_flag + " given: wins over the settings files");
-            online = 1;
+            online = 1; via = "--psnr flag";
         } else env.log("[online] --psnr value is not host[:port], ignored");
     } else if (env_online) {
         env.log("[online] PSNR_SERVER is set in the environment: wins over the settings files");
-        online = 1;
+        online = 1; via = "environment";
     } else if (st.rep_enabled && st.com_enabled) {
         env.log("[online] ERROR: re-psn and community are both enabled; online play refused, enable one method only "
                 "(repsn.ini [repsn] enabled / community.ini [community] enabled)");
@@ -253,10 +262,10 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
     }
 
     if (!user_flag.empty()) {
-        env.set("PS3_NP_ONLINE_ID", user_flag.c_str());
+        env.set("PS3_NP_ONLINE_ID", user_flag.c_str()); nvia = "--username flag";
         env.log("[online] --username given: wins over the settings files");
     } else if (has(env, "PS3_NP_ONLINE_ID")) {
-        env.log("[online] PS3_NP_ONLINE_ID is set in the environment: wins over the settings files");
+        env.log("[online] PS3_NP_ONLINE_ID is set in the environment: wins over the settings files"); nvia = "environment";
     } else if (online && !st.name.empty()) {
         env.set("PS3_NP_ONLINE_ID", st.name.c_str());
         env.log("[online] online id " + st.name);
@@ -272,6 +281,24 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
     if (!st.comm_id.empty() && !has(env, "PSNR_COMM_ID")) env.set("PSNR_COMM_ID", st.comm_id.c_str());
     if (!st.report_rtt.empty() && !has(env, "PSNR_REPORT_RTT")) env.set("PSNR_REPORT_RTT", st.report_rtt.c_str());
     if (st.rejected) env.log("[online] " + std::to_string(st.rejected) + " setting(s) rejected in total");
+    {   /* snapshot for the in-game page */
+        View& v = g_view;
+        v.valid = 1; v.files = st.files; v.rejected = st.rejected; v.rep_enabled = st.rep_enabled; v.com_enabled = st.com_enabled;
+        v.online = online; v.presets = (int)st.presets.size();
+        /* effective values: what apply() exported, with where each came from */
+        v.method = via[0] != 'f' ? 1 : (st.rep_enabled && st.com_enabled) ? 3 : st.com_enabled ? 2 : st.rep_enabled ? 1 : 0;
+        std::string eff_server = st.server;
+        if (!strcmp(via, "--psnr flag")) eff_server = with_port(psnr_flag);
+        else if (!strcmp(via, "environment")) { const char* e = env.get("PSNR_SERVER"); eff_server = e ? e : ""; }
+        std::string eff_name = st.name;
+        if (nvia[0] == '-') eff_name = user_flag;
+        else if (nvia[0] == 'e') { const char* e = env.get("PS3_NP_ONLINE_ID"); eff_name = e ? e : ""; }
+        snprintf(v.server, sizeof v.server, "%s", eff_server.c_str());
+        snprintf(v.name, sizeof v.name, "%s", eff_name.c_str());
+        snprintf(v.active, sizeof v.active, "%s", st.active.c_str());
+        snprintf(v.via, sizeof v.via, "%s", via);
+        snprintf(v.name_via, sizeof v.name_via, "%s", nvia);
+    }
     return online;
 }
 
@@ -310,6 +337,26 @@ static void resolve_dirs(const Env& env, const std::string& exe_dir, const std::
 }
 
 }  // namespace jsp_online
+
+/* Text lines for the in-game page, read only: the settings read at start, one line per call (line 0, 1, ...).
+ * Returns the number of lines left to ask for after this one (0 = this was the last), or -1 when `line` is out of range
+ * or nothing was read yet. ASCII only (the page's font). */
+extern "C" int jsp_online_describe(int line, char* out, int n)
+{
+    using namespace jsp_online;
+    const View& v = g_view;
+    if (!v.valid || line < 0 || line > 5 || n < 2) return -1;
+    static const char* const methods[] = {"Off", "re-psn", "Community (not supported yet)", "REFUSED: both enabled"};
+    switch (line) {
+    case 0: snprintf(out, n, "Method: %s (%s)", methods[v.method], v.via); break;
+    case 1: snprintf(out, n, "Server: %s (%s)", v.server[0] ? v.server : "(none)", v.via); break;
+    case 2: snprintf(out, n, "Online name: %s (%s)", v.name[0] ? v.name : "(none)", v.name_via); break;
+    case 3: snprintf(out, n, "Community preset: %s (%d saved)", v.active[0] ? v.active : "(none)", v.presets); break;
+    case 4: snprintf(out, n, "Settings files: %d read, %d rejected", v.files, v.rejected); break;
+    default: snprintf(out, n, "Online play this session: %s", v.online ? "yes" : "no"); break;
+    }
+    return 5 - line;
+}
 
 #ifndef JSP_ONLINE_TEST
 #ifdef _WIN32

@@ -37,6 +37,7 @@ extern "C" void jsp_register_hle_overrides(void);         /* jsp_hle.cpp */
 extern "C" void jsp_register_autopilot_overrides(void);   /* jsp_autopilot.cpp (test only) */
 extern "C" void jsp_register_game_overrides(void);        /* jsp_game.cpp */
 extern "C" void jsp_register_unlock_overrides(void);      /* jsp_unlock.cpp */
+extern "C" void jsp_register_port_menu_overrides(void);   /* jsp_port_menu.cpp (ENHANCEMENT, off unless JSP_PORT_MENU=1) */
 
 /* Context handlers registered here precede the runtime's (ppu_hle_init runs after this). */
 extern "C" void ps3_load_prx_modules(void)
@@ -47,6 +48,7 @@ extern "C" void ps3_load_prx_modules(void)
     jsp_register_autopilot_overrides();
     jsp_register_game_overrides();
     jsp_register_unlock_overrides();   /* ENHANCEMENT, off unless JSP_UNLOCK_ALL=1 */
+    jsp_register_port_menu_overrides(); /* ENHANCEMENT, off unless JSP_PORT_MENU=1; after jsp_register_game_overrides: it chains behind the pad filters set there */
 }
 
 /* ---------------------------------------------------------------------------

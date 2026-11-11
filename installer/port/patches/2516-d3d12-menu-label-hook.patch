@@ -1,0 +1,178 @@
+Patch 2516: a switchable replacement for one menu label texture (ENHANCEMENT, off by default).
+
+Applies after 2013, 2507 and 2509 and the shader warm-up patches 2068 and 2070 (checked by applying the whole series to the pinned toolkit): 2013
+hooks the same upload site (its logo check runs first, the label check follows it), 2507's g_tex_patch_hook runs at the entry of the upload (before the
+label's guest-byte hash is read) and 2509 does not touch the upload.
+
+libs/video/jsp_menu_label.h holds a table of (FNV-1a-64 of a 512 x 64 linear BC3 texture's 32,768 source bytes, art file). At upload (vp_upload_tex_slot,
+after level 0 is copied) a matching texture gets its level-0 bytes replaced by the art (512 x 64 straight-alpha RGBA, re-encoded with jex_bc3_encode of
+patch 2013) while the switch is on. The slot remembers that it is a registered label and the switch generation it was uploaded with; when the switch
+changes, the cache test fails on its next use and the texture is uploaded again (the guest bytes do not change, so the checksum test alone would keep
+the old copy).
+
+Port glue API (defined in rsx_d3d12_backend.c, plain C, any thread, cheap):
+    void jsp_menu_label_set(int training_row_visible);   /* 1: "Training" art in place of "Battle Replay"; 0: the game's label */
+For a test without glue the environment variable JSP_MENU_TRAINING_LABEL=1 gives the initial state on. Art: menu_training_off.rgba /
+menu_training_on.rgba from JSP_MENU_LABEL_DIR, the exe directory or the working directory (installer/tools/menu_label_art.py makes them).
+Registered pairs: the US panel's menu2_off/on_tx_gallery_000 ("Battle Replay"; also the label of a third Free Battle row, panel index 0x1C / 0x38).
+No game data is stored here: the table holds hashes only.
+
+diff --git a/libs/video/jsp_menu_label.h b/libs/video/jsp_menu_label.h
+new file mode 100644
+index 0000000..58024e6
+--- /dev/null
++++ b/libs/video/jsp_menu_label.h
+@@ -0,0 +1,89 @@
++/* J-Stars patch 2516: a replacement label for a main-menu panel texture, switched by the port.
++ * ENHANCEMENT, off by default: nothing changes unless the port glue calls jsp_menu_label_set(1) (or the environment
++ * variable JSP_MENU_TRAINING_LABEL=1 is set for a test).
++ *
++ *   void jsp_menu_label_set(int training_row_visible);   // callable from any thread, cheap; the next upload of the texture follows it
++ *
++ * The game's sub-menu panel (main_menu2) binds its row labels by texture index. The label of the Gallery panel's first
++ * row, "Battle Replay" (menu2_off/on_tx_gallery_000, 512 x 64 linear DXT5, 32,768 bytes), is also the label a third Free
++ * Battle row gets, where the port wants "Training". While the switch is on, the level-0 bytes of those two textures are
++ * replaced at upload by our own art (installer/tools/menu_label_art.py: menu_training_off.rgba / _on.rgba, 512 x 64
++ * straight-alpha RGBA, re-encoded to BC3 here with jex_bc3_encode of patch 2013). A texture is recognised by FNV-1a-64 of its
++ * 32,768 source bytes (the US panel; ASSUMPTION: the same bytes in the other regions' panel, add pairs to jml_tab).
++ * Changing the switch makes the backend upload those textures again on their next use (jml_gen is part of the cache test).
++ * Diagnostics: the first 64 distinct 512 x 64 BC3 uploads are logged as [MENULABEL] hash lines; JSP_MENU_LABEL_DUMP=<dir> also writes each as
++ * lbl_<hash>.bin (to find a texture's hash in a run).
++ * The art is loaded from JSP_MENU_LABEL_DIR, the exe directory or the working directory; a missing file leaves the game's label.
++ * No game data is stored here.
++ */
++#ifndef JSP_MENU_LABEL_H
++#define JSP_MENU_LABEL_H
++#include "jsp_ex_logo.h"   /* jex_bc3_encode, jex_fnv64 */
++
++typedef struct { uint64_t hash; const char* art; } jml_entry;
++static const jml_entry jml_tab[] = {
++    { 0x50682882db48c1c4ull, "menu_training_off.rgba" },   /* menu2_off_tx_gallery_000 "Battle Replay" */
++    { 0xecad95fe6a96c5d1ull, "menu_training_on.rgba"  },   /* menu2_on_tx_gallery_000 */
++};
++#define JML_N ((int)(sizeof jml_tab / sizeof jml_tab[0]))
++#define JML_W 512
++#define JML_H 64
++#define JML_BYTES (JML_W * JML_H)   /* BC3: 16 bytes per 4x4 texels = 1 byte per texel */
++
++static volatile int jml_on = -1;    /* -1: not read from the environment yet */
++static volatile unsigned jml_gen = 0;
++
++static int jml_enabled(void) {
++    if (jml_on < 0) { const char* e = getenv("JSP_MENU_TRAINING_LABEL"); jml_on = (e && atoi(e)) ? 1 : 0; }
++    return jml_on;
++}
++static unsigned jml_generation(void) { return jml_gen; }
++
++static const uint8_t* jml_art(int i) {
++    static int tried[JML_N]; static uint8_t* art[JML_N];
++    if (tried[i]) return art[i];
++    tried[i] = 1;
++    char path[1024]; const char* env = getenv("JSP_MENU_LABEL_DIR");
++    for (int k = 0; k < 3 && !art[i]; k++) {
++        path[0] = 0;
++        if (k == 0 && env) snprintf(path, sizeof path, "%s/%s", env, jml_tab[i].art);
++#ifdef _WIN32
++        else if (k == 1) { DWORD n = GetModuleFileNameA(NULL, path, sizeof path - 40);
++            while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
++            strcpy(path + n, jml_tab[i].art); }
++#endif
++        else if (k == 2) snprintf(path, sizeof path, "%s", jml_tab[i].art);
++        if (!path[0]) continue;
++        FILE* f = fopen(path, "rb");
++        if (!f) continue;
++        art[i] = (uint8_t*)malloc(JML_W * JML_H * 4);
++        if (fread(art[i], 1, JML_W * JML_H * 4, f) != (size_t)JML_W * JML_H * 4) { free(art[i]); art[i] = NULL; }
++        fclose(f);
++        if (art[i]) fprintf(stderr, "[MENULABEL] art %s%c", path, 10);
++    }
++    if (!art[i]) fprintf(stderr, "[MENULABEL] %s not found (JSP_MENU_LABEL_DIR): label left as is%c", jml_tab[i].art, 10);
++    return art[i];
++}
++
++/* Called after level 0 of a texture was copied to dst (rows of `pitch` bytes, one per block row; src = guest bytes).
++ * Returns 1 when the texture is one of the registered labels (the cache then tracks the switch), whatever its state. */
++static int jml_apply(const uint8_t* src, uint32_t w, uint32_t h, uint8_t* dst, uint32_t pitch) {
++    if (w != JML_W || h != JML_H) return 0;
++    uint64_t hh = jex_fnv64(src, JML_BYTES);
++    { static uint64_t seen[64]; static int ns; int f = 0; for (int k = 0; k < ns; k++) if (seen[k] == hh) f = 1;
++      if (!f && ns < 64) { seen[ns++] = hh; fprintf(stderr, "[MENULABEL] 512x64 BC3 upload hash %016llx pitch %u%c", (unsigned long long)hh, pitch, 10);
++        { const char* dd = getenv("JSP_MENU_LABEL_DUMP"); if (dd) { char fn[1100]; snprintf(fn, sizeof fn, "%s/lbl_%016llx.bin", dd, (unsigned long long)hh);
++            FILE* f = fopen(fn, "wb"); if (f) { fwrite(src, 1, JML_BYTES, f); fclose(f); } } } } }
++    int i; for (i = 0; i < JML_N; i++) if (jml_tab[i].hash == hh) break;
++    if (i == JML_N) return 0;
++    if (!jml_enabled()) return 1;
++    const uint8_t* art = jml_art(i);
++    if (!art) return 1;
++    for (int by = 0; by < JML_H / 4; by++) for (int bx = 0; bx < JML_W / 4; bx++) {
++        uint8_t px[64];
++        for (int j = 0; j < 16; j++) memcpy(px + j * 4, art + ((by * 4 + j / 4) * JML_W + bx * 4 + j % 4) * 4, 4);
++        jex_bc3_encode(px, dst + (size_t)by * pitch + (size_t)bx * 16);
++    }
++    return 1;
++}
++#endif
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1b7e9ea..b334712 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -26,6 +26,7 @@
+ #include "rsx_vpull.h"
+ #include "rsx_texture_layout.h"
+ #include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
++#include "jsp_menu_label.h"   /* "Training" label for a panel row, switched by the port (J-Stars patch 2516) */
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -246,7 +247,10 @@ typedef struct {
+     u32 last_frame;     /* frame_count when last referenced: the slot least
+                          * recently used is the one given to a new texture */
+     int bc_rgba;        /* a DXT texture held decoded as RGBA8 (patch 2067, bc_decode_rgba) */
++    int lbl;            /* patch 2516: a registered menu label (jml_apply matched) */
++    unsigned lblgen;    /* jml_generation() when it was uploaded */
+ } VPTexSlot;
++static int s_jml_hit;   /* patch 2516: set by the upload hook, read when the slot is stored */
+ /* Distinct textures uploadable per frame. J-Stars' fights churned ~4,500 texture re-creations per 5 s through
+  * the LRU at 192 slots; 1024 keeps every fight texture resident (patch 2024). */
+ #define VP_TEX_SLOTS 1024
+@@ -4419,6 +4423,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+             && c->cube == cube && c->pitch == pitch_arg) {
+             c->last_frame = s_d3d.frame_count;
+             if (c->used) return i;                /* already bound this frame */
++            if (c->lbl && c->lblgen != jml_generation()) { slot = i; break; }   /* patch 2516: the menu-label switch changed; guest bytes did not */
+             { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
+               if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
+                                  nocache = e ? atoi(e) : 0; }
+@@ -4975,6 +4980,8 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+     if (!cube && tl.fmt == RSX_TEXFMT_BC3 && !tl.swizzled)
+         { jex_apply(vm_base + off, w, h, 1, (u8*)mapped, pitch);
+           jex_apply_small(vm_base + off, w, h, 1, (u8*)mapped, pitch); }
++    s_jml_hit = (!cube && tl.fmt == RSX_TEXFMT_BC3 && !tl.swizzled)
++              ? jml_apply(vm_base + off, w, h, (u8*)mapped, pitch) : 0;
+     /* Levels 1.. into their own footprints (level 0 is at offset 0). */
+     for (u32 _l = 1; _l < levels; _l++)
+         rsx_texture_decode(_map0 + mfp[_l].Offset, mfp[_l].Footprint.RowPitch,
+@@ -5022,6 +5029,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+ 
+     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
+     t->cube = cube; t->used = 1; t->levels = levels; t->bc_rgba = bc_cpu;
++    t->lbl = s_jml_hit; t->lblgen = jml_generation();
+     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+       t->csum = TEX_CSUM(vm_base + off, nb); }
+     #undef TEX_CSUM
+@@ -6480,6 +6488,15 @@ static u32 s_last_drawn_off  = 0;
+ 
+ void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
+ 
++/* Patch 2516: the port's switch for the third Free Battle row's label ("Training" in place of the Gallery panel's
++ * "Battle Replay" art). Any thread; the labels are uploaded again on their next use. */
++void jsp_menu_label_set(int training_row_visible)
++{
++    (void)jml_enabled();                       /* read the environment default first */
++    training_row_visible = training_row_visible ? 1 : 0;
++    if (jml_on != training_row_visible) { jml_on = training_row_visible; jml_gen++; }
++}
++
+ static void composite_present(u32 fi)
+ {
+     u32 want = s_composite_src;

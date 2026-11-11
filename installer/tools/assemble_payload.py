@@ -237,6 +237,15 @@ def main(argv=None):
         print("ex_logo_art failed (it needs Pillow and numpy):\n" + r.stdout + r.stderr, file=sys.stderr)
         return 1
     print(r.stdout.strip())
+    if a.tree == "v18":
+        # the art of the in-game Port Settings page (toolkit patches 2516-2518, JSP_PORT_MENU=1): the two menu labels and the glyph atlas,
+        # drawn here from Fira Sans Heavy Italic (SIL OFL 1.1; the font file is not in the repository, see menu_label_art.py)
+        for tool in ("menu_label_art.py", "menu_font_art.py"):
+            r = subprocess.run([sys.executable, "-I", str(ROOT / "installer/tools" / tool), str(out)], capture_output=True, text=True)
+            if r.returncode:
+                print(f"{tool} failed (it needs Pillow, numpy and build/installer/fonts/FiraSans-HeavyItalic.ttf):\n" + r.stdout + r.stderr, file=sys.stderr)
+                return 1
+            print(r.stdout.strip())
     # the settings window (C# 5 source; setup and firstrun.py compile it on the player's PC with Windows' own csc)
     shutil.copy2(pub / "launcher/JStarsLauncher.cs", out / "tools" / "jsp-settings.cs")
     shutil.copy2(a.launcher, out / "jsp-launcher.exe")

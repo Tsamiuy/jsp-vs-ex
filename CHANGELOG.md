@@ -31,6 +31,8 @@ see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9). `docs/FEATURES.md
 
 ### Changes since the first builds
 
+- Port Settings page (opt-in, `JSP_PORT_MENU=1`, US 1.00 build): toolkit patches 2516-2518 (menu label replacement, present-time overlay layer, label mask by open panel), `jsp_port_menu.cpp`, the lifter's `--insn-patches` for the Options row count (`installer/port/jsp/lift_insn_patches.json`), and the label and font art drawn at installer build time (`menu_label_art.py`, `menu_font_art.py`). Host tests only so far; see `docs/notes/PORT_SETTINGS.md`.
+
 - Installer and CI: the port on ps3recomp v0.19.0 (`installer/port`) is now the default tree of
   `assemble_payload.py`, `installer.yml` (new `tree` input) and `release.yml`. The switch is `--tree current` (the default) or
   `--tree legacy` (the earlier v0.15 port); the names do not change with the toolkit version. The older `v18`, `v19` and `v15`
