@@ -965,7 +965,12 @@ def main(argv=None, ask=input):
         c.mark(s)
     say(f"RESULT: ok, steps up to {STEPS[last]} done")
     if a.until == "all":
-        say("Start the game with jsp-launcher.exe in this folder. The first start installs the game data from your disc.")
+        if (c.root / "jsp-settings.exe").is_file():
+            say("Start the game with jsp-settings.exe in this folder (settings: resolution, window, controls, Online; then Start Game), "
+                "or directly with jsp-launcher.exe. The first start installs the game data from your disc.")
+        else:   # no C# compiler of Windows: build_settings_window said so above
+            say("Start the game with jsp-launcher.exe in this folder (the settings window could not be built, see above). "
+                "The first start installs the game data from your disc.")
     return 0
 
 
