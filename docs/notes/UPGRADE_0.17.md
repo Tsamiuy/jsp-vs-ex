@@ -59,8 +59,8 @@ Reasons, with evidence below:
 | #388 taskset bits atomic, #383 DMA-halt wall-time backoff, #362 SPU image by bytes | SPURS robustness. J-Stars mostly uses jobs + our `cellSpursJq` override, so probably low impact. | Not tried |
 
 ### Not relevant to us
-Vulkan/Metal backend work, draw engine 3D textures, Linux/macOS/MinGW CI, cellVdec, God of War /
-Killzone / Twisted Metal specifics, lifter options, POSIX `mmap` template.
+Vulkan/Metal backend work, draw engine 3D textures, Linux/macOS/MinGW CI, cellVdec, other games'
+specifics, lifter options, POSIX `mmap` template.
 
 ## Conflict map (trial `git merge v0.17.0` into jstars-port)
 

@@ -12,7 +12,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rpcs3_locate as L  # noqa: E402
 
-SERIAL = "BCUS98116"
+SERIAL = "BLUS31519"
 
 
 def make_sfo(**kv):
@@ -56,7 +56,7 @@ class Base(unittest.TestCase):
     def tree(self, name="rpcs3", cfg="config", disc=True, update_ver="01.29"):
         root = self.tmp / name
         cfgd = root / cfg if cfg else root
-        self.disc = self.tmp / "discs" / "Killzone 2"
+        self.disc = self.tmp / "discs" / "Sample Game"
         if disc:
             (self.disc / "PS3_GAME" / "USRDIR").mkdir(parents=True, exist_ok=True)
         w(cfgd / "games.yml", f"{SERIAL}: {self.disc}/\nOTHER00001: /nowhere/\n")
@@ -129,12 +129,12 @@ class FindTests(Base):
 
 class SfoTests(Base):
     def test_param_sfo(self):
-        p = w(self.tmp / "PARAM.SFO", make_sfo(APP_VER="01.29", TITLE_ID=SERIAL, TITLE="Killzone 2",
+        p = w(self.tmp / "PARAM.SFO", make_sfo(APP_VER="01.29", TITLE_ID=SERIAL, TITLE="Sample Game",
                                                CATEGORY="GD", VERSION="01.01", PARENTAL_LEVEL=5))
         r = L.param_sfo(p)
         self.assertTrue(r["ok"])
         self.assertEqual(r["keys"]["APP_VER"], "01.29")
-        self.assertEqual(r["keys"]["TITLE"], "Killzone 2")
+        self.assertEqual(r["keys"]["TITLE"], "Sample Game")
         self.assertEqual(r["keys"]["PARENTAL_LEVEL"], 5)
         self.assertEqual(L.param_sfo(self.tmp)["keys"]["TITLE_ID"], SERIAL)
 
@@ -322,11 +322,11 @@ class ReviewTests(Base):
 
     def test_quoted_windows_path(self):
         root = self.tree()
-        w(root / "config" / "games.yml", "BCUS98234: 'D:\\Games\\Killzone 3\\'\n")
-        self.assertEqual(L.parse_kv("BCUS98234: 'D:\\Games\\Killzone 3\\'")["BCUS98234"],
-                         "D:\\Games\\Killzone 3\\")
-        r = L.game_path(root, "BCUS98234")
-        self.assertEqual(r["disc_dir"], "D:\\Games\\Killzone 3")
+        w(root / "config" / "games.yml", "BLES02136: 'D:\\Games\\Sample Game 3\\'\n")
+        self.assertEqual(L.parse_kv("BLES02136: 'D:\\Games\\Sample Game 3\\'")["BLES02136"],
+                         "D:\\Games\\Sample Game 3\\")
+        r = L.game_path(root, "BLES02136")
+        self.assertEqual(r["disc_dir"], "D:\\Games\\Sample Game 3")
 
     def test_no_titles(self):
         root = self.tree()
@@ -342,7 +342,7 @@ class ReviewTests(Base):
 
     def test_disc_only_modes(self):
         root = self.tree(update_ver=None)
-        # Like a real disc (R&C's ToD): APP_VER 01.00, VERSION 02.00; the disc want compares VERSION.
+        # Like a real disc: APP_VER 01.00, VERSION 02.00; the disc want compares VERSION.
         self._disc_sfo(TITLE_ID="BCES00000", VERSION="02.00", APP_VER="01.00")
         w(self.disc / "PS3_GAME/USRDIR/EBOOT.elf", b"\x7fELF" + b"d")
         r = L.locate(str(root), {SERIAL: "disc:02.00"})
@@ -363,12 +363,12 @@ class ReviewTests(Base):
         w(self.disc / "PS3_GAME/USRDIR/EBOOT.elf", b"\x7fELF" + b"d")
         codes = lambda want: [x["code"] for x in L.locate(str(root), {SERIAL: want})["titles"][SERIAL]["problems"]]
         key = lambda want: L.locate(str(root), {SERIAL: want})["titles"][SERIAL]["disc_ver_key"]
-        # R&C ToD pair: VERSION 02.00 / APP_VER 01.00
+        # First real-disc pair: VERSION 02.00 / APP_VER 01.00
         self._disc_sfo(VERSION="02.00", APP_VER="01.00")
         self.assertEqual(codes("disc:02.00"), []); self.assertEqual(key("disc:02.00"), "VERSION")
         self.assertEqual(codes("disc:VERSION=02.00"), [])
         self.assertEqual(codes("disc:VERSION=01.00"), ["wrong_version"])
-        # KZ3 pair: VERSION 01.01 / APP_VER 01.00
+        # Second real-disc pair: VERSION 01.01 / APP_VER 01.00
         self._disc_sfo(VERSION="01.01", APP_VER="01.00")
         self.assertEqual(codes("disc:01.00"), []); self.assertEqual(key("disc:01.00"), "APP_VER")
         self.assertEqual(codes("disc:APP_VER=01.00"), [])
@@ -432,8 +432,8 @@ class MiscTests(Base):
             self.assertEqual(L.redact(home / ".config" / "a"), "<home>/.config/a")
             self.assertEqual(L.redact("/ho" + "me/other/Games/x"), "<user>/Games/x")
             self.assertEqual(L.redact("C:\\Us" + "ers\\Bob\\RPCS3\\x"), "<user>/RPCS3/x")
-            self.assertEqual(L.redact("D:\\Games\\KZ2 disc\\PS3_GAME\\USRDIR\\EBOOT.BIN"), "<path>/USRDIR/EBOOT.BIN")
-            self.assertEqual(L.redact("/mnt/discs/BCUS98116/PS3_GAME"), "<path>/BCUS98116/PS3_GAME")
+            self.assertEqual(L.redact("D:\\Games\\Sample disc\\PS3_GAME\\USRDIR\\EBOOT.BIN"), "<path>/USRDIR/EBOOT.BIN")
+            self.assertEqual(L.redact("/mnt/discs/BLUS31519/PS3_GAME"), "<path>/BLUS31519/PS3_GAME")
             self.assertEqual(L.redact("relative/x"), "relative/x")
             self.assertEqual(L.redact("/opt/x"), "<path>/opt/x")   # other absolute paths: last two components only
 

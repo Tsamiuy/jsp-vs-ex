@@ -583,8 +583,8 @@ def locate(rpcs3_dir=None, wants=None, extra_eboots=None) -> dict:
         disc = game_path(c, tid)
         if not disc["ok"]:
             probs.append(_problem("missing_disc", disc["text"]))
-        # Discs differ in which PARAM.SFO key holds "the disc version" (R&C ToD: VERSION 02.00 / APP_VER 01.00;
-        # KZ3: APP_VER 01.00 / VERSION 01.01). "disc:KEY=VER" names the key; a plain "disc:VER" matches either.
+        # Discs differ in which PARAM.SFO key holds "the disc version" (one disc: VERSION 02.00 / APP_VER 01.00;
+        # another: APP_VER 01.00 / VERSION 01.01). "disc:KEY=VER" names the key; a plain "disc:VER" matches either.
         dkey, dver, dmatch = None, None, True
         if disc["ok"] and ver:
             k, _, v = ver.partition("=") if "=" in ver else ("", "", ver)
