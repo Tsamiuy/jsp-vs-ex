@@ -72,7 +72,7 @@ index ada021e..cc8374b 100644
  }
  
 +/* FIFO_FAST v2: SET_TRANSFORM_PROGRAM words (0x0B80..0x0BFC, vertex-program
-+ * microcode) are the most frequent FIFO data in Builder's histogram
++ * microcode) are the most frequent FIFO data in the port author's histogram
 + * (jstars-notes CPU_PROFILE §28) and were handled after ~60 tests in
 + * rsx_process_method. This is that handler, taken first; nothing above it
 + * claims 0x0B80..0x0BFC (no other NV4097 method lives in 0x0B00..0x0BFF).

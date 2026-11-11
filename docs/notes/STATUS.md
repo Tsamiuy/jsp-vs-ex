@@ -292,7 +292,7 @@ content.
   (stages\t0wrap\s03, not yet looked at). Still to do, with the mirror build: Athena (lines gone?),
   Penguin Village (no plant boxes), Dark Tournament facing the ring, Yoshiwara + Namek (no change),
   T0_WRAP=0 on Athena (lines back), fps; then labelled pictures for the maintainer. Script:
-  scratchpad batch31 (stages\t0wrap2\s03,s05,s09,s00,s06,s03_off).
+  scratch folder batch31 (stages\t0wrap2\s03,s05,s09,s00,s06,s03_off).
 - Diagnostics added today (off): FP_IDCOLOR fixed (9ffcec9), FP_IDCOLOR_RT (077fea4).
 - Next after that: other texture items in STAGE_TEXTURES.md; reusable branch is at
   generic-0.17 (builds, 16/16 tests).
@@ -310,7 +310,7 @@ Open items, in order:
    (run stopped at the pause, partial dir perf\scratch\laser\vpattr_04EEE600 is incomplete): demo with
    `VP_ATTRS=1 RSX_DBG_VP=04EEE600` (+ VP_ATTRS_DUMP=3:8), retry RSX_DBG_VP=04732D80 / 04FC4600 if no
    [DUCKVP]; duck_vp.hlsl lands in jstars\run, move it into the run dir. Then `DEPTH_OFF=1 RSX_CAP=10200:8:12`.
-   Script: scratchpad batch87.sh (same steps). Note: VP_ATTRS dedupes by attribute mask over the whole run
+   Script: scratch folder batch87.sh (same steps). Note: VP_ATTRS dedupes by attribute mask over the whole run
    and the beam's fp addresses differ per draw, so VP_ATTRS_FP can't target it; the beam's [VPATTR] lines
    may be missing. Beam timing in the attract demo: frame_count ~10210-10300 (screenshot ~330-345 s).
 2. **Triangle glitch** (big flat triangle over the top-right quarter, the maintainer's run demo_new): not reproduced

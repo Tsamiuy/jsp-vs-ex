@@ -12,7 +12,7 @@ checkout, and they apply together in any order (checked in the scratch clone). O
 
 ## Why (CPU_PROFILE §16-20)
 - The AI assistant's 40 Hidden Leaf thread dumps (build-pdb at b7be61b, perf\scratch\slowmaps\s07_pdb,
-  symbolized: scratchpad symdumps.py): the drawing thread's own code time is in
+  symbolized: scratch folder symdumps.py): the drawing thread's own code time is in
   - `vp_record_cb` ~40%, plus memcpy 13%;
   - FIFO decode 23%;
   - `dr_expand_key` / `zcmp_desc` ~15%.
