@@ -61,8 +61,9 @@ first build takes a while and needs several GB of free space, and `Build again` 
 > still called `--tree v18`) lifts and builds on Windows (Direct3D 12) and boots, plays the opening movie, the menus and fights
 > with sound, at about 30 frames per second in the demo and in Free Battle on one Windows machine (its earlier v18 build, on
 > toolkit v0.18.0, ran at 16 to 22). It has had fewer tests than the earlier v15 tree (`--tree v15`, about 29 frames per second):
-> the EU disc, the first-start window and long runs are not re-checked on it, and it has known problems, such as washed-out
-> lighting on some floors (see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)). The frame rates were measured on one Windows machine; the installer was exercised under Proton on Linux.
+> the EU disc, the first-start window and long runs are not re-checked on it, and it has known problems (see Known problems
+> below and [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)). The game port was run on one Windows PC (see #9); this
+> installer and zip are untested on native Windows and were exercised only under Proton on Linux.
 >
 > Dated table (top refreshed 2026-10-30, mostly for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md).
 
@@ -72,6 +73,13 @@ Direct3D 12. Details: [installer/README.md](installer/README.md) and [docs/LAYOU
 
 ## Known problems
 
+Of the default build (the v19 tree), as listed in [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9); not re-checked means not run again on v19:
+
+- Lighting on some floors was washed out on the earlier v18 build; whether the shadow fixes changed that has not been compared on v19. A white bar under the left portrait is not explained.
+- A loading page is reported on v19 and has not been compared with the v15 tree; a black window of about two minutes at the first start is reported (not re-checked after the boot fix); log files stay at 0 bytes during play and fill at exit.
+- "Fight again" from the result menu left a flat brown screen on v18 (not re-checked); long runs and the lost-device case are not re-checked on v19.
+- Not tried yet on v19: key rebinds and controller remaps by hand, playing to a K.O., characters other than the route's five, an install through the setup program, and Windows 10 with the menu fix.
+- Needs a CPU with AVX2 by default (`JSP_AVX2`, #9).
 - Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The default (v19) tree has
   an experimental Online Battle over a re-psn server, off unless turned on: see [installer/README.md](installer/README.md).
 - A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `toolkit/ps3recomp-local.patch`, see
