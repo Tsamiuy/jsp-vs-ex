@@ -199,7 +199,9 @@ add_executable(${PROJECT_NAME}
     jsp_jobqueue.cpp   # cellSpursJq Port2 (after the v0.15 stubs.cpp)
     jsp_sysutil.cpp    # cellSearch / cellMusic callbacks (after the v0.15 jstars_sysutil.cpp)
     jsp_hle.cpp        # UCS2toUTF8, NetCtl GetState, BGM status (after the v0.15 stubs.cpp)
+    jsp_autopilot.cpp  # test auto-pilot (AUTO_FIGHT / AUTO_MENU), off unless set
     jsp_game.cpp       # the v0.15 jstars_game.cpp: PC text, Exit Game, menus, HUD size, FPS counter, Training
+    jsp_online.cpp     # ENHANCEMENT: reads repsn.ini / community.ini at startup, sets the runtime's online environment
     jsp_unlock.cpp     # ENHANCEMENT: unlock-everything cheat, JSP_UNLOCK_ALL=1 (the launcher's Cheats tab)
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}

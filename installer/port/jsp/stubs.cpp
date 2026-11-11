@@ -34,6 +34,7 @@
 extern "C" void jsp_register_job_queue_overrides(void);   /* jsp_jobqueue.cpp */
 extern "C" void jsp_register_sysutil_overrides(void);     /* jsp_sysutil.cpp */
 extern "C" void jsp_register_hle_overrides(void);         /* jsp_hle.cpp */
+extern "C" void jsp_register_autopilot_overrides(void);   /* jsp_autopilot.cpp (test only) */
 extern "C" void jsp_register_game_overrides(void);        /* jsp_game.cpp */
 extern "C" void jsp_register_unlock_overrides(void);      /* jsp_unlock.cpp */
 
@@ -43,6 +44,7 @@ extern "C" void ps3_load_prx_modules(void)
     jsp_register_job_queue_overrides();
     jsp_register_sysutil_overrides();
     jsp_register_hle_overrides();
+    jsp_register_autopilot_overrides();
     jsp_register_game_overrides();
     jsp_register_unlock_overrides();   /* ENHANCEMENT, off unless JSP_UNLOCK_ALL=1 */
 }

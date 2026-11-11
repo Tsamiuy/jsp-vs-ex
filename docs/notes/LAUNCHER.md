@@ -17,7 +17,7 @@ DLSS / Frame Generation later.
 `Play J-Stars.bat`, `J-Stars Settings.bat`, `jstars\play.ps1` and `jstars\settings.ps1` are unchanged and
 stay as the fallback. Caveat: the old `J-Stars Settings.bat` rewrites `play_settings.txt` with only
 RES_SCALE and FULLSCREEN, so using it drops the launcher's key bindings and window size.
-The launcher folder is outside the git repo (`ps3recomp-src`), so it has no commit; the .cs file is the record.
+The launcher sources are in `launcher/` in this repository (`JStarsLauncher.cs`, `JStarsLauncher19.cs`, `build_launcher*.bat`); git history is the record.
 
 ## What it does (same steps as play.ps1)
 
@@ -43,8 +43,8 @@ WINDOW_SIZE=WxH         optional window client size (create_window in rsx_d3d12_
 BOOST_OFF_ON_EXIT=0|1   launcher only
 PAD_KEY_<NAME>=0xNN     Windows virtual-key code per pad input (needs the cellPad patch)
 ```
-Lines the launcher does not know are kept. Resolution list: RES_SCALE is an integer scale, so 720p/1440p/
-4K/5K are all the render sizes the game can produce today (5K labelled "not tested"). The window-size list
+Lines the launcher does not know are kept. Resolution list: The game accepts any RES_SCALE from 1 to 4
+(patch 2504, e.g. 1.5 = 1080p); the launcher's list offers only the whole factors 720p/1440p/4K/5K (5K labelled "not tested"). The window-size list
 is every 16:9 mode the screens report (EnumDisplaySettings) plus 1280/1600/1920/2560/3200/3840-wide 16:9
 sizes that fit the biggest screen. On the maintainer's PC (measured 2026-10-27): 1280x720, 1600x900, 1920x1080,
 2560x1440, 3200x1800, 3840x2160 (screens DISPLAY6 up to 2560x1600 and DISPLAY7 up to 3840x2160).
@@ -66,7 +66,7 @@ Nothing changes when no PAD_KEY_ variable is set. Not compiled yet (no compiler 
 ## Test plan for the AI assistant (not run yet)
 
 1. Build with the patch. Start the game from the launcher at RES_SCALE=1 in a window. Expect: no console,
-   game window in front, `launcher_log.txt` shows "Mount output: DRIVE=<x> | MOUNTED_HERE=True".
+   game window in front, `launcher_log.txt` shows "Mount attempt 1: DRIVE=<x> | MOUNTED_HERE=True".
 2. In the menu, press Z (Cross) and arrows: same as before.
 3. Close the game with its X: launcher log shows exit code, boost off, disc unmounted; launcher comes back.
 4. Start again, press Exit in the launcher: game closes within 20 s with no force prompt.
@@ -97,7 +97,7 @@ Nothing changes when no PAD_KEY_ variable is set. Not compiled yet (no compiler 
 - The game exe now contains `PAD_KEY_`, so the Controls page no longer shows the "not read yet" notice.
 
 Launcher fixes after it (2026-10-28, `launcher\JStarsLauncher.cs.pre-mountretry` = before):
-- Mount retried once after 2 s; log lines "Mount attempt 1/2: ...".
+- Mount retried once after 2 s; log lines "Mount attempt 1: ..." and "Mount attempt 2: ...".
 - PowerShell now runs as a plain `-NoProfile -NonInteractive -Command "..."` (no `-EncodedCommand`, no
   `-ExecutionPolicy Bypass`) with `$ProgressPreference='SilentlyContinue'`, so the CLIXML progress blob is
   gone from the log. Checked read-only with the same call form: stdout `ATTACHED=False`, stderr empty.
@@ -194,4 +194,8 @@ Rebuilt; `--screenshots` check shows the slider at 100 % and left the settings f
 2026-11-02: Edge smoothing also offers SMAA (AA_MODE=smaa).
 2026-11-02: Display page has Full-size smoke and effects (FX_FULL in play_settings.txt, default on).
 
-2026-11-04: Display tab has "FPS counter (bottom left)" (FPS_COUNTER=1 in play_settings.txt); the window is 24 px taller for it.
+2026-11-04: Display tab has "FPS counter (bottom left)" (FPS_COUNTER=1 in play_settings.txt), on the same row as "Show FPS in the window title"; the two boxes together made the window 24 px taller.
+
+2026-11-10: v19 launcher has an Online tab (Off / re-psn / Community server) that edits `repsn.ini` and `community.ini` in the shared folder (`PS3RECOMP_SHARED_DIR`, else `<install>\shared` when `jsp-install.ini` says portable=1, else `%APPDATA%\PS3Recomp`). Keys `enabled`, `server`, `name`; community `active` and `[preset LABEL]` `address`, `name`. Writes go to a temp file in the same folder, flushed, then `File.Replace`; files are re-read before each save, limited to 64 KB and 512-byte lines, and unknown lines are kept. Checked by `installer/tools/online_option_test.py` and a mono harness of the INI class; the tab was not shown on a screen.
+2026-11-10: Online tab, re-psn panel: Find on LAN (`LanDiscover` in `JStarsLauncher19.cs`) sends re-psn's 64-byte DISCOVER (UdpClient, broadcast, 255.255.255.255 and each IPv4 interface's directed broadcast, port 36100), collects 52-byte replies for 1.2 s on a worker thread, validates every field and fills `host:port`. Checked by `installer/tools/lan_discover_test.py` (golden request bytes, reply parser, a fake responder, and a real re-psn server on loopback) and source checks in `online_option_test.py`; not tried across a real network or on Windows.
+2026-11-10: the Online tab and Find on LAN moved into `JStarsLauncher.cs` (the installer's `jsp-settings.exe`, which had no Online tab); `JStarsLauncher19.cs` carries the same code (`make_launcher19.py` no longer matches `JStarsLauncher.cs`, its first substitution fails, so v19 is edited by hand now; the tab code was copied, not generated). Start Game saves unsaved Online edits first (`SaveOnlineIfDirty`). `online_option_test.py` checks both files; `lan_discover_test.py` builds the one `LanDiscover` and checks the v19 copy is identical. Game side: `jsp_online.cpp` now looks for `jsp-install.ini` in the exe folder and its parent (the installer puts the exe in `game\`), matching the window's rule.

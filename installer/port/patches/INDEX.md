@@ -67,6 +67,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2064 | fix | the per-draw fragment constants of patch 2056 cover programs with up to 128 inline constants (was 64). | rsx_d3d12_backend.c | vp_fp_compile_blob, vp_record_cb, render_frame |  | J-Stars |
 | 2065 | fix | when the async pipeline queue of patch 2057 is full, finished builds that no draw came back for are freed | rsx_d3d12_backend.c | fp_async_queue | FPA_RECLAIM | J-Stars |
 | 2066 | fix | the D3D12 backend never frees or reuses GPU objects under a batch that may still be running: the GPU wait | rsx_d3d12_backend.c |  |  | candidate |
+| 2067 | fix | DXT1/23/45 textures whose width or height is not a multiple of 4 are decoded to RGBA8 on the CPU | rsx_d3d12_backend.c | tex_hint_on, vp_upload_tex_slot_impl, render_frame | BC_NATIVE | J-Stars |
 | 2500 | feature | the window options of the v0.15 port: WINDOW_SIZE=<w>x<h>, FULLSCREEN=1 (borderless, F11 toggles), | rsx_d3d12_backend.c | d3d12_wndproc, create_window | WINDOW_ICON, WINDOW_SIZE, FULLSCREEN, TITLE_STATS | J-Stars |
 | 2501 | feature | the game window hides the cursor where cellPad says so (g_pad_cursor_hidden, patch 6500) and adds mouse | rsx_d3d12_backend.c | win_set_fullscreen |  | J-Stars |
 | 2502 | feature | shadow maps rendered at SHADOW_SCALE times the guest size (1-4, default 2; 1 = the game's own size). | rsx_d3d12_backend.c | vp_shadow_pack, off_ds_get, render_frame | SHADOW_SCALE | J-Stars |
@@ -97,6 +98,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 6007 | fix | PAD_SCRIPT events "+N:mask" (N clock units after the previous event fired) and "~N:mask" (once the | cellPad.c, ppu_fs.cpp |  |  | J-Stars |
 | 6008 | fix | PAD_SCRIPT "^N:mask" fires N clock units after a save-data load or save finishes, and "*N:mask" | cellPad.c, cellSaveData.c | savedata_execute_run |  | J-Stars |
 | 6009 | fix | a thread polling with back-to-back tiny sys_timer_usleep calls really sleeps (USLEEP_SPIN=1 off). | sys_timer.c | sys_timer_usleep | USLEEP_SPIN, USLEEP_AFTER_US, USLEEP_REAL_US, USLEEP_GAP_US | J-Stars |
+| 6010 | fix | Patch 6010 (fix line): the FIFO walker force-recycles a title's own command ring only after the title has stayed | cellGcmSys.c | gcm_rsx_process_fifo_unlocked | GCM_OVERRUN_HOLD_MS | J-Stars |
 | 6500 | feature | input modes and bindings of the v0.15 port, on the Windows (XInput) backend: INPUT_MODE=keyboard/kbm/ | cellPad.c | pad_key_down, pad_poll_keyboard, pad_poll_xinput, pad_poll_backend | INPUT_MODE, MOUSE_SENS, PAD_NO_KEYBOARD, PAD_KEYS_SPLIT ... | J-Stars |
 | 6501 | feature | title-port hooks from the v0.15 port: g_spu_put_hook_img (every SPU PUT with the SPU image that issued it, | cellPad.c, spu_channels.c, spu_dma.h | cellPad_poll, void, mfc_do_transfer |  | J-Stars |
 | 6503 | feature | the DualSense (PS5 controller, also the Edge) over USB or Bluetooth, from the v0.15 port. Windows has no | CMakeLists.txt, cellPad.c | pad_clock, pad_xinput_stick_to_u8 | PAD_NO_DUALSENSE | J-Stars |

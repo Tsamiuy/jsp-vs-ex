@@ -2,7 +2,10 @@
 
 The v19 game runs from PS3Recomp\\jstars19 (jsp.exe, its FFmpeg DLLs and EBOOT.elf, copied there by
 tools\\publish19.ps1) with the game data of the installer layout in %APPDATA%\\JSP Fan Revival (hdd0, saves in
-hdd0_gamedata). Run: python make_launcher19.py, then build_launcher19.bat."""
+hdd0_gamedata). Run: python make_launcher19.py, then build_launcher19.bat.
+
+NOT MAINTAINED: this generator no longer matches JStarsLauncher.cs (its first substitution fails), so JStarsLauncher19.cs is
+edited by hand."""
 import os
 here = os.path.dirname(os.path.abspath(__file__))
 s = open(os.path.join(here, 'JStarsLauncher.cs'), encoding='utf-8').read()

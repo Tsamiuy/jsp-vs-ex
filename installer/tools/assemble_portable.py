@@ -64,7 +64,7 @@ This program contacts no server: no update check, no crash report, no telemetry.
 2. Double-click run.cmd. It asks for:
      - the folder of your game disc (the one that holds PS3_GAME)
      - your decrypted EBOOT.elf, from your own copy: see RPCS3 and its documentation
-   and then builds the game here. This takes a long time; if it stops, run.cmd again: finished steps are kept.
+   and then builds the game here. (An EBOOT.elf the port does not know is refused; to try one at your own risk, start run.cmd --allow-unknown-eboot: unsupported.) This takes a long time; if it stops, run.cmd again: finished steps are kept.
 3. Start the game with jsp-settings.exe (settings: resolution, window, controls; then Start Game), or directly with
    jsp-launcher.exe. The first start installs the game data from your disc (a few minutes).
 

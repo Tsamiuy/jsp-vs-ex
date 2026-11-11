@@ -33,7 +33,7 @@ first build takes a while and needs several GB of free space, and `Build again` 
 
 **A ready-made installer download:** coming soon (no release is published yet).
 
-**Linux and Steam Deck (Proton):** coming soon. Not supported yet; the newer tree has reached fights under Proton in tests.
+**Linux and Steam Deck (Proton):** coming soon. Not supported yet; an earlier v18 build of the newer tree reached fights under Proton in tests.
 
 ## What makes it different
 
@@ -45,7 +45,7 @@ first build takes a while and needs several GB of free space, and `Build again` 
 | Higher resolutions, a resizable window and borderless fullscreen | [Features: Display](docs/FEATURES.md#resolution) |
 | Keyboard, mouse or controller, with a launcher to rebind keys | [Features: Input](docs/FEATURES.md#input-modes) |
 | Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
-| The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [installer/README.md, "Online Battle"](installer/README.md#online-battle-experimental) |
+| The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [docs/ONLINE.md](docs/ONLINE.md) (quick start) |
 
 ## Coming soon
 

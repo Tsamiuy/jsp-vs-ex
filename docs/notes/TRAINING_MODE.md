@@ -130,7 +130,7 @@ In a Training fight, the game's own pause menu has a sixth row, **Training setti
 
 Run names below (pj1, cam5, tm4 and the like) are local runs and are not in this repository.
 
-**Settings:** Unlimited Stamina (on/off). To add one, add a line to `k_settings` in `port\jstars_game.cpp` and what it does to `settings_tick`. Text slots still free: 14, 18, 21, 23, 25, 33 and 34.
+**Settings:** Unlimited Stamina, Free Camera and Hide HUD (each on/off; see their sections below). To add one, add a line to `k_settings` in `port\jstars_game.cpp` and what it does to `settings_tick`. Text slots still free: 14, 25, 33 and 34 (23 is free in the v0.15 tree; the v18 tree uses it for Group Camera under `JSP_EXPERIMENTS`).
 
 **How it works:** it's a real sub-menu of the game's menu, opened the way Restart's Yes/No box is, so the game stays paused and the selector doesn't move.
 
@@ -157,7 +157,7 @@ Run names below (pj1, cam5, tm4 and the like) are local runs and are not in this
 
 Off by default since 11-05: normal Training Mode is back. `TRAINING_HOLD=1` and `TRAINING_NO_KNOCKDOWN=1` turn the experiment on. The code is still in the game file.
 
-For mapping every skill to its numbers (the maintainer's plan): in a Training fight, nobody gets knocked down and the opponent stands 2.5 in front of Player 1, held there, so every skill can be used on it without walking. Turn-based is left as it was. Numbers: Balance/Knockdowns.md.
+For mapping every skill to its numbers (the maintainer's plan): in a Training fight, nobody gets knocked down and the opponent stands 2.5 in front of Player 1, held there, so every skill can be used on it without walking. Turn-based is left as it was. Numbers: [../balance/Knockdowns.md](../balance/Knockdowns.md).
 
 - **No knockdowns:** 1 s into the fight, `kd_flatten_all` looks through 0x41000000-0x42000000 for attack files (0x9C-byte slots, reaction +0x39) and projectile files (232-byte rows, reaction +0xAF): the entry count, three zero words, and at least 85% of the entries with damage looking right. Every entry whose reaction knocks down is set to 1, a flinch, rows without damage too (Gintoki's Justaway knocked down from one, nk1). The first hit from a file the scan missed flattens it too (Dio's and Dai's attack files fail the check on disk). The old bytes are put back when the fight scene ends. The too-many-hits build-up (+0x1A4 of each hit fighter) is held at 0. Since 11-05 the game's own knockdowns are kept unless `TRAINING_NO_KNOCKDOWN` is set (the code only checks that the variable exists, so `=0` also turns it on).
 - **Held close:** `pin_dummy` takes both places once per fight (`tb_fighters`) and puts the opponent on the line between the spawns, `k_train_apart` = 2.5 from Player 1, holding x and z (height free). Looking the places up every frame drifted with Player 1 (nk1). Since 11-05 `TRAINING_HOLD=1` is needed to turn it on.
@@ -240,28 +240,34 @@ the maintainer's plan: a setting that lets R3 start Victory Burst from the start
 
 ## The v18 tree (installer/port, 2026-11-05)
 
-Training is ported to the `v18` tree (`installer/port/jsp/jsp_training.cpp`), steps 1 to 3. There is no menu choice
-there yet: the environment variable `TRAINING=1` makes Free Battle run as Training. Without it nothing is hooked. With the
-installer, put `TRAINING=1` in the settings file: `jsp-launcher.exe` puts each of its lines in the environment
-(`installer/launcher/launcher.c`).
+Now (2026-11-10): Training is ported to the `v18` tree in `installer/port/jsp/jsp_game.cpp`. Free Battle shows a Free Battle /
+Training Mode choice box, on by default (`FREE_BATTLE_BOX=0` turns it off); choosing Training Mode starts Training. The first
+port, `jsp_training.cpp`, described below, is an earlier version and is not built; its `TRAINING=1` switch and the
+`TRAINING_NODUMMY` and `TRAINING_NOLOCK` switches have no effect in the built tree.
 
-- **How it hooks:** v0.18.0 calls every indirect call through its function table, so the file wraps the lifted functions
-  there (as the trace in `jsp_hle.cpp` does). No toolkit patch is needed. The screens are found by their vtable in r3,
+On 2026-11-05 the port was written as follows (the file named below is the earlier, unbuilt one):
+
+Training is ported to the `v18` tree (`installer/port/jsp/jsp_training.cpp`), steps 1 to 3. There was no menu choice
+yet: the environment variable `TRAINING=1` made Free Battle run as Training.
+
+- **How it hooks:** v0.19.0 calls every indirect call through its function table, so the file wraps the lifted functions
+  there (as the trace in `jsp_hle.cpp` does). The built tree installs `g_ppu_icall_hook`, added by toolkit patch `0500-ppu-indirect-call-hook.patch`. The screens are found by their vtable in r3,
   not by heap addresses.
 - **Step 1:** nobody is KO'd (the damage call @0x00085B84 leaves 1 health), and health refills 45 frames (about 1.5 s,
-  ASSUMPTION: 30 frames per game second) after a fighter's last hit. The refill runs from the HUD's health read
+  ASSUMPTION: 30 frames per game second) after a fighter's last hit (the built tree refills by wall clock instead: 1 s after the
+  combo number goes away, 1.5 s after the last hit if no combo number came up). The refill runs from the HUD's health read
   @0x00085CEC.
 - **Step 2:** the CPU fighters of the other team become dummies: their pad is handed to a human driver (+0x18 and
   +0x1FC, 3 to 1) and the pad getters @0x9D5AC to 0x9D750 answer "nothing pressed".
   - Fighter numbers in a fight are 0 Player 1, 1 the opponent, 2 Player 1's partner, 3 the opponent's partner. The
     v0.15 reading held only in 1 on 1.
 - **Step 3:** on character select, the CPU partner slots (1 and 3) are locked with the game's own padlock. On stage
-  select the time is Unlimited. Not ported yet: the padlock picture on the time box and the blocked presses there
-  (the box can be changed, but it is set back at once).
-- **Test-only switches:** `TRAINING_TEST_LOW=N` starts every fighter at N/100 health; `TRAINING_NODUMMY` keeps the
-  opponents as CPUs; `TRAINING_NOLOCK` leaves the partner slots free.
-- **Not done in v18:** the menu choice, the rewards check (no J-Points after Training), the Training settings menu,
-  the 0-star dummy, and a check with 4 fighters.
+  select the time is Unlimited. The built tree blocks Cross, Left and Right on the time box; its own padlock picture
+  is opt-in (`TRAINING_LOCK_PICTURE=1`).
+- **Test-only switches:** `TRAINING_TEST_LOW=N` starts every fighter at N/100 health. (`TRAINING_NODUMMY` keeps the
+  opponents as CPUs and `TRAINING_NOLOCK` leaves the partner slots free, but they exist only in the unbuilt `jsp_training.cpp`.)
+- **Not done in v18:** the rewards check (no J-Points after Training) and a check with 4 fighters. The menu choice, the
+  Training settings menu and the 0-star dummy are in `jsp_game.cpp`.
 
 Tested under Proton on Linux, US disc, with a scripted pad route (the same file and toolkit pin, built from this
 project's development tree, not from the installer): a Training fight with TIME at infinity, 16 hits all on the dummy
