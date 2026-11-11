@@ -86,4 +86,7 @@ jobs:
           gh run download "$GITHUB_RUN_ID" --name "jsp-installer-$GITHUB_SHA" --dir files
           python3 tools/release.py notes "$VERSION" > notes.md
           ls -l files
-          gh release create "v$VERSION" --draft --verify-tag --title "v$VERSION" --notes-file notes.md files/*
+          # A 0.x version is a pre-release: the draft is created with the pre-release flag set.
+          flags=(--draft --verify-tag)
+          case "$VERSION" in 0.*) flags+=(--prerelease) ;; esac
+          gh release create "v$VERSION" "${flags[@]}" --title "v$VERSION" --notes-file notes.md files/*
