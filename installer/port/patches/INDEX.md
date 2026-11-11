@@ -91,6 +91,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
 | 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
 | 3900 | experiment | AUDIO_SILENCE=1 counts the mixed cellAudio blocks that are all zero (diagnostic, off by default). | cellAudio.c | audio_mix_thread_func | AUDIO_SILENCE | J-Stars |
+| 3901 | experiment | HANG_WATCH=<seconds> prints where every guest thread is when the guest stops requesting flips (diagnostic, off by default). | ppu_hle.cpp |  | HANG_WATCH | J-Stars |
 | 6001 | fix | export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.) | ppu_loader.cpp | ppu_resv_register |  | J-Stars |
 | 6002 | fix | g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.) | ppu_hle.cpp | ps3_hle_call |  | J-Stars |
 | 6003 | fix | PAD_SCRIPT takes an optional hold length, "<t>:<mask>:<polls>". (Upstream candidate.) | cellPad.c |  |  | J-Stars |
