@@ -7,8 +7,9 @@ All notable changes are listed here, newest first. The format follows
 ## [Unreleased]
 
 First pre-release. J-Stars Victory VS+ for Windows: the game is built on your PC (ps3recomp, Direct3D 12) from your own copy of the disc, no game
-files are included. On the Windows PC it was tested on it boots, plays the menus and fights with sound at about 30 frames
-per second, and the installer builds and starts it. It is a pre-release with known problems and fewer tests than it needs:
+files are included. On the Windows PC it was tested on, it boots, plays the menus and fights with sound at about 30 frames
+per second, and the installer builds and starts it. It needs a 64-bit CPU with AVX2.
+It is a pre-release with known problems and fewer tests than it needs:
 see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9). `docs/FEATURES.md` lists each feature with how it was tested.
 
 ### What you get
