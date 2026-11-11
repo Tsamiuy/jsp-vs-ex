@@ -38,7 +38,7 @@ v0.19.0 toolkit is on main in `installer/port` (#2, merged); it is an opt-in ins
 - 📋 1v1 and 3v3 matches beside the usual 2v2 (the game is built around 2v2 with a support character; 3v3 only if the
   engine allows it); all three online too, see section 4 ([details](FEATURES.md#match-sizes))
 - 📋 Your own music files in place of the game's tracks (your files, never shipped) ([details](FEATURES.md#own-music))
-- 🔧 An unlock-all switch for cards, progression bars, J-Points, characters, titles and more, as a save edit with a backup (launcher: Cheats tab) ([details](FEATURES.md#unlock-all))
+- ✅ An unlock-all switch for cards, progression bars, J-Points, characters, titles and more, as a save edit with a backup (launcher: Cheats tab) ([details](FEATURES.md#unlock-all))
 - 📋 **Cross-Save with RPCS3, without PSN:** one save that moves both ways between the port and RPCS3 as a plain copy,
   since RPCS3 keeps this game's save unencrypted. Setup can already import an RPCS3 save once; not tested yet: an RPCS3
   save in the newer tree (`--tree v18`) and a port save in RPCS3. Saves from a real PS3 are encrypted and are a separate
