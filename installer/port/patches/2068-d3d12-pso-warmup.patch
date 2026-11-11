@@ -1,0 +1,232 @@
+Patch 2068 (fix line): pipeline warm-up. Every guest-FP pipeline a run builds is noted in pipelines.bin (beside
+shader_cache.bin); the next run builds all noted pipelines on worker threads right after the device is up, while the
+game boots, and keeps them: the game's own request for the same pipeline then gets the ready one at once.
+PSO_WARMUP=0 turns it off.
+
+J-Stars builds its pipelines when a draw first needs them, on worker threads (patch 2057), and a draw whose pipeline
+is not ready is skipped: on every start the fight intros showed characters missing and wrong colours for a few
+seconds, and new effects on some maps slowed the game the first time (the maintainer, 11-11). HITCH log with a warm
+shader cache: 110 pipeline builds in one intro frame (99 ms), bench/exp/2026-11-11_1603-intro-cache2. pso_cache.bin
+(PSO_CACHE=1) is not used for J-Stars (its second start stayed on the loading screen), so nothing else carried
+pipelines from one run to the next. This is the v0.15 installer patch 0004 for v0.19, keeping the warmed pipelines
+instead of releasing them.
+
+Tested (US disc, auto-pilot Training intro, three starts in a row): start 1 notes 159 pipelines and its intro shows the fighter half drawn (pipelines still building); starts 2 and 3 build 159/161 noted pipelines in 0.1 s on 8 threads at boot, HITCH shows 0 pipeline builds in the intro instead of 77-110 (50-99 ms) (bench/exp/2026-11-11_1608..1611-psow1..3, 2026-11-11_1603-intro-cache2).
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index f340ec1a..7fef86f4 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2198,6 +2198,195 @@ static HRESULT sc_compile(const char* hlsl, const char* name, const char* target
+         sc_store_locked(c, key, (*out)->lpVtbl->GetBufferPointer(*out), (u32)(*out)->lpVtbl->GetBufferSize(*out));
+     return hr;
+ }
++/* --- Patch 2068: pipeline warm-up (PSO_WARMUP=0 off) -----------------------------------------------------------
++ * Every guest-FP pipeline built through sc_pipeline is noted in pipelines.bin (its description with the pointers
++ * cleared, the 16-ATTR or empty input layout, the VS and PS bytecode). psow_start (device and root signature up)
++ * reads the file and builds every noted pipeline on worker threads in the background; sc_pipeline first asks
++ * psow_take for a ready pipeline with the same key. A pipeline the game asks for before its warm-up build is done is
++ * built as before (the warm one is then kept for nothing). Log: [PSOW]. */
++#define PSOW_MAGIC 0x32575350u   /* "PSW2" */
++#define PSOW_MAX_BYTES (1u << 20)
++typedef struct { u32 magic, vs_len, ps_len, n_il; u64 key; D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; } PsoRec;
++typedef struct { u64 key; ID3D12PipelineState* pso; } PsowSlot;
++#define PSOW_SLOTS 16384u
++static PsowSlot s_psow_tab[PSOW_SLOTS];
++static SRWLOCK s_psow_lock = SRWLOCK_INIT;
++static u64 s_psow_noted[PSOW_SLOTS];
++static FILE* s_psow_out;
++static volatile LONG s_psow_built, s_psow_taken, s_psow_total;
++static int psow_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("PSO_WARMUP"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++static D3D12_INPUT_ELEMENT_DESC s_psow_il[16];
++static void psow_il_init(void)
++{
++    for (int i = 0; i < 16; i++) {   /* the layout vp_fp_make_pso gives every non-pulling guest-FP pipeline */
++        s_psow_il[i].SemanticName = "ATTR"; s_psow_il[i].SemanticIndex = i;
++        s_psow_il[i].Format = DXGI_FORMAT_R32G32B32A32_FLOAT; s_psow_il[i].InputSlot = 0;
++        s_psow_il[i].AlignedByteOffset = (UINT)(i * 16);
++        s_psow_il[i].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA; s_psow_il[i].InstanceDataStepRate = 0;
++    }
++}
++/* The description with every pointer cleared: what is stored and keyed (as sc_pipeline keys it). */
++static void psow_plain(D3D12_GRAPHICS_PIPELINE_STATE_DESC* d)
++{
++    d->pRootSignature = NULL;
++    d->VS.pShaderBytecode = d->PS.pShaderBytecode = d->DS.pShaderBytecode = NULL;
++    d->HS.pShaderBytecode = d->GS.pShaderBytecode = NULL;
++    memset(&d->StreamOutput, 0, sizeof d->StreamOutput);
++    d->InputLayout.pInputElementDescs = NULL;
++    memset(&d->CachedPSO, 0, sizeof d->CachedPSO);
++}
++static u64 psow_key(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd)
++{
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC st = *pd; psow_plain(&st);
++    u64 k = sc_hash(14695981039346656037ull, pd->VS.pShaderBytecode, pd->VS.BytecodeLength);
++    k = sc_hash(k, pd->PS.pShaderBytecode, pd->PS.BytecodeLength);
++    return sc_hash(k, &st, sizeof st) | 1u;
++}
++static int psow_guest(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd)
++{
++    return pd->pRootSignature == s_d3d.vp_root_sig && pd->VS.pShaderBytecode && pd->PS.pShaderBytecode &&
++           pd->VS.BytecodeLength <= PSOW_MAX_BYTES && pd->PS.BytecodeLength <= PSOW_MAX_BYTES &&
++           (pd->InputLayout.NumElements == 0 || pd->InputLayout.NumElements == 16) &&
++           !pd->DS.pShaderBytecode && !pd->HS.pShaderBytecode && !pd->GS.pShaderBytecode;
++}
++/* A warmed pipeline for this description (an added reference), or NULL. */
++static ID3D12PipelineState* psow_take(u64 key)
++{
++    ID3D12PipelineState* r = NULL;
++    AcquireSRWLockExclusive(&s_psow_lock);
++    u32 i = (u32)(key ^ (key >> 29)) & (PSOW_SLOTS - 1u);
++    for (u32 n = 0; n < PSOW_SLOTS && s_psow_tab[i].key; n++, i = (i + 1u) & (PSOW_SLOTS - 1u))
++        if (s_psow_tab[i].key == key) { r = s_psow_tab[i].pso; if (r) r->lpVtbl->AddRef(r); break; }
++    ReleaseSRWLockExclusive(&s_psow_lock);
++    if (r) InterlockedIncrement(&s_psow_taken);
++    return r;
++}
++static void psow_put(u64 key, ID3D12PipelineState* pso)
++{
++    AcquireSRWLockExclusive(&s_psow_lock);
++    u32 i = (u32)(key ^ (key >> 29)) & (PSOW_SLOTS - 1u), n = 0;
++    while (s_psow_tab[i].key && s_psow_tab[i].key != key && n++ < PSOW_SLOTS) i = (i + 1u) & (PSOW_SLOTS - 1u);
++    if (!s_psow_tab[i].key) { s_psow_tab[i].key = key; s_psow_tab[i].pso = pso; pso = NULL; }
++    ReleaseSRWLockExclusive(&s_psow_lock);
++    if (pso) pso->lpVtbl->Release(pso);   /* already there, or the table is full */
++}
++/* 1 when key was already noted (this run or a file record). */
++static int psow_noted(u64 key)
++{
++    u32 i = (u32)(key ^ (key >> 31)) & (PSOW_SLOTS - 1u), n = 0;
++    while (s_psow_noted[i] && s_psow_noted[i] != key) { if (++n >= PSOW_SLOTS) return 1; i = (i + 1u) & (PSOW_SLOTS - 1u); }
++    if (s_psow_noted[i] == key) return 1;
++    s_psow_noted[i] = key;
++    return 0;
++}
++/* After a guest-FP pipeline was built: append it to pipelines.bin once. */
++static void psow_note(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, u64 key)
++{
++    if (!psow_on() || !psow_guest(pd)) return;
++    AcquireSRWLockExclusive(&s_psow_lock);
++    if (!psow_noted(key)) {
++        if (!s_psow_out) s_psow_out = fopen("pipelines.bin", "ab");
++        if (s_psow_out) {
++            PsoRec r; memset(&r, 0, sizeof r);
++            r.magic = PSOW_MAGIC; r.vs_len = (u32)pd->VS.BytecodeLength; r.ps_len = (u32)pd->PS.BytecodeLength;
++            r.n_il = pd->InputLayout.NumElements; r.key = key; r.pd = *pd; psow_plain(&r.pd);
++            fwrite(&r, sizeof r, 1, s_psow_out);
++            fwrite(pd->VS.pShaderBytecode, 1, r.vs_len, s_psow_out);
++            fwrite(pd->PS.pShaderBytecode, 1, r.ps_len, s_psow_out);
++            fflush(s_psow_out);
++        }
++    }
++    ReleaseSRWLockExclusive(&s_psow_lock);
++}
++typedef struct { PsoRec* rec; const u8* vs; const u8* ps; } PsowItem;
++static PsowItem* s_psow_items; static u8* s_psow_buf; static volatile LONG s_psow_next;
++static double s_psow_t0;
++static DWORD WINAPI psow_worker(LPVOID arg)
++{
++    (void)arg;
++    for (;;) {
++        const LONG k = InterlockedIncrement(&s_psow_next) - 1;
++        if (k >= s_psow_total) break;
++        PsowItem* t = &s_psow_items[k];
++        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = t->rec->pd;
++        pd.pRootSignature = s_d3d.vp_root_sig;
++        pd.VS.pShaderBytecode = t->vs; pd.VS.BytecodeLength = t->rec->vs_len;
++        pd.PS.pShaderBytecode = t->ps; pd.PS.BytecodeLength = t->rec->ps_len;
++        pd.InputLayout.pInputElementDescs = t->rec->n_il ? s_psow_il : NULL; pd.InputLayout.NumElements = t->rec->n_il;
++        ID3D12PipelineState* pso = NULL;
++        if (SUCCEEDED(s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso)) && pso)
++            psow_put(t->rec->key, pso);
++        if (InterlockedIncrement(&s_psow_built) == s_psow_total)
++            fprintf(stderr, "[PSOW] warmed %ld noted pipelines in %.1f s%c", s_psow_total, perf_now() - s_psow_t0, 10);
++    }
++    return 0;
++}
++/* Once, as soon as the device and the guest root signature exist: start building the noted pipelines. */
++static void psow_start(void)
++{
++    static int ran = 0;
++    if (ran || !psow_on() || !s_d3d.device || !s_d3d.vp_root_sig) return;
++    ran = 1;
++    psow_il_init();
++    FILE* f = fopen("pipelines.bin", "rb");
++    if (!f) { fprintf(stderr, "[PSOW] no pipelines noted yet (first start)%c", 10); return; }
++    fseek(f, 0, SEEK_END); const long sz = ftell(f); fseek(f, 0, SEEK_SET);
++    s_psow_buf = sz > 0 ? (u8*)malloc((size_t)sz) : NULL;
++    if (!s_psow_buf || fread(s_psow_buf, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(s_psow_buf); s_psow_buf = NULL; return; }
++    fclose(f);
++    int cap = 0; long pos = 0;
++    while (pos + (long)sizeof(PsoRec) <= sz) {   /* a torn last record ends the list */
++        PsoRec* r = (PsoRec*)(s_psow_buf + pos);
++        if (r->magic != PSOW_MAGIC || r->vs_len > PSOW_MAX_BYTES || r->ps_len > PSOW_MAX_BYTES || (r->n_il != 0 && r->n_il != 16) ||
++            pos + (long)sizeof(PsoRec) + (long)r->vs_len + (long)r->ps_len > sz) break;
++        pos += (long)sizeof(PsoRec) + r->vs_len + r->ps_len; cap++;
++    }
++    s_psow_items = (PsowItem*)calloc(cap ? cap : 1, sizeof(PsowItem));
++    LONG n = 0; pos = 0;
++    for (int i = 0; i < cap; i++) {
++        PsoRec* r = (PsoRec*)(s_psow_buf + pos);
++        const u8* vs = s_psow_buf + pos + sizeof(PsoRec);
++        if (!psow_noted(r->key)) { s_psow_items[n].rec = r; s_psow_items[n].vs = vs; s_psow_items[n].ps = vs + r->vs_len; n++; }
++        pos += (long)sizeof(PsoRec) + r->vs_len + r->ps_len;
++    }
++    s_psow_total = n;
++    if (!n) return;
++    SYSTEM_INFO si; GetSystemInfo(&si);
++    int nt = (int)si.dwNumberOfProcessors / 2; if (nt < 1) nt = 1; if (nt > 8) nt = 8;
++    { const char* e = getenv("PSO_WARMUP_THREADS"); if (e && atoi(e) > 0) nt = atoi(e); }
++    s_psow_t0 = perf_now();
++    for (int i = 0; i < nt; i++) {
++        HANDLE h = CreateThread(NULL, 0, psow_worker, NULL, 0, NULL);
++        if (h) { SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(h); }
++    }
++    fprintf(stderr, "[PSOW] building %ld noted pipelines on %d thread(s) in the background%c", n, nt, 10);
++}
++static void psow_report(void)
++{
++    static int said = 0;
++    if (!said && s_psow_total && s_psow_built == s_psow_total && s_d3d.frame_count > 600) {
++        said = 1;
++        fprintf(stderr, "[PSOW] %ld of the game's pipeline requests so far were warm%c", s_psow_taken, 10);
++    }
++}
++static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out);
++/* patch 2068: a warmed pipeline first; a guest-FP pipeline built here is noted for the next start */
++static HRESULT sc_pipeline_warm(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out)
++{
++    if (psow_on() && psow_guest(pd)) {
++        const u64 k = psow_key(pd);
++        if ((*out = psow_take(k)) != NULL) return S_OK;
++        const HRESULT hr = sc_pipeline(pd, out);
++        if (SUCCEEDED(hr) && *out) psow_note(pd, k);
++        return hr;
++    }
++    return sc_pipeline(pd, out);
++}
+ /* CreateGraphicsPipelineState from the blob of an earlier run. */
+ static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out)
+ {
+@@ -3233,7 +3422,7 @@ static HRESULT vp_fp_make_pso(ID3DBlob* vsb, ID3DBlob* pb, u32 blend, int nrt, D
+     pd.SampleDesc.Count = 1;
+ 
+     ID3D12PipelineState* pso = NULL; HRESULT hr;
+-    hr = sc_pipeline(&pd, &pso);   /* pso_cache.bin when on (51a4e57) */
++    hr = sc_pipeline_warm(&pd, &pso);   /* pso_cache.bin when on (51a4e57); patch 2068: warmed pipelines first */
+     *ppso = pso;
+     return hr;
+ }
+@@ -5848,6 +6037,7 @@ static void render_frame(void)
+             &IID_ID3D12Resource, (void**)&s_d3d.readback_buf);
+     }
+ 
++    psow_start(); psow_report();   /* patch 2068 */
+     /* Reset command allocator and list */
+     s_d3d.cmd_allocators[fi]->lpVtbl->Reset(s_d3d.cmd_allocators[fi]);
+     s_d3d.cmd_list->lpVtbl->Reset(s_d3d.cmd_list, s_d3d.cmd_allocators[fi], NULL);

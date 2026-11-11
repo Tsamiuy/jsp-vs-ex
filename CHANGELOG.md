@@ -23,6 +23,10 @@ What `main` has so far; `docs/FEATURES.md` lists each item with how it was teste
 - Game: reads `repsn.ini` and `community.ini` at startup and sets the runtime's online variables from them (re-psn
   server and name, peer port; both methods on is refused, a community preset keeps the game offline, `--psnr`,
   `--username` and environment variables win), logging on `[online]` lines; host test in CI.
+- D3D12: a vertex program seen for the first time is compiled on worker threads instead of the drawing thread, so
+  new objects and camera turns no longer freeze the game for a moment (toolkit patch 2070, `VS_ASYNC=0` turns it off).
+- D3D12: every pipeline a run builds is noted in `pipelines.bin` and the next start builds them all at boot, so the fight
+  intros no longer show half-drawn characters while pipelines build (toolkit patch 2068, `PSO_WARMUP=0` turns it off).
 - D3D12: the GPU wait only gives up on a removed device, and the deferred-release table grows instead of freeing its
   oldest entry early (toolkit patch 2066).
 - RPCS3 save import stages incoming files before replacing progress, restores the old files after an I/O error,
