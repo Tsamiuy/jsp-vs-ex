@@ -1,5 +1,5 @@
 /* Offline test for the TEX_EXPAND port (upstream ps3recomp 122690f) on the
- * jstars-port decompiler. Build from the scratch folder:
+ * jstars-port decompiler. Build from a work folder:
  *   gcc -std=c11 -I<work>/libs/video -I<ours>/include test_expand.c \
  *       <work>/libs/video/rsx_fp_decompiler.c -o test_expand && ./test_expand */
 #include <stdio.h>

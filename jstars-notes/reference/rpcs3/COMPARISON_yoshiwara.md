@@ -4,7 +4,7 @@
 
 - **RPCS3:** `Screen Recording 2026-10-21 170237.mp4` (5 min 52 s, 1920x1080, RPCS3 overlay on).
 - **Frames:** 12 frames, one every 30 s, in `frames\frame_NNNs.jpg`. They were extracted with
-  Windows' built-in media stack (`Windows.Media.Editing`, a script in my scratch folder); ffmpeg is not
+  Windows' built-in media stack (`Windows.Media.Editing`, a local script); ffmpeg is not
   installed and nothing was installed.
 - **The stage is Yoshiwara Paradise (Gintama):** `frame_060s.jpg` is its Stage Select screen.
   Teams: Toriko, Naruto, support Luffy vs Ichigo, Goku, support Gintoki.
