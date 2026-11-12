@@ -6,6 +6,8 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Settings window (`jsp-settings.exe`): Start Game, its "already running" check and the Controls page's key-support notice looked for `game\JStarsRecomp.exe`, but a current-tree install places `game\jsp.exe`, so Start Game answered "The game is not built yet" and the Controls page said the game does not read key changes. The window now takes the exe name from `paths.txt` (`EXE=`), and falls back to `jsp.exe` when that file is there.
+
 ## [0.2.0] - 2026-11-12
 
 ### Added
