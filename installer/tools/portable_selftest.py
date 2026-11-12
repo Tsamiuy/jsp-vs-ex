@@ -69,7 +69,7 @@ def main(scratch, payload=None, disc=None, eboot=None):
     check("pack folder itself", firstrun.pack_path("/x/JSP", root) == "@APP@")
     check("pack outside/sibling", firstrun.pack_path("/x/JSP2/hdd0", root) == "/x/JSP2/hdd0" and
           firstrun.pack_path("/y/disc", root) == "/y/disc")
-    check("unpack", firstrun.unpack_path("@APP@/hdd0", pathlib.Path("/z/Renamed")) == "/z/Renamed/hdd0")
+    check("unpack", firstrun.unpack_path("@APP@/hdd0", pathlib.Path("/z/Renamed")) == str(pathlib.Path("/z/Renamed") / "hdd0"))   # backslashes on Windows
     check("disc root accepts PS3_GAME", firstrun.disc_root(fx / "disc" / "PS3_GAME") == fx / "disc")
     # the fixture's EBOOT.elf is not a known build: without --allow-unknown-eboot the portable flow refuses it (E3), with it only warns
     app0 = scratch / "app0"
@@ -119,22 +119,22 @@ def main(scratch, payload=None, disc=None, eboot=None):
     old = scratch / "old" / "JSP Fan Revival"
     old.mkdir(parents=True)
     ns = firstrun.argparse.Namespace(root=str(old), disc=str(fx / "disc"), eboot=str(fx / "EBOOT.elf"), devflash=str(fx / "dev_flash"),
-                                     hdd0=str(old / "hdd0"), force=[])
+                                     hdd0=str(old / "hdd0"), force=[], toolchain=str(scratch / "none"))
     (old / "build" / "port").mkdir(parents=True)
     (old / "build" / "port" / firstrun.EXE).write_bytes(b"MZ")
     c = firstrun.Ctx(ns, "US", "BLUS31519")
     check("place step", firstrun.step_place(c))
     pt = (old / "paths.txt").read_text()
     check("paths.txt: hdd0 relative, disc outside absolute",
-          "PS3_HDD0_ROOT=@APP@/hdd0" in pt and f"PS3_VFS_ROOT={fx}/disc/" in pt.replace("\\", "/"), pt.splitlines()[1])
+          "PS3_HDD0_ROOT=@APP@/hdd0" in pt and f"PS3_VFS_ROOT={fx}/disc/".replace("\\", "/") in pt.replace("\\", "/"), pt.splitlines()[1])
     (old / "build" / "port" / "CMakeCache.txt").write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={old.as_posix()}/port\n")
     (old / "build" / "location.txt").write_text(str(old) + "\n")
-    c.mark("place", "k")
+    c.mark("place")
     new = scratch / "new" / "Renamed Folder"
     new.parent.mkdir(parents=True)
     old.rename(new)
     c2 = firstrun.Ctx(firstrun.argparse.Namespace(**{**vars(ns), "root": str(new), "hdd0": str(new / "hdd0")}), "US", "BLUS31519")
-    check("marker still current after the move", c2.done("place", "k"))
+    check("place marker is stale after the move (the install folder is a build input; reset_if_moved drops it)", bool(c2.stale_reason("place")))
     check("paths.txt unchanged and relative after the move", (new / "paths.txt").read_text() == pt)
     check("stale CMake cache dropped after the move", firstrun.drop_stale_cache(c2) and not (new / "build" / "port").exists())
     check("cache of this folder kept", not firstrun.drop_stale_cache(c2))

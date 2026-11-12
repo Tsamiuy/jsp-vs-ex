@@ -1,0 +1,36 @@
+# The one list of host tests (no game data, no GPU), run by tools/ci/run_host_tests.py in CI and by hand:
+#     python3 tools/ci/run_host_tests.py [--toolkit DIR] [--fake-tool EXE --launcher EXE]
+# Row:      WHERE | PATH [ARGS]      WHERE = all, posix or windows. .py runs as `python3 -I`, .sh with bash, .c is compiled with cc.
+# Exclude:  exclude | GLOB | REASON  (a file that matches *_test.*, test_*.py or *selftest* and is not a test of its own)
+# Placeholders in ARGS: {scratch} an empty folder of this test, {toolkit} the patched ps3recomp folder (--toolkit),
+# {font} the Fira Sans file, {fake_tool} and {launcher} the exes the Windows job builds. A row whose placeholder was not given fails (never skips).
+# tools/ci/run_host_tests.py --check-coverage fails when a test file in git is neither listed nor excluded here.
+all     | installer/tools/rpcs3_wizard_test.py
+all     | installer/tools/test_rpcs3_locate.py
+all     | installer/tools/steam_shortcut_test.py
+all     | installer/tools/firstrun_selftest.py --units
+all     | installer/tools/portable_selftest.py {scratch}
+all     | installer/tools/lan_discover_test.py
+all     | installer/tools/online_option_test.py
+all     | installer/tools/quote_arg_test.py
+all     | installer/tools/support_bundle_test.py
+all     | installer/tools/unlock_option_test.py
+all     | tools/test_features.py
+all     | tools/test_release.py
+all     | tools/test_contributors.py
+# release.yml runs the tag step on ubuntu-latest, and this test fakes `gh` with an extension-less script that Windows' CreateProcess cannot start (not a product problem)
+posix   | tools/ci/test_release_tag.py
+posix   | installer/tools/online_settings_test.sh
+posix   | installer/tools/port_menu_test.sh
+posix   | installer/tools/version_line_test.sh
+posix   | installer/tools/overlay_font_test.sh {font}
+posix   | installer/tools/port_overlay_test.c {toolkit}
+windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
+windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
+exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
+exclude | installer/tools/port_menu_test.cpp | compiled and run by port_menu_test.sh
+exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
+exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh
+exclude | jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner
+exclude | jstars/run_test.ps1 | a manual run script for the game, needs the game and a GPU
+exclude | jstars/test_fight.txt | data file of that manual run script
