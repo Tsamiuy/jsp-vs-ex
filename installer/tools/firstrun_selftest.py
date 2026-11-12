@@ -147,16 +147,25 @@ def units():
     rc, out = go()
     check("EBOOT changed: lift, spu, build, place rerun", ran == ["lift", "spu", "build", "place"] and "input changed: eboot" in out, str(ran))
     rc, out = go()
+    (root / "build" / "port" / "old.obj").write_text("o")   # an object of the last build
     (root / "port" / "main.cpp").write_text("m2")   # a source of the port changes
     rc, out = go()
-    check("port source changed: only build and place rerun", ran == ["build", "place"] and "port_sources" in out, str(ran))
+    check("port source changed: only build and place rerun, compile tree dropped", ran == ["build", "place"] and "port_sources" in out
+          and not (root / "build" / "port" / "old.obj").exists(), str(ran))
+    (root / "build" / "port" / "old.obj").write_text("o")
     (root / "ps3recomp/tools/ppu_lifter.py").write_text("a2")   # a lifter change re-lifts
     rc, out = go()
-    check("lifter tool changed: lift, spu, build, place rerun", ran == ["lift", "spu", "build", "place"], str(ran))
+    check("lifter tool changed: lift, spu, build, place rerun, compile tree dropped", ran == ["lift", "spu", "build", "place"]
+          and not (root / "build" / "port" / "old.obj").exists(), str(ran))
     firstrun.toolchain_paths(vs)["T1 llvm-mingw clang"].write_bytes(b"clang-two")   # compiler update
     (root / "build" / "port" / "CMakeCache.txt").write_text("old")
+    (root / "build" / "port" / "old.obj").write_text("o")
     rc, out = go()
-    check("toolchain changed: build and place rerun, compile tree dropped", ran == ["build", "place"] and "toolchain" in out, str(ran))
+    check("toolchain changed: build and place rerun, compile tree dropped", ran == ["build", "place"] and "toolchain" in out
+          and not (root / "build" / "port" / "old.obj").exists(), str(ran))
+    (root / "build" / "port" / "old.obj").write_text("o")
+    rc, out = go(extra=["--force", "build"])
+    check("--force build keeps the compile tree (same inputs, ninja decides)", ran == ["build"] and (root / "build" / "port" / "old.obj").exists(), str(ran))
     # old plain marker (the format before fingerprints) counts as stale
     (root / "build/markers/lift.done").write_text("eboot 0123 region US\n")
     rc, out = go()

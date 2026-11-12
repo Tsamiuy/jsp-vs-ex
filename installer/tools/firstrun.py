@@ -967,8 +967,10 @@ def main(argv=None, ask=input):
             say(f"[{s}] already done (inputs unchanged), skipped")
             continue
         say(f"[{s}] running: {why}")
-        if s == "build" and why.startswith("input changed") and ("toolchain" in why or "ffmpeg" in why):
-            shutil.rmtree(c.build / "port", ignore_errors=True)   # the CMake cache names the old compiler
+        if s == "build" and why.startswith("input changed") and any(k in why for k in ("toolchain", "ffmpeg", "port_sources", "toolkit")):
+            # toolchain, ffmpeg: the CMake cache names the old ones. port_sources, toolkit: a new version's files can be older than
+            # the objects the last build left (the portable zip dates every file 1980-01-01), so ninja would keep the old code.
+            shutil.rmtree(c.build / "port", ignore_errors=True)
         if not fns[s](c):
             say(f"RESULT: failed, step {s} stopped; see {c.build}")
             return 1
