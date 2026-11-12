@@ -93,6 +93,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
 | 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
+| 3004 | fix | cellAudio WASAPI backend re-opens the default render device when the device is lost or the default changes. | audio_wasapi_recover.h, cellAudio.c, test_audio_device_recover.c | audio_backend_queued_samples, audio_backend_init, audio_backend_submit |  | candidate |
 | 3900 | experiment | AUDIO_SILENCE=1 counts the mixed cellAudio blocks that are all zero (diagnostic, off by default). | cellAudio.c | audio_mix_thread_func | AUDIO_SILENCE | J-Stars |
 | 6001 | fix | export the registered guest thread contexts so the port can print guest call stacks. (Upstream candidate.) | ppu_loader.cpp | ppu_resv_register |  | J-Stars |
 | 6002 | fix | g_hle_inflight is cleared after every table-dispatched HLE call, and the last call is kept apart. (Upstream candidate.) | ppu_hle.cpp | ps3_hle_call |  | J-Stars |
