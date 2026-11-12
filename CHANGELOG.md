@@ -6,6 +6,8 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-12
+
 ### Added
 
 - Port Settings page (opt-in, `JSP_PORT_MENU=1`, US 1.00 build): toolkit patches 2516-2518 (menu label replacement, present-time overlay layer, label mask by open panel), `jsp_port_menu.cpp`, the lifter's `--insn-patches` for the Options row count (`installer/port/jsp/lift_insn_patches.json`), and the label and font art drawn at installer build time (`menu_label_art.py`, `menu_font_art.py`). The Online page edits Method, Server, Online name and Community preset with a character picker and saves them to the shared settings folder (`repsn.ini`, `community.ini`, as the launcher does), applied on the next start; `JSP_PORT_MENU_EDIT=0` keeps it read only. Overlay text is blitted in two passes (rims, then bodies) so letters no longer cover each other. Checked in game under Proton with a player-side build of the US disc: the page opens, edits, saves and closes; without `JSP_PORT_MENU` the Options list keeps its five rows. See `docs/notes/PORT_SETTINGS.md`.
