@@ -8,7 +8,7 @@
 # registers them from SPU_DIR.
 cmake_minimum_required(VERSION 3.20)
 project(jsp
-    VERSION 0.1.0
+    VERSION 0.2.0
     LANGUAGES C CXX
     DESCRIPTION "Recompiled PS3 game project (ps3recomp)"
 )
