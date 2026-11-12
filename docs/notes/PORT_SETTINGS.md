@@ -1,8 +1,8 @@
 # Port Settings page (opt-in)
 
 ENHANCEMENT, off by default. `JSP_PORT_MENU=1` gives the Options list a sixth row, "Port Settings". Cross on it opens a page drawn by
-the port over the game (Up/Down select, Cross opens, Circle goes back); the first sub-page, "Online", shows the online settings read at
-start and edits four of them (below). US 1.00 build only: the hooks sit at fixed addresses of that code,
+the port over the game (Up/Down select, Cross opens, Circle goes back). Its pages: Display, Graphics and Controls (the launcher's settings, below), Online (below), and a list of what stays launcher-only. To get the row
+without the launcher's window, put the line `JSP_PORT_MENU=1` in `play_settings.txt` (every line of that file becomes an environment variable for the game; the settings window keeps lines it does not own). US 1.00 build only: the hooks sit at fixed addresses of that code,
 and the glue refuses to start on another build (it reads the instruction it needs to find).
 
 ## What it is made of
@@ -21,6 +21,36 @@ and the glue refuses to start on another build (it reads the instruction it need
 The lift: with the instruction patch the lifted code reads the switch `g_port_menu_six_rows` (defined in `jsp_port_menu.cpp` whether or not the
 page is on), so a US setup lifts again once (the lift fingerprint includes the patch file) and the build follows. With the switch off the game
 runs the instruction as before. The EU build lifts without the patch (its code differs at that address and the lifter would stop).
+
+## The settings pages (Display, Graphics, Controls)
+
+The launcher's settings, editable in the game. Same file (`play_settings.txt`), same keys, same format: only the lines a page changes are
+rewritten, comments and unknown lines stay, the file's own line ends are kept, a temp file beside it is renamed over it. Every change is saved at
+once (as the launcher does), the page says "Saved. Applied now." or "Saved. Applies on the next start." A `*` after a value marks a saved value the
+running game has not picked up yet. A failed save is shown on the page. `JSP_PORT_MENU_EDIT=0` removes these pages (and keeps Online read only).
+
+Which file: the launcher (`jsp-launcher.exe` and both settings windows) names the file it loaded in `JSP_SETTINGS_FILE`. Started another way, the game uses
+the first of `<install folder>\play_settings.txt`, `<exe folder>\play_settings.txt`, `%APPDATA%\JSP Fan Revival\play_settings.txt`, else it creates the
+AppData one. The main page shows the path. The launcher's window closes with the game, so it never writes an older copy over a change made in the game.
+
+| Page | Setting (file key) | When it applies |
+|---|---|---|
+| Display | Render resolution (`RES_SCALE`), Display mode (`FULLSCREEN`), Window size (`WINDOW_SIZE`), FPS in the window title (`TITLE_STATS`) | next start (read once by the toolkit; F11 still switches fullscreen in the game) |
+| Graphics | Fight HUD size (`UI_SCALE`), Edge smoothing (`AA_MODE`), FPS counter (`FPS_COUNTER`), Shadow distance (`SHADOW_RANGE`), Model detail (`MODEL_DETAIL`), Object draw distance (`OBJECT_DISTANCE`) | now (the readers in `jsp_game.cpp` re-read when a page changes them; model detail and object distance are rewritten into the map objects already seen) |
+| Graphics | Shadows (`SHADOW_SCALE`), Full-size smoke and effects (`FX_FULL`) | next start (static caches in the toolkit) |
+| Controls | Input (`INPUT_MODE`), Mouse sensitivity (`MOUSE_SENS`) | next start (static caches in toolkit patch 6500) |
+| Controls > Keys | the 20 key bindings of the current mode's page: press the key (Esc or Circle cancels; F11 stays fullscreen); a key in use swaps; Keyboard and Keyboard-and-mouse have a page each (`KB_KEY_*`, `KBM_KEY_*`, and `PAD_KEY_*` for the game, as the launcher writes them) | next start |
+| Controls > Controller buttons | which Xbox button presses each PS3 button (`PAD_BTN_*`; a button in use swaps) | next start |
+
+Each page ends in "Reset this page to the defaults" (the launcher's defaults). Where a key is unset the page shows what the game does then (for example Edge smoothing Off,
+where the launcher would write FXAA).
+
+Launcher only (the page "Launcher only" says why): Unlock everything (the save is backed up before the game starts and the game loads its save first; the key is never taken from the
+file), CPU boost and "boost off at exit" (the launcher changes the power plan around the game), the game disc folder, EBOOT and rebuild options (chosen at install), and the Online tab's preset list and Find on LAN.
+
+Code: `installer/port/jsp/jsp_settings.h` (key table, file model, key and button rules; header only), `jsp_settings.cpp` (file path, atomic save, live values),
+the pages in `jsp_port_menu.cpp`. Host test: `bash installer/tools/settings_test.sh` (file round trip, the rules the launcher applies, the pages against a fake file, and a check
+of the key table against `launcher/JStarsLauncher*.cs`, the readers and the defaults).
 
 ## The Online page (editable)
 
@@ -41,7 +71,7 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 
 ## State of the tests
 
-- Host tests: `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
+- Host tests: `bash installer/tools/settings_test.sh` (above), `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
   (canvas, rectangles, text, dirty rectangles; run against the exported and patched toolkit), a series export of all patches in order
   (`installer/tools/export_toolkit.py`), and syntax-only compiles of the backend, `jsp_port_menu.cpp`, `jsp_online.cpp` and `stubs.cpp`.
 - In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows): with `JSP_PORT_MENU=1` a
@@ -52,6 +82,8 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 
 ## Open
 
+- The settings pages are not built or run yet (host test and syntax checks only): open each page, change one live and one next-start setting, rebind a key, close, and start again to see the saved values arrive.
+- Live input rebinding would need a generation counter in toolkit patch 6500 (its key, button and mode tables are read once).
 - Build the v19 tree with the feature and run the page (open it from the Options list, both sub-pages, edit and save, close it, check the menu keeps working, and that the written `repsn.ini` is read back at the next start).
 - The port's "Exit Game" option shares the Options list and tests the cursor from the bottom; check both options with the sixth row present.
 - The overlay is drawn before 2508's and 2509's pictures, so those land on top (a page open with the FPS counter or the time-limit stamp).

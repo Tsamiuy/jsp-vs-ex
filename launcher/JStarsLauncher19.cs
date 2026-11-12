@@ -1744,6 +1744,7 @@ namespace JStarsLauncher
                     if (k.Length > 0) psi.EnvironmentVariables[k] = v;
                 }
                 boostOff = psi.EnvironmentVariables["BOOST_OFF_ON_EXIT"] != "0";
+                psi.EnvironmentVariables["JSP_SETTINGS_FILE"] = settingsFile;   // the in-game settings pages write this file (jsp_settings.cpp)
                 psi.EnvironmentVariables.Remove("JSP_UNLOCK_ALL");   // never from the settings file: only the Cheats box, after its backup
                 if (unlockThisRun) { psi.EnvironmentVariables["JSP_UNLOCK_ALL"] = "1"; Log("Unlock everything: on for this start (save backed up)."); }
 
