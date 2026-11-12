@@ -258,7 +258,7 @@ def facts(app, blobs, refused, not_text, cuts, names):
     except OSError:
         L.append("free space on the install drive: unknown")
     L.append(f"bundled Python: {sys.version.split()[0]} ({platform.architecture()[0]})")
-    exe_name = firstrun.TREE_EXE[firstrun.payload_tree(app)]   # the tree's exe: jsp.exe (current) or JStarsRecomp.exe (legacy)
+    exe_name = firstrun.TREE_EXE["v18"]   # jsp.exe; no payload_tree() here, a bundle must also be made from a folder whose tree.txt is odd
     exe = app / "game" / exe_name
     if exe.is_file():
         st = exe.stat()

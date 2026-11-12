@@ -13,11 +13,11 @@ Steps (each leaves build/markers/<step>.done holding a fingerprint of its inputs
 unchanged and says which input changed otherwise; a marker in the old plain format counts as stale):
   checks  preflight, one line per check: "OK code ...", "WARN code ..." or "FAIL code ..." (codes in PREFLIGHT below)
   lift    PPU: ppu_loader.py, ppu_lifter.py  -> build/analysis, build/recompiled   (the SETUP.md pipeline; the v18 tree adds find_functions.py)
-  spu     the 18 JOBCRT jobs embedded in the EBOOT -> build/spu (jsp_spu.py, or lift_jobs.py for the v18 tree: scan, wrap, lift, spu_workloads.c)
+  spu     the 18 JOBCRT jobs embedded in the EBOOT -> build/spu (lift_jobs.py: scan, wrap, lift, spu_workloads.c)
   build   cmake + ninja with the bundled llvm-mingw (cmake/llvm-mingw.cmake; the same commands in build/build-port.cmd) -> build/port/JStarsRecomp.exe
   place   game/JStarsRecomp.exe, game/EBOOT.elf, game/run/, paths.txt for the launcher
-Which tree is built is written by assemble_payload.py into <root>/tree.txt: "v15" (this repository's jstars/port on the v0.15 toolkit,
-no file = v15) or "v18" (installer/port: the glue in port/, the ps3recomp v0.19.0 toolkit with installer/port/patches applied, exe jsp.exe).
+The tree is written by assemble_payload.py into <root>/tree.txt: "v18" (installer/port: the glue in port/, the ps3recomp v0.19.0
+toolkit with installer/port/patches applied, exe jsp.exe), the only one; a missing or other tree.txt stops with an error (the v15 tree is retired: tag legacy-v15).
 Exit code 0 when everything asked for passed. The last line is "RESULT: ...". The log (--log) is appended to.
 
 Portable zip (layout of --interactive --portable adapted from the same installer):
@@ -70,7 +70,7 @@ EXE = PROFILE["exe"]
 TOC = "0x8d3888"          # r2 of the lifted code (both regions); the v18 lifter takes it as --toc
 INSN_PATCHES = "lift_insn_patches.json"   # in the port folder: instruction patches the v0.19 lifter emits behind a switch (US 1.00 code only)
 PORT_MENU_ART = ("menu_training_off.rgba", "menu_training_on.rgba", "menu_port_settings_off.rgba", "menu_port_settings_on.rgba", "menu_font.jmf")
-TREE_EXE = {"v15": EXE, "v18": "jsp.exe"}
+TREE_EXE = {"v18": "jsp.exe"}   # the only tree; the v15 tree (exe EXE) is no longer built, see tag legacy-v15
 # ======================================================================================================================
 STEPS = ["checks", "lift", "spu", "build", "place"]
 WIN = os.name == "nt"
@@ -490,13 +490,16 @@ MARKER_TAG = "fp1 "     # a marker is "fp1 " + JSON of the step's inputs; anythi
 
 
 def payload_tree(root):
-    """'v18' when <root>/tree.txt says so, else 'v15' (payloads made before the file existed)."""
+    """'v18' when <root>/tree.txt says so. A missing or unknown tree.txt is an error, not a guess: this firstrun.py only knows the
+    v18 recipe, and a payload of the retired v15 tree (git tag legacy-v15, issue #152) has its own firstrun.py."""
     f = pathlib.Path(root) / "tree.txt"
     try:
         v = f.read_text().split()[0]
     except (OSError, IndexError):
-        return "v15"
-    return v if v in TREE_EXE else "v15"
+        v = ""
+    if v not in TREE_EXE:
+        sys.exit(f"{f}: missing or unknown tree id {v!r}; this firstrun.py builds only the v18 tree (the v15 tree is retired, see tag legacy-v15)")
+    return v
 
 
 class Ctx:
@@ -527,12 +530,10 @@ class Ctx:
         eb = self.cached("eboot", lambda: sha(self.eboot))
         tools = self.cached("tools", lambda: tree_hash(self.tools))
         if step == "lift":
-            return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, **({"tree": "v18"} if self.tree == "v18" else {}),
+            return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, "tree": "v18",
                     **({"insn_patches": self.cached("insn_patches", lambda: sha(insn_patches(self)))} if insn_patches(self) else {})}
         if step == "spu":
-            if self.tree == "v18":
-                return {"eboot": eb, "toolkit_tools": tools, "lift_jobs": self.cached("lift_jobs", lambda: tree_hash(self.root / "tools" / "lift_jobs.py"))}
-            return {"eboot": eb, "toolkit_tools": tools, "jsp_spu": self.cached("jsp_spu", lambda: tree_hash(self.root / "tools" / "jsp_spu.py"))}
+            return {"eboot": eb, "toolkit_tools": tools, "lift_jobs": self.cached("lift_jobs", lambda: tree_hash(self.root / "tools" / "lift_jobs.py"))}
         if step == "build":
             return {"lift": digest(self.inputs("lift")), "spu": digest(self.inputs("spu")),
                     "port_sources": self.cached("port", lambda: tree_hash(self.root / "port")),
@@ -606,7 +607,7 @@ def insn_patches(c):
     """The --insn-patches file of the v18 tree for the US 1.00 code, else None. Its addresses are that code's: the lifter stops when an
     instruction word differs from the patch's `orig`, so the EU build lifts without it."""
     f = c.root / "port" / INSN_PATCHES
-    return f if c.tree == "v18" and c.region == "US" and f.is_file() else None
+    return f if c.region == "US" and f.is_file() else None
 
 
 def step_lift(c):
@@ -619,17 +620,15 @@ def step_lift(c):
     ok, t1 = run("lift: ppu_loader", [*c.py, c.tools / "ppu_loader.py", e, "-o", str(an) + os.sep], an / "ppu_loader.log")
     if not ok:
         return False
-    funcs, jobs_args, t3 = an / "EBOOT.functions.json", ["--jobs"], 0
-    if c.tree == "v18":
-        # the v0.19 lifter wants the function list completed by find_functions.py and the TOC value
-        funcs = an / "functions.json"
-        ok, t3 = run("lift: find_functions", [*c.py, c.tools / "find_functions.py", e, "--seed-json", an / "EBOOT.functions.json",
-                                              "--output", funcs], an / "find_functions.log")
-        if not ok:
-            return False
-        jobs_args = ["--toc", TOC, "-j"]   # --toc goes before the job count; the pair is spliced in front of it
-        if insn_patches(c):
-            jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # JSP_PORT_MENU=1: the Options row count (see jsp_port_menu.cpp)
+    # the v0.19 lifter wants the function list completed by find_functions.py and the TOC value
+    funcs = an / "functions.json"
+    ok, t3 = run("lift: find_functions", [*c.py, c.tools / "find_functions.py", e, "--seed-json", an / "EBOOT.functions.json",
+                                          "--output", funcs], an / "find_functions.log")
+    if not ok:
+        return False
+    jobs_args = ["--toc", TOC, "-j"]   # --toc goes before the job count; the pair is spliced in front of it
+    if insn_patches(c):
+        jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # JSP_PORT_MENU=1: the Options row count (see jsp_port_menu.cpp)
     ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", funcs,
                                       "--hle-stubs", an / "EBOOT.imports.json", "--code-end", CODE_END[c.region],
                                       "--chunks", "64", *jobs_args, str(c.a.jobs), "--output", out], out / "lift.log")
@@ -642,14 +641,8 @@ def step_lift(c):
 
 
 def step_spu(c):
-    if c.tree == "v18":
-        ok, _ = run("spu: jobs", [*c.py, c.root / "tools" / "lift_jobs.py", "--eboot", c.eboot, "--ps3recomp", c.root / "ps3recomp",
-                                  "--out", c.build / "spu", "-j", str(min(4, c.a.jobs))], c.build / "spu.log")
-        n = len(list((c.build / "spu").glob("*/spu_recomp.c")))
-        say(f"[spu] {n} lifted job images")
-        return ok and n > 0 and (c.build / "spu" / "spu_workloads.c").is_file()
-    ok, _ = run("spu: jobs", [*c.py, c.root / "tools" / "jsp_spu.py", c.eboot, "--tools", c.tools, "--work", c.build / "spuwork",
-                              "--out", c.build / "spu", "--jobs", str(min(4, c.a.jobs))], c.build / "spu.log")
+    ok, _ = run("spu: jobs", [*c.py, c.root / "tools" / "lift_jobs.py", "--eboot", c.eboot, "--ps3recomp", c.root / "ps3recomp",
+                              "--out", c.build / "spu", "-j", str(min(4, c.a.jobs))], c.build / "spu.log")
     n = len(list((c.build / "spu").glob("*/spu_recomp.c")))
     say(f"[spu] {n} lifted job images")
     return ok and n > 0 and (c.build / "spu" / "spu_workloads.c").is_file()

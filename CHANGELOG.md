@@ -6,6 +6,7 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Installer: `assemble_payload.py --tree legacy` (and `v15`) no longer builds the earlier v0.15 tree and exits with a pointer to the git tag `legacy-v15` (issue #152); `firstrun.py` builds only the current tree and stops with an error when `tree.txt` is missing or unknown; CI no longer builds or tests the legacy tree (the `toolkit` job and the legacy patch series check are gone, the `tree` input of `installer.yml` too).
 - Repository layout: `Play J-Stars.bat` and `Test Fight.bat` (legacy v0.15 tree only) moved from the root into `jstars/`, next to `play.ps1` which they start; the installer never shipped them.
 - Repository layout: `jstars-notes/` is now `docs/archive/jstars-notes/`, `toolkit/` and `tools/toolkit/apply_toolkit.py` are now in `jstars/toolkit/`, and `docs/README.md` lists the documentation by audience. `docs/LAYOUT.md` marks every root folder current or legacy. No files deleted; the installer, CI and the checks use the new paths.
 - Releases: `.recomp.json` now names the current version (`"x-version"`), which `tools/release.py bump` rewrites and `--check` (CI) compares with `installer/VERSION`; from 1.0.0 on the bump also sets its status to `released`. Its notes no longer say that nothing has been released.
