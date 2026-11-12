@@ -41,10 +41,14 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 
 ## State of the tests
 
-- Host tests only: `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
+- Host tests: `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
   (canvas, rectangles, text, dirty rectangles; run against the exported and patched toolkit), a series export of all patches in order
   (`installer/tools/export_toolkit.py`), and syntax-only compiles of the backend, `jsp_port_menu.cpp`, `jsp_online.cpp` and `stubs.cpp`.
-- The read-only page has been seen in game on the maintainers' earlier tree (US disc, Proton). The editable page, the written files and the font change have not run in the game anywhere yet, and nothing has run on this tree.
+- In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows): with `JSP_PORT_MENU=1` a
+  scripted pad run opened Options > Port Settings > Online, set Method, Server and Online name with the picker, saved and closed;
+  `repsn.ini` then held the new values with its other lines, comment and CRLF kept, `community.ini` stayed off and no temporary
+  file was left. Without `JSP_PORT_MENU` the Options list showed its five rows and no file was written. The first run of a fresh
+  build (no shader cache yet) reached the menu too late for the scripted route; the second run passed.
 
 ## Open
 
