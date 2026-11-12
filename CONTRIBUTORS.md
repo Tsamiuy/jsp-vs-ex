@@ -41,7 +41,7 @@ Updated by the contributors workflow from merged pull requests in this repositor
 
 <!-- contributors:start -->
 - [Tsamiuy](https://github.com/Tsamiuy): 49 merged pull requests, most recent #139, #116, #115
-- [undecuple](https://github.com/undecuple): 44 merged pull requests, most recent #137, #127, #130
+- [undecuple](https://github.com/undecuple): 45 merged pull requests, most recent #140, #137, #127
 <!-- contributors:end -->
 
 ## Play testers
