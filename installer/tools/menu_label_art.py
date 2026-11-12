@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Emit the "Training" label of the main menu's sub-menu panel (toolkit patch 2516) and the "Port Settings" label (patch 2518) as raw RGBA files.
 
-Our own art: the letters come from Fira Sans Heavy Italic (SIL Open Font License 1.1, https://github.com/
-mozilla/Fira; pinned by SHA-256 below; the font file is not in the repository: put FiraSans-HeavyItalic.ttf in build/installer/fonts/), drawn heavier and in the game's panel-label style (measured on
+Our own art: the letters come from Fira Sans Heavy Italic (SIL Open Font License 1.1, version 4.301 from https://github.com/
+bBoxType/FiraSans; pinned by SHA-256 below, and downloaded by the installer workflow (FIRA_URL); the font file is not in the repository: put FiraSans-HeavyItalic.ttf in build/installer/fonts/), drawn heavier and in the game's panel-label style (measured on
 the game's own 512 x 64 labels, no pixels of them are read or kept here):
   off: white-to-grey vertical gradient letters, ~2 px black rim, soft 1 px edge;
   on:  black letters with a ~3 px soft white glow.

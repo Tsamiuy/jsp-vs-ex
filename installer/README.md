@@ -77,14 +77,15 @@ create the save, or use the EU file's first five events as a prefix (not tried o
 
 You need: Git, Python 3 with Pillow and numpy (`python -m pip install pillow numpy`), Inno Setup 6.7 or newer (`ISCC.exe`), internet access
 for the toolchain download, the 64-bit embeddable Python package from python.org (3.13 was used), and
-`IBMPlexMono-Bold.ttf` (SIL OFL 1.1). No Visual Studio and no separate C compiler: the launcher is compiled with the
+`IBMPlexMono-Bold.ttf` and `FiraSans-HeavyItalic.ttf` (Fira Sans 4.301 from github.com/bBoxType/FiraSans; both SIL OFL 1.1;
+the workflow's pinned URLs and SHA-256 are `PLEX_*` and `FIRA_*` in `.github/workflows/installer.yml`). No Visual Studio and no separate C compiler: the launcher is compiled with the
 downloaded llvm-mingw.
 
 ```
 git clone --recurse-submodules https://github.com/Tsamiuy/jsp-vs-ex.git
 cd jsp-vs-ex
 mkdir build\installer\fonts
-rem put IBMPlexMono-Bold.ttf in build\installer\fonts
+rem put IBMPlexMono-Bold.ttf and FiraSans-HeavyItalic.ttf in build\installer\fonts
 rem unpack the embeddable Python into build\installer\toolchain-cache\python (python.exe directly inside)
 python installer\tools\fetch_toolchain.py
 python installer\tools\installer_art.py
