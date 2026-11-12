@@ -90,15 +90,20 @@ def units():
     lvl, cid, msg = firstrun.identify_eboot(a_elf, "BLUS31519")
     check("E3 known build, same disc: OK", (lvl, cid) == ("OK", "E3") and "matches the disc folder" in msg, msg)
     lvl, _c, msg = firstrun.identify_eboot(b_elf, "BLUS31519")
-    check("E3 same program, other file layout: WARN", lvl == "WARN" and "should work" in msg, msg)
+    check("E3 same program, other file layout: WARN, full hash", lvl == "WARN" and "should work" in msg
+          and hashlib.sha256(b_elf).hexdigest() in msg, msg)
     lvl, _c, msg = firstrun.identify_eboot(a_elf, "BLES02136")
     check("E3 other region's EBOOT: FAIL", lvl == "FAIL" and "same copy as the disc folder" in msg, msg)
     lvl, _c, msg = firstrun.identify_eboot(other, "BLUS31519")
-    check("E3 unknown build: FAIL with a hash prefix only", lvl == "FAIL" and hashlib.sha256(other).hexdigest()[:12] in msg
-          and hashlib.sha256(other).hexdigest() not in msg and "/" not in msg and "\\" not in msg, msg)
+    check("E3 unknown build: FAIL with the full hash and the build-again.cmd hint", lvl == "FAIL" and hashlib.sha256(other).hexdigest() in msg
+          and "build-again.cmd" in msg and "dev_hdd0" not in msg, msg)
+    for upd in ("C:\\rpcs3\\dev_hdd0\\game\\BLUS31519\\USRDIR\\EBOOT.elf", "/x/RPCS3/DEV_HDD0/game/NPUB31647/USRDIR/EBOOT.elf"):
+        lvl, _c, msg = firstrun.identify_eboot(other, "BLUS31519", path=upd)
+        check("E3 unknown build under dev_hdd0\\game: names path, full hash, update hint", lvl == "FAIL" and upd in msg
+              and hashlib.sha256(other).hexdigest() in msg and "update's EBOOT" in msg and "PS3_GAME" in msg, msg)
     lvl, _c, msg = firstrun.identify_eboot(other, "BLUS31519", allow_unknown=True)
-    check("E3 unknown build + --allow-unknown-eboot: WARN, unsupported, hash prefix only", lvl == "WARN" and "UNSUPPORTED" in msg
-          and hashlib.sha256(other).hexdigest()[:12] in msg and hashlib.sha256(other).hexdigest() not in msg, msg)
+    check("E3 unknown build + --allow-unknown-eboot: WARN, unsupported, full hash", lvl == "WARN" and "UNSUPPORTED" in msg
+          and hashlib.sha256(other).hexdigest() in msg, msg)
     lvl, _c, msg = firstrun.identify_eboot(a_elf, "BLES02136", allow_unknown=True)
     check("E3 other region's known EBOOT + --allow-unknown-eboot: still FAIL", lvl == "FAIL" and "same copy as the disc folder" in msg, msg)
     lvl, _c, msg = firstrun.identify_eboot(a_elf, "BLUS31519", allow_unknown=True)
