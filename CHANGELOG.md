@@ -2,7 +2,7 @@
 
 All notable changes are listed here, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `X.Y.Z` (the number in `installer/VERSION`).
-0.0.1 is the first version and has not been released yet, so everything so far is under Unreleased.
+0.1.0 and 0.2.0 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
 
 ## [Unreleased]
 
