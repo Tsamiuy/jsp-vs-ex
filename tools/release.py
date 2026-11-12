@@ -20,6 +20,11 @@ Docs that name the current release mark it with a span on one line: `<!-- versio
 requires every X.Y.Z inside a span to equal installer/VERSION, and bump rewrites them, so a span may hold a whole link
 (`<!-- version -->[0.2.0](.../releases/tag/v0.2.0)<!-- /version -->`). Every *.md file except CHANGELOG.md is scanned;
 text outside the spans (history such as "since 0.1.0") is left alone.
+
+.recomp.json (the project's entry for recomp.fyi) carries the version in its extension field "x-version"; --check requires
+it to equal installer/VERSION and bump rewrites it. From 1.0.0 on, bump also sets "status" from "exploring" or
+"in-progress" to "released" (the schema's "public build, still maintained"); 0.x versions are pre-releases and leave it.
+A repository without .recomp.json is not checked.
 """
 import argparse
 import datetime
@@ -38,6 +43,9 @@ UNRELEASED = "## [Unreleased]"
 MARKER = re.compile(r"(<!-- version -->)(.*?)(<!-- /version -->)")
 OPEN_MARKER = "<!-- version -->"
 ANY_VERSION = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")
+RECOMP_JSON = ".recomp.json"
+RECOMP_VERSION = re.compile(r'("x-version"\s*:\s*")([^"]*)(")')
+RECOMP_STATUS = re.compile(r'("status"\s*:\s*")(exploring|in-progress)(")')
 SKIP_DIRS = {".git", "node_modules", "build", "work", "vendor"}
 
 
@@ -133,6 +141,12 @@ def check(root):
         problems.append(f"{CHANGELOG}: no '## [{version}]' section for the current version")
     for rel in doc_files(root):
         problems += span_problems(rel, read(root, rel), version)
+    if (root / RECOMP_JSON).exists():
+        m = RECOMP_VERSION.search(read(root, RECOMP_JSON))
+        if m is None:
+            problems.append(f'{RECOMP_JSON}: no "x-version" field')
+        elif m.group(2) != version:
+            problems.append(f'{RECOMP_JSON}: x-version is {m.group(2)}, {VERSION_FILE} is {version}')
     return problems
 
 
@@ -172,6 +186,11 @@ def bump(root, arg, today=None):
         filled = fill_spans(text, new)
         if filled != text:
             out[rel] = filled
+    if (root / RECOMP_JSON).exists():
+        text = RECOMP_VERSION.sub(lambda m: m.group(1) + new + m.group(3), read(root, RECOMP_JSON), count=1)
+        if parse(new)[0] >= 1:
+            text = RECOMP_STATUS.sub(lambda m: m.group(1) + "released" + m.group(3), text, count=1)
+        out[RECOMP_JSON] = text
     for rel, text in out.items():
         (root / rel).write_text(text, encoding="utf-8", newline="")
     return list(out), []
