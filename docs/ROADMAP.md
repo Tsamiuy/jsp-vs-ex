@@ -38,6 +38,7 @@ build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree curren
 - ✅ **Training Mode** in Free Battle: a standing dummy, no KO with health refill, unlimited time ([details](FEATURES.md#training-mode))
 - 📋 Training options: infinite Stamina, infinite support, unlimited Victory Burst ([details](FEATURES.md#training-options))
 - 📋 Two local players in Training ([details](FEATURES.md#training-2p))
+- 📋 Arcade for two players on one PC ([details](FEATURES.md#arcade-2p))
 - 📋 KO count up to 5 as a match option in every mode except Training ([details](FEATURES.md#ko-count))
 - 📋 1v1 and 3v3 matches beside the usual 2v2 (the game is built around 2v2 with a support character; 3v3 only if the
   engine allows it); all three online too, see section 4 ([details](FEATURES.md#match-sizes))
@@ -63,6 +64,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
 - 📋 Lobbies, matchmaking, ranked ([details](FEATURES.md#lobbies-ranked))
 - 📋 Online Training for up to 4 players ([details](FEATURES.md#online-training))
+- 📋 Online Arcade for two players, the smaller co-op step before Victory Road ([details](FEATURES.md#online-arcade-2p))
 - 📋 Online co-op Victory Road (the largest online item) ([details](FEATURES.md#online-victory-road))
 
 ## 5. After 1.0  📋
