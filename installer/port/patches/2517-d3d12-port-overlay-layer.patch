@@ -1,0 +1,506 @@
+Patch 2517: a present-time overlay for the port's own pages: a CPU-drawn RGBA layer alpha-blended onto the back buffer just before present (ENHANCEMENT).
+
+Closed by default and free: while no page is open `jov_gpu_present` is one flag test; nothing is created before the first page. Unlike 2508's oskp_draw,
+which copies an opaque panel with CopyTextureRegion, the layer is blended by one small draw (fullscreen triangle, bilinear, premultiplied source-over,
+own root signature/pipeline/descriptor heap, so the guest's state is untouched) and only the changed rectangle is uploaded (per frame index; a frame's
+copy is rewritten only after the GPU is done with it, like the swap chain's own resources). 2508 (oskp_draw) and 2509 (copyrects_draw, stamp_draw) also
+draw onto the back buffer before present; their calls come after jov_gpu_present, so their pictures land on top of this layer. ASSUMPTION: that order is
+what is wanted; check with a page open plus the FPS counter or the time-limit stamp. The canvas is at whatever size the port asks (begin(0,0) =
+output size), stretched over the back buffer.
+
+libs/video/jsp_overlay.h is the CPU half and has no Direct3D in it (host-testable): canvas, fill, RGBA blit, and text in the menu's own style from
+menu_font.jmf (installer/tools/menu_font_art.py makes it; searched in JSP_MENU_LABEL_DIR, the exe directory, the working directory). Port glue API
+(plain C, installer/port/jsp/jsp_overlay_api.h; a short spin lock the render thread only try-locks, so an open edit never stalls a frame):
+    jsp_overlay_begin(w, h) / _fill_rect / _blit_rgba / _text / _text_style / _text_width / _cap_height / jsp_overlay_end() / jsp_overlay_close()
+    jsp_overlay_output_size(&w, &h), jsp_overlay_active()
+The overlay is drawn after the guest-fb / scanout / composite paths and before the frame dump and the PRESENT transition, so dumps and screenshots
+show it. No game data is stored here.
+
+diff --git a/libs/video/jsp_overlay.h b/libs/video/jsp_overlay.h
+new file mode 100644
+index 0000000..2b8599e
+--- /dev/null
++++ b/libs/video/jsp_overlay.h
+@@ -0,0 +1,262 @@
++/* J-Stars patch 2517: a present-time overlay for the port's own pages (ENHANCEMENT, off and free unless a page is open).
++ *
++ * Like 2508's oskp_draw (a CPU-drawn RGBA panel in an upload buffer copied onto the back
++ * buffer before present). Here the layer is alpha-blended by one small draw (the copy overwrote), and only the changed rows are uploaded.
++ *
++ * This file is the CPU half (canvas, rectangles, bitmaps, text in the menu's own style from menu_font.jmf made by
++ * installer/tools/menu_font_art.py) and has no Direct3D in it, so it builds on a host compiler for tests. The backend draws the canvas.
++ * It is included once, by rsx_d3d12_backend.c. Port glue API (plain C, see installer/port/jsp/jsp_overlay_api.h):
++ *
++ *   jsp_overlay_begin(w, h)    start an edit of the layer; w = 0 means the output (back buffer) size. Clears what the last edit drew.
++ *                              The layer is retained: the backend keeps drawing it every frame, so a page redraws only when it changes.
++ *   jsp_overlay_fill_rect(x, y, w, h, rgba)
++ *   jsp_overlay_blit_rgba(x, y, w, h, straight_rgba8, stride_bytes)
++ *   jsp_overlay_text(x, y, str, scale, rgba) / _text_style(.., style)   y = top of the capital letters; style 0 = "off", 1 = "on"
++ *   jsp_overlay_end()          publish the edit (the next present uploads the changed rectangle)
++ *   jsp_overlay_close()        remove the layer; after that a present costs one flag test
++ * Colours are 0xAABBGGRR (JSP_RGBA(r,g,b,a)), straight alpha. The edit holds a spin lock the render thread only try-locks (a frame that finds
++ * it busy keeps showing the previous layer), so begin ... end must be short and on one thread.
++ */
++#ifndef JSP_OVERLAY_H
++#define JSP_OVERLAY_H
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++
++#define JSP_RGBA(r, g, b, a) ((uint32_t)(r) | ((uint32_t)(g) << 8) | ((uint32_t)(b) << 16) | ((uint32_t)(a) << 24))
++
++typedef struct { int x0, y0, x1, y1; } jov_rect;   /* x1/y1 exclusive; empty when x1 <= x0 */
++
++static struct {
++    volatile int lock;          /* 1 while an edit is open or the renderer reads */
++    volatile int active;        /* the layer is shown */
++    volatile unsigned gen;      /* bumped by every end() */
++    uint8_t* px;                /* premultiplied RGBA8, w x h, rows of w*4 */
++    int w, h;
++    int out_w, out_h;           /* back buffer size, set by the backend */
++    jov_rect used, prev, cur;   /* drawn bounds of the last edit, of the one before, of this one */
++    jov_rect pend[4];           /* per frame index: rows still to upload */
++    int editing;
++    /* font */
++    int font_tried, font_ok;
++    uint32_t fw, fh, fstyles, ffirst, fcount, fcell_h, fbase, fstride, fcap;
++    uint8_t* fpx;               /* premultiplied atlas */
++    uint16_t* fmet;             /* 8 u16 per glyph */
++} jov;
++
++static int jov_try_lock(void) { return !__sync_lock_test_and_set(&jov.lock, 1); }
++static void jov_lock(void) { while (__sync_lock_test_and_set(&jov.lock, 1)) { } }
++static void jov_unlock(void) { __sync_lock_release(&jov.lock); }
++
++static void jov_union(jov_rect* a, jov_rect b)
++{
++    if (b.x1 <= b.x0 || b.y1 <= b.y0) return;
++    if (a->x1 <= a->x0 || a->y1 <= a->y0) { *a = b; return; }
++    if (b.x0 < a->x0) a->x0 = b.x0;
++    if (b.y0 < a->y0) a->y0 = b.y0;
++    if (b.x1 > a->x1) a->x1 = b.x1;
++    if (b.y1 > a->y1) a->y1 = b.y1;
++}
++static jov_rect jov_clip(jov_rect r) {
++    if (r.x0 < 0) r.x0 = 0;
++    if (r.y0 < 0) r.y0 = 0;
++    if (r.x1 > jov.w) r.x1 = jov.w;
++    if (r.y1 > jov.h) r.y1 = jov.h;
++    return r;
++}
++
++/* The backend reports the back buffer size at init; begin(0, 0) takes it. */
++void jsp_overlay_set_output(int w, int h) { jov.out_w = w; jov.out_h = h; }
++void jsp_overlay_output_size(int* w, int* h) { if (w) *w = jov.out_w; if (h) *h = jov.out_h; }
++int jsp_overlay_active(void) { return jov.active; }
++
++int jsp_overlay_begin(int w, int h)
++{
++    if (w <= 0 || h <= 0) { w = jov.out_w; h = jov.out_h; }
++    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return 0;
++    jov_lock();
++    if (w != jov.w || h != jov.h || !jov.px) {       /* new size: a fresh canvas, every frame re-uploads it all */
++        free(jov.px);
++        jov.px = (uint8_t*)calloc((size_t)w * h, 4);
++        if (!jov.px) { jov.w = jov.h = 0; jov_unlock(); return 0; }
++        jov.w = w; jov.h = h;
++        jov.used = (jov_rect){0, 0, w, h};
++        for (int i = 0; i < 4; i++) jov.pend[i] = (jov_rect){0, 0, w, h};
++    }
++    jov_rect u = jov_clip(jov.used);                 /* clear only what the last edit drew */
++    for (int y = u.y0; y < u.y1; y++) memset(jov.px + ((size_t)y * jov.w + u.x0) * 4, 0, (size_t)(u.x1 - u.x0) * 4);
++    jov.prev = jov.used;
++    jov.cur = (jov_rect){0, 0, 0, 0};
++    jov.editing = 1;
++    return 1;
++}
++
++/* Source-over of one premultiplied pixel (a, already tinted) onto the canvas. */
++static inline void jov_over(uint8_t* d, unsigned r, unsigned g, unsigned b, unsigned a)
++{
++    unsigned ia = 255 - a;
++    d[0] = (uint8_t)(r + (d[0] * ia + 127) / 255);
++    d[1] = (uint8_t)(g + (d[1] * ia + 127) / 255);
++    d[2] = (uint8_t)(b + (d[2] * ia + 127) / 255);
++    d[3] = (uint8_t)(a + (d[3] * ia + 127) / 255);
++}
++
++void jsp_overlay_fill_rect(int x, int y, int w, int h, uint32_t rgba)
++{
++    if (!jov.editing) return;
++    jov_rect r = jov_clip((jov_rect){x, y, x + w, y + h});
++    if (r.x1 <= r.x0 || r.y1 <= r.y0) return;
++    unsigned a = rgba >> 24, cr = (rgba & 255) * a / 255, cg = ((rgba >> 8) & 255) * a / 255, cb = ((rgba >> 16) & 255) * a / 255;
++    for (int yy = r.y0; yy < r.y1; yy++)
++        for (int xx = r.x0; xx < r.x1; xx++) jov_over(jov.px + ((size_t)yy * jov.w + xx) * 4, cr, cg, cb, a);
++    jov_union(&jov.cur, r);
++}
++
++void jsp_overlay_blit_rgba(int x, int y, int w, int h, const uint8_t* rgba, int stride)
++{
++    if (!jov.editing || !rgba) return;
++    jov_rect r = jov_clip((jov_rect){x, y, x + w, y + h});
++    if (r.x1 <= r.x0 || r.y1 <= r.y0) return;
++    for (int yy = r.y0; yy < r.y1; yy++) {
++        const uint8_t* s = rgba + (size_t)(yy - y) * stride + (size_t)(r.x0 - x) * 4;
++        for (int xx = r.x0; xx < r.x1; xx++, s += 4)
++            jov_over(jov.px + ((size_t)yy * jov.w + xx) * 4, s[0] * s[3] / 255, s[1] * s[3] / 255, s[2] * s[3] / 255, s[3]);
++    }
++    jov_union(&jov.cur, r);
++}
++
++/* ---- font ---- */
++static void jov_font_load(void)
++{
++    if (jov.font_tried) return;
++    jov.font_tried = 1;
++    char path[1100]; const char* env = getenv("JSP_MENU_LABEL_DIR");
++    FILE* f = NULL;
++    for (int k = 0; k < 3 && !f; k++) {
++        path[0] = 0;
++        if (k == 0 && env) snprintf(path, sizeof path, "%s/menu_font.jmf", env);
++#ifdef _WIN32
++        else if (k == 1) { DWORD n = GetModuleFileNameA(NULL, path, sizeof path - 40);   /* windows.h: the backend includes it first */
++            while (n && path[n - 1] != '\\' && path[n - 1] != '/') n--;
++            strcpy(path + n, "menu_font.jmf"); }
++#endif
++        else if (k == 2) snprintf(path, sizeof path, "menu_font.jmf");
++        if (path[0]) f = fopen(path, "rb");
++    }
++    if (!f) { fprintf(stderr, "[OVERLAY] menu_font.jmf not found (JSP_MENU_LABEL_DIR): no text%c", 10); return; }
++    uint32_t hd[10];
++    if (fread(hd, 4, 10, f) != 10 || memcmp(hd, "JMF1", 4) != 0 || hd[1] > 8192 || hd[2] > 8192 || hd[5] > 256) { fclose(f); return; }
++    jov.fw = hd[1]; jov.fh = hd[2]; jov.fstyles = hd[3]; jov.ffirst = hd[4]; jov.fcount = hd[5];
++    jov.fcell_h = hd[6]; jov.fbase = hd[7]; jov.fstride = hd[8]; jov.fcap = hd[9];
++    jov.fmet = (uint16_t*)malloc((size_t)jov.fcount * 16);
++    jov.fpx = (uint8_t*)malloc((size_t)jov.fw * jov.fh * 4);
++    if (!jov.fmet || !jov.fpx || fread(jov.fmet, 16, jov.fcount, f) != jov.fcount ||
++        fread(jov.fpx, 4, (size_t)jov.fw * jov.fh, f) != (size_t)jov.fw * jov.fh) {
++        free(jov.fmet); free(jov.fpx); jov.fmet = NULL; jov.fpx = NULL; fclose(f); return;
++    }
++    fclose(f);
++    for (size_t i = 0; i < (size_t)jov.fw * jov.fh; i++) {   /* premultiply */
++        uint8_t* p = jov.fpx + i * 4;
++        p[0] = (uint8_t)(p[0] * p[3] / 255); p[1] = (uint8_t)(p[1] * p[3] / 255); p[2] = (uint8_t)(p[2] * p[3] / 255);
++    }
++    jov.font_ok = 1;
++    fprintf(stderr, "[OVERLAY] font %s %ux%u, %u glyphs%c", path, jov.fw, jov.fh, jov.fcount, 10);
++}
++
++/* Pixel of the atlas (premultiplied, clamped inside the cell). */
++static inline const uint8_t* jov_atl(int x, int y, int cx0, int cy0, int cw, int ch)
++{
++    if (x < cx0) x = cx0;
++    if (x >= cx0 + cw) x = cx0 + cw - 1;
++    if (y < cy0) y = cy0;
++    if (y >= cy0 + ch) y = cy0 + ch - 1;
++    return jov.fpx + ((size_t)y * jov.fw + x) * 4;
++}
++
++/* One glyph cell with its pen at (px, by) (floats), scaled, tinted by rgba (modulate, straight). */
++static void jov_glyph(const uint16_t* m, int style, float px, float by, float scale, uint32_t rgba)
++{
++    int cw = m[2], ch = (int)jov.fcell_h;
++    int cx0 = m[0], cy0 = m[1] + style * (int)jov.fstride;
++    float dx = px - (int16_t)m[3] * scale, dy = by - jov.fbase * scale;
++    jov_rect r = jov_clip((jov_rect){(int)floorf(dx), (int)floorf(dy), (int)ceilf(dx + cw * scale) + 1, (int)ceilf(dy + ch * scale) + 1});
++    if (r.x1 <= r.x0 || r.y1 <= r.y0) return;
++    unsigned tr = rgba & 255, tg = (rgba >> 8) & 255, tb = (rgba >> 16) & 255, ta = rgba >> 24;
++    for (int y = r.y0; y < r.y1; y++) for (int x = r.x0; x < r.x1; x++) {
++        float sx = (x + 0.5f - dx) / scale - 0.5f, sy = (y + 0.5f - dy) / scale - 0.5f;
++        if (sx < -1 || sy < -1 || sx > cw || sy > ch) continue;
++        int ix = (int)floorf(sx), iy = (int)floorf(sy);
++        float fx = sx - ix, fy = sy - iy, c[4];
++        const uint8_t* p00 = jov_atl(cx0 + ix, cy0 + iy, cx0, cy0, cw, ch);
++        const uint8_t* p10 = jov_atl(cx0 + ix + 1, cy0 + iy, cx0, cy0, cw, ch);
++        const uint8_t* p01 = jov_atl(cx0 + ix, cy0 + iy + 1, cx0, cy0, cw, ch);
++        const uint8_t* p11 = jov_atl(cx0 + ix + 1, cy0 + iy + 1, cx0, cy0, cw, ch);
++        for (int k = 0; k < 4; k++)
++            c[k] = (p00[k] * (1 - fx) + p10[k] * fx) * (1 - fy) + (p01[k] * (1 - fx) + p11[k] * fx) * fy;
++        unsigned a = (unsigned)(c[3] * ta / 255 + 0.5f);
++        if (!a) continue;
++        jov_over(jov.px + ((size_t)y * jov.w + x) * 4,
++                 (unsigned)(c[0] * tr * ta / 65025.0f + 0.5f), (unsigned)(c[1] * tg * ta / 65025.0f + 0.5f),
++                 (unsigned)(c[2] * tb * ta / 65025.0f + 0.5f), a);
++    }
++    jov_union(&jov.cur, r);
++}
++
++/* Width of a string in pixels (0 when the font is missing). */
++float jsp_overlay_text_width(const char* s, float scale)
++{
++    jov_font_load();
++    if (!jov.font_ok || !s) return 0;
++    float w = 0;
++    for (; *s; s++) { unsigned c = (unsigned char)*s; if (c < jov.ffirst || c >= jov.ffirst + jov.fcount) c = '?';
++                      w += jov.fmet[(c - jov.ffirst) * 8 + 4] / 16.0f * scale; }
++    return w;
++}
++float jsp_overlay_cap_height(float scale) { jov_font_load(); return jov.font_ok ? jov.fcap * scale : 0; }
++
++void jsp_overlay_text_style(float x, float y, const char* s, float scale, uint32_t rgba, int style)
++{
++    if (!jov.editing || !s || scale <= 0) return;
++    jov_font_load();
++    if (!jov.font_ok) return;
++    if (style < 0 || style >= (int)jov.fstyles) style = 0;
++    float by = y + jov.fcap * scale;                /* y = top of the capitals */
++    /* Two passes per string when the atlas has the split planes (nstyles 6: 2+2k rim/glow, 3+2k body, k = style): every rim first,
++     * then every body, so a glyph's rim never covers the previous glyph's body and letters can sit at the font's own spacing. */
++    int passes = (style < 2 && jov.fstyles >= 6) ? 2 : 1;
++    for (int pass = 0; pass < passes; pass++) {
++        float px = x;
++        int plane = passes == 2 ? 2 + 2 * style + pass : style;
++        for (const char* t = s; *t; t++) {
++            unsigned c = (unsigned char)*t; if (c < jov.ffirst || c >= jov.ffirst + jov.fcount) c = '?';
++            const uint16_t* m = jov.fmet + (size_t)(c - jov.ffirst) * 8;
++            if (m[2]) jov_glyph(m, plane, px, by, scale, rgba);
++            px += m[4] / 16.0f * scale;
++        }
++    }
++}
++void jsp_overlay_text(float x, float y, const char* s, float scale, uint32_t rgba) { jsp_overlay_text_style(x, y, s, scale, rgba, 0); }
++
++void jsp_overlay_end(void)
++{
++    if (!jov.editing) return;
++    jov_rect d = jov.prev; jov_union(&d, jov.cur);
++    jov.used = jov.cur;
++    for (int i = 0; i < 4; i++) jov_union(&jov.pend[i], d);
++    jov.gen++;
++    jov.active = 1;
++    jov.editing = 0;
++    jov_unlock();
++}
++
++void jsp_overlay_close(void)
++{
++    jov_lock();
++    jov.active = 0;
++    for (int i = 0; i < 4; i++) jov.pend[i] = (jov_rect){0, 0, jov.w, jov.h};   /* shown again later: upload it all */
++    jov.editing = 0;
++    jov_unlock();
++}
++#endif
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b334712..6ce20bb 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -26,6 +26,7 @@
+ #include "rsx_vpull.h"
+ #include "rsx_texture_layout.h"
+ #include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
++#include "jsp_overlay.h"   /* present-time overlay for the port's own pages (J-Stars patch 2517) */
+ #include "jsp_menu_label.h"   /* "Training" label for a panel row, switched by the port (J-Stars patch 2516) */
+ #include <stdio.h>
+ #include <string.h>
+@@ -6554,6 +6555,191 @@ static void composite_present(u32 fi)
+ }
+ 
+ 
++/* ---- Patch 2517: the port overlay (jsp_overlay.h), alpha-blended onto back buffer `fi` just before present. ----
++ * One frame-indexed copy of the canvas lives in a default-heap texture (a frame's texture is rewritten only after the GPU is done with that
++ * frame, the same rule the swap chain's own per-frame resources follow) and is drawn as one fullscreen triangle with premultiplied
++ * source-over blending; only the rows that changed are copied up. Nothing here runs, and nothing is created, until the first page is open. */
++typedef struct {
++    ID3D12Resource* tex;        /* canvas copy, R8G8B8A8, w x h */
++    ID3D12Resource* up;         /* upload buffer, pitch-aligned rows of the same size */
++    u32 w, h, pitch;
++} JovFrame;
++static JovFrame s_jov_fr[FRAME_COUNT];
++static ID3D12RootSignature* s_jov_rs;
++static ID3D12PipelineState* s_jov_pso;
++static ID3D12DescriptorHeap* s_jov_heap;   /* FRAME_COUNT shader-visible SRVs */
++static int s_jov_failed;
++
++static int jov_gpu_init(void)
++{
++    if (s_jov_pso) return 1;
++    if (s_jov_failed) return 0;
++    s_jov_failed = 1;
++    static const char vs[] =
++        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
++        "O main(uint id : SV_VertexID) {\n"
++        "    O o; float2 t = float2((id << 1) & 2, id & 2);\n"
++        "    o.p = float4(t * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = t; return o;\n"
++        "}\n";
++    static const char ps[] =
++        "Texture2D<float4> t0 : register(t0);\n"
++        "SamplerState s0 : register(s0);\n"
++        "float4 main(float4 p : SV_Position, float2 uv : TEXCOORD0) : SV_Target { return t0.Sample(s0, uv); }\n";
++    ID3DBlob *vb = NULL, *pb = NULL, *err = NULL;
++    if (FAILED(D3DCompile(vs, sizeof vs - 1, "jov_vs", NULL, NULL, "main", "vs_5_0", 0, 0, &vb, &err)) ||
++        FAILED(D3DCompile(ps, sizeof ps - 1, "jov_ps", NULL, NULL, "main", "ps_5_0", 0, 0, &pb, &err))) {
++        fprintf(stderr, "[OVERLAY] shader: %s%c", err ? (const char*)err->lpVtbl->GetBufferPointer(err) : "?", 10);
++        return 0;
++    }
++    D3D12_DESCRIPTOR_RANGE rg = {0};
++    rg.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
++    rg.NumDescriptors = 1;
++    D3D12_ROOT_PARAMETER rp = {0};
++    rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++    rp.DescriptorTable.NumDescriptorRanges = 1;
++    rp.DescriptorTable.pDescriptorRanges = &rg;
++    rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    D3D12_STATIC_SAMPLER_DESC ss = {0};
++    ss.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
++    ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++    ss.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
++    ss.MaxLOD = D3D12_FLOAT32_MAX;
++    ss.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    D3D12_ROOT_SIGNATURE_DESC rd = {0};
++    rd.NumParameters = 1; rd.pParameters = &rp;
++    rd.NumStaticSamplers = 1; rd.pStaticSamplers = &ss;
++    ID3DBlob* sig = NULL;
++    if (FAILED(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
++        FAILED(s_d3d.device->lpVtbl->CreateRootSignature(s_d3d.device, 0, sig->lpVtbl->GetBufferPointer(sig),
++               sig->lpVtbl->GetBufferSize(sig), &IID_ID3D12RootSignature, (void**)&s_jov_rs)))
++        return 0;
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
++    pd.pRootSignature = s_jov_rs;
++    pd.VS.pShaderBytecode = vb->lpVtbl->GetBufferPointer(vb);
++    pd.VS.BytecodeLength  = vb->lpVtbl->GetBufferSize(vb);
++    pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb);
++    pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
++    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++    pd.RasterizerState.DepthClipEnable = TRUE;
++    D3D12_RENDER_TARGET_BLEND_DESC* bl = &pd.BlendState.RenderTarget[0];   /* premultiplied source-over */
++    bl->BlendEnable = TRUE;
++    bl->SrcBlend = D3D12_BLEND_ONE;       bl->DestBlend = D3D12_BLEND_INV_SRC_ALPHA;  bl->BlendOp = D3D12_BLEND_OP_ADD;
++    bl->SrcBlendAlpha = D3D12_BLEND_ONE;  bl->DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA; bl->BlendOpAlpha = D3D12_BLEND_OP_ADD;
++    bl->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++    pd.SampleMask = UINT_MAX;
++    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    pd.NumRenderTargets = 1;
++    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
++    pd.SampleDesc.Count = 1;
++    if (FAILED(s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
++            s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&s_jov_pso)))
++        return 0;
++    D3D12_DESCRIPTOR_HEAP_DESC hd = {0};
++    hd.NumDescriptors = FRAME_COUNT; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
++    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
++    if (FAILED(s_d3d.device->lpVtbl->CreateDescriptorHeap(s_d3d.device, &hd, &IID_ID3D12DescriptorHeap, (void**)&s_jov_heap)))
++        return 0;
++    s_jov_failed = 0;
++    fprintf(stderr, "[OVERLAY] pipeline ready%c", 10);
++    return 1;
++}
++
++static void jov_gpu_present(u32 fi)
++{
++    if (!jov.active) return;                          /* the whole cost of a closed overlay */
++    if (fi >= FRAME_COUNT || !jov.px || !jov_gpu_init()) return;
++    if (!jov_try_lock()) {                            /* an edit is open: keep showing this frame's last copy, if any */
++        if (!s_jov_fr[fi].tex) return;
++        goto draw;
++    }
++    {
++        JovFrame* f = &s_jov_fr[fi];
++        if (f->tex && (f->w != (u32)jov.w || f->h != (u32)jov.h)) {   /* canvas size changed: frame fi's GPU use is done */
++            f->tex->lpVtbl->Release(f->tex); f->tex = NULL;
++            f->up->lpVtbl->Release(f->up); f->up = NULL;
++        }
++        if (!f->tex) {
++            f->w = (u32)jov.w; f->h = (u32)jov.h; f->pitch = (f->w * 4 + 255) & ~255u;
++            D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++            D3D12_RESOURCE_DESC td = {0};
++            td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++            td.Width = f->w; td.Height = f->h; td.DepthOrArraySize = 1; td.MipLevels = 1;
++            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
++            td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++            D3D12_HEAP_PROPERTIES up = {0}; up.Type = D3D12_HEAP_TYPE_UPLOAD;
++            D3D12_RESOURCE_DESC bd = {0};
++            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++            bd.Width = (u64)f->pitch * f->h; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
++            bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++            if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
++                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, NULL, &IID_ID3D12Resource, (void**)&f->tex)) ||
++                FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &up, D3D12_HEAP_FLAG_NONE, &bd,
++                    D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&f->up))) {
++                if (f->tex) { f->tex->lpVtbl->Release(f->tex); f->tex = NULL; }
++                jov_unlock(); return;
++            }
++            D3D12_CPU_DESCRIPTOR_HANDLE h;
++            s_jov_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_jov_heap, &h);
++            h.ptr += (u64)fi * s_d3d.srv_inc;
++            s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, f->tex, NULL, h);
++            jov.pend[fi] = (jov_rect){0, 0, jov.w, jov.h};
++        }
++        jov_rect r = jov_clip(jov.pend[fi]);
++        if (r.x1 > r.x0 && r.y1 > r.y0) {
++            void* p = NULL; D3D12_RANGE none = {0, 0};
++            if (SUCCEEDED(f->up->lpVtbl->Map(f->up, 0, &none, &p)) && p) {
++                for (int y = r.y0; y < r.y1; y++)
++                    memcpy((u8*)p + (size_t)y * f->pitch + (size_t)r.x0 * 4, jov.px + ((size_t)y * jov.w + r.x0) * 4, (size_t)(r.x1 - r.x0) * 4);
++                D3D12_RANGE wr = {(SIZE_T)r.y0 * f->pitch, (SIZE_T)r.y1 * f->pitch};
++                f->up->lpVtbl->Unmap(f->up, 0, &wr);
++                D3D12_RESOURCE_BARRIER b = {0};
++                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++                b.Transition.pResource = f->tex; b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++                b.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++                b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++                s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++                D3D12_TEXTURE_COPY_LOCATION dl = {0}, sl = {0};
++                dl.pResource = f->tex; dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++                sl.pResource = f->up; sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++                sl.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++                sl.PlacedFootprint.Footprint.Width = f->w; sl.PlacedFootprint.Footprint.Height = f->h;
++                sl.PlacedFootprint.Footprint.Depth = 1; sl.PlacedFootprint.Footprint.RowPitch = f->pitch;
++                D3D12_BOX box = {(UINT)r.x0, (UINT)r.y0, 0, (UINT)r.x1, (UINT)r.y1, 1};
++                s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dl, (UINT)r.x0, (UINT)r.y0, 0, &sl, &box);
++                b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++                b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++                s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++            }
++            jov.pend[fi] = (jov_rect){0, 0, 0, 0};
++        }
++        jov_unlock();
++    }
++draw:;
++    ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
++    D3D12_CPU_DESCRIPTOR_HANDLE rtv;
++    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv);
++    rtv.ptr += (u64)fi * s_d3d.rtv_descriptor_size;
++    cl->lpVtbl->OMSetRenderTargets(cl, 1, &rtv, FALSE, NULL);
++    D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
++    D3D12_RECT sc = {0, 0, (LONG)s_d3d.width, (LONG)s_d3d.height};
++    cl->lpVtbl->RSSetViewports(cl, 1, &vp);
++    cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
++    cl->lpVtbl->SetGraphicsRootSignature(cl, s_jov_rs);
++    cl->lpVtbl->SetPipelineState(cl, s_jov_pso);
++    ID3D12DescriptorHeap* hh[] = { s_jov_heap };
++    cl->lpVtbl->SetDescriptorHeaps(cl, 1, hh);
++    D3D12_GPU_DESCRIPTOR_HANDLE gh;
++    s_jov_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_jov_heap, &gh);
++    gh.ptr += (u64)fi * s_d3d.srv_inc;
++    cl->lpVtbl->SetGraphicsRootDescriptorTable(cl, 0, gh);
++    cl->lpVtbl->IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    cl->lpVtbl->DrawInstanced(cl, 3, 1, 0, 0);
++    static int logged;
++    if (PS3_LOG_FIRST(logged, 2)) fprintf(stderr, "[OVERLAY] first present with the layer %dx%d -> %ux%u%c", jov.w, jov.h, s_d3d.width, s_d3d.height, 10);
++}
++
++
+ static void guest_fb_present(u32 fi)
+ {
+     static int inited = 0;
+@@ -8790,6 +8976,7 @@ skip_dump_consider: ;
+     guest_fb_present(fi);
+     scanout_auto_present(fi);
+     composite_present(fi);
++    jov_gpu_present(fi);        /* patch 2517: the port's overlay, if a page is open */
+     int dumping = (s_d3d.dump_frames_left > 0 && s_d3d.readback_buf
+                    && s_d3d.dump_skip_left == 0);
+     { static int mind2 = -1;
+@@ -11756,6 +11943,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+     memset(&s_d3d, 0, sizeof(s_d3d));
+     s_d3d.width = width;
+     s_d3d.height = height;
++    jsp_overlay_set_output((int)width, (int)height);   /* patch 2517 */
+     s_d3d.clear_color[0] = 0.0f;
+     s_d3d.clear_color[1] = 0.0f;
+     s_d3d.clear_color[2] = 0.1f;

@@ -49,6 +49,9 @@ env:
   PYTHON_EMBED_SHA256: 97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297
   PLEX_URL: https://github.com/IBM/plex/releases/download/%40ibm%2Fplex-mono%401.1.0/ibm-plex-mono.zip
   PLEX_SHA256: 4bfc936d0e1fd19db6327a3786eabdbc3dc0d464500576f6458f6706df68d26c
+  # Fira Sans 4.301 Heavy Italic (bBoxType/FiraSans at a fixed commit, SIL OFL 1.1) for the Port Settings menu art (menu_label_art.py)
+  FIRA_URL: https://raw.githubusercontent.com/bBoxType/FiraSans/f54eeb3124c63fe9b5bcd36d09d1cd46788cd15e/Fira_Sans_4_3/Fonts/Fira_Sans_TTF_4301/Normal/Italic/FiraSans-HeavyItalic.ttf
+  FIRA_SHA256: a30804a11e8ad1b38d6cabc725644a1048aab6fb7e2811507f0e208a469c8ef9
   # Build-time only, never shipped. The README asks for 6.7 or newer; 6.7.3 is pinned so every run uses the same compiler.
   INNO_VERSION: '6.7.3'
   INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
@@ -76,7 +79,7 @@ jobs:
         run: |
           $dl = Join-Path $env:RUNNER_TEMP 'dl'
           New-Item -ItemType Directory -Force -Path $dl, build\installer\fonts | Out-Null
-          foreach ($p in @(@($env:PYTHON_EMBED_URL, $env:PYTHON_EMBED_SHA256, 'python.zip'), @($env:PLEX_URL, $env:PLEX_SHA256, 'plex.zip'))) {
+          foreach ($p in @(@($env:PYTHON_EMBED_URL, $env:PYTHON_EMBED_SHA256, 'python.zip'), @($env:PLEX_URL, $env:PLEX_SHA256, 'plex.zip'), @($env:FIRA_URL, $env:FIRA_SHA256, 'FiraSans-HeavyItalic.ttf'))) {
             $f = Join-Path $dl $p[2]
             Invoke-WebRequest -Uri $p[0] -OutFile $f
             $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
@@ -85,6 +88,7 @@ jobs:
           Expand-Archive -Path (Join-Path $dl 'python.zip') -DestinationPath build\installer\toolchain-cache\python
           Expand-Archive -Path (Join-Path $dl 'plex.zip') -DestinationPath (Join-Path $dl 'plex')
           Copy-Item (Join-Path $dl 'plex\ibm-plex-mono\fonts\complete\ttf\IBMPlexMono-Bold.ttf') build\installer\fonts\
+          Copy-Item (Join-Path $dl 'FiraSans-HeavyItalic.ttf') build\installer\fonts\
 
       - name: Inno Setup (pinned)
         # Always the pinned version. ISCC.exe carries no

@@ -1,0 +1,110 @@
+Patch 2518: jsp_menu_label_set becomes a bit mask gated on the open panel; adds the "Port Settings" label (ENHANCEMENT; builds on 2516).
+
+One bit per replaced label slot: bit 0 = "Training" (menu2_{off,on}_tx_gallery_000, owned by panel 3, Free Battle), bit 1 = "Port Settings"
+(menu2_{off,on}_tx_ranking_000, owned by panel 8, Options). A slot is replaced only while its bit is set (jsp_menu_label_set(mask)) and its panel is the
+open one (jsp_menu_label_panel(id): the main-menu object's [+0x44]); until the port calls the panel function once, labels are not gated (the 2516
+behaviour; jsp_menu_label_set(1) is still the old Training switch). Fixes the Gallery panel's "Battle Replay" row reading "Training" while the switch was
+on, and keeps Rankings' first row alone when Port Settings is on. The effective mask changes the switch generation, so the labels re-upload only when
+what is shown changes. Hashes of ranking_000 (FNV-1a-64 of the 32,768 texel bytes of the US data, measured on the disc): off 0x14765796c32156f6,
+on 0x4db137acc27c2a49 (ASSUMPTION: the same bytes in the other regions' panels). Test default: JSP_MENU_LABEL_MASK=<n> (JSP_MENU_TRAINING_LABEL=1 = 1).
+No game data is stored here.
+
+diff --git a/libs/video/jsp_menu_label.h b/libs/video/jsp_menu_label.h
+index 58024e6..55f68dd 100644
+--- a/libs/video/jsp_menu_label.h
++++ b/libs/video/jsp_menu_label.h
+@@ -20,23 +20,44 @@
+ #define JSP_MENU_LABEL_H
+ #include "jsp_ex_logo.h"   /* jex_bc3_encode, jex_fnv64 */
+ 
+-typedef struct { uint64_t hash; const char* art; } jml_entry;
++/* Patch 2518: one bit per replaced label slot, and the menu panel that owns the slot. A slot is replaced only while its bit is set
++ * (jsp_menu_label_set) AND the panel that owns it is the open one (jsp_menu_label_panel); the same texture is also another panel's label
++ * (gallery_000 is Gallery's "Battle Replay", ranking_000 is Rankings' first row), which the old single switch relabelled too. */
++typedef struct { uint64_t hash; const char* art; int bit; int panel; } jml_entry;
++#define JML_BIT_TRAINING 0       /* mask bit 0: "Training" on the Free Battle panel's third row (panel id 3) */
++#define JML_BIT_PORT_SETTINGS 1  /* mask bit 1: "Port Settings" on the Options panel's sixth row (panel id 8) */
++#define JML_PANEL_UNKNOWN (-1)   /* the port never said which panel is open: no panel gate (the 2516 behaviour) */
+ static const jml_entry jml_tab[] = {
+-    { 0x50682882db48c1c4ull, "menu_training_off.rgba" },   /* menu2_off_tx_gallery_000 "Battle Replay" */
+-    { 0xecad95fe6a96c5d1ull, "menu_training_on.rgba"  },   /* menu2_on_tx_gallery_000 */
++    { 0x50682882db48c1c4ull, "menu_training_off.rgba",      JML_BIT_TRAINING,      3 },   /* menu2_off_tx_gallery_000 "Battle Replay" */
++    { 0xecad95fe6a96c5d1ull, "menu_training_on.rgba",       JML_BIT_TRAINING,      3 },   /* menu2_on_tx_gallery_000 */
++    { 0x14765796c32156f6ull, "menu_port_settings_off.rgba", JML_BIT_PORT_SETTINGS, 8 },   /* menu2_off_tx_ranking_000 (hash of the US data) */
++    { 0x4db137acc27c2a49ull, "menu_port_settings_on.rgba",  JML_BIT_PORT_SETTINGS, 8 },   /* menu2_on_tx_ranking_000 */
+ };
+ #define JML_N ((int)(sizeof jml_tab / sizeof jml_tab[0]))
+ #define JML_W 512
+ #define JML_H 64
+ #define JML_BYTES (JML_W * JML_H)   /* BC3: 16 bytes per 4x4 texels = 1 byte per texel */
+ 
+-static volatile int jml_on = -1;    /* -1: not read from the environment yet */
++static volatile int jml_mask = -1;       /* bits the port asked for; -1: not read from the environment yet */
++static volatile int jml_panel = JML_PANEL_UNKNOWN;
++static volatile int jml_eff = 0;         /* bits in effect: asked for and their panel open */
+ static volatile unsigned jml_gen = 0;
+ 
+-static int jml_enabled(void) {
+-    if (jml_on < 0) { const char* e = getenv("JSP_MENU_TRAINING_LABEL"); jml_on = (e && atoi(e)) ? 1 : 0; }
+-    return jml_on;
++static void jml_recompute(void) {
++    int eff = 0;
++    for (int i = 0; i < JML_N; i++)
++        if (((jml_mask >> jml_tab[i].bit) & 1) && (jml_panel == JML_PANEL_UNKNOWN || jml_panel == jml_tab[i].panel)) eff |= 1 << jml_tab[i].bit;
++    if (eff != jml_eff) { jml_eff = eff; jml_gen++; }   /* labels are uploaded again on their next use */
+ }
++static int jml_enabled(void) {       /* reads the environment default on first use; returns the mask */
++    if (jml_mask < 0) {
++        const char* e = getenv("JSP_MENU_LABEL_MASK"), *t = getenv("JSP_MENU_TRAINING_LABEL");
++        jml_mask = e ? (atoi(e) & 0xFF) : ((t && atoi(t)) ? 1 : 0);
++        jml_recompute();
++    }
++    return jml_mask;
++}
++static int jml_slot_on(int i) { return (jml_eff >> jml_tab[i].bit) & 1; }
+ static unsigned jml_generation(void) { return jml_gen; }
+ 
+ static const uint8_t* jml_art(int i) {
+@@ -76,7 +97,8 @@ static int jml_apply(const uint8_t* src, uint32_t w, uint32_t h, uint8_t* dst, u
+             FILE* f = fopen(fn, "wb"); if (f) { fwrite(src, 1, JML_BYTES, f); fclose(f); } } } } }
+     int i; for (i = 0; i < JML_N; i++) if (jml_tab[i].hash == hh) break;
+     if (i == JML_N) return 0;
+-    if (!jml_enabled()) return 1;
++    (void)jml_enabled();
++    if (!jml_slot_on(i)) return 1;
+     const uint8_t* art = jml_art(i);
+     if (!art) return 1;
+     for (int by = 0; by < JML_H / 4; by++) for (int bx = 0; bx < JML_W / 4; bx++) {
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6ce20bb..f89e24f 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6489,13 +6489,23 @@ static u32 s_last_drawn_off  = 0;
+ 
+ void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
+ 
+-/* Patch 2516: the port's switch for the third Free Battle row's label ("Training" in place of the Gallery panel's
+- * "Battle Replay" art). Any thread; the labels are uploaded again on their next use. */
+-void jsp_menu_label_set(int training_row_visible)
++/* Patch 2516 / 2518: the port's switches for replaced menu labels. `mask`: bit 0 "Training" on the Free Battle panel's third row (in place of
++ * the Gallery panel's "Battle Replay" art), bit 1 "Port Settings" on the Options panel's sixth row (in place of Rankings' first row). A slot is
++ * replaced only while its bit is set and its panel is the open one (jsp_menu_label_panel). Any thread; the labels are uploaded again on their
++ * next use. jsp_menu_label_set(1) is the old Training switch. */
++void jsp_menu_label_set(int mask)
+ {
+     (void)jml_enabled();                       /* read the environment default first */
+-    training_row_visible = training_row_visible ? 1 : 0;
+-    if (jml_on != training_row_visible) { jml_on = training_row_visible; jml_gen++; }
++    jml_mask = mask & 0xFF;
++    jml_recompute();
++}
++/* The open sub-menu panel (the main-menu object's [+0x44]: 3 Free Battle, 8 Options, other ids and 0 = none of ours). Until the port calls this once,
++ * labels are not gated by panel. */
++void jsp_menu_label_panel(int panel_id)
++{
++    (void)jml_enabled();
++    jml_panel = panel_id < 0 ? 0 : panel_id;
++    jml_recompute();
+ }
+ 
+ static void composite_present(u32 fi)

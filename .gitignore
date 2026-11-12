@@ -184,6 +184,11 @@ __pycache__/
 !/installer/tools/*.cmake
 !/installer/tools/online_settings_test.cpp
 !/installer/tools/online_settings_test.sh
+!/installer/tools/port_menu_test.cpp
+!/installer/tools/port_menu_test.sh
+!/installer/tools/port_overlay_test.c
+!/installer/tools/overlay_font_test.cpp
+!/installer/tools/overlay_font_test.sh
 !/installer/patches/
 /installer/patches/*
 !/installer/patches/*.patch
@@ -194,6 +199,8 @@ __pycache__/
 /installer/port/jsp/*
 !/installer/port/jsp/*.cpp
 !/installer/port/jsp/*.inc
+!/installer/port/jsp/*.h
+!/installer/port/jsp/lift_insn_patches.json
 !/installer/port/jsp/CMakeLists.txt
 !/installer/port/patches/
 /installer/port/patches/*

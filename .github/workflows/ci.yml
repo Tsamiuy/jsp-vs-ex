@@ -46,6 +46,9 @@ jobs:
       - name: Online settings reader host test
         run: bash installer/tools/online_settings_test.sh
 
+      - name: Port Settings page host test
+        run: bash installer/tools/port_menu_test.sh
+
       - name: Version numbers agree (tools/release.py)
         run: |
           python3 tools/test_release.py

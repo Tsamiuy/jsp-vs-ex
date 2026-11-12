@@ -46,6 +46,7 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/tools/quote_arg_test.py` | Plain Python, no Windows: a model of the Windows argv rules checks that `ArgQ` in `jsp.iss` (used for every path in `build-again.cmd` and the RPCS3 helper calls) round-trips paths that end in a backslash or a drive root, and that the old `"PATH"` form does not. |
 | `installer/tools/unlock_option_test.py` | Plain Python, no Windows: source checks that the opt-in "Unlock everything" option of the v19 launcher backs the save up before the start, never starts after a failed backup, unticks after one use, never writes the switch to the settings file, and that the port registers its hook only when `JSP_UNLOCK_ALL` is set. See [UNLOCK_ALL.md](../docs/notes/UNLOCK_ALL.md). |
 | `installer/tools/script_paths_test.py`, `launcher_settings_test.py`, `fake_tool.c` | Run on Windows (or a Windows Python under Wine/Proton) with `fake_tool.c` compiled: which folder names break the generated `build-port.cmd`, and the settings order of the launcher |
+| `installer/tools/port_menu_test.sh`, `overlay_font_test.sh`, `port_overlay_test.c`, `menu_label_art.py`, `menu_font_art.py` | The opt-in Port Settings page: `bash installer/tools/port_menu_test.sh` is a host test of the page's pad logic and its editable Online page against a fake backend (g++ only; CI runs it). `overlay_font_test.sh` draws the glyph atlas through a model of the overlay's two-pass text blit and checks no letter covers its neighbour (needs Pillow, numpy and the font; not in CI). `port_overlay_test.c` tests the toolkit's overlay (needs the patched toolkit, see its header). The two `_art.py` scripts draw the label and glyph art at payload build time from Fira Sans Heavy Italic (`build/installer/fonts/`; needs Pillow and numpy) |
 | `installer/tools/assemble_portable.py` | Packs the same payload as `jsp-<version>-portable.zip` with `run.cmd` and a short readme |
 | `installer/tools/fetch_toolchain.py`, `toolchain.json` | Downloads llvm-mingw, CMake, Ninja, their licence texts and the FFmpeg source (its libavcodec/libavutil headers only go into the payload, for the opening-movie decoder) on the machine that builds the installer, checks the pinned SHA-256 of each, unpacks them into a cache. Nothing downloaded is committed |
 | `installer/tools/llvm-mingw.cmake` | CMake toolchain file for the bundled compiler |
@@ -76,14 +77,15 @@ create the save, or use the EU file's first five events as a prefix (not tried o
 
 You need: Git, Python 3 with Pillow and numpy (`python -m pip install pillow numpy`), Inno Setup 6.7 or newer (`ISCC.exe`), internet access
 for the toolchain download, the 64-bit embeddable Python package from python.org (3.13 was used), and
-`IBMPlexMono-Bold.ttf` (SIL OFL 1.1). No Visual Studio and no separate C compiler: the launcher is compiled with the
+`IBMPlexMono-Bold.ttf` and `FiraSans-HeavyItalic.ttf` (Fira Sans 4.301 from github.com/bBoxType/FiraSans; both SIL OFL 1.1;
+the workflow's pinned URLs and SHA-256 are `PLEX_*` and `FIRA_*` in `.github/workflows/installer.yml`). No Visual Studio and no separate C compiler: the launcher is compiled with the
 downloaded llvm-mingw.
 
 ```
 git clone --recurse-submodules https://github.com/Tsamiuy/jsp-vs-ex.git
 cd jsp-vs-ex
 mkdir build\installer\fonts
-rem put IBMPlexMono-Bold.ttf in build\installer\fonts
+rem put IBMPlexMono-Bold.ttf and FiraSans-HeavyItalic.ttf in build\installer\fonts
 rem unpack the embeddable Python into build\installer\toolchain-cache\python (python.exe directly inside)
 python installer\tools\fetch_toolchain.py
 python installer\tools\installer_art.py

@@ -65,7 +65,9 @@ their licence texts go into the package under `licenses\`, and `installer/licens
 tree); the ps3recomp toolkit with `toolkit/ps3recomp-local.patch`
 applied (MIT, see above; SMAA as above); and the licence texts of this repository. The wizard images are drawn at build
 time in IBM Plex Mono Bold (IBM Corp., SIL Open Font License 1.1; the font file is not included here and the images contain
-only the rendered text).
+only the rendered text). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301
+(bBoxType/FiraSans, SIL Open Font License 1.1); the font file is not included here or in the package, and the art contains
+only the rendered text.
 
 ## Installer music
 
