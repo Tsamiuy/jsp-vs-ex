@@ -32,6 +32,7 @@ def main(tool, scratch):
         try:
             root = base / name / "app"
             (root / "port").mkdir(parents=True)
+            (root / "tree.txt").write_text("v18\n")   # a current payload always has it (assemble_payload.py)
             vs = base / name / "tc"
             for p in firstrun.toolchain_paths(vs).values():
                 p.parent.mkdir(parents=True, exist_ok=True)
