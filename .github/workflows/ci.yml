@@ -43,6 +43,9 @@ jobs:
           python3 installer/tools/rpcs3_wizard_test.py
           python3 installer/tools/test_rpcs3_locate.py
 
+      - name: Steam shortcut writer
+        run: python3 -I installer/tools/steam_shortcut_test.py
+
       - name: Online settings reader host test
         run: bash installer/tools/online_settings_test.sh
 

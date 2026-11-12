@@ -96,6 +96,11 @@ Name: "{group}\Uninstall {#AppDirName}"; Filename: "{uninstallexe}"; IconFilenam
 Name: "{autodesktop}\{#AppDirName}"; Filename: "{app}\jsp-settings.exe"; WorkingDir: "{app}"; IconFilename: "{app}\jsp-launcher.ico"; Tasks: desktopicon; Check: SettingsBuilt
 Name: "{autodesktop}\{#AppDirName}"; Filename: "{app}\{#LauncherExe}"; WorkingDir: "{app}"; IconFilename: "{app}\jsp-launcher.ico"; Tasks: desktopicon; Check: not SettingsBuilt
 
+; ENHANCEMENT: "Add to Steam" on the last page (steam_shortcut.py, bundled Python): a non-Steam shortcut in each Steam account of this user. Unchecked, never in silent installs
+; (skipifsilent). It refuses while Steam runs, backs the list up, changes nothing twice; the console stays open so its message can be read.
+[Run]
+Filename: "{cmd}"; Parameters: "/C """"{app}\toolchain\python\python.exe"" -X utf8 ""{app}\steam_shortcut.py"" --app ""{app}"" & pause"; WorkingDir: "{app}"; Description: "Add to &Steam (a non-Steam shortcut; close Steam first)"; Flags: postinstall skipifsilent unchecked; Check: SteamShortcutReady
+
 [UninstallDelete]
 Type: files; Name: "{app}\jsp-settings.exe"
 Type: filesandordirs; Name: "{app}\build"
@@ -910,6 +915,12 @@ begin
     SaveImportRun;
     RunBuildStep;
   end;
+end;
+
+{ Offers the Add to Steam box only when the build finished and the helper is in place. }
+function SteamShortcutReady: Boolean;
+begin
+  Result := (BuildRc = 0) and not SkipBuild and FileExists(ExpandConstant('{app}\steam_shortcut.py')) and FileExists(ExpandConstant('{app}\toolchain\python\python.exe'));
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

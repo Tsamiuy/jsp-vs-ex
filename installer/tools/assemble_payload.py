@@ -236,6 +236,8 @@ def main(argv=None):
     shutil.copy2(ROOT / "installer/tools/eboot_ids.json", out / "eboot_ids.json")   # known EBOOT builds, read by firstrun.py (check E3)
     # the Start-menu "Make a support bundle" entry: support_bundle.py sits beside firstrun.py (it imports scrub() from it)
     shutil.copy2(ROOT / "installer/tools/support_bundle.py", out / "support_bundle.py")
+    # the "Add to Steam" box on the installer's last page runs this with the bundled Python
+    shutil.copy2(ROOT / "installer/tools/steam_shortcut.py", out / "steam_shortcut.py")
     (out / "support-bundle.cmd").write_bytes(SUPPORT_CMD.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii"))
     # the "EX" for the title logo (toolkit patch 0006), drawn here; firstrun.py places it next to JStarsRecomp.exe
     r = subprocess.run([sys.executable, "-I", str(ROOT / "installer/tools/ex_logo_art.py"), str(out / "ex_logo_A.rgba")],
