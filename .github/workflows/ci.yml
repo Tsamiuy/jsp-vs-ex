@@ -190,7 +190,7 @@ jobs:
           cc=build/installer/toolchain-cache/trees/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe
           mkdir -p "$RUNNER_TEMP/exes"
           "$cc" -O2 -mwindows -s -o "$RUNNER_TEMP/exes/jsp-launcher.exe" installer/launcher/launcher.c
-          "$cc" -O2 -o "$RUNNER_TEMP/exes/fake_tool.exe" installer/tools/fake_tool.c
+          "$cc" -O2 -municode -o "$RUNNER_TEMP/exes/fake_tool.exe" installer/tools/fake_tool.c   # wmain entry point
 
       - name: Host tests on Windows (one result per test)
         run: python tools/ci/run_host_tests.py --strict-skip --launcher "$RUNNER_TEMP/exes/jsp-launcher.exe" --fake-tool "$RUNNER_TEMP/exes/fake_tool.exe" --scratch "$RUNNER_TEMP/host-tests"
