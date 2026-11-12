@@ -6,8 +6,6 @@
 !/NOTICE.md
 !/SECURITY.md
 !/CONTRIBUTING.md
-!/Play J-Stars.bat
-!/Test Fight.bat
 !/CONTRIBUTORS.md
 !/CHANGELOG.md
 !/AGENTS.md
@@ -40,6 +38,8 @@
 !/jstars/run_test.ps1
 !/jstars/play.ps1
 !/jstars/test_fight.txt
+!/jstars/Play J-Stars.bat
+!/jstars/Test Fight.bat
 !/jstars/snap_window.ps1
 !/jstars/toolkit/
 /jstars/toolkit/*
