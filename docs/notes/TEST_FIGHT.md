@@ -1,6 +1,6 @@
 # Test Fight: open the game straight into a Training match (2026-10-31)
 
-`Test Fight.bat` in the PS3Recomp folder starts the game and walks itself through to a Training match. Normal play isn't affected: `Play J-Stars.bat` doesn't set the switch.
+`jstars\Test Fight.bat` (in the PS3Recomp folder until 2026-11-12) starts the game and walks itself through to a Training match. Normal play isn't affected: `Play J-Stars.bat` doesn't set the switch.
 
 ## How to use it
 

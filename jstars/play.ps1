@@ -1,5 +1,5 @@
 # Play J-Stars Victory VS+ (the recompiled port) with no time limit.
-#   Start it with "Play J-Stars.bat" in the PS3Recomp folder.
+#   Start it with "Play J-Stars.bat" beside it (jstars folder).
 # Mounts the ISO read-only as the disc, turns CPU boost on, starts the game,
 # waits until you close the game window, then turns boost off and unmounts.
 # Logs go to run\play_stdout.txt and run\play_stderr.txt (overwritten each time).
