@@ -10,6 +10,8 @@ What goes in (text only: .log .txt .ini .cmd), every file through firstrun.scrub
   logs\\*.log, build\\**\\*.log (step logs), game\\run\\*.txt, the *.log, *.txt, *.ini and *.cmd files of the install folder
   (play_settings.txt, jsp-install.ini, build-again.cmd, paths.txt, VERSION.txt, tree.txt when present), the settings file in
   %APPDATA%\\JSP Fan Revival, and the newest two Inno Setup logs in %TEMP% that mention this app. Plus facts.txt.
+facts.txt: version, Windows, CPU count and model, AVX2, RAM, free space, the game exe, step markers, the GPU (from the game's log) and
+each display adapter's driver version (read from the registry, never changed).
 What never goes in: the EBOOT, disc files, saves (hdd0, .sav), lift output (.c/.h), shader caches, binaries, environment dumps.
 A total cap (CAP_BYTES, uncompressed) applies: over it, the oldest lines of the largest logs go first and facts.txt says what was cut.
 
@@ -165,6 +167,70 @@ def ram_gb():
         return "unknown"
 
 
+def reg_values(root, path, names):
+    """Values of one registry key (HKEY_LOCAL_MACHINE only, read only); {} when absent or not Windows."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+            out = {}
+            for n in names:
+                try:
+                    out[n] = str(winreg.QueryValueEx(k, n)[0]).strip()
+                except OSError:
+                    pass
+            return out
+    except (ImportError, OSError):
+        return {}
+
+
+def reg_subkeys(path):
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+            return [winreg.EnumKey(k, i) for i in range(winreg.QueryInfoKey(k)[0])]
+    except (ImportError, OSError):
+        return []
+
+
+def cpu_model(read=reg_values):
+    """The CPU's model name: the registry's ProcessorNameString on Windows, /proc/cpuinfo elsewhere (host tests)."""
+    v = read(None, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", ("ProcessorNameString",)).get("ProcessorNameString", "")
+    if v:
+        return " ".join(v.split())
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.lower().startswith("model name"):
+                    return " ".join(line.split(":", 1)[1].split())
+    except OSError:
+        pass
+    return platform.processor() or "unknown"
+
+
+def avx2():
+    """IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE = 40); "unknown" off Windows or on a Windows too old to say."""
+    try:
+        return "yes" if ctypes.windll.kernel32.IsProcessorFeaturePresent(40) else "no (or not reported by this Windows)"
+    except (AttributeError, OSError):
+        return "unknown"
+
+
+# The display adapters' driver keys (the Display device class); each numbered subkey is one installed adapter.
+DISPLAY_CLASS = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+
+
+def gpu_drivers(subkeys=reg_subkeys, read=reg_values):
+    """'NAME: driver VERSION (DATE)' for each display adapter in the registry; [] when none or not Windows."""
+    out = []
+    for sk in subkeys(DISPLAY_CLASS):
+        if not sk.isdigit():
+            continue
+        v = read(None, DISPLAY_CLASS + "\\" + sk, ("DriverDesc", "DriverVersion", "DriverDate"))
+        if v.get("DriverDesc") and v.get("DriverVersion"):
+            out.append(f"{v['DriverDesc']}: driver {v['DriverVersion']}" + (f" ({v['DriverDate']})" if v.get("DriverDate") else ""))
+    return out
+
+
 def gpu_name(blobs):
     """The GPU from the toolkit's Direct3D 12 start-up line ("[D3D12] adapter: NAME (VRAM N MB)", printed to the game's stdout,
     which the launcher keeps in game\\run\\play_stdout.txt); else the first other log line that names a GPU or adapter."""
@@ -186,6 +252,7 @@ def facts(app, blobs, refused, not_text, cuts, names):
         L.append(f"{n}: " + (p.read_text("utf-8", "replace").strip().replace("\n", " | ")[:200] if p.is_file() else "absent"))
     L.append(f"Windows: {platform.platform()} ({platform.version()})")
     L.append(f"CPUs: {os.cpu_count() or os.environ.get("NUMBER_OF_PROCESSORS", "unknown")}   RAM: {ram_gb()}")
+    L.append(f"CPU: {cpu_model()}   AVX2: {avx2()}")
     try:
         L.append(f"free space on the install drive: {shutil.disk_usage(app).free / 2**30:.1f} GB")
     except OSError:
@@ -202,6 +269,8 @@ def facts(app, blobs, refused, not_text, cuts, names):
     done = sorted(p.stem for p in mk.glob("*.done")) if mk.is_dir() else []
     L.append("first-run step markers: " + (", ".join(done) if done else "none") + "   (steps: " + ", ".join(firstrun.STEPS) + ")")
     L.append(f"GPU: {gpu_name(blobs)}")
+    drivers = gpu_drivers()
+    L.append("GPU driver: " + ("; ".join(drivers) if drivers else "not found (not Windows, or no display driver key)"))
     L.append("")
     L.append("files in this zip:")
     L += [f"  {n}" for n in names]
