@@ -87,8 +87,15 @@ extern "C" int (*g_rsx_copy_rects)(short (*rects)[6], int max);   /* rsx_d3d12_b
 extern "C" const uint32_t* (*g_rsx_stamp)(short* x, short* y, short* w, short* h, short* show_w, short* show_h);   /* rsx_d3d12_backend.c */
 extern "C" const uint32_t* (*g_rsx_stamp2)(short* x, short* y, short* w, short* h, short* show_w, short* show_h);  /* rsx_d3d12_backend.c */
 extern "C" int (*g_ppu_icall_hook)(uint32_t target, uint64_t* gpr);   /* ppu_loader.cpp */
+/* jsp_settings.cpp: the settings the in-game pages change while the game runs (UI_SCALE, AA_MODE, MODEL_DETAIL, OBJECT_DISTANCE,
+ * SHADOW_RANGE, FPS_COUNTER). jsp_setting_gen() moves at every change; the readers below cache their value and re-read when it moves. */
+extern "C" int  jsp_setting_gen(void);
+extern "C" int  jsp_setting_get(const char* key, char* out, int n);
 
 namespace {
+
+/* A live setting as a float / text: an in-game change, else the environment, else def / nullptr-like "". */
+float setting_float(const char* key, float def) { char b[48]; return jsp_setting_get(key, b, sizeof b) ? (float)std::atof(b) : def; }
 
 /* Experiments (the maintainer 11-09: half-finished work stays out of the Features build): Group Camera and see-through
  * scenery, Turn-based, 6 fighters (SIX_*), the Balance log and knockdown research (KD_*, KO_TEST_MAX), action swaps,
@@ -669,9 +676,10 @@ bool hud_target(uint32_t rt_off)
 float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
 {
     static float s = -1.0f;
-    if (s < 0.0f) {
-        const char* e = std::getenv("UI_SCALE");
-        s = e ? (float)std::atof(e) : 1.0f;
+    static int sgen = -1;
+    if (s < 0.0f || sgen != jsp_setting_gen()) {   /* live: the in-game Graphics page changes it */
+        sgen = jsp_setting_gen();
+        s = setting_float("UI_SCALE", 1.0f);
         if (s < 0.5f) s = 0.5f;
         if (s > 1.0f) s = 1.0f;
     }
@@ -747,9 +755,12 @@ float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
 int aa_mode(uint32_t rt_off)
 {
     static int m = -1;
-    if (m < 0) {
-        const char* e = std::getenv("AA_MODE");
-        m = !e ? 0 : !std::strcmp(e, "fxaa") ? 1 : !std::strcmp(e, "fxaa2") ? 2 : !std::strcmp(e, "smaa") ? 3 : 0;
+    static int mgen = -1;
+    if (m < 0 || mgen != jsp_setting_gen()) {   /* live: the in-game Graphics page changes it */
+        mgen = jsp_setting_gen();
+        char e[32];
+        const bool set = jsp_setting_get("AA_MODE", e, sizeof e) != 0;
+        m = !set ? 0 : !std::strcmp(e, "fxaa") ? 1 : !std::strcmp(e, "fxaa2") ? 2 : !std::strcmp(e, "smaa") ? 3 : 0;
     }
     if (!m || !hud_target(rt_off)) return 0;
     const uint32_t st = vm_read32(0x0094DEC4u);
@@ -2363,10 +2374,23 @@ struct LodOrig { float d0, d1, cull; uint32_t w0, w1, wc, flag; };
 std::unordered_map<uint32_t, LodOrig> g_lod_orig;
 void lod_select_hook(uint32_t o)
 {
-    static const float md = [] { const char* e = std::getenv("MODEL_DETAIL"); float v = e ? (float)std::atof(e) : 1.0f;
-                                  return v < 0.25f ? 0.25f : v > 100.0f ? 100.0f : v; }();
-    static const float od = [] { const char* e = std::getenv("OBJECT_DISTANCE"); float v = e ? (float)std::atof(e) : 1.0f;
-                                  return v < 0.0f ? 1.0f : v > 100.0f ? 100.0f : v; }();
+    /* Live: the in-game Graphics page changes MODEL_DETAIL and OBJECT_DISTANCE. Objects already seen are rescaled from their own
+     * stored originals and written back at once; the rest follow at their next call. */
+    static float md = 1.0f, od = 1.0f;
+    static int lgen = -1;
+    if (lgen != jsp_setting_gen()) {
+        lgen = jsp_setting_gen();
+        float v = setting_float("MODEL_DETAIL", 1.0f); md = v < 0.25f ? 0.25f : v > 100.0f ? 100.0f : v;
+        v = setting_float("OBJECT_DISTANCE", 1.0f); od = v < 0.0f ? 1.0f : v > 100.0f ? 100.0f : v;
+        for (auto& kv : g_lod_orig) {
+            LodOrig& lo = kv.second;
+            const float n0 = lo.d0 * md, n1 = lo.d1 * md, nc = od > 0.0f ? lo.cull * od : lo.cull;
+            std::memcpy(&lo.w0, &n0, 4); std::memcpy(&lo.w1, &n1, 4); std::memcpy(&lo.wc, &nc, 4);
+            if (kv.first < 0x10000u || kv.first >= 0xF0000000u || vm_read32(kv.first) != 0x008843D0u) continue;   /* the object is gone */
+            vm_write32(kv.first + 0x50, lo.w0); vm_write32(kv.first + 0x54, lo.w1); vm_write32(kv.first + 0x5C, lo.wc);
+            vm_write32(kv.first + 0x58, od == 0.0f ? 0 : lo.flag);   /* never stop drawing / the object's own cull switch */
+        }
+    }
     /* VEGETATION=<f> ("Vegetation" in the launcher: 1 Normal, 0.66 Medium, 0.33 Low, 0 Off): plants are the map
      * objects with their own cull distance (+0x58 set by the stage's LODModelInfo; the maintainer saw them follow
      * OBJECT_DISTANCE). A share of them, picked by address so the same ones stay hidden, is culled at distance 0. */
@@ -2927,6 +2951,17 @@ const uint32_t* fps_stamp(short* x, short* y, short* w, short* h, short* show_w,
     return fading;
 }
 
+/* FPS_COUNTER, live: on = the stamp hook is installed, off = removed. Called at start and from the pad filter (cheap: one atomic read). */
+void fps_counter_apply()
+{
+    static int fgen = -1;
+    if (fgen == jsp_setting_gen()) return;
+    fgen = jsp_setting_gen();
+    char e[16];
+    const bool on = jsp_setting_get("FPS_COUNTER", e, sizeof e) && e[0] && e[0] != '0';
+    g_rsx_stamp2 = on ? fps_stamp : nullptr;
+}
+
 const uint32_t* stage_lock_stamp(short* x, short* y, short* w, short* h, short* show_w, short* show_h)
 {
     if (const uint32_t* menu = tb_stamp(x, y, w, h, show_w, show_h)) return menu;
@@ -3366,12 +3401,23 @@ void two_player_watch(uint16_t b)   /* port 0, every poll */
  * and from about x8 other fighters' shadows drop out (the maintainer's test, 11-10). jstars-notes/GRAPHICS_MAP.md. */
 void shadow_range_tick()
 {
-    static const float f = [] { const char* e = std::getenv("SHADOW_RANGE"); float v = e ? (float)std::atof(e) : 1.0f;
-                                 return v < 1.0f ? 1.0f : v > 2.0f ? 2.0f : v; }();
-    if (f <= 1.0f) return;
+    static float f = 1.0f;
+    static int sgen = -1;
+    if (sgen != jsp_setting_gen()) {   /* live: the in-game Graphics page changes it */
+        sgen = jsp_setting_gen();
+        const float v = setting_float("SHADOW_RANGE", 1.0f);
+        f = v < 1.0f ? 1.0f : v > 2.0f ? 2.0f : v;
+    }
+    static float base = 0.0f, written = -1.0f;
+    if (f <= 1.0f && written < 0.0f) return;
     const uint32_t srv = vm_read32(vm_read32(0x008D3888u + 0x464Cu));
     if (srv < 0x10000u || srv >= 0xF0000000u) return;
-    static float base = 0.0f, written = -1.0f;
+    if (f <= 1.0f) {   /* back to Normal: put the game's own value back once */
+        const uint32_t raw0 = vm_read32(srv + 0xF4); float cur0; std::memcpy(&cur0, &raw0, 4);
+        if (cur0 == written && base > 0.0f) { uint32_t w; std::memcpy(&w, &base, 4); vm_write32(srv + 0xF4, w); }
+        written = -1.0f;
+        return;
+    }
     const uint32_t raw = vm_read32(srv + 0xF4); float cur; std::memcpy(&cur, &raw, 4);
     if (cur != written) base = cur;   /* the game set a new value */
     if (!(base > 0.0f && base < 100000.0f)) return;
@@ -3382,7 +3428,7 @@ void shadow_range_tick()
 
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
-    if (port == 0) shadow_range_tick();
+    if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
     else if (port == 1 && !g_two_players) {
         static const bool always = [] { const char* e = std::getenv("PAD_P2_ALWAYS"); return e && *e == '1'; }();
@@ -3678,7 +3724,7 @@ extern "C" void jsp_register_game_overrides(void)
     g_rsx_copy_rects = training_copy_rects;
     g_rsx_stamp = stage_lock_stamp;
     if (kExp) g_rsx_cutout = gc_cutout;   /* see-through scenery: Group Camera */
-    if (env_on("FPS_COUNTER")) g_rsx_stamp2 = fps_stamp;
+    fps_counter_apply();   /* FPS_COUNTER=1: the counter; live, the in-game Graphics page switches it */
     g_cellpad_filter = game_pad_filter;
     g_cellpad_rstick_filter = freecam_rstick;
     const char* ma = std::getenv("MENU_ARROWS_DPAD");

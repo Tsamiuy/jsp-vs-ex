@@ -22,7 +22,8 @@
  *   2. a marker file:       <install folder>\settings_here.txt    (then only <install folder>\play_settings.txt, never AppData)
  *   3. the install folder:  <install folder>\play_settings.txt
  *   4. AppData:             %APPDATA%\JSP Fan Revival\play_settings.txt   (answers the #52 note that this copy was ignored)
- * No rule merges with another; paths.txt is always read first.
+ * No rule merges with another; paths.txt is always read first. The file that won is also put in JSP_SETTINGS_FILE for the game: the in-game
+ * settings pages (jsp_settings.cpp) save to that same file.
  *
  * Reads <exe folder>\paths.txt (KEY=VALUE lines written by firstrun.py: PS3_VFS_ROOT, PS3_HDD0_ROOT, PS3_DEV_FLASH, PS3_TITLE,
  * PS3_VERBOSE, EXE, ELF), then the settings file chosen above (KEY=VALUE, e.g. RES_SCALE=3, FULLSCREEN=1; the
@@ -170,22 +171,22 @@ static void load_settings(const char *here, const char *cmd, char *exe, size_t e
     char f[MAX_PATH * 2], app[MAX_PATH];
     snprintf(f, sizeof f, "%s\\settings_here.txt", here);
     if (flag_settings(cmd, f, sizeof f)) {
-        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: command line (--settings %s)", f); }
+        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: command line (--settings %s)", f); }
         else snprintf(why, why_n, "settings: command line (--settings %s), file not found, defaults", f);
         return;
     }
     snprintf(f, sizeof f, "%s\\settings_here.txt", here);
     if (file_exists(f)) {
         snprintf(f, sizeof f, "%s\\play_settings.txt", here);
-        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: marker file (settings_here.txt), install folder (play_settings.txt)"); }
+        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: marker file (settings_here.txt), install folder (play_settings.txt)"); }
         else snprintf(why, why_n, "settings: marker file (settings_here.txt), no play_settings.txt in the install folder, defaults");
         return;
     }
     snprintf(f, sizeof f, "%s\\play_settings.txt", here);
-    if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: install folder (play_settings.txt)"); return; }
+    if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: install folder (play_settings.txt)"); return; }
     if (GetEnvironmentVariableA("APPDATA", app, sizeof app)) {
         snprintf(f, sizeof f, "%s\\JSP Fan Revival\\play_settings.txt", app);
-        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: AppData (%%APPDATA%%\\JSP Fan Revival\\play_settings.txt)"); return; }
+        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: AppData (%%APPDATA%%\\JSP Fan Revival\\play_settings.txt)"); return; }
     }
     snprintf(why, why_n, "settings: none found, defaults");
 }

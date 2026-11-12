@@ -52,6 +52,7 @@
 #include <string>
 #include <vector>
 #include "jsp_version_line.h"   // the version line (text and value choice, host-tested: installer/tools/version_line_test.cpp)
+#include "jsp_settings.h"        // the launcher's settings as data and the settings file model (host-tested: installer/tools/settings_test.cpp)
 
 #ifndef JSP_PORT_MENU_TEST
 #include <mutex>
@@ -73,6 +74,8 @@ extern "C" int jsp_online_edit_get(int field, char* out, int n);
 extern "C" int jsp_online_edit_set(int field, const char* v, char* hint, int n);
 extern "C" void jsp_online_edit_cycle(int field, int dir);
 extern "C" int jsp_online_edit_save(char* msg, int n);
+extern "C" void jsp_setting_set_live(const char* key, const char* value);        // jsp_settings.cpp
+namespace jps { std::string io_path(); bool io_load(std::string& text, std::string& note); bool io_save(const std::string& text, std::string& err); }
 #endif
 
 namespace jpm {
@@ -80,8 +83,10 @@ namespace jpm {
 // Digital buttons as one mask: (DIGITAL2 << 8) | DIGITAL1 (cellPad.h CELL_PAD_CTRL_*; the same masks PAD_SCRIPT uses).
 enum : uint16_t { BTN_START = 0x0008, BTN_UP = 0x0010, BTN_RIGHT = 0x0020, BTN_DOWN = 0x0040, BTN_LEFT = 0x0080,
                   BTN_L1 = 0x0400, BTN_R1 = 0x0800, BTN_CIRCLE = 0x2000, BTN_CROSS = 0x4000, BTN_SQUARE = 0x8000 };
-enum Page { CLOSED = 0, MAIN = 1, ONLINE = 2 };
-constexpr int kMainRows = 2;   // 0 "Online", 1 "Close"
+enum Page { CLOSED = 0, MAIN = 1, ONLINE = 2, DISPLAY = 3, GRAPHICS = 4, CONTROLS = 5, KEYS = 6, PADBTNS = 7, LAUNCHER = 8 };
+constexpr int kSettingsVisible = 8;   // rows shown at once on a settings page
+// The settings pages' rows (jsp_settings.h has the data): a choice item, a key, a controller button, a link to a sub-page, "Reset".
+struct SRow { enum Kind { ITEM, KEY, PADBTN, OPEN, RESET } kind; int idx; Page target; };
 // the Online page's rows: 0 Method, 1 Server, 2 Online name, 3 Community preset, 4 Save, 5 Discard changes.
 enum : int { ROW_METHOD = 0, ROW_SERVER = 1, ROW_NAME = 2, ROW_PRESET = 3, ROW_SAVE = 4, ROW_DISCARD = 5, kEditRows = 6 };
 
@@ -96,6 +101,17 @@ struct Backend {
     virtual bool save(std::string& msg) = 0;                           // writes the files; msg: confirmation or reason
     virtual const char* charset(int field) = 0;                        // the letters the picker offers, in order
     virtual size_t max_len(int field) = 0;
+};
+
+// The OS side of the settings pages (jsp_settings.cpp in the game; a fake in the host test).
+struct SettingsIO {
+    virtual ~SettingsIO() {}
+    virtual bool load(std::string& text, std::string& note) = 0;       // the settings file; a missing file is fine (empty text)
+    virtual bool save(const std::string& text, std::string& err) = 0;  // atomic write
+    virtual const char* active(const char* key) = 0;                    // the value the running game started with (nullptr: unset)
+    virtual void live(const char* key, const char* value) = 0;          // a live setting changed ("" = unset): the readers pick it up
+    virtual int poll_vk(bool mouse) = 0;                                // a key held right now (Windows virtual-key code), 0 = none
+    virtual std::string path() = 0;
 };
 
 // The Options panel's cursor struct (func_001C07F0: [0] total, [4] cursor, [8] visible, [0xC] top, [0x10] last).
@@ -126,6 +142,14 @@ struct Menu {
     std::string msg;              // line under the rows
     bool msg_err = false, edited = false;
     std::vector<std::string> events;   // for the log, drained by the glue
+    // the settings pages (Display, Graphics, Controls, Launcher only). io == nullptr: no such pages (JSP_PORT_MENU_EDIT=0).
+    SettingsIO* io = nullptr;
+    jps::Model model;                  // the settings file as read when the page opened, with the changes since
+    std::vector<SRow> srows;           // rows of the open settings page
+    int ssel = 0, stop = 0;            // selected row, first visible row
+    bool capturing = false, cap_armed = false;   // waiting for a key on a KEYS row (armed = all keys were up once)
+    bool smsg_err = false;
+    std::string smsg;                  // the line under the settings rows
 
     bool active() const { return page != CLOSED || wait_release; }
 
@@ -147,22 +171,43 @@ struct Menu {
             return false;
         }
         if (page == ONLINE && be) { feed_online(edge); return true; }
-        const int rows = page == MAIN ? kMainRows : 0;
+        if (page >= DISPLAY && page <= PADBTNS) { feed_settings(edge); return true; }
+        if (page == LAUNCHER) { if (edge & (BTN_CIRCLE | BTN_CROSS)) back_to_main(LAUNCHER); return true; }
+        const std::vector<Page> mr = main_rows();
+        const int rows = page == MAIN ? (int)mr.size() : 0;
         if (rows && (edge & BTN_DOWN)) { sel = (sel + 1) % rows; dirty = true; }
         if (rows && (edge & BTN_UP)) { sel = (sel + rows - 1) % rows; dirty = true; }
         if (edge & BTN_CROSS) {
             if (page == MAIN) {
-                if (sel == 0) { enter_online(); }
-                else close();
+                const Page t = mr[(size_t)sel];
+                if (t == ONLINE) enter_online();
+                else if (t == CLOSED) close();
+                else enter_settings(t);
             }
         }
         if (edge & BTN_CIRCLE) {
-            if (page == ONLINE) { page = MAIN; sel = 0; dirty = true; }
+            if (page == ONLINE) back_to_main(ONLINE);
             else close();
         }
         return true;
     }
-    void close() { page = CLOSED; sel = 0; editing = false; wait_release = true; dirty = true; }
+    // The main page's rows, top to bottom; CLOSED stands for "Close". The settings pages exist only with an io.
+    std::vector<Page> main_rows() const
+    {
+        std::vector<Page> r;
+        if (io) { r.push_back(DISPLAY); r.push_back(GRAPHICS); r.push_back(CONTROLS); }
+        r.push_back(ONLINE);
+        if (io) r.push_back(LAUNCHER);
+        r.push_back(CLOSED);
+        return r;
+    }
+    void back_to_main(Page from)
+    {
+        page = MAIN; dirty = true; sel = 0;
+        const std::vector<Page> mr = main_rows();
+        for (size_t i = 0; i < mr.size(); i++) if (mr[i] == from) sel = (int)i;
+    }
+    void close() { page = CLOSED; sel = 0; editing = false; capturing = false; wait_release = true; dirty = true; }
     bool take_dirty() { const bool d = dirty; dirty = false; return d; }
 
     void enter_online()
@@ -199,8 +244,153 @@ struct Menu {
         }
         if (edge & BTN_CIRCLE) {
             events.push_back(std::string("online edit: back") + (edited ? " (unsaved changes dropped)" : ""));
-            page = MAIN; sel = 0; dirty = true;
+            back_to_main(ONLINE);
         }
+    }
+
+    // ---- the settings pages ----
+    void enter_settings(Page t)
+    {
+        std::string text, note;
+        if (!io->load(text, note)) { smsg = note; smsg_err = true; dirty = true; return; }   // stays on the main page
+        model.f = jps::File::parse(text);
+        smsg.clear(); smsg_err = false;
+        open_settings(t, 0);
+        events.push_back(std::string("settings: page ") + page_name(t) + " (" + io->path() + ")");
+    }
+    static const char* page_name(Page p)
+    {
+        return p == DISPLAY ? "Display" : p == GRAPHICS ? "Graphics" : p == CONTROLS ? "Controls" : p == KEYS ? "Keys" : p == PADBTNS ? "Controller buttons" : "";
+    }
+    void open_settings(Page t, int sel_row)
+    {
+        page = t; ssel = sel_row; stop = 0; capturing = false; dirty = true;
+        rebuild_rows();
+    }
+    // the rows of the open page (rebuilt after every change: the Controls page shows the key or the controller list by the input mode)
+    void rebuild_rows()
+    {
+        srows.clear();
+        auto items = [&](jps::Group g) { for (int i = 0; i < jps::k_item_count; i++) if (jps::k_items[i].group == g) srows.push_back({ SRow::ITEM, i, CLOSED }); };
+        if (page == DISPLAY) { items(jps::G_DISPLAY); srows.push_back({ SRow::RESET, 0, CLOSED }); }
+        else if (page == GRAPHICS) { items(jps::G_GRAPHICS); srows.push_back({ SRow::RESET, 0, CLOSED }); }
+        else if (page == CONTROLS) {
+            items(jps::G_CONTROLS);
+            if (model.mode() == 2) srows.push_back({ SRow::OPEN, 0, PADBTNS }); else srows.push_back({ SRow::OPEN, 0, KEYS });
+        }
+        else if (page == KEYS) { for (int a = 0; a < jps::k_action_count; a++) srows.push_back({ SRow::KEY, a, CLOSED }); srows.push_back({ SRow::RESET, 0, CLOSED }); }
+        else if (page == PADBTNS) { for (int b = 0; b < jps::k_padbtn_count; b++) srows.push_back({ SRow::PADBTN, b, CLOSED }); srows.push_back({ SRow::RESET, 0, CLOSED }); }
+        const int n = (int)srows.size();
+        if (ssel >= n) ssel = n - 1;
+        if (ssel < 0) ssel = 0;
+        if (ssel < stop) stop = ssel;
+        if (ssel >= stop + kSettingsVisible) stop = ssel - kSettingsVisible + 1;
+    }
+    // the text of the right-hand column and whether the running game still has the old value
+    std::string row_label(const SRow& r) const
+    {
+        switch (r.kind) {
+        case SRow::ITEM: return jps::k_items[r.idx].label;
+        case SRow::KEY: return jps::k_actions[r.idx].label;
+        case SRow::PADBTN: return jps::k_padbtns[r.idx].label;
+        case SRow::OPEN: return r.target == KEYS ? "Keys" : "Controller buttons";
+        default: return "Reset this page to the defaults";
+        }
+    }
+    std::string row_value(const SRow& r) const
+    {
+        switch (r.kind) {
+        case SRow::ITEM: return model.saved_text(jps::k_items[r.idx]);
+        case SRow::KEY: return capturing && r.idx == srows[(size_t)ssel].idx ? (model.mode() == 1 ? "key or mouse button..." : "press a key...") : jps::key_name(model.key_vk(r.idx));
+        case SRow::PADBTN: return jps::k_xbutton_names[model.pad_btn(r.idx)];
+        case SRow::OPEN: return "Cross: open";
+        default: return "";
+        }
+    }
+    bool row_pending(const SRow& r) const
+    {
+        if (r.kind != SRow::ITEM) return false;
+        return model.pending(jps::k_items[r.idx], [&](const char* k) { return io->active(k); });
+    }
+    // Saves the file after a change; a live item is also handed to its reader. what: for the log.
+    void commit(const std::string& what, const jps::Item* live_item)
+    {
+        std::string err;
+        if (!io->save(model.f.text(), err)) { smsg = err; smsg_err = true; events.push_back("settings: NOT saved: " + err); dirty = true; return; }
+        smsg_err = false; dirty = true;
+        bool live = false;
+        if (live_item && live_item->apply == jps::LIVE) {
+            std::string v; model.f.get(live_item->key, v);
+            io->live(live_item->key, v.c_str());
+            live = true;
+        }
+        if (live) smsg = "Saved. Applied now.";
+        else if (live_item || what.compare(0, 4, "key ") == 0 || what.compare(0, 7, "button ") == 0) smsg = "Saved. Applies on the next start.";
+        else smsg = "Saved.";
+        events.push_back("settings: " + what + (live ? " (saved, applied now)" : " (saved)"));
+    }
+    void feed_settings(uint16_t edge)
+    {
+        if (capturing) { feed_capture(edge); return; }
+        const int n = (int)srows.size();
+        if (edge & BTN_DOWN) { ssel = (ssel + 1) % n; dirty = true; }
+        if (edge & BTN_UP) { ssel = (ssel + n - 1) % n; dirty = true; }
+        if (edge & (BTN_DOWN | BTN_UP)) {
+            if (ssel < stop) stop = ssel;
+            if (ssel >= stop + kSettingsVisible) stop = ssel - kSettingsVisible + 1;
+            if (ssel == 0) stop = 0;
+        }
+        const SRow r = srows[(size_t)ssel];
+        const int dir = (edge & BTN_LEFT) ? -1 : (edge & BTN_RIGHT) ? 1 : (edge & BTN_CROSS) ? 1 : 0;
+        if (dir && r.kind == SRow::ITEM) {
+            const jps::Item& it = jps::k_items[r.idx];
+            model.cycle(it, dir);
+            rebuild_rows();
+            commit(std::string(it.key) + "=" + it.values[model.saved_index(it) < 0 ? 0 : model.saved_index(it)], &it);
+        } else if (dir && r.kind == SRow::PADBTN) {
+            const int cur = model.pad_btn(r.idx);
+            model.set_pad_btn(r.idx, ((cur + dir) % jps::k_xbutton_count + jps::k_xbutton_count) % jps::k_xbutton_count);
+            commit(std::string("button ") + jps::k_padbtns[r.idx].id + " = " + jps::k_xbuttons[model.pad_btn(r.idx)], nullptr);
+        } else if ((edge & BTN_CROSS) && r.kind == SRow::KEY) {
+            capturing = true; cap_armed = false; smsg.clear(); smsg_err = false; dirty = true;
+        } else if ((edge & BTN_CROSS) && r.kind == SRow::OPEN) {
+            open_settings(r.target, 0);
+        } else if ((edge & BTN_CROSS) && r.kind == SRow::RESET) {
+            if (page == DISPLAY) model.reset_group(jps::G_DISPLAY);
+            else if (page == GRAPHICS) model.reset_group(jps::G_GRAPHICS);
+            else if (page == KEYS) model.reset_keys();
+            else if (page == PADBTNS) model.reset_pad_btns();
+            // live items go back to the defaults at once
+            if (page == GRAPHICS) {
+                for (int i = 0; i < jps::k_item_count; i++)
+                    if (jps::k_items[i].group == jps::G_GRAPHICS && jps::k_items[i].apply == jps::LIVE) {
+                        std::string v; model.f.get(jps::k_items[i].key, v); io->live(jps::k_items[i].key, v.c_str());
+                    }
+            }
+            commit(std::string("reset ") + page_name(page), nullptr);
+            if (!smsg_err) smsg = page == GRAPHICS ? "Defaults saved. Some apply on the next start." : "Defaults saved. Applies on the next start.";
+        }
+        if (edge & BTN_CIRCLE) {
+            if (page == KEYS || page == PADBTNS) { open_settings(CONTROLS, 0); for (int i = 0; i < (int)srows.size(); i++) if (srows[(size_t)i].kind == SRow::OPEN) { ssel = i; } rebuild_rows(); }
+            else back_to_main(page);
+            events.push_back("settings: back");
+        }
+    }
+    // Waiting for a key on a KEYS row. Esc, or Circle on a controller, cancels; F11 stays the fullscreen key.
+    void feed_capture(uint16_t edge)
+    {
+        const int vk = io->poll_vk(model.mode() == 1);
+        if (!cap_armed) { if (vk == 0) cap_armed = true; return; }   // a key still held from the press that started the capture is not a binding
+        if (vk == 0) {
+            if (edge & BTN_CIRCLE) { capturing = false; smsg = "Cancelled."; smsg_err = false; dirty = true; }
+            return;
+        }
+        if (vk == 0x1B) { capturing = false; smsg = "Cancelled."; smsg_err = false; dirty = true; return; }
+        if (vk == 0x7A) { smsg = "F11 is kept for fullscreen."; smsg_err = true; dirty = true; return; }
+        const SRow r = srows[(size_t)ssel];
+        model.set_key(r.idx, vk);
+        capturing = false;
+        commit(std::string("key ") + jps::k_actions[r.idx].id + " = " + jps::vk_text(vk), nullptr);
     }
 
     // The character picker: Up/Down the letter at the position (L1/R1 by ten), Left/Right the position, Square deletes,
@@ -251,6 +441,14 @@ struct Menu {
 // Defined always, so a lift made with the patch links even when JSP_PORT_MENU is off.
 extern "C" { int g_port_menu_six_rows = 0; }
 
+#ifdef _WIN32
+extern "C" {
+__declspec(dllimport) short __stdcall GetAsyncKeyState(int vk);
+__declspec(dllimport) void* __stdcall GetForegroundWindow(void);
+__declspec(dllimport) unsigned long __stdcall GetWindowThreadProcessId(void* hwnd, unsigned long* pid);
+__declspec(dllimport) unsigned long __stdcall GetCurrentProcessId(void);
+}
+#endif
 namespace {
 
 typedef void (*fn_t)(ppu_context*);
@@ -280,6 +478,35 @@ struct GameBackend : jpm::Backend {
     size_t max_len(int f) override { return f == jpm::ROW_SERVER ? 260 : 16; }
 };
 GameBackend g_backend;
+
+// The settings pages' OS side: jsp_settings.cpp (file, live values) and the keyboard (key capture).
+struct GameSettingsIO : jpm::SettingsIO {
+    bool load(std::string& text, std::string& note) override { return jps::io_load(text, note); }
+    bool save(const std::string& text, std::string& err) override { return jps::io_save(text, err); }
+    const char* active(const char* key) override { return std::getenv(key); }
+    void live(const char* key, const char* value) override { jsp_setting_set_live(key, value); }
+    std::string path() override { return jps::io_path(); }
+    // The lowest virtual-key code held down while the game window has the focus, 0 when none. Mouse buttons only when asked; the left and
+    // right Shift, Ctrl and Alt are one key each (0x10-0x12, as the launcher binds them); Windows keys and the unassigned codes are skipped.
+    int poll_vk(bool mouse) override
+    {
+#ifdef _WIN32
+        unsigned long pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        if (pid != GetCurrentProcessId()) return 0;
+        for (int vk = 1; vk < 255; vk++) {
+            if (vk == 0x03 || vk == 0x07 || vk == 0x0A || vk == 0x0B || vk == 0x0E || vk == 0x0F) continue;
+            if ((vk >= 0xA0 && vk <= 0xA5) || vk == 0x5B || vk == 0x5C || vk == 0x5D || vk == 0x5F || vk >= 0xE0) continue;
+            if (vk <= 0x06 && !mouse) continue;
+            if (GetAsyncKeyState(vk) & 0x8000) return vk;
+        }
+#else
+        (void)mouse;
+#endif
+        return 0;
+    }
+};
+GameSettingsIO g_settings_io;
 
 uint32_t g_obj = 0;            // the main-menu object (r3 of @0x001E0830)
 int g_last_panel = -1, g_last_open = -1, g_last_cursor = -1, g_last_top = -1;
@@ -383,6 +610,71 @@ void draw_online_edit(uint32_t white, uint32_t gold)
     jsp_overlay_text_style(260, 598, g_menu.editing ? "L1 / R1: ten letters at a time" : "Online play cannot change in a session: saved settings apply on the next start.", 0.5f, white, 0);
 }
 
+// Text wrapped at `width` characters; returns the next y. Words are not split.
+int draw_wrapped(float x, int y, const std::string& m, size_t width, float scale, uint32_t col, int line_h, int max_y)
+{
+    size_t from = 0;
+    while (from < m.size() && y < max_y) {
+        size_t to = from + width;
+        if (to >= m.size()) to = m.size();
+        else { size_t sp = m.rfind(' ', to); if (sp != std::string::npos && sp > from) to = sp; }
+        jsp_overlay_text_style(x, (float)y, m.substr(from, to - from).c_str(), scale, col, 0);
+        from = to; while (from < m.size() && m[from] == ' ') from++;
+        y += line_h;
+    }
+    return y;
+}
+
+// A settings page: label left, value right, 8 rows at a time. "*" after a value: saved, the running game has not picked it up.
+void draw_settings(uint32_t white, uint32_t gold)
+{
+    using namespace jpm;
+    const Menu& m = g_menu;
+    jsp_overlay_text_style(260, 112, (std::string("Port Settings - ") + Menu::page_name(m.page)).c_str(), 1.4f, white, 0);
+    const int n = (int)m.srows.size();
+    for (int i = m.stop; i < n && i < m.stop + kSettingsVisible; i++) {
+        const SRow& r = m.srows[(size_t)i];
+        const int y = 170 + (i - m.stop) * 44;
+        const bool on = i == m.ssel;
+        if (on) jsp_overlay_fill_rect(250, y - 10, 780, 42, JSP_RGBA(255, 255, 255, 235));
+        jsp_overlay_text_style(290, (float)y, m.row_label(r).c_str(), 0.95f, white, on ? 1 : 0);
+        const std::string v = m.row_value(r);
+        if (!v.empty()) {
+            const std::string shown = m.row_pending(r) ? v + " *" : v;
+            jsp_overlay_text_style(640, (float)y, shown.c_str(), 0.85f, white, on ? 1 : 0);
+        }
+    }
+    if (m.stop > 0) jsp_overlay_text_style(930, 112, "more above", 0.5f, white, 0);
+    if (m.stop + kSettingsVisible < n) jsp_overlay_text_style(930, 536, "more below", 0.5f, white, 0);
+    const uint32_t mc = m.smsg_err ? JSP_RGBA(255, 150, 110, 255) : white;
+    if (!m.smsg.empty()) draw_wrapped(260, 536, m.smsg, 60, 0.7f, mc, 24, 572);
+    const SRow& cur = m.srows[(size_t)m.ssel];
+    if (m.capturing) {
+        jsp_overlay_text_style(260, 578, m.model.mode() == 1 ? "Press a key or a mouse button.  Esc or Circle: cancel" : "Press a key.  Esc or Circle: cancel", 0.5f, white, 0);
+        jsp_overlay_text_style(260, 598, "F11 stays the fullscreen key.", 0.5f, white, 0);
+    } else {
+        const char* h1 = cur.kind == SRow::KEY ? "Up/Down: select  Cross: change the key  Circle: back"
+                       : cur.kind == SRow::OPEN || cur.kind == SRow::RESET ? "Up/Down: select  Cross: open or reset  Circle: back"
+                       : "Up/Down: select  Left/Right or Cross: change  Circle: back";
+        jsp_overlay_text_style(260, 578, h1, 0.5f, white, 0);
+        jsp_overlay_text_style(260, 598, "Every change is saved at once. * = saved; applies on the next start.", 0.5f, white, 0);
+    }
+    (void)gold;
+}
+
+// What the launcher keeps for itself, and why.
+void draw_launcher_only(uint32_t white)
+{
+    jsp_overlay_text_style(260, 112, "Port Settings - Launcher only", 1.4f, white, 0);
+    int y = 168;
+    for (int i = 0; i < jps::k_launcher_only_count; i++) {
+        jsp_overlay_text_style(290, (float)y, jps::k_launcher_only[i].what, 0.8f, JSP_RGBA(240, 190, 30, 255), 0);
+        y = draw_wrapped(310, y + 30, jps::k_launcher_only[i].why, 78, 0.55f, white, 22, 580);
+        y += 12;
+    }
+    jsp_overlay_text_style(260, 598, "Circle: back", 0.5f, white, 0);
+}
+
 // ---- ENHANCEMENT (display, default on): the version line on the main menu's top list (jsp_version_line.h) ----
 // "Top list up" = jpv::top_menu(): the main-menu object (r3 of 0x001E0830) is alive, and the panel's per-frame update
 // (0x001E7238, vtable 0x87D910 +0x10) ran within the last two flips with panel state (+0x38) 0 = closed. ASSUMPTION: that update is
@@ -446,14 +738,26 @@ void draw_page()
     jsp_overlay_fill_rect(220, 624, 840, 6, gold);
     if (g_menu.page == MAIN) {
         jsp_overlay_text_style(260, 130, "Port Settings", 1.6f, white, 0);
-        static const char* const rows[kMainRows] = {"Online", "Close"};
-        for (int i = 0; i < kMainRows; i++) {
-            const int y = 250 + i * 70;
-            const bool on = i == g_menu.sel;
-            if (on) jsp_overlay_fill_rect(250, y - 16, 780, 56, JSP_RGBA(255, 255, 255, 235));
-            jsp_overlay_text_style(290, (float)y, rows[i], 1.2f, white, on ? 1 : 0);
+        const std::vector<Page> mr = g_menu.main_rows();
+        const int step = mr.size() > 2 ? 52 : 70, y0 = mr.size() > 2 ? 200 : 250;
+        for (size_t i = 0; i < mr.size(); i++) {
+            const int y = y0 + (int)i * step;
+            const bool on = (int)i == g_menu.sel;
+            const char* name = mr[i] == DISPLAY ? "Display" : mr[i] == GRAPHICS ? "Graphics" : mr[i] == CONTROLS ? "Controls" : mr[i] == ONLINE ? "Online" : mr[i] == LAUNCHER ? "Launcher only" : "Close";
+            if (on) jsp_overlay_fill_rect(250, y - 14, 780, 48, JSP_RGBA(255, 255, 255, 235));
+            jsp_overlay_text_style(290, (float)y, name, 1.2f, white, on ? 1 : 0);
         }
-        jsp_overlay_text_style(260, 560, "Up/Down: select    Cross: open    Circle: close", 0.8f, white, 0);
+        if (g_menu.io) {
+            if (!g_menu.smsg.empty()) jsp_overlay_text_style(260, 520, g_menu.smsg.c_str(), 0.7f, g_menu.smsg_err ? JSP_RGBA(255, 150, 110, 255) : white, 0);
+            std::string pth = g_menu.io->path();
+            if (pth.size() > 78) pth = "..." + pth.substr(pth.size() - 75);
+            jsp_overlay_text_style(260, 548, ("Settings file: " + pth).c_str(), 0.5f, white, 0);
+        }
+        jsp_overlay_text_style(260, 575, "Up/Down: select    Cross: open    Circle: close", 0.8f, white, 0);
+    } else if (g_menu.page >= DISPLAY && g_menu.page <= PADBTNS) {
+        draw_settings(white, gold);
+    } else if (g_menu.page == LAUNCHER) {
+        draw_launcher_only(white);
     } else if (g_menu.be) {
         draw_online_edit(white, gold);
     } else {
@@ -645,7 +949,8 @@ extern "C" void jsp_register_port_menu_overrides(void)
     jsp_menu_label_set(mask);
     g_port_menu_six_rows = 1;
     g_menu.be = &g_backend;   // the Online page is editable (JSP_PORT_MENU_EDIT=0 keeps it read only)
-    if (const char* ed = std::getenv("JSP_PORT_MENU_EDIT")) if (ed[0] == '0') g_menu.be = nullptr;
+    g_menu.io = &g_settings_io;   // the Display, Graphics, Controls and Launcher-only pages
+    if (const char* ed = std::getenv("JSP_PORT_MENU_EDIT")) if (ed[0] == '0') { g_menu.be = nullptr; g_menu.io = nullptr; }
     install_pad_filter();
     std::fprintf(stderr, "[portmenu] JSP_PORT_MENU set: Options gets a sixth row (hooks 0x%08X, 0x%08X), pad filter on, label mask %d\n",
                  k_build_options, k_panel_update, mask);

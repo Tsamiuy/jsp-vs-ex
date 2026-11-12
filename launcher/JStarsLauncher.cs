@@ -1634,6 +1634,7 @@ namespace JStarsLauncher
                     if (k.Length > 0) psi.EnvironmentVariables[k] = v;
                 }
                 boostOff = psi.EnvironmentVariables["BOOST_OFF_ON_EXIT"] != "0";
+                psi.EnvironmentVariables["JSP_SETTINGS_FILE"] = settingsFile;   // the in-game settings pages write this file (jsp_settings.cpp)
 
                 Status("Starting the game...");
                 game = Process.Start(psi);
