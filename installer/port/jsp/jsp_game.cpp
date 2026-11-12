@@ -1220,6 +1220,12 @@ void bal_tick(uint16_t buttons, uint16_t lx, uint16_t ly)
     if (ko_max > 0 && training_fight_scene()) {
         for (uint32_t ea : { 0x490238E4u, 0x492D1F20u }) if (vm_read32(ea) == 3u) vm_write32(ea, (uint32_t)ko_max);
     }
+    /* The fighter list lives only as long as the fight: it is cleared once the fight HUD has gone, with or without the
+     * balance log (release builds have none, and the list used to be cleared only on the log's fight-end line, so
+     * Unlimited Stamina kept writing into the freed fighter objects after Return to character select). Clearing on
+     * every tick outside a fight also covers leaving Training from its pause menu. The HUD's health getter notes the
+     * fighters again on the next frame of a fight. */
+    if (!training_fight_scene()) g_bal_nobj = 0;
     FILE* f = bal_file();
     if (!f) return;
     const unsigned long long now = GetTickCount64();
@@ -2166,7 +2172,7 @@ const uint32_t* tb_stamp(short* x, short* y, short* w, short* h, short* show_w, 
 
 void settings_tick()
 {
-    if (!g_set_stamina) return;
+    if (!g_set_stamina || !training_fight_scene()) return;   /* only fighters of the fight on screen (see bal_tick) */
     for (int i = 0; i < g_bal_nobj; i++) vm_write32(g_bal_obj[i] + 0x9Cu, vm_read32(g_bal_obj[i] + 0xA0u));
 }
 

@@ -6,6 +6,7 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Training: after a fight with Unlimited Stamina on, the port no longer keeps writing stamina into the fighters the game has already freed (for example after Re-select character(s)).
 - Setup's EBOOT check now names the file it checked and shows the full SHA-256. When the file is not a build this port knows, it says whether the path looks like the game update's EBOOT (inside an RPCS3 dev_hdd0 game folder) and which file to pick instead.
 - The support bundle's facts.txt checks for the exe of the installed tree (jsp.exe on the current tree), so it no longer reports the game exe as absent.
 
