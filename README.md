@@ -79,6 +79,16 @@ Of the default build (the v19 tree), as listed in [issue #9](https://github.com/
 - A loading page is reported on v19 and has not been compared with the v15 tree; a black window of about two minutes at the first start is reported (not re-checked after the boot fix); log files stay at 0 bytes during play and fill at exit.
 - "Fight again" from the result menu left a flat brown screen on v18 (not re-checked); long runs and the lost-device case are not re-checked on v19.
 - Not tried yet on v19: key rebinds and controller remaps by hand, playing to a K.O., characters other than the route's five, the portable zip, and Windows 10 with the menu fix.
+- Reported by play testers on 0.1.0 (not yet reproduced here unless noted):
+  - The frame rate drops to about 20 per second in heavy scenes: many fighters on screen, a building being destroyed,
+    the Temple of Athena stage and online matches. In one tester's log the frame rate follows the number of draws per
+    frame, not the network: the cost of each draw on the drawing thread is the limit, and it is being worked on.
+  - Training: Return to character select after using Unlimited Stamina can leave a black screen and freeze; a fix is
+    being tested. The same freeze after turning Unlimited Stamina off is not explained yet.
+  - Online: a solo battle against the computer started from the online lobby froze on the Versus screen; after a
+    connection error in Ranked, the Online Battle menu froze. No log of either yet: a support bundle made right after
+    such a freeze helps.
+  - The online lobby's Selected Stage picture is drawn with horizontal stripes.
 - Needs a CPU with AVX2 by default (`JSP_AVX2`, #9).
 - Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The default (v19) tree has
   an experimental Online Battle over a re-psn server, off unless turned on: see [installer/README.md](installer/README.md).
