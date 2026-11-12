@@ -191,12 +191,13 @@ def facts(app, blobs, refused, not_text, cuts, names):
     except OSError:
         L.append("free space on the install drive: unknown")
     L.append(f"bundled Python: {sys.version.split()[0]} ({platform.architecture()[0]})")
-    exe = app / "game" / firstrun.EXE
+    exe_name = firstrun.TREE_EXE[firstrun.payload_tree(app)]   # the tree's exe: jsp.exe (current) or JStarsRecomp.exe (legacy)
+    exe = app / "game" / exe_name
     if exe.is_file():
         st = exe.stat()
-        L.append(f"game\\{firstrun.EXE}: present, {st.st_size} bytes, {datetime.datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M:%S}")
+        L.append(f"game\\{exe_name}: present, {st.st_size} bytes, {datetime.datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M:%S}")
     else:
-        L.append(f"game\\{firstrun.EXE}: absent")
+        L.append(f"game\\{exe_name}: absent")
     mk = app / "build" / "markers"
     done = sorted(p.stem for p in mk.glob("*.done")) if mk.is_dir() else []
     L.append("first-run step markers: " + (", ".join(done) if done else "none") + "   (steps: " + ", ".join(firstrun.STEPS) + ")")
