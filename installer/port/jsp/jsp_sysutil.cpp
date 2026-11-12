@@ -2,7 +2,7 @@
 //
 // After this repository's v0.15 port (jstars/port/jstars_sysutil.cpp; jsp-vs-ex, Tsamiuy, MIT), ported to
 // ps3recomp v0.18.0, which still has neither library (cellSearch 8 and cellMusic 7 imports
-// missing). Notes: jstars-notes/FINDINGS.md section 14.
+// missing). Notes: docs/archive/jstars-notes/FINDINGS.md section 14.
 //
 // From the original header:
 //

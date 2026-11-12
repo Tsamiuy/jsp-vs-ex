@@ -409,7 +409,7 @@ void pc_text_put(int image_id, uint32_t ea, uint32_t size)
  * becomes Exit Game: Cross on it opens the port's Yes/No box (the text panel
  * in confirm mode); Yes closes the game window, No returns to the list. Read
  * from the game's own state (static data in the EBOOT, found by diffing
- * memory dumps on each screen, jstars-notes FINDINGS "Exit Game"):
+ * memory dumps on each screen, docs/archive/jstars-notes FINDINGS "Exit Game"):
  *   0x008E63FC  Options cursor, counted from the bottom (Cross-Save = 0)
  *   0x0096CD60 / 0x0096CCB8  2 / 2 while the Options list itself is up
  *   0x0095654C  5 on the Options list (9 in the Cross-Save submenu)
@@ -526,7 +526,7 @@ void exit_option_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
  * game uploads into RSX memory: white letters normally, black ones while the
  * entry is highlighted. Before the backend reads a texture, swap those exact
  * bytes (one block compared, then FNV-1a of the whole image) for the same-
- * styled "Exit Game" (exit_label_light/dark.inc, drawn by jstars-notes/tools/
+ * styled "Exit Game" (exit_label_light/dark.inc, drawn by docs/archive/jstars-notes/tools/
  * exit_label.ps1 and packed by dxt5enc.py). */
 const uint8_t k_exit_label_light[32768] = {
 #include "exit_label_light.inc"
@@ -984,7 +984,7 @@ int training_find(uint32_t obj)
 
 /* Balance log (run\balance_log.txt, written in Training, new each launch): every hit
  * with its return addresses, P1's button changes and the fighters' stat fields, so a
- * Training session can be matched to moves afterwards (jstars-notes\Balance). */
+ * Training session can be matched to moves afterwards (docs\archive\jstars-notes\Balance). */
 FILE* g_bal = nullptr;
 uint32_t g_bal_obj[8];
 int g_bal_nobj = 0;
@@ -2369,7 +2369,7 @@ void six_watch_tick(bool picking)
  * default 30), +0x54 (LOD 1 up to, 60), and when +0x58 != 0 a cull distance +0x5C (100) beyond which nothing is
  * drawn; the chosen level goes to +0x60. Defaults from func_003955B4, per-object values from the stage's
  * LODModelInfo chunk (func_00366398 -> func_003629E4). Each object's own values are kept and scaled here, just before
- * the game reads them. jstars-notes/GRAPHICS_MAP.md. */
+ * the game reads them. docs/archive/jstars-notes/GRAPHICS_MAP.md. */
 struct LodOrig { float d0, d1, cull; uint32_t w0, w1, wc, flag; };
 std::unordered_map<uint32_t, LodOrig> g_lod_orig;
 void lod_select_hook(uint32_t o)
@@ -3398,7 +3398,7 @@ void two_player_watch(uint16_t b)   /* port 0, every poll */
  * of its ShadowServer (the singleton func_003CD9E4 returns, *(*(r2 + 0x464C))): +0xF0 = 0.5 near, +0xF4 = far (150 in
  * a fight, 10 in the intros). Far scales the far end each poll, so shadows reach further from the fighter. More than
  * x2 spreads the shadow map's depth too thin: speckled self-shadow patches and a line that moves with the camera,
- * and from about x8 other fighters' shadows drop out (the maintainer's test, 11-10). jstars-notes/GRAPHICS_MAP.md. */
+ * and from about x8 other fighters' shadows drop out (the maintainer's test, 11-10). docs/archive/jstars-notes/GRAPHICS_MAP.md. */
 void shadow_range_tick()
 {
     static float f = 1.0f;

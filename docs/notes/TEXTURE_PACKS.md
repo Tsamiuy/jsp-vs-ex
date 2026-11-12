@@ -67,7 +67,7 @@ marked dynamic and not dumped again.
 - `<hash>_<w>x<h>_<ff>.dds`, keeping the exact decoded format: BC1/2/3 stay compressed and lossless,
   RGBA8/RG8/R8 uncompressed. DDS is header + bytes, so no image library is needed.
 - With `TEX_DUMP_PNG=1`, also a `.png` of the RGBA8 (BC decoded by the same code as
-  `jstars-notes\tools\texbin.py`) for browsing and upscaling.
+  `docs\archive\jstars-notes\tools\texbin.py`) for browsing and upscaling.
 - One line per texture in `texdump\<TITLE>\dump.csv`: hash, w, h, RSX fmt, swizzled/linear, mip
   count, guest offset, first frame, binds so far, and a free tag from `TEX_DUMP_TAG` (e.g. the
   stage name set by the run script). That tag is how we pick "environment of stage X".

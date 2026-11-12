@@ -5,7 +5,7 @@
 
   current  installer/port/patches on ps3recomp v0.19.0: installer/tools/export_toolkit.py (the tool assemble_payload.py --tree current
            and so firstrun use): `git archive` of the pin, then `git apply -p1` of every patch in name order.
-  legacy   installer/patches on the v0.15 tree: tools/toolkit/apply_toolkit.py, the port files of jstars/port and then
+  legacy   installer/patches on the v0.15 tree: jstars/toolkit/apply_toolkit.py, the port files of jstars/port and then
            assemble_payload.apply_patches (git apply -p1, then the reverse check that each patch is really in).
 Nothing is written outside the scratch folder. Standard library only.
 """
@@ -56,7 +56,7 @@ def main():
         if b"\0" not in data:
             data = data.replace(b"\r\n", b"\n")   # as assemble_payload.py does: the patches are LF
         (out / "port" / n).write_bytes(data)
-    r = subprocess.run([sys.executable, "-I", str(ROOT / "tools/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
+    r = subprocess.run([sys.executable, "-I", str(ROOT / "jstars/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
                        capture_output=True, text=True)
     if r.returncode:
         print("::error::legacy: apply_toolkit.py failed\n" + r.stdout + r.stderr)

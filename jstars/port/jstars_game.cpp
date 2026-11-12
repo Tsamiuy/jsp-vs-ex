@@ -489,7 +489,7 @@ void exit_option_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
  * game uploads into RSX memory: white letters normally, black ones while the
  * entry is highlighted. Before the backend reads a texture, swap those exact
  * bytes (one block compared, then FNV-1a of the whole image) for the same-
- * styled "Exit Game" (exit_label_light/dark.inc, drawn by jstars-notes/tools/
+ * styled "Exit Game" (exit_label_light/dark.inc, drawn by docs/archive/jstars-notes/tools/
  * exit_label.ps1 and packed by dxt5enc.py). */
 const uint8_t k_exit_label_light[32768] = {
 #include "exit_label_light.inc"
@@ -929,7 +929,7 @@ int training_find(uint32_t obj)
 
 /* Balance log (run\balance_log.txt, written in Training, new each launch): every hit
  * with its return addresses, P1's button changes and the fighters' stat fields, so a
- * Training session can be matched to moves afterwards (jstars-notes\Balance). */
+ * Training session can be matched to moves afterwards (docs\archive\jstars-notes\Balance). */
 FILE* g_bal = nullptr;
 uint32_t g_bal_obj[8];
 int g_bal_nobj = 0;

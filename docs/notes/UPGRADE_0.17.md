@@ -25,7 +25,7 @@ Reasons, with evidence below:
 - Our base: local tag `v0.15.0` = `0fe7dbf`, identical to upstream's. `jstars-port` = `e799d57`,
   41 commits, 13 toolkit files, +3283/-184 (2630 of it in `rsx_d3d12_backend.c`).
 - Trial merge/cherry-picks were done in a throwaway clone outside the project folder (deleted
-  afterwards). Upstream commits are in `jstars-notes\upgrade-0.17\ps3recomp-v0.15.0..v0.17.0.bundle`
+  afterwards). Upstream commits are in `docs\archive\jstars-notes\upgrade-0.17\ps3recomp-v0.15.0..v0.17.0.bundle`
   so the AI assistant can use them offline:
   `git fetch <bundle> refs/tags/v0.17.0:refs/tags/v0.17.0` (the PC cannot reach GitHub directly).
 

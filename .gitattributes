@@ -5,7 +5,7 @@
 *.cs text eol=crlf
 *.sh text eol=lf
 *.patch -text
-/toolkit/third_party_smaa/* -text
+/jstars/toolkit/third_party_smaa/* -text
 
 # Images and other binary files
 *.png binary

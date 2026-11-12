@@ -95,7 +95,7 @@ Of the default build (the v19 tree), as listed in [issue #9](https://github.com/
 - Needs a CPU with AVX2 by default (`JSP_AVX2`, #9).
 - Online and Cross-Save upload need PSN and do nothing in the default build (Cross-Save is now "Exit Game"). The default (v19) tree has
   an experimental Online Battle over a re-psn server, off unless turned on: see [installer/README.md](installer/README.md).
-- A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `toolkit/ps3recomp-local.patch`, see
+- A hand build from this repository (the pinned ps3recomp v0.15.0 submodule plus `jstars/toolkit/ps3recomp-local.patch`, see
   [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine; the notes build from a local checkout
   with the same changes. The installer applies the same patch for you.
 - Read [docs/SCRIPTS.md](docs/SCRIPTS.md) before running the scripts: they change your power plan and mount the disc image.

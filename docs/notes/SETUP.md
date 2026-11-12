@@ -11,7 +11,7 @@ This page covers the default v15 tree (ps3recomp v0.15.0, `jstars\port`). The op
 | `ps3recomp-src\` | `git clone` of sp00nznet/ps3recomp at the bundle's commit `0fe7dbf5`. The port builds the runtime **from this**. Has local edits — see RUNTIME_BUGS.md. |
 | `RPCS3\` | RPCS3 0.0.43 with the PS3 firmware installed as RPCS3 documents. Its `dev_flash` is used read-only at run time. ISO: `RPCS3\games\J-Stars Victory Vs+.iso`. |
 | `jstars\` | Everything for this title (below). |
-| `docs\notes\` | These notes. `jstars-notes\` holds the patches, analysis tools and measurements. |
+| `docs\notes\` | These notes. `docs\archive\jstars-notes\` holds the patches, analysis tools and measurements. |
 
 ### `jstars\`
 

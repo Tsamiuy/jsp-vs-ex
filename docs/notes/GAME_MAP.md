@@ -16,7 +16,7 @@ One index of the game's data, triggers and code. It points to the detailed notes
 | What | Details | Status |
 |---|---|---|
 | Archives | `USRDIR\data\PS3\partition_op_{battle,character,map,progress,sound}_ps3.cpk`, plus `game` and `patch`, which stay on the disc. Contents table is XOR-masked @UTF | tested: the game loads them; GAME_INTERNALS.md |
-| Compression | `$CMP` file: `$CL0`, `$CLH`, `$CH0`, `$CR0` chunks. `jstars-notes/tools/cmp_unpack.py` unpacks it | tested: Gintoki's pack byte-identical to game memory (FINDINGS "Balance work") |
+| Compression | `$CMP` file: `$CL0`, `$CLH`, `$CH0`, `$CR0` chunks. `docs/archive/jstars-notes/tools/cmp_unpack.py` unpacks it | tested: Gintoki's pack byte-identical to game memory (FINDINGS "Balance work") |
 | Pack | `STPK`: count at +8, then 48-byte entries from +16: offset, size, name at +0x10 (32 characters, longer names are cut). Packs nest. Entries of size 0 are placeholders | reading: every pack unpacks |
 | `_m` / `_v` / `_i` | Main data / textures and graphics data / index data, judging by contents | reading |
 | Language | `_US_`, `_FR_`, `_NS_` for text and art; `_ALL_` for everything else | reading |

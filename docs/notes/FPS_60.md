@@ -12,7 +12,7 @@ a smoother one. The realistic route to smoother motion is frame generation outsi
      (syscall 0x8D, r3 = 0xC8);
   2. SetFlip + flush, then, when its second argument is 1, wait until a vblank counter at
      `*(*(TOC−0x4A80))` is at least 1 (it is counted up by a vblank handler), and reset it to 0
-     (jstars-notes/patches/frame-pacing/README.md).
+     (docs/archive/jstars-notes/patches/frame-pacing/README.md).
 - Flip mode is VSYNC (`cellGcmSetFlipMode(2)`, FINDINGS "frames lock to vblanks"), flips complete on 60 Hz ticks,
   and measured frames are 2 vblanks (30 fps) or 3 (20 fps) (CPU_PROFILE §42: 29.1-29.6 f/s on all tested maps without PERF; the 20-fps frames of §37-41 were PERF's own overhead and late ticks).
   So the game itself never asks for more than one frame per 2 vblanks.

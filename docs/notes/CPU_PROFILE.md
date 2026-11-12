@@ -74,7 +74,7 @@ and keep compiles off the present thread (`PSO_ASYNC`, exists, opt-in).
 
 ## 5. Profiling runs needed (for the AI assistant; all on the current build, a fight on Namek s06 + the demo)
 
-1. **Per-thread CPU** (no code change): run `jstars-notes\tools\thread_cpu.ps1 -Start <fight s>
+1. **Per-thread CPU** (no code change): run `docs\archive\jstars-notes\tools\thread_cpu.ps1 -Start <fight s>
    -Window 5 -Count 12 -Out thread_cpu.txt` alongside a run with `PS3_SAMPLE=2` and
    `-Commands threads`. Gives real CPU % per thread (spinning counts) and, via the sampler's tid
    lines and the guest call chains, which game thread each one is. Also note Task Manager's total.

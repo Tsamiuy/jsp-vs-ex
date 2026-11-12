@@ -184,7 +184,7 @@ A setting in Training settings. While it is on, the pad moves the camera and the
 
 - Each fighter has a camera object, vtable `0x00874DF8`. +0x10 is the view matrix, +0x50 its inverse (rows: right, up, the way it looks, position), and +0x90 the position again. The third row is the look direction, not its negative.
 - `0x0006FF10` steers it each frame. `training_icall` skips that call while the setting is on, and `freecam_write` writes both matrices on every pad read. It writes every camera seen in the last 500 ms; the lowest address is treated as the player's (reading).
-- The right stick needed a new hook in the toolkit, `g_cellpad_rstick_filter` in `cellPad.c`. That change is in `toolkit/ps3recomp-local.patch`.
+- The right stick needed a new hook in the toolkit, `g_cellpad_rstick_filter` in `cellPad.c`. That change is in `jstars/toolkit/ps3recomp-local.patch`.
 
 **Tested** (scripted, keyboard input, Akainu against a 0-star Koro-sensei):
 
@@ -207,7 +207,7 @@ In Training the time limit is always Unlimited and can't be changed. A padlock r
 - The Stage select screen (vtable `0x0087FCF8`) holds the seconds at +0x78: 300, or 0 for Unlimited. Finish and Back both run `0x0026FAA0`, which copies +0x78 to the battle settings, field +0x18. The settings object comes from the getter `0x00270A9C`, and `0x00270CD8` picks the current mode's block.
 - The time limit box (vtable `0x00880018`) shows its own choice at +0x40. Its table at `0x00765CA4` turns that choice into seconds: 0 is 0, 1 is 300.
 - `stage_lock` writes 0 to both on every pad read while the screen is up, and hides Cross, Left and Right while the focus (+0x58) is on the box. The selector can still rest on the box, but nothing happens there.
-- The padlock is a small opaque picture from `stage_lock_stamp`, drawn by a new hook in the renderer, `g_rsx_stamp` in `rsx_d3d12_backend.c`. That toolkit change is in `toolkit/ps3recomp-local.patch`.
+- The padlock is a small opaque picture from `stage_lock_stamp`, drawn by a new hook in the renderer, `g_rsx_stamp` in `rsx_d3d12_backend.c`. That toolkit change is in `jstars/toolkit/ps3recomp-local.patch`.
 - The boxes slide with their scene: box +0x28, then +4, then +0x1C is how far right of their place they are, 732 off the screen and 0 in place. The game is 2 frames ahead of the frame being drawn, so the padlock and the right arrow's patch use the value from 2 frames ago (`stage_slide_tick`).
 - **Fade (11-03, the maintainer):** the padlock now fades to white with the screen. The stage select screen's state at +0x48 is 9 while it is up, 0xD on Start, 0xE while the screen fades to white (500 ms, probe pf1; the port times its fade on the wall clock, not in frames, so it can drift from the game's own fade when the game runs slow) and 0xF once it is white, then 0. `stage_slide_tick` turns that into `g_lock_white` (50 ms lag for the 2 frames), and `stage_lock_stamp` mixes each pixel toward white. Tested with back-to-back screenshots (cf3, cf4): mid-fade the badge stays within about 13 of the bar beside it and the gold follows. cf3 showed the padlock popping back for about 100 ms on the white screen when the state went to 0 before the box was hidden; cf4, after the fix, has no pop.
 
