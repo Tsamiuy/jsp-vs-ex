@@ -63,6 +63,7 @@ jobs:
       portable: true
       tree: current
       keep_days: 30
+      release_version: ${{ needs.tag.outputs.version }}
 
   draft:
     needs: [tag, build]
