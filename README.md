@@ -28,10 +28,11 @@ The frame rates were measured on one Windows machine; see [Status](#status).
 3. Run `jsp-setup.exe` (no admin rights) and point it at the disc folder and `EBOOT.elf`. It builds the port on your PC.
 4. Start **JSP Fan Revival** from the Start menu.
 
-Caveat: this installer has not been run on a real Windows PC yet (see its [status table](installer/README.md#status)); the
-first build takes a while and needs several GB of free space, and `Build again` in the Start menu resumes it.
+Caveat: the first build takes a while and needs several GB of free space, and `Build again` in the Start menu resumes it.
 
-**A ready-made installer download:** coming soon (no release is published yet).
+**A ready-made download:** the [0.1.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.1.0) has
+`jsp-setup.exe` and a portable zip (`jsp-0.1.0-portable.zip`), with SHA-256 sums. Both still build the game on your PC from
+your own copy.
 
 **Linux and Steam Deck (Proton):** coming soon. Not supported yet; an earlier v18 build of the newer tree reached fights under Proton in tests.
 
@@ -49,7 +50,6 @@ first build takes a while and needs several GB of free space, and `Build again` 
 
 ## Coming soon
 
-- A published installer and portable zip.
 - Closing the open problems of the v19 tree, now the default ([issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)).
 - Online matches with rollback netcode, spectating and lobbies ([Roadmap, section 4](docs/ROADMAP.md)).
 - More match options and Training options ([Roadmap, section 3](docs/ROADMAP.md)).
@@ -57,13 +57,15 @@ first build takes a while and needs several GB of free space, and `Build again` 
 
 ## Status
 
-> **Work in progress, not a release.** The default build (the v19 tree, built on ps3recomp v0.19.0; the installer switch is
+> **Pre-release (0.1.0), work in progress.** The default build (the v19 tree, built on ps3recomp v0.19.0; the installer switch is
 > `--tree current`) lifts and builds on Windows (Direct3D 12) and boots, plays the opening movie, the menus and fights
 > with sound, at about 30 frames per second in the demo and in Free Battle on one Windows machine (its earlier v18 build, on
 > toolkit v0.18.0, ran at 16 to 22). It has had fewer tests than the earlier v15 tree (`--tree legacy`, about 29 frames per second):
 > the EU disc, the first-start window and long runs are not re-checked on it, and it has known problems (see Known problems
 > below and [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)). The game port was run on one Windows PC (see #9); the
-> CI-built setup program installed, built and started it on that PC; the portable zip has not been run on Windows.
+> CI-built setup program installed, built and started it on that PC. Since 0.1.0, play testers have installed it with the
+> setup program and the portable zip on their own Windows 11 PCs (AMD and NVIDIA graphics) and played menus, fights and
+> online matches; their reports are under Known problems.
 >
 > Dated table (top refreshed 2026-10-30, mostly for the v15 tree): [docs/notes/STATUS.md](docs/notes/STATUS.md).
 
@@ -78,13 +80,14 @@ Of the default build (the v19 tree), as listed in [issue #9](https://github.com/
 - Lighting on some floors was washed out on the earlier v18 build; whether the shadow fixes changed that has not been compared on v19. A white bar under the left portrait is not explained.
 - A loading page is reported on v19 and has not been compared with the v15 tree; a black window of about two minutes at the first start is reported (not re-checked after the boot fix); log files stay at 0 bytes during play and fill at exit.
 - "Fight again" from the result menu left a flat brown screen on v18 (not re-checked); long runs and the lost-device case are not re-checked on v19.
-- Not tried yet on v19: key rebinds and controller remaps by hand, playing to a K.O., characters other than the route's five, the portable zip, and Windows 10 with the menu fix.
+- Not tried yet on v19: key rebinds and controller remaps by hand, playing to a K.O., characters other than the route's five, and Windows 10 with the menu fix.
 - Reported by play testers on 0.1.0 (not yet reproduced here unless noted):
   - The frame rate drops to about 20 per second in heavy scenes: many fighters on screen, a building being destroyed,
     the Temple of Athena stage and online matches. In one tester's log the frame rate follows the number of draws per
     frame, not the network: the cost of each draw on the drawing thread is the limit, and it is being worked on.
-  - Training: Return to character select after using Unlimited Stamina can leave a black screen and freeze; a fix is
-    being tested. The same freeze after turning Unlimited Stamina off is not explained yet.
+  - Training: Return to character select after using Unlimited Stamina can leave a black screen and freeze. It did not
+    happen in our runs; a related fix is in (Unlimited Stamina no longer writes into fighters the game has freed), but the
+    freeze itself, with Unlimited Stamina on or off, is not explained yet.
   - Online: a solo battle against the computer started from the online lobby froze on the Versus screen; after a
     connection error in Ranked, the Online Battle menu froze. No log of either yet: a support bundle made right after
     such a freeze helps.
