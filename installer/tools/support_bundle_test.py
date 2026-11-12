@@ -83,6 +83,15 @@ def main():
         g = sb.gpu_name({"a.log": b"[spu] gpu sync: 3 waits\n", "game/run/play_stdout.txt": b"[D3D12] adapter: Test GPU (VRAM 8 MB)\r\n"})
         check(g == "Test GPU (VRAM 8 MB) (from game/run/play_stdout.txt)", "GPU: the [D3D12] adapter line wins over a looser match")
         check("bundled Python: " in f and "CPUs: " in f and "free space" in f and "Windows: " in f, "facts: system lines")
+        check("\nCPU: " in f and "AVX2: " in f and "\nGPU driver: " in f, "facts: CPU model, AVX2 and GPU driver lines")
+        fake = {r"HARDWARE\DESCRIPTION\System\CentralProcessor\0": {"ProcessorNameString": "  Test CPU   8-Core  "},
+                sb.DISPLAY_CLASS + "\\0000": {"DriverDesc": "Test GPU", "DriverVersion": "32.0.15.6094", "DriverDate": "10-1-2026"},
+                sb.DISPLAY_CLASS + "\\0001": {"DriverDesc": "Basic Display"},       # no version: skipped
+                sb.DISPLAY_CLASS + "\\Properties": {"DriverDesc": "x", "DriverVersion": "1"}}   # not an adapter: skipped
+        rd = lambda _r, path, names: {n: v for n, v in fake.get(path, {}).items() if n in names}
+        check(sb.cpu_model(rd) == "Test CPU 8-Core", "CPU: the registry name, spaces collapsed")
+        check(sb.gpu_drivers(lambda _p: ["0000", "0001", "Properties"], rd) == ["Test GPU: driver 32.0.15.6094 (10-1-2026)"], "GPU driver: numbered adapter keys with a version only")
+        check(sb.gpu_drivers(lambda _p: [], rd) == [], "GPU driver: none found")
 
         # the cap: two big logs, the oldest lines of the largest go first, with a note
         w(app / "logs/firstrun-20260102-000000.log", "".join(f"old line {i}\n" for i in range(50000)) + "NEWEST LINE\n")
