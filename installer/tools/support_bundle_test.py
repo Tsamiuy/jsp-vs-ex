@@ -74,6 +74,11 @@ def main():
         check("VERSION.txt: 0.18.0-test" in f and "tree.txt: absent" in f, "facts: version, and tree.txt absent is fine")
         check("markers: lift, spu" in f, "facts: step markers")
         check("JStarsRecomp.exe: present, 12 bytes" in f, "facts: game exe size")
+        cur = t / "app-current"                  # the current tree (tree.txt v18) places jsp.exe, not JStarsRecomp.exe
+        w(cur / "tree.txt", "v18\n")
+        w(cur / "game/jsp.exe", b"MZ" + b"0" * 6)
+        fc = sb.facts(cur, {}, [], [], [], [])
+        check("jsp.exe: present, 8 bytes" in fc and "JStarsRecomp" not in fc, "facts: the current tree's exe is jsp.exe")
         check("GPU: Test Adapter 9000" in f, "facts: GPU name from a log line")
         g = sb.gpu_name({"a.log": b"[spu] gpu sync: 3 waits\n", "game/run/play_stdout.txt": b"[D3D12] adapter: Test GPU (VRAM 8 MB)\r\n"})
         check(g == "Test GPU (VRAM 8 MB) (from game/run/play_stdout.txt)", "GPU: the [D3D12] adapter line wins over a looser match")
