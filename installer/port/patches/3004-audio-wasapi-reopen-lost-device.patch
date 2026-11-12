@@ -1,0 +1,494 @@
+Patch 3004: cellAudio WASAPI backend re-opens the default render device when the device is lost or the default changes.
+
+Symptom (J-Stars tester, after alt-tab): the sound was gone for the rest of the run. The backend opened the endpoint once.
+When GetCurrentPadding then failed (AUDCLNT_E_DEVICE_INVALIDATED on a default-device change, a device taken by another
+program, sleep, an audio service restart) audio_backend_room returned -1 and the mix thread paced on the clock with no
+output until exit. The submit path also ignored the HRESULTs of GetCurrentPadding, GetBuffer and ReleaseBuffer.
+
+Now: a result that means the device is gone (padding failure, or DEVICE_INVALIDATED / SERVICE_NOT_RUNNING /
+RESOURCES_INVALIDATED / ENDPOINT_CREATE_FAILED from GetBuffer or ReleaseBuffer) releases client, render client and event
+and starts re-opening the current default render endpoint with the same format negotiation as the first open (48 kHz
+stereo float, event callback, autoconvert; the fallback without event now uses a fresh client). Opening runs on its own
+thread so the mix thread never waits for Activate/Initialize; the first try is at the loss, then every 0.5, 1, 2, 2 ... s.
+Meanwhile mixing and the guest-side pacing are unchanged (the mix thread paces on the performance counter, as with no
+device). A start with no device now also retries. Once a second, while healthy, the default endpoint id is compared with
+the one the stream plays on: a stream on the old device keeps playing there after the user switches, so no HRESULT
+reports it; a change triggers the same re-open. Log: one "[cellAudio] audio device lost (0x... in ...)" line per loss, up
+to three "re-open try N failed" lines, one "audio device re-opened after N ms" line.
+
+The decision logic (which HRESULTs mean re-open, retry timing, endpoint-id comparison) is in audio_wasapi_recover.h with
+no Windows dependency; libs/audio/tests/test_audio_device_recover.c drives it with fake HRESULTs and a fake clock.
+Upstream candidate (general fix, no J-Stars specifics). Not run in a game: cellAudio.c compiled (mingw -Wall -Wextra) and the host test run; the full exe not built yet.
+
+diff --git a/libs/audio/audio_wasapi_recover.h b/libs/audio/audio_wasapi_recover.h
+new file mode 100644
+index 0000000..e4c6f7a
+--- /dev/null
++++ b/libs/audio/audio_wasapi_recover.h
+@@ -0,0 +1,63 @@
++/* Decision logic for re-opening the WASAPI render device (J-Stars patch 3004). No Windows headers: the host test
++ * (tests/test_audio_device_recover.c) drives it with fake HRESULTs and a fake clock. */
++#ifndef PS3R_AUDIO_WASAPI_RECOVER_H
++#define PS3R_AUDIO_WASAPI_RECOVER_H
++#include <stdint.h>
++#include <wchar.h>
++
++#define PS3R_AUDCLNT_E_DEVICE_INVALIDATED    0x88890004u
++#define PS3R_AUDCLNT_E_ENDPOINT_CREATE_FAILED 0x8889000Fu
++#define PS3R_AUDCLNT_E_SERVICE_NOT_RUNNING   0x88890010u
++#define PS3R_AUDCLNT_E_RESOURCES_INVALIDATED 0x88890026u
++
++/* Device-gone class for GetBuffer/ReleaseBuffer/Start results: the endpoint was unplugged, disabled, taken over by
++ * the user's default-device change or the audio service restarted (sleep, driver reset). */
++static inline int ps3r_wasapi_hr_is_device_gone(uint32_t hr)
++{
++    return hr == PS3R_AUDCLNT_E_DEVICE_INVALIDATED || hr == PS3R_AUDCLNT_E_SERVICE_NOT_RUNNING ||
++           hr == PS3R_AUDCLNT_E_RESOURCES_INVALIDATED || hr == PS3R_AUDCLNT_E_ENDPOINT_CREATE_FAILED;
++}
++/* GetCurrentPadding fails only when the stream is unusable, so any failure there means re-open. */
++static inline int ps3r_wasapi_padding_failed_means_lost(uint32_t hr) { return (int32_t)hr < 0; }
++
++#define PS3R_AUDIO_RETRY_FIRST_MS   0u     /* first try at the loss itself: the new default may already be there */
++#define PS3R_AUDIO_RETRY_STEP_MS    500u   /* then 500, 1000, 2000 ms ... */
++#define PS3R_AUDIO_RETRY_MAX_MS     2000u
++#define PS3R_AUDIO_POLL_MS          1000u  /* healthy: look at the default endpoint this often */
++
++typedef struct {
++    int      lost;           /* 1 while no device is open */
++    uint32_t attempts;       /* failed re-opens since the loss */
++    uint64_t lost_at_ms;
++    uint64_t next_try_ms;
++    uint64_t next_poll_ms;
++} ps3r_audio_dev_state;
++
++static inline void ps3r_audio_dev_init(ps3r_audio_dev_state* s, uint64_t now) {
++    s->lost = 0; s->attempts = 0; s->lost_at_ms = 0; s->next_try_ms = 0; s->next_poll_ms = now + PS3R_AUDIO_POLL_MS;
++}
++static inline void ps3r_audio_dev_lost(ps3r_audio_dev_state* s, uint64_t now) {
++    s->lost = 1; s->attempts = 0; s->lost_at_ms = now; s->next_try_ms = now + PS3R_AUDIO_RETRY_FIRST_MS;
++}
++static inline int ps3r_audio_dev_retry_due(const ps3r_audio_dev_state* s, uint64_t now) {
++    return s->lost && now >= s->next_try_ms;
++}
++static inline void ps3r_audio_dev_open_failed(ps3r_audio_dev_state* s, uint64_t now) {
++    uint32_t step = PS3R_AUDIO_RETRY_STEP_MS << (s->attempts < 4 ? s->attempts : 4);
++    if (step > PS3R_AUDIO_RETRY_MAX_MS) step = PS3R_AUDIO_RETRY_MAX_MS;
++    s->attempts++; s->next_try_ms = now + step;
++}
++static inline void ps3r_audio_dev_opened(ps3r_audio_dev_state* s, uint64_t now) {
++    s->lost = 0; s->attempts = 0; s->next_poll_ms = now + PS3R_AUDIO_POLL_MS;
++}
++static inline int ps3r_audio_dev_poll_due(const ps3r_audio_dev_state* s, uint64_t now) {
++    return !s->lost && now >= s->next_poll_ms;
++}
++static inline void ps3r_audio_dev_polled(ps3r_audio_dev_state* s, uint64_t now) { s->next_poll_ms = now + PS3R_AUDIO_POLL_MS; }
++/* The default render endpoint is a different one than the stream runs on (a stream opened on the old device keeps
++ * playing there, so no HRESULT ever reports the switch). Empty/NULL current id = lookup failed: not a change. */
++static inline int ps3r_audio_default_changed(const wchar_t* open_id, const wchar_t* default_id) {
++    if (!default_id || !default_id[0] || !open_id) return 0;
++    return wcscmp(open_id, default_id) != 0;
++}
++#endif
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index e8b487a..09c7590 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -21,6 +21,7 @@
+ #include <stdint.h>
+ #include <math.h>
+ #include "ps3emu/log_first.h"
++#include "audio_wasapi_recover.h"
+ #include "ps3emu/thread_name.h"
+ 
+ /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
+@@ -234,19 +235,46 @@ static u32 audio_backend_queued_samples(void)
+ 
+ #if AUDIO_BACKEND_WASAPI
+ 
++typedef struct {
++    IAudioClient*       client;
++    IAudioRenderClient* render;
++    HANDLE              event;
++    UINT32              buf_frames;
++    wchar_t             id[128];   /* endpoint id the stream was opened on */
++} wasapi_dev;
++
+ static IAudioClient*        s_wasapi_client = NULL;
+ static IAudioRenderClient*  s_wasapi_render = NULL;
+ static HANDLE               s_wasapi_event  = NULL;
+ static UINT32               s_wasapi_buf_frames = 0;
++static wchar_t              s_wasapi_dev_id[128];
++/* J-Stars patch 3004: re-open after a lost device. State is touched by the mix thread only, except the staging
++ * struct, which the opener thread owns until it publishes s_wasapi_open_state 2 or 3. */
++static ps3r_audio_dev_state s_wasapi_st;
++static wasapi_dev           s_wasapi_stage;
++static HANDLE               s_wasapi_opener = NULL;
++static volatile LONG        s_wasapi_open_state = 0;   /* 0 idle, 1 opener running, 2 opened, 3 failed */
++static volatile LONG        s_wasapi_open_hr = 0;
++
++static void wasapi_dev_close(wasapi_dev* d)
++{
++    if (d->client) d->client->lpVtbl->Stop(d->client);
++    if (d->render) { d->render->lpVtbl->Release(d->render); d->render = NULL; }
++    if (d->client) { d->client->lpVtbl->Release(d->client); d->client = NULL; }
++    if (d->event)  { CloseHandle(d->event); d->event = NULL; }
++    d->buf_frames = 0;
++}
+ 
+-static int audio_backend_init(void)
++/* Open the current default render endpoint and start the stream. Same format negotiation as the first open. */
++static HRESULT wasapi_open_default(wasapi_dev* d)
+ {
+     HRESULT hr;
++    memset(d, 0, sizeof(*d));
+ 
+     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+     if (FAILED(hr) && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) {
+         printf("[cellAudio] CoInitializeEx failed: 0x%08lX\n", hr);
+-        return -1;
++        return hr;
+     }
+ 
+     IMMDeviceEnumerator* enumerator = NULL;
+@@ -254,7 +282,7 @@ static int audio_backend_init(void)
+                           &IID_IMMDeviceEnumerator, (void**)&enumerator);
+     if (FAILED(hr)) {
+         printf("[cellAudio] Failed to create device enumerator: 0x%08lX\n", hr);
+-        return -1;
++        return hr;
+     }
+ 
+     IMMDevice* device = NULL;
+@@ -263,15 +291,19 @@ static int audio_backend_init(void)
+     enumerator->lpVtbl->Release(enumerator);
+     if (FAILED(hr)) {
+         printf("[cellAudio] Failed to get default audio endpoint: 0x%08lX\n", hr);
+-        return -1;
++        return hr;
+     }
++    { LPWSTR id = NULL;
++      if (SUCCEEDED(device->lpVtbl->GetId(device, &id)) && id) {
++          wcsncpy(d->id, id, 127); d->id[127] = 0; CoTaskMemFree(id); } }
+ 
+     hr = device->lpVtbl->Activate(device, &IID_IAudioClient, CLSCTX_ALL,
+-                                   NULL, (void**)&s_wasapi_client);
++                                   NULL, (void**)&d->client);
+     device->lpVtbl->Release(device);
+     if (FAILED(hr)) {
+         printf("[cellAudio] Failed to activate audio client: 0x%08lX\n", hr);
+-        return -1;
++        d->client = NULL;
++        return hr;
+     }
+ 
+     WAVEFORMATEX wfx;
+@@ -290,7 +322,7 @@ static int audio_backend_init(void)
+     REFERENCE_TIME buf_duration = 600000; /* 60 ms in 100 ns units */
+     { const char* e = getenv("PS3_AUDIO_BUF_MS"); const int ms = e ? atoi(e) : 0;
+       if (ms >= 10 && ms <= 500) buf_duration = (REFERENCE_TIME)ms * 10000; }
+-    s_wasapi_event = CreateEventW(NULL, FALSE, FALSE, NULL);
++    d->event = CreateEventW(NULL, FALSE, FALSE, NULL);
+ 
+     /* Shared mode only takes the device's own mix format unless the stream
+      * asks the audio engine to convert: on a device not running 48 kHz stereo
+@@ -303,64 +335,157 @@ static int audio_backend_init(void)
+ #define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
+ #endif
+     const DWORD convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+-    hr = s_wasapi_client->lpVtbl->Initialize(
+-        s_wasapi_client,
++    hr = d->client->lpVtbl->Initialize(
++        d->client,
+         AUDCLNT_SHAREMODE_SHARED,
+         AUDCLNT_STREAMFLAGS_EVENTCALLBACK | convert,
+         buf_duration, 0, &wfx, NULL);
+ 
+     if (FAILED(hr)) {
+-        /* Fallback: try without event callback */
+-        hr = s_wasapi_client->lpVtbl->Initialize(
+-            s_wasapi_client,
++        /* Fallback: try without event callback. A failed Initialize leaves the client unusable: take a fresh one. */
++        d->client->lpVtbl->Release(d->client); d->client = NULL;
++        { IMMDeviceEnumerator* en2 = NULL; IMMDevice* dev2 = NULL;
++          HRESULT h2 = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &IID_IMMDeviceEnumerator, (void**)&en2);
++          if (SUCCEEDED(h2)) { h2 = en2->lpVtbl->GetDefaultAudioEndpoint(en2, eRender, eConsole, &dev2); en2->lpVtbl->Release(en2); }
++          if (SUCCEEDED(h2)) { h2 = dev2->lpVtbl->Activate(dev2, &IID_IAudioClient, CLSCTX_ALL, NULL, (void**)&d->client); dev2->lpVtbl->Release(dev2); }
++          if (FAILED(h2)) { d->client = NULL; hr = h2; } }
++        if (d->client) hr = d->client->lpVtbl->Initialize(
++            d->client,
+             AUDCLNT_SHAREMODE_SHARED,
+             convert, buf_duration, 0, &wfx, NULL);
+         if (FAILED(hr)) {
+             printf("[cellAudio] WASAPI Initialize failed: 0x%08lX\n", hr);
+-            s_wasapi_client->lpVtbl->Release(s_wasapi_client);
+-            s_wasapi_client = NULL;
+-            CloseHandle(s_wasapi_event);
+-            s_wasapi_event = NULL;
+-            return -1;
++            wasapi_dev_close(d);
++            return hr;
+         }
+-        CloseHandle(s_wasapi_event);
+-        s_wasapi_event = NULL;
++        CloseHandle(d->event);
++        d->event = NULL;
+     } else {
+-        s_wasapi_client->lpVtbl->SetEventHandle(s_wasapi_client, s_wasapi_event);
++        d->client->lpVtbl->SetEventHandle(d->client, d->event);
+     }
+ 
+-    s_wasapi_client->lpVtbl->GetBufferSize(s_wasapi_client, &s_wasapi_buf_frames);
++    d->client->lpVtbl->GetBufferSize(d->client, &d->buf_frames);
+ 
+-    hr = s_wasapi_client->lpVtbl->GetService(
+-        s_wasapi_client, &IID_IAudioRenderClient, (void**)&s_wasapi_render);
++    hr = d->client->lpVtbl->GetService(
++        d->client, &IID_IAudioRenderClient, (void**)&d->render);
+     if (FAILED(hr)) {
+         printf("[cellAudio] Failed to get render client: 0x%08lX\n", hr);
+-        s_wasapi_client->lpVtbl->Release(s_wasapi_client);
+-        s_wasapi_client = NULL;
+-        return -1;
++        d->render = NULL;
++        wasapi_dev_close(d);
++        return hr;
+     }
+ 
+-    s_wasapi_client->lpVtbl->Start(s_wasapi_client);
++    hr = d->client->lpVtbl->Start(d->client);
++    if (FAILED(hr)) { wasapi_dev_close(d); return hr; }
++    return S_OK;
++}
++
++static void wasapi_adopt(const wasapi_dev* d)
++{
++    s_wasapi_client = d->client; s_wasapi_render = d->render; s_wasapi_event = d->event;
++    s_wasapi_buf_frames = d->buf_frames;
++    wcsncpy(s_wasapi_dev_id, d->id, 127); s_wasapi_dev_id[127] = 0;
++}
++
++static int audio_backend_init(void)
++{
++    wasapi_dev d;
++    const HRESULT hr = wasapi_open_default(&d);
++    ps3r_audio_dev_init(&s_wasapi_st, GetTickCount64());
++    if (FAILED(hr)) {
++        /* No device at start (none plugged in, service down): keep trying, the mix thread paces on the clock meanwhile. */
++        ps3r_audio_dev_lost(&s_wasapi_st, GetTickCount64());
++        return -1;
++    }
++    wasapi_adopt(&d);
+     return 0;
+ }
+ 
+ static void audio_backend_shutdown(void)
+ {
+-    if (s_wasapi_client) {
+-        s_wasapi_client->lpVtbl->Stop(s_wasapi_client);
+-    }
+-    if (s_wasapi_render) {
+-        s_wasapi_render->lpVtbl->Release(s_wasapi_render);
+-        s_wasapi_render = NULL;
++    if (s_wasapi_opener) {
++        WaitForSingleObject(s_wasapi_opener, 5000);
++        CloseHandle(s_wasapi_opener); s_wasapi_opener = NULL;
++        if (s_wasapi_open_state == 2) wasapi_dev_close(&s_wasapi_stage);
++        s_wasapi_open_state = 0;
+     }
+-    if (s_wasapi_client) {
+-        s_wasapi_client->lpVtbl->Release(s_wasapi_client);
+-        s_wasapi_client = NULL;
++    wasapi_dev cur = { s_wasapi_client, s_wasapi_render, s_wasapi_event, 0, {0} };
++    wasapi_dev_close(&cur);
++    s_wasapi_client = NULL; s_wasapi_render = NULL; s_wasapi_event = NULL;
++}
++
++/* The device is gone: drop the stream and start the retry clock. One log line per loss. */
++static void wasapi_mark_lost(HRESULT hr, const char* where)
++{
++    if (s_wasapi_st.lost) return;
++    const ULONGLONG now = GetTickCount64();
++    fprintf(stderr, "[cellAudio] audio device lost (0x%08lX in %s): re-opening the default render endpoint%c",
++            (unsigned long)hr, where, 10);
++    wasapi_dev cur = { s_wasapi_client, s_wasapi_render, s_wasapi_event, 0, {0} };
++    wasapi_dev_close(&cur);
++    s_wasapi_client = NULL; s_wasapi_render = NULL; s_wasapi_event = NULL; s_wasapi_buf_frames = 0;
++    ps3r_audio_dev_lost(&s_wasapi_st, now);
++}
++
++/* Opening takes tens of ms (Activate/Initialize): never on the mix thread. */
++static unsigned __stdcall wasapi_opener_thread(void* arg)
++{
++    (void)arg;
++    const HRESULT hr = wasapi_open_default(&s_wasapi_stage);
++    InterlockedExchange(&s_wasapi_open_hr, (LONG)hr);
++    InterlockedExchange(&s_wasapi_open_state, FAILED(hr) ? 3 : 2);
++    return 0;
++}
++
++/* Mix thread, every block while no device is open: collect the opener's result or start a new attempt. */
++static void wasapi_service_reopen(void)
++{
++    const ULONGLONG now = GetTickCount64();
++    const LONG st = s_wasapi_open_state;
++    if (st == 2 || st == 3) {
++        WaitForSingleObject(s_wasapi_opener, INFINITE);
++        CloseHandle(s_wasapi_opener); s_wasapi_opener = NULL;
++        if (st == 2) {
++            wasapi_adopt(&s_wasapi_stage);
++            fprintf(stderr, "[cellAudio] audio device re-opened after %llu ms (%u failed tries, buffer %u frames)%c",
++                    (unsigned long long)(now - s_wasapi_st.lost_at_ms), (unsigned)s_wasapi_st.attempts,
++                    (unsigned)s_wasapi_buf_frames, 10);
++            ps3r_audio_dev_opened(&s_wasapi_st, now);
++        } else {
++            if (s_wasapi_st.attempts < 3)
++                fprintf(stderr, "[cellAudio] audio device re-open try %u failed 0x%08lX, retrying%c",
++                        (unsigned)s_wasapi_st.attempts + 1, (unsigned long)s_wasapi_open_hr, 10);
++            ps3r_audio_dev_open_failed(&s_wasapi_st, now);
++        }
++        s_wasapi_open_state = 0;
++    } else if (st == 0 && ps3r_audio_dev_retry_due(&s_wasapi_st, now)) {
++        s_wasapi_open_state = 1;
++        s_wasapi_opener = (HANDLE)_beginthreadex(NULL, 0, wasapi_opener_thread, NULL, 0, NULL);
++        if (!s_wasapi_opener) { s_wasapi_open_state = 0; ps3r_audio_dev_open_failed(&s_wasapi_st, now); }
+     }
+-    if (s_wasapi_event) {
+-        CloseHandle(s_wasapi_event);
+-        s_wasapi_event = NULL;
++}
++
++/* Healthy: once a second, is the default render endpoint still the one we play on? A stream opened on the old
++ * device keeps playing there when the user switches, so nothing reports it. */
++static void wasapi_poll_default(void)
++{
++    static IMMDeviceEnumerator* en = NULL;
++    static int com_ready = 0;
++    if (!com_ready) { CoInitializeEx(NULL, COINIT_MULTITHREADED); com_ready = 1; }   /* mix thread has no COM yet */
++    const ULONGLONG now = GetTickCount64();
++    ps3r_audio_dev_polled(&s_wasapi_st, now);
++    if (!en && FAILED(CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
++                                       &IID_IMMDeviceEnumerator, (void**)&en))) { en = NULL; return; }
++    IMMDevice* dev = NULL;
++    if (FAILED(en->lpVtbl->GetDefaultAudioEndpoint(en, eRender, eConsole, &dev))) return;
++    LPWSTR id = NULL;
++    if (SUCCEEDED(dev->lpVtbl->GetId(dev, &id)) && id) {
++        wchar_t cur[128]; wcsncpy(cur, id, 127); cur[127] = 0;
++        CoTaskMemFree(id);
++        if (ps3r_audio_default_changed(s_wasapi_dev_id, cur))
++            wasapi_mark_lost((HRESULT)0, "default endpoint changed");
+     }
++    dev->lpVtbl->Release(dev);
+ }
+ 
+ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+@@ -368,7 +493,8 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+     if (!s_wasapi_render) return;
+ 
+     UINT32 padding = 0;
+-    s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    HRESULT hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    if (ps3r_wasapi_padding_failed_means_lost((uint32_t)hr)) { wasapi_mark_lost(hr, "GetCurrentPadding"); return; }
+ 
+     UINT32 available = s_wasapi_buf_frames - padding;
+     if (num_samples > available) {
+@@ -378,7 +504,7 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+     if (num_samples == 0) return;
+ 
+     BYTE* buf = NULL;
+-    HRESULT hr = s_wasapi_render->lpVtbl->GetBuffer(s_wasapi_render, num_samples, &buf);
++    hr = s_wasapi_render->lpVtbl->GetBuffer(s_wasapi_render, num_samples, &buf);
+     if (SUCCEEDED(hr) && buf) {
+         /* PS3_MUTE=1: silence at the device, nothing else changes -- the
+          * title still gets a working cellAudio and the device still paces
+@@ -387,22 +513,31 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+         static int mute = -1;
+         if (mute < 0) mute = getenv("PS3_MUTE") ? 1 : 0;
+         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+-        s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
++        hr = s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
+                                                mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
++        if (ps3r_wasapi_hr_is_device_gone((uint32_t)hr)) wasapi_mark_lost(hr, "ReleaseBuffer");
++    } else if (FAILED(hr) && ps3r_wasapi_hr_is_device_gone((uint32_t)hr)) {
++        wasapi_mark_lost(hr, "GetBuffer");
+     }
+ }
+ 
+-/* Frames the device can take right now; -1 with no device open. */
++/* Frames the device can take right now; -1 with no device open (the caller then paces on the clock). */
+ static int audio_backend_room(void)
+ {
++    if (s_wasapi_st.lost) {
++        wasapi_service_reopen();
++        if (s_wasapi_st.lost) return -1;
++    } else if (s_wasapi_client && ps3r_audio_dev_poll_due(&s_wasapi_st, GetTickCount64())) {
++        wasapi_poll_default();
++        if (s_wasapi_st.lost) { wasapi_service_reopen(); return -1; }
++    }
+     if (!s_wasapi_client) return -1;
+     UINT32 padding = 0;
+     const HRESULT hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
+-    if (FAILED(hr)) {
+-        /* Device gone (AUDCLNT_E_DEVICE_INVALIDATED on a default-device
+-         * change, sleep, ...): pace on the clock rather than spin. */
+-        static int _n = 0; if (PS3_LOG_FIRST(_n, 4))
+-            fprintf(stderr, "[cellAudio] GetCurrentPadding failed 0x%08lX -- clock pacing%c", (unsigned long)hr, 10);
++    if (ps3r_wasapi_padding_failed_means_lost((uint32_t)hr)) {
++        /* AUDCLNT_E_DEVICE_INVALIDATED on a default-device change, sleep, ...: re-open; pace on the clock meanwhile. */
++        wasapi_mark_lost(hr, "GetCurrentPadding");
++        wasapi_service_reopen();
+         return -1;
+     }
+     return (int)(s_wasapi_buf_frames - padding);
+diff --git a/libs/audio/tests/test_audio_device_recover.c b/libs/audio/tests/test_audio_device_recover.c
+new file mode 100644
+index 0000000..36c98af
+--- /dev/null
++++ b/libs/audio/tests/test_audio_device_recover.c
+@@ -0,0 +1,47 @@
++/* Host test for the WASAPI re-open decisions (J-Stars patch 3004). gcc -I libs/audio libs/audio/tests/test_audio_device_recover.c */
++#include "../audio_wasapi_recover.h"
++#include <assert.h>
++#include <stdio.h>
++int main(void)
++{
++    /* which results mean re-open */
++    assert(ps3r_wasapi_hr_is_device_gone(0x88890004u));   /* DEVICE_INVALIDATED */
++    assert(ps3r_wasapi_hr_is_device_gone(0x88890010u));   /* SERVICE_NOT_RUNNING */
++    assert(ps3r_wasapi_hr_is_device_gone(0x88890026u));   /* RESOURCES_INVALIDATED */
++    assert(!ps3r_wasapi_hr_is_device_gone(0));            /* S_OK */
++    assert(!ps3r_wasapi_hr_is_device_gone(0x88890006u));  /* BUFFER_TOO_LARGE: caller bug, not a lost device */
++    assert(!ps3r_wasapi_hr_is_device_gone(0x8889000Bu));  /* BUFFER_OPERATION_PENDING */
++    assert(ps3r_wasapi_padding_failed_means_lost(0x88890004u));
++    assert(ps3r_wasapi_padding_failed_means_lost(0x80004005u)); /* E_FAIL */
++    assert(!ps3r_wasapi_padding_failed_means_lost(0));
++    assert(!ps3r_wasapi_padding_failed_means_lost(1));    /* S_FALSE */
++
++    /* retry timing: immediate, then 500, 1000, 2000, 2000 ... after each failure */
++    ps3r_audio_dev_state s; ps3r_audio_dev_init(&s, 1000);
++    assert(!ps3r_audio_dev_retry_due(&s, 1000));          /* healthy: nothing to retry */
++    assert(!ps3r_audio_dev_poll_due(&s, 1999) && ps3r_audio_dev_poll_due(&s, 2000));
++    ps3r_audio_dev_lost(&s, 5000);
++    assert(!ps3r_audio_dev_poll_due(&s, 99999));          /* no polling while lost */
++    assert(ps3r_audio_dev_retry_due(&s, 5000));
++    ps3r_audio_dev_open_failed(&s, 5010);
++    assert(!ps3r_audio_dev_retry_due(&s, 5509) && ps3r_audio_dev_retry_due(&s, 5510));
++    ps3r_audio_dev_open_failed(&s, 5510);
++    assert(!ps3r_audio_dev_retry_due(&s, 6509) && ps3r_audio_dev_retry_due(&s, 6510));
++    ps3r_audio_dev_open_failed(&s, 6510);
++    assert(ps3r_audio_dev_retry_due(&s, 8510) && !ps3r_audio_dev_retry_due(&s, 8509));
++    for (int i = 0; i < 20; i++) ps3r_audio_dev_open_failed(&s, 10000);
++    assert(s.next_try_ms == 12000);                        /* capped at 2 s, no overflow of the shift */
++    ps3r_audio_dev_opened(&s, 20000);
++    assert(!s.lost && s.attempts == 0 && !ps3r_audio_dev_retry_due(&s, 99999));
++    assert(!ps3r_audio_dev_poll_due(&s, 20999) && ps3r_audio_dev_poll_due(&s, 21000));
++    ps3r_audio_dev_lost(&s, 30000);                        /* a second loss starts over */
++    assert(s.attempts == 0 && ps3r_audio_dev_retry_due(&s, 30000));
++
++    /* default-device change with no HRESULT */
++    assert(!ps3r_audio_default_changed(L"{a}", L"{a}"));
++    assert(ps3r_audio_default_changed(L"{a}", L"{b}"));
++    assert(!ps3r_audio_default_changed(L"{a}", L""));      /* no default right now: not a change */
++    assert(!ps3r_audio_default_changed(L"{a}", NULL));
++    puts("test_audio_device_recover: ok");
++    return 0;
++}
