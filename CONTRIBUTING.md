@@ -43,6 +43,11 @@ CI) reports any version that disagrees. To release, either way:
 - Locally: `python3 tools/release.py bump X.Y.Z` (or `major|minor|patch`) writes the version everywhere and turns Unreleased
   into `## [X.Y.Z] - date`; commit it and open a pull request as usual.
 
+Docs that name the current release (the README's download link and status line) wrap it in a span on one line:
+`<!-- version -->[0.2.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.2.0)<!-- /version -->`. The bump rewrites
+every X.Y.Z inside the spans, and `python3 tools/release.py --check` (CI) fails when a span names another version than
+`installer/VERSION`. Text outside the spans, such as "since 0.1.0", is history and stays as written.
+
 Merging a change to `installer/VERSION` into `main` starts the `release` workflow: it tags `vX.Y.Z`, builds the installer
 and creates a **draft** GitHub release with the files and the notes (`python3 tools/release.py notes X.Y.Z`). Look at the
 draft and publish it by hand; a 0.x version is created as a pre-release. If a build fails after tagging, rerun the release workflow: a tag at the same commit with no release resumes

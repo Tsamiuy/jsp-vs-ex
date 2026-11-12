@@ -42,7 +42,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch -c "release/v$version"
-          git add installer/VERSION installer/port/jsp/CMakeLists.txt jstars/port/CMakeLists.txt CHANGELOG.md
+          git add -u   # fresh checkout: only what bump wrote (VERSION, CMake, CHANGELOG, the docs' version spans)
           git commit -m "Release $version"
           git push origin "release/v$version"
           gh pr create --base main --head "release/v$version" --title "Release $version" --body-file "$RUNNER_TEMP/notes.md"

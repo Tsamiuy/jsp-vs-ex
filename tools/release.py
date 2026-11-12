@@ -4,7 +4,8 @@
     python3 tools/release.py --check          # exit 1 (one line per problem) when a version field differs from
                                               # installer/VERSION, it is not a plain X.Y.Z, CHANGELOG.md has no
                                               # "## [Unreleased]" section first, or no "## [X.Y.Z]" section for it
-    python3 tools/release.py bump X.Y.Z       # or major | minor | patch: write the new version everywhere and turn
+    python3 tools/release.py bump X.Y.Z       # or major | minor | patch: write the new version everywhere (also the
+                                              # <!-- version --> spans in the docs) and turn
                                               # "## [Unreleased]" into "## [X.Y.Z] - date" (UTC) with a fresh empty one
                                               # above it; nothing is written unless every check passes; no git is run
     python3 tools/release.py notes X.Y.Z      # print that version's CHANGELOG section (the release notes)
@@ -14,6 +15,11 @@ installer/VERSION is the single source (the installer and the portable zip read 
 and built on the player's PC, so they cannot read that file: each keeps a literal VERSION in its project() call, which
 this tool rewrites. 0.0.1 is the first, unreleased version: it needs no CHANGELOG section of its own (everything is under
 Unreleased); from the first bump on, every version in installer/VERSION has one.
+
+Docs that name the current release mark it with a span on one line: `<!-- version -->...<!-- /version -->`. --check
+requires every X.Y.Z inside a span to equal installer/VERSION, and bump rewrites them, so a span may hold a whole link
+(`<!-- version -->[0.2.0](.../releases/tag/v0.2.0)<!-- /version -->`). Every *.md file except CHANGELOG.md is scanned;
+text outside the spans (history such as "since 0.1.0") is left alone.
 """
 import argparse
 import datetime
@@ -29,6 +35,10 @@ PLAIN = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CMAKE_VERSION = re.compile(r"(project\(\s*\w+\s+VERSION\s+)(\S+)")
 HEADING = re.compile(r"^## .*$", re.M)
 UNRELEASED = "## [Unreleased]"
+MARKER = re.compile(r"(<!-- version -->)(.*?)(<!-- /version -->)")
+OPEN_MARKER = "<!-- version -->"
+ANY_VERSION = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")
+SKIP_DIRS = {".git", "node_modules", "build", "work", "vendor"}
 
 
 def parse(v):
@@ -62,6 +72,37 @@ def find_section(text, version):
     return None
 
 
+def doc_files(root):
+    """Every *.md file that may hold version spans (CHANGELOG.md keeps its history and is never rewritten)."""
+    out = []
+    for p in sorted(root.rglob("*.md")):
+        rel = p.relative_to(root)
+        if rel.as_posix() == CHANGELOG or any(part in SKIP_DIRS for part in rel.parts[:-1]):
+            continue
+        out.append(rel.as_posix())
+    return out
+
+
+def span_problems(rel, text, version):
+    problems = []
+    for n, line in enumerate(text.splitlines(), 1):
+        spans = MARKER.findall(line)
+        if line.count(OPEN_MARKER) != len(spans):
+            problems.append(f"{rel}:{n}: a version span must open and close on one line")
+        for _, inner, _ in spans:
+            found = ANY_VERSION.findall(inner)
+            if not found:
+                problems.append(f"{rel}:{n}: a version span holds no X.Y.Z")
+            for v in found:
+                if v != version:
+                    problems.append(f"{rel}:{n}: version span says {v}, {VERSION_FILE} is {version}")
+    return problems
+
+
+def fill_spans(text, version):
+    return MARKER.sub(lambda m: m.group(1) + ANY_VERSION.sub(version, m.group(2)) + m.group(3), text)
+
+
 def check(root):
     problems = []
     try:
@@ -90,6 +131,8 @@ def check(root):
         problems.append(f"{CHANGELOG}: the first section must be '{UNRELEASED}'")
     if version != FIRST and find_section(log, version) is None:
         problems.append(f"{CHANGELOG}: no '## [{version}]' section for the current version")
+    for rel in doc_files(root):
+        problems += span_problems(rel, read(root, rel), version)
     return problems
 
 
@@ -124,6 +167,11 @@ def bump(root, arg, today=None):
            CHANGELOG: log[:start] + f"{UNRELEASED}\n\n## [{new}] - {today}" + log[start + len(UNRELEASED):]}
     for rel in CMAKE_FILES:
         out[rel] = CMAKE_VERSION.sub(lambda m: m.group(1) + new, read(root, rel), count=1)
+    for rel in doc_files(root):
+        text = read(root, rel)
+        filled = fill_spans(text, new)
+        if filled != text:
+            out[rel] = filled
     for rel, text in out.items():
         (root / rel).write_text(text, encoding="utf-8", newline="")
     return list(out), []
