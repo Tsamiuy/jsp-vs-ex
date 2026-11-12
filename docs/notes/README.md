@@ -1,7 +1,7 @@
 # J-Stars Victory VS+ — ps3recomp port notes
 
 Notes from the static-recompilation port of **J-Stars Victory VS+** (BLUS31519, US disc) with
-**ps3recomp v0.15.0** plus local changes (kept in this repository as `toolkit/ps3recomp-local.patch`; originally the branch `jstars-port`). Written so the work can
+**ps3recomp v0.15.0** plus local changes (kept in this repository as `jstars/toolkit/ps3recomp-local.patch`; originally the branch `jstars-port`). Written so the work can
 be resumed without rediscovering anything.
 
 ## Where it stands (2026-10-30)
@@ -46,12 +46,12 @@ What changed, how it was tested and the evidence: table at the top of STATUS.md.
 | [FAKED_IMPORTS.md](FAKED_IMPORTS.md) | Faked / missing imports |
 | [UNUSED_CONTENT.md](UNUSED_CONTENT.md) | Search for unused fighters, moves, stages and menus in the game data; the map99 test stage and the Tokyo Game Show character select |
 | [PLAYABLE_EXTRA_CHARACTERS.md](PLAYABLE_EXTRA_CHARACTERS.md) | Can Jotaro, Dio, Dai or Asakura Yoh be made playable? What is on the disc and what a borrowed body does |
-| [RUNTIME_BUGS.md](RUNTIME_BUGS.md) | Early toolkit bugs (written 10-19; the full set of toolkit changes is `toolkit/ps3recomp-local.patch`) |
+| [RUNTIME_BUGS.md](RUNTIME_BUGS.md) | Early toolkit bugs (written 10-19; the full set of toolkit changes is `jstars/toolkit/ps3recomp-local.patch`) |
 | [REUSABLE.md](REUSABLE.md) | What carries over to the next game |
 | [CARDS.md](CARDS.md) | The 276 cards: where the names and the save bits are, how many exist per character, how the save was checked |
 | [UPGRADE_0.17.md](UPGRADE_0.17.md), [UPGRADE_0.18.md](UPGRADE_0.18.md) | Upstream toolkit upgrade surveys (decision: stay on v0.15.0) |
-| [RPCS3_COMPARISON.md](RPCS3_COMPARISON.md), [RPCS3_BEAM_READ.md](RPCS3_BEAM_READ.md) | RPCS3 reference captures (`jstars-notes/reference/rpcs3/`) |
-| [jstars-notes/tools/README.md](../../jstars-notes/tools/README.md) | RSX_CAP capture helper scripts |
-| [jstars-notes/patches/](../../jstars-notes/patches/) | Write-ups of single experiments as diffs (against the branch of that day, **not** a build recipe; the real changes are in `toolkit/ps3recomp-local.patch`) |
+| [RPCS3_COMPARISON.md](RPCS3_COMPARISON.md), [RPCS3_BEAM_READ.md](RPCS3_BEAM_READ.md) | RPCS3 reference captures (`docs/archive/jstars-notes/reference/rpcs3/`) |
+| [docs/archive/jstars-notes/tools/README.md](../archive/jstars-notes/tools/README.md) | RSX_CAP capture helper scripts |
+| [docs/archive/jstars-notes/patches/](../archive/jstars-notes/patches/) | Write-ups of single experiments as diffs (against the branch of that day, **not** a build recipe; the real changes are in `jstars/toolkit/ps3recomp-local.patch`) |
 
 Last updated: 2026-11-05 (Training notes and launcher FPS counter added).

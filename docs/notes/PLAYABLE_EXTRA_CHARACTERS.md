@@ -132,4 +132,4 @@ Scripts, kept in a local work folder that is not part of this repository:
 
 Yoh: `y1.py` (packs, hashes, text), `scan_yoh.py`, `scan_yoh.txt` (the search).
 
-Unpacked with `jstars-notes/tools/cmp_unpack.py`.
+Unpacked with `docs/archive/jstars-notes/tools/cmp_unpack.py`.

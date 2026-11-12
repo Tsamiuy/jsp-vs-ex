@@ -24,7 +24,7 @@ look at memory and take screenshots.
    the first 0x130 bytes (19 rows of 16 bytes). If one screenshot isn't enough, take two: one from the start, one
    from start + 0x100.
 8. If you can, also take the same screenshots for the next record (start + 0x130).
-9. Save the screenshots into `jstars-notes\reference\` (for example `rpcs3_beam_record_1.png`), then tell me.
+9. Save the screenshots into `docs\archive\jstars-notes\reference\` (for example `rpcs3_beam_record_1.png`), then tell me.
 
 ## What I'll look at
 

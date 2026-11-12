@@ -80,8 +80,8 @@ jobs:
           if (-not (Test-Path "$out\J-Stars Launcher.exe")) { exit 1 }
 
   toolkit:
-    # The patched toolkit as a Windows builder makes it: submodule at the pin, toolkit/ps3recomp-local.patch applied
-    # by tools/toolkit/apply_toolkit.py (Git for Windows' default line-ending conversion stays on, as on a player's PC).
+    # The patched toolkit as a Windows builder makes it: submodule at the pin, jstars/toolkit/ps3recomp-local.patch applied
+    # by jstars/toolkit/apply_toolkit.py (Git for Windows' default line-ending conversion stays on, as on a player's PC).
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -91,12 +91,12 @@ jobs:
           persist-credentials: false
 
       - name: The toolkit patch applies to the pinned ps3recomp
-        run: python tools/toolkit/apply_toolkit.py --check
+        run: python jstars/toolkit/apply_toolkit.py --check
 
       - name: Build the patched toolkit folder
         shell: pwsh
         run: |
-          python tools/toolkit/apply_toolkit.py --out "$env:RUNNER_TEMP\ps3recomp"
+          python jstars/toolkit/apply_toolkit.py --out "$env:RUNNER_TEMP\ps3recomp"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (-not (Test-Path "$env:RUNNER_TEMP\ps3recomp\.toolkit-stamp")) { exit 1 }
 

@@ -2,12 +2,12 @@
 
 Read-only survey. Nothing in `ps3recomp-src` or `jstars` was changed, built or committed.
 Upstream v0.17.0 was checked in a throwaway clone outside the project folder (made from
-`ps3recomp-src` + `jstars-notes\upgrade-0.17\*.bundle`, deleted afterwards).
+`ps3recomp-src` + `docs\archive\jstars-notes\upgrade-0.17\*.bundle`, deleted afterwards).
 
 Sources: `git log v0.15.0..jstars-port` (**42 commits**, 13 toolkit files, +3333/-188, 2684 lines
-of it in `rsx_d3d12_backend.c`), `jstars-notes\patches\*\README.md`, `FINDINGS.md`, `STATUS.md`,
+of it in `rsx_d3d12_backend.c`), `docs\archive\jstars-notes\patches\*\README.md`, `FINDINGS.md`, `STATUS.md`,
 `STAGES.md`, `RUNTIME_BUGS.md`, `FAKED_IMPORTS.md`, `UPGRADE_0.17.md`, `jstars\port\*.cpp`,
-`jstars-notes\tools\*`.
+`docs\archive\jstars-notes\tools\*`.
 
 ## Short answer
 
@@ -161,7 +161,7 @@ J-Stars test results before treating them as reusable.
 | Debug console (`jstars_debug.cpp`) | `PS3_DEBUG=<file>` stat/threads/mem | Name only | Move into the template |
 | SPU job pipeline: `SPU_DUMP_MISS` → `scan_jobcrt.py` → `lift_all_jobs.py` → `spu_workloads.c` | `jstars\spu_jobs` | Paths, `KNOWN` table | Move scripts to shared tools; keep the `KNOWN` table in the game folder |
 | `port\build.bat` | clang-cl + Ninja build | VS and Python locations | Template `build.bat` reading them from env/config |
-| Notes layout (STATUS, FINDINGS, `patches\<name>\README.md` + patch) | `jstars-notes` | None | Copy as an empty `<game>-notes` template |
+| Notes layout (STATUS, FINDINGS, `patches\<name>\README.md` + patch) | `docs/archive/jstars-notes` | None | Copy as an empty `<game>-notes` template |
 
 ---
 

@@ -9,7 +9,7 @@ internal ids "v18" (current) and "v15" (legacy), which firstrun.py reads to know
 
 Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). The payload holds only code that
 is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
-applied (tools/toolkit/apply_toolkit.py, run here when the installer is built, so the player needs no Git), the embeddable
+applied (jstars/toolkit/apply_toolkit.py, run here when the installer is built, so the player needs no Git), the embeddable
 Windows Python, firstrun.py + jsp_spu.py, the launcher, icons, NOTICE and licence texts. Never any game file, lifted code or
 image in git; the compiler is the bundled llvm-mingw (toolchain.json); no Visual Studio is needed.
 
@@ -286,7 +286,7 @@ def main(argv=None):
             (out / "port" / n).write_bytes(data)
             shutil.copystat(pub / "jstars/port" / n, out / "port" / n)
         # the toolkit: pinned v0.15.0 + this repository's patch + SMAA files, applied here
-        r = subprocess.run([sys.executable, "-I", str(pub / "tools/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
+        r = subprocess.run([sys.executable, "-I", str(pub / "jstars/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
                            capture_output=True, text=True)
         if r.returncode:
             print("apply_toolkit failed:\n" + r.stdout + r.stderr, file=sys.stderr)

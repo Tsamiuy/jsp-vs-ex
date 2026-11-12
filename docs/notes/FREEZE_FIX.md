@@ -20,7 +20,7 @@ The counter kept counting after the cap. It counted every inline word, about 88,
 
 In the toolkit (`libs/video`, `libs/spurs`), 132 capped counters now stop at their cap: `n < 8 ? (n++, 1) : 0`. Output is otherwise unchanged. Four counters of the form `n++ < 8 || n % k == 0`, and counters in other parts of the code, were left; none is on the upload path, and they would overflow only after far longer.
 
-The fix is part of `toolkit/ps3recomp-local.patch`. A toolkit built with `tools/toolkit/apply_toolkit.py` from this version or later has it. A toolkit built from an older patch freezes in long fights.
+The fix is part of `jstars/toolkit/ps3recomp-local.patch`. A toolkit built with `jstars/toolkit/apply_toolkit.py` from this version or later has it. A toolkit built from an older patch freezes in long fights.
 
 ## Evidence
 

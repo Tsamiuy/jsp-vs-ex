@@ -12,7 +12,7 @@ DLSS / Frame Generation later.
 | `PS3Recomp\launcher\JStarsLauncher.cs` | Its source, one file, C# 5 (Windows' own .NET Framework 4 compiler). |
 | `PS3Recomp\launcher\build_launcher.bat` | Rebuilds the exe with `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. No installs. |
 | `jstars\play_settings.txt.pre-launcher` | Copy of the settings file before the launcher first saves it. |
-| `jstars-notes\patches\cellpad_keymap.patch` | cellPad change so the game reads the key bindings (for the AI assistant). |
+| `docs\archive\jstars-notes\patches\cellpad_keymap.patch` | cellPad change so the game reads the key bindings (for the AI assistant). |
 
 `Play J-Stars.bat`, `J-Stars Settings.bat`, `jstars\play.ps1` and `jstars\settings.ps1` are unchanged and
 stay as the fallback. Caveat: the old `J-Stars Settings.bat` rewrites `play_settings.txt` with only
@@ -56,7 +56,7 @@ F11 refused, Esc is the game's quit key). A key already used by another input sw
 "Reset to defaults" restores the cellPad defaults. The page checks whether the game exe contains the
 string `PAD_KEY_` and, if not, says the bindings are saved but not read by this game build yet.
 
-Patch for the AI assistant (`jstars-notes\patches\cellpad_keymap.patch`, made against the working tree of
+Patch for the AI assistant (`docs\archive\jstars-notes\patches\cellpad_keymap.patch`, made against the working tree of
 `libs/input/cellPad.c` that already has the AI assistant's uncommitted g_pad_arrows_dpad change; `git apply --check`
 passes): the two key tables become non-const with a name per entry, and on the first poll each entry's
 key is replaced by `PAD_KEY_<NAME>` if set (strtol base 0, 1..255). Names: LSTICK_UP/DOWN/LEFT/RIGHT,

@@ -11,7 +11,7 @@ The hand build below is the earlier v15 tree (`jstars/port`, toolkit v0.15.0). T
   with the C++ workload and clang-cl, CMake and Ninja, and Python 3 with the ps3recomp requirements. The installer
   (below) does not need these: it carries its own compiler.
 - The ps3recomp toolkit: a submodule at `third_party/ps3recomp`, pinned to `v0.15.0`, plus this repository's
-  changes to it in `toolkit/ps3recomp-local.patch` (see [Toolkit](#toolkit) below). The port has not yet been
+  changes to it in `jstars/toolkit/ps3recomp-local.patch` (see [Toolkit](#toolkit) below). The port has not yet been
   built from that folder on a clean machine; the notes build from a local checkout with the same changes.
 - Optional: an RPCS3 installation, only if you want to set `PS3_DEV_FLASH` to its `dev_flash` folder; the game reads nothing from
   `dev_flash` in testing.
@@ -25,13 +25,13 @@ The hand build below is the earlier v15 tree (`jstars/port`, toolkit v0.15.0). T
 
 ## Toolkit
 
-The submodule stays unchanged. `tools/toolkit/apply_toolkit.py` copies its pinned commit to `build\ps3recomp` and
-applies `toolkit/ps3recomp-local.patch` there. It needs Python 3.8 or newer and Git, nothing else.
+The submodule stays unchanged. `jstars/toolkit/apply_toolkit.py` copies its pinned commit to `build\ps3recomp` and
+applies `jstars/toolkit/ps3recomp-local.patch` there. It needs Python 3.8 or newer and Git, nothing else.
 
 ```
 git clone --recurse-submodules https://github.com/Tsamiuy/jsp-vs-ex.git
 cd jsp-vs-ex
-python tools\toolkit\apply_toolkit.py
+python jstars\toolkit\apply_toolkit.py
 ```
 
 Then build the port with `-DPS3RECOMP_DIR=<checkout>\build\ps3recomp` (the script prints the path). Notes:

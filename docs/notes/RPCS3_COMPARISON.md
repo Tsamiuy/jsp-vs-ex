@@ -22,7 +22,7 @@ and how fast the game can go. Use it for the open problems: shadow maps (FINDING
   filter, "Write Color Buffers", "Read Color/Depth Buffers", frame limit off, SPU decoder).
 - Take screenshots with RPCS3's own capture or Windows Snipping at identical window size. Name:
   `<scene>_<what>_<yyyymmdd>.png`.
-- Save everything under **`jstars-notes\reference\rpcs3\`** (subfolders `shots\`, `debugger\`,
+- Save everything under **`docs\archive\jstars-notes\reference\rpcs3\`** (subfolders `shots\`, `debugger\`,
   `perf\`), plus a one-line entry per file in `reference\rpcs3\INDEX.md` (what, how taken, setting).
 
 ## 1. Matching screenshots (same scenes as our captures)

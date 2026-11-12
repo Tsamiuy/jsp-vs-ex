@@ -88,7 +88,7 @@ message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 #     AMD Excavator/Zen). The SPU float helpers have an AVX2 path (spu_helpers.h,
 #     checked bit-exact against their reference) that the build never enabled,
 #     and fmaf (PPU vmaddfp, SPU fma) becomes one instruction instead of a
-#     library call. Offline (jstars-notes tools\bench_avx.c): spu_fm 2.5x and
+#     library call. Offline (docs/archive/jstars-notes tools\bench_avx.c): spu_fm 2.5x and
 #     spu_fma ~1.3x faster per op, results identical. -DJSTARS_AVX2=OFF builds
 #     for any x86-64 as before.
 option(JSTARS_AVX2 "Build for AVX2+FMA CPUs (faster SPU/VMX float maths)" ON)

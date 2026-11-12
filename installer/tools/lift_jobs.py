@@ -61,7 +61,7 @@ def scan(b):
     return jobs
 
 
-# Names of the jobs identified in the v0.15 notes (jstars-notes/FINDINGS.md); the rest are named by address.
+# Names of the jobs identified in the v0.15 notes (docs/archive/jstars-notes/FINDINGS.md); the rest are named by address.
 KNOWN = {0x00829A80: 'crijob_asrvoice', 0x00819780: 'crijob_atomdec'}
 
 

@@ -21,6 +21,9 @@
 /docs/*
 !/docs/*.md
 !/docs/features.tsv
+!/docs/archive/
+/docs/archive/*
+!/docs/archive/jstars-notes/
 !/docs/notes/
 /docs/notes/*
 !/docs/notes/*.md
@@ -38,6 +41,11 @@
 !/jstars/play.ps1
 !/jstars/test_fight.txt
 !/jstars/snap_window.ps1
+!/jstars/toolkit/
+/jstars/toolkit/*
+!/jstars/toolkit/*.py
+!/jstars/toolkit/README.md
+!/jstars/toolkit/ps3recomp-local.patch
 !/jstars/port/
 /jstars/port/*
 !/jstars/port/*.cpp
@@ -51,20 +59,20 @@
 !/jstars/spu_jobs/*.py
 
 # Notes: text, patches and scripts only
-!/jstars-notes/
-/jstars-notes/**
-!/jstars-notes/**/
-!/jstars-notes/**/*.md
-!/jstars-notes/**/*.patch
-!/jstars-notes/**/*.py
-!/jstars-notes/**/*.ps1
-!/jstars-notes/**/*.sh
-!/jstars-notes/**/*.bat
-!/jstars-notes/**/*.c
-!/jstars-notes/**/*.h
-!/jstars-notes/**/*.inc
-!/jstars-notes/**/*.csv
-/jstars-notes/tools/refs/
+!/docs/archive/jstars-notes/
+/docs/archive/jstars-notes/**
+!/docs/archive/jstars-notes/**/
+!/docs/archive/jstars-notes/**/*.md
+!/docs/archive/jstars-notes/**/*.patch
+!/docs/archive/jstars-notes/**/*.py
+!/docs/archive/jstars-notes/**/*.ps1
+!/docs/archive/jstars-notes/**/*.sh
+!/docs/archive/jstars-notes/**/*.bat
+!/docs/archive/jstars-notes/**/*.c
+!/docs/archive/jstars-notes/**/*.h
+!/docs/archive/jstars-notes/**/*.inc
+!/docs/archive/jstars-notes/**/*.csv
+/docs/archive/jstars-notes/tools/refs/
 
 # Helper tools
 !/tools/
@@ -80,9 +88,6 @@
 !/tools/site/*.py
 !/tools/boost/
 !/tools/ci/
-!/tools/toolkit/
-/tools/toolkit/*
-!/tools/toolkit/*.py
 /tools/boost/*.lnk
 
 # ---- Never, whatever the rules above say ----
@@ -145,23 +150,18 @@ __pycache__/
 !/assets/social-preview.png
 !/assets/logo-mark-512.png
 
+# SMAA 1x for the v0.15 toolkit (MIT, upstream files kept byte for byte); the .hlsl is named exactly because *.hlsl is on the never-list
+!/jstars/toolkit/third_party_smaa/
+/jstars/toolkit/third_party_smaa/*
+!/jstars/toolkit/third_party_smaa/AreaTex.h
+!/jstars/toolkit/third_party_smaa/SearchTex.h
+!/jstars/toolkit/third_party_smaa/SMAA.hlsl
+!/jstars/toolkit/third_party_smaa/SMAA_hlsl.inc
+
 # ps3recomp toolkit, pinned as a submodule (the code stays upstream; only the pointer is stored)
 !/third_party/
 /third_party/*
 !/third_party/ps3recomp
-
-# Toolkit change set
-!/toolkit/
-/toolkit/*
-!/toolkit/README.md
-!/toolkit/ps3recomp-local.patch
-# SMAA 1x (MIT, upstream files kept byte for byte); the .hlsl is named exactly because *.hlsl is on the never-list
-!/toolkit/third_party_smaa/
-/toolkit/third_party_smaa/*
-!/toolkit/third_party_smaa/AreaTex.h
-!/toolkit/third_party_smaa/SearchTex.h
-!/toolkit/third_party_smaa/SMAA.hlsl
-!/toolkit/third_party_smaa/SMAA_hlsl.inc
 
 # Installer (source only; the exe, payload and generated images stay in build/, which is ignored)
 !/installer/
