@@ -380,6 +380,7 @@ namespace JStarsLauncher
     {
         // ---- paths (the launcher sits in the PS3Recomp folder) ----
         readonly string root, here, iso, exe, elf, settingsFile, runDir, boostDir;
+        readonly string gameProc;   // the game's process name (the exe's file name without .exe), for the "already running" check
         // Installed by setup or the portable zip (paths.txt / jsp-install.ini beside this exe): only the settings and
         // a Start Game button that hands over to jsp-launcher.exe (disc check, paths, boost); no CPU boost option.
         readonly bool installed;
@@ -428,6 +429,23 @@ namespace JStarsLauncher
         Process game;
         volatile bool gameRunning, closingAfterGame;
 
+        // The game exe setup placed in game\: paths.txt names it (EXE=jsp.exe on the current tree, EXE=JStarsRecomp.exe on the
+        // legacy one; installer/tools/firstrun.py writes it). Without paths.txt: jsp.exe when that file is there.
+        static string InstalledExeName(string root)
+        {
+            try
+            {
+                foreach (var line in File.ReadAllLines(Path.Combine(root, "paths.txt")))
+                {
+                    if (!line.StartsWith("EXE=")) continue;
+                    var n = line.Substring(4).Trim();
+                    if (n.Length > 0 && n.IndexOfAny(new[] { '\\', '/', ':' }) < 0) return n;
+                }
+            }
+            catch { }
+            return File.Exists(Path.Combine(root, "game", "jsp.exe")) ? "jsp.exe" : "JStarsRecomp.exe";
+        }
+
         public LauncherForm()
         {
             root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
@@ -437,7 +455,7 @@ namespace JStarsLauncher
             {
                 here = root;
                 iso = elf = boostDir = "";
-                exe = Path.Combine(root, @"game\JStarsRecomp.exe");
+                exe = Path.Combine(root, "game", InstalledExeName(root));   // jsp.exe on the current tree, JStarsRecomp.exe on the legacy one
                 runDir = Path.Combine(root, @"game\run");
                 launcherExe = Path.Combine(root, "jsp-launcher.exe");
                 settingsFile = InstalledSettingsFile(root);
@@ -456,6 +474,7 @@ namespace JStarsLauncher
                 launcherExe = "";
             }
 
+            gameProc = Path.GetFileNameWithoutExtension(exe);
             AddKeyActions(kbActions);
             AddKeyActions(kbmActions);
             // Controller defaults as in cellPad.c (Xbox layout: A = Cross, B = Circle, ...).
@@ -1537,7 +1556,7 @@ namespace JStarsLauncher
             if (installed)   // jsp-launcher.exe does the rest (disc check, paths.txt, these settings, boost)
             {
                 if (!File.Exists(exe)) { MessageBox.Show(this, "The game is not built yet. Run \"Build again\" from the Start menu.", Text); return; }
-                if (Process.GetProcessesByName("JStarsRecomp").Length > 0) { MessageBox.Show(this, "The game is already running.", Text); return; }
+                if (Process.GetProcessesByName(gameProc).Length > 0) { MessageBox.Show(this, "The game is already running.", Text); return; }
                 if (!SaveOnlineIfDirty()) return;
                 SaveSettings();
                 try { Process.Start(new ProcessStartInfo(launcherExe) { WorkingDirectory = root, UseShellExecute = false }); }
@@ -1547,7 +1566,7 @@ namespace JStarsLauncher
             }
             if (!File.Exists(exe)) { MessageBox.Show(this, "The game is not built yet:\n" + exe, Text); return; }
             if (!File.Exists(iso)) { MessageBox.Show(this, "The game disc image was not found:\n" + iso, Text); return; }
-            if (Process.GetProcessesByName("JStarsRecomp").Length > 0) { MessageBox.Show(this, "The game is already running.", Text); return; }
+            if (Process.GetProcessesByName(gameProc).Length > 0) { MessageBox.Show(this, "The game is already running.", Text); return; }
             if (!SaveOnlineIfDirty()) return;
             SaveSettings();
             gameRunning = true;
