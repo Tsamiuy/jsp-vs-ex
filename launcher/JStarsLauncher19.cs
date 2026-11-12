@@ -421,6 +421,15 @@ namespace JStarsLauncher
         CheckBox fpsBox;
         CheckBox unlockBox;                  // ENHANCEMENT (opt-in): one start with everything unlocked; never saved to the settings file
         volatile bool unlockThisRun;
+        // ENHANCEMENT (opt-in): a separate TEST save. The game keeps its saves under PS3_GAMEDATA_ROOT\dev_hdd0\home\00000001\savedata
+        // (ps3recomp cellSaveData.c; the user id folder is fixed), the first-boot data install under PS3_HDD0_ROOT, so pointing
+        // PS3_GAMEDATA_ROOT at a second folder gives a second save set and the 2.5 GB install is shared.
+        // ASSUMPTION: the game writes no save-like data through plain file calls under <hdd0>\home (none is found in the port sources).
+        RadioButton rbSaveNormal, rbSaveTest;
+        Label saveActiveLabel;
+        bool testSave;                       // the active save set; kept in jsp-install.ini [install] savemode=normal|test
+        volatile bool testSaveThisRun;
+        const string TestSuffix = "_gamedata_test";   // <hdd0>_gamedata_test beside <hdd0>_gamedata (the normal save root, main.cpp)
         string backupNote = "";              // what BackupSave did, written to the log once RunGame has opened it
         const string SaveName = "NPUB31647-B0";                          // US save folder (BLUS31519)
         static readonly string[] SaveNames = { SaveName, "NPEB02204-B0" };   // US, EU (BLES02136): the launcher does not know the disc's region
@@ -751,11 +760,27 @@ namespace JStarsLauncher
         {
             var p = new TabPage("Cheats") { Padding = new Padding(12) };
             int y = 16;
-            unlockBox = new CheckBox { Text = "Unlock everything (cheat)", Location = P(16, y), AutoSize = true, Checked = false };
+            // The save in use: a normal save or a separate test save (see SaveRoot). The first test start seeds the test save
+            // from the normal one (the normal side is only read).
+            testSave = IniValue("savemode") == "test";
+            p.Controls.Add(new Label { Text = "Save in use", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 24;
+            rbSaveNormal = new RadioButton { Text = "Normal save", Location = P(34, y), AutoSize = true, Checked = !testSave };
+            y += 24;
+            rbSaveTest = new RadioButton { Text = "Test save (separate; the normal save is not touched while it is in use)", Location = P(34, y), AutoSize = true, Checked = testSave };
+            rbSaveNormal.CheckedChanged += delegate { SaveModeChanged(); };
+            p.Controls.Add(rbSaveNormal);
+            p.Controls.Add(rbSaveTest);
+            y += 26;
+            saveActiveLabel = new Label { Location = P(34, y), AutoSize = true, ForeColor = SystemColors.GrayText };
+            p.Controls.Add(saveActiveLabel);
+            y += 44;
+            // Pre-ticked only when the installer's "Unlock everything" task wrote unlock=1; on a normal save Start Game still asks first.
+            unlockBox = new CheckBox { Text = "Unlock everything (cheat)", Location = P(16, y), AutoSize = true, Checked = IniValue("unlock") == "1" };
             p.Controls.Add(unlockBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Next start only: backs up your save first; cannot be undone except by restoring the backup.",
+                Text = "Next start only: backs up the save in use first; cannot be undone except by restoring the backup (or, on the test save, by deleting it).",
                 Location = P(34, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             y += 34;
             p.Controls.Add(new Label {
@@ -763,22 +788,112 @@ namespace JStarsLauncher
                        "the game has loaded, and the game writes them out itself at its next save. The backup is the save folder\r\n" +
                        "(" + string.Join(" or ", SaveNames) + ") copied beside it as BACKUP-<folder>-<date>-<time>. Unlocked titles and icons\r\n" +
                        "are visible to online opponents; accepted online for now, which may change when online play is ready. To undo it,\r\n" +
-                       "close the game and put the backup folder back under the original name.",
+                       "close the game and put the backup folder back under the original name.\r\n\r\n" +
+                       "The test save is a second set of saves and trophies in " + TestSuffix + " beside the game's normal save folder; the installed\r\n" +
+                       "game data is shared, so nothing is installed twice. Its first start copies your normal save into it, so the test\r\n" +
+                       "begins from your progress; delete the folder to begin again from a fresh copy. Switch back to the normal save here at any time.",
                 Location = P(34, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            UpdateSaveModeUi();
             return p;
         }
 
+        // jsp-install.ini [install] <key>=<value>, lower-cased value, "" when absent (the same file the Portable task writes).
+        string IniValue(string key)
+        {
+            try
+            {
+                string ini = Path.Combine(root, "jsp-install.ini");
+                if (!File.Exists(ini)) return "";
+                foreach (string line in File.ReadAllLines(ini))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq > 0 && line.Substring(0, eq).Trim().ToLowerInvariant() == key) return line.Substring(eq + 1).Trim().ToLowerInvariant();
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        // Writes [install] savemode=... into jsp-install.ini (replaces the line, else adds it under [install]). Only the choice of
+        // the save in use is stored here: the unlock switch itself is never written by the launcher.
+        void WriteSaveMode(string value)
+        {
+            try
+            {
+                string ini = Path.Combine(root, "jsp-install.ini");
+                var lines = File.Exists(ini) ? new System.Collections.Generic.List<string>(File.ReadAllLines(ini)) : new System.Collections.Generic.List<string>();
+                int at = lines.FindIndex(l => l.Split('=')[0].Trim().ToLowerInvariant() == "savemode");
+                if (at >= 0) lines[at] = "savemode=" + value;
+                else
+                {
+                    int sec = lines.FindIndex(l => l.Trim().ToLowerInvariant() == "[install]");
+                    if (sec >= 0) lines.Insert(sec + 1, "savemode=" + value); else { lines.Add("[install]"); lines.Add("savemode=" + value); }
+                }
+                File.WriteAllLines(ini, lines.ToArray());
+            }
+            catch (Exception ex) { Status("Could not remember the save in use: " + ex.Message); }
+        }
+
+        void SaveModeChanged()
+        {
+            if (gameRunning) { rbSaveTest.Checked = testSave; rbSaveNormal.Checked = !testSave; return; }   // not while the game runs
+            testSave = rbSaveTest.Checked;
+            WriteSaveMode(testSave ? "test" : "normal");
+            UpdateSaveModeUi();
+        }
+
+        // Shows which save is active, on the tab and in the window title.
+        void UpdateSaveModeUi()
+        {
+            Text = testSave ? "J-Stars Victory VS+  [TEST SAVE]" : "J-Stars Victory VS+";
+            if (saveActiveLabel != null)
+                saveActiveLabel.Text = testSave
+                    ? "ACTIVE: TEST save (" + SaveRoot(true) + "). The normal save is not read or written by the game."
+                    : "ACTIVE: normal save (" + SaveRoot(false) + ").";
+        }
+
+        // The save root the game gets as PS3_GAMEDATA_ROOT: the normal one is the port's own default (main.cpp: <hdd0>_gamedata), the test one a sibling.
+        string SaveRoot(bool test)
+        {
+            return Path.Combine(appData, "hdd0") + (test ? TestSuffix : "_gamedata");
+        }
+
         // The save folders this port may use (the game's data folder is <hdd0>_gamedata; the plain hdd0 layout is checked too).
-        string[] SaveFolders()
+        string[] SaveFolders() { return SaveFolders(testSaveThisRun); }
+
+        string[] SaveFolders(bool test)
         {
             string hdd0 = Path.Combine(appData, "hdd0");
             var l = new System.Collections.Generic.List<string>();
             foreach (string n in SaveNames)
             {
-                l.Add(Path.Combine(hdd0 + "_gamedata", @"dev_hdd0\home\00000001\savedata\" + n));
-                l.Add(Path.Combine(hdd0, @"home\00000001\savedata\" + n));
+                l.Add(Path.Combine(SaveRoot(test), @"dev_hdd0\home\00000001\savedata\" + n));
+                if (!test) l.Add(Path.Combine(hdd0, @"home\00000001\savedata\" + n));
             }
             return l.ToArray();
+        }
+
+        // First start on the test save: copies the normal save folders into it (the normal side is only read). Never overwrites an
+        // existing test save. Returns an error text or null.
+        string SeedTestSave()
+        {
+            if (Directory.Exists(SaveRoot(true))) return null;
+            try
+            {
+                foreach (string n in SaveNames)
+                {
+                    string rel = @"dev_hdd0\home\00000001\savedata\" + n;
+                    string src = Path.Combine(SaveRoot(false), rel);
+                    if (Directory.Exists(src)) CopyTree(src, Path.Combine(SaveRoot(true), rel));
+                }
+                Directory.CreateDirectory(SaveRoot(true));
+                return null;
+            }
+            catch (Exception ex)
+            {
+                try { if (Directory.Exists(SaveRoot(true))) Directory.Delete(SaveRoot(true), true); } catch { }
+                return "Could not copy your save into the test save (" + ex.Message + ").";
+            }
         }
 
         // True when the game has run here before: it wrote its own data, the <hdd0>_gamedata folder (created by the game's runtime,
@@ -1668,6 +1783,16 @@ namespace JStarsLauncher
             }
             SaveSettings();
             unlockThisRun = false;
+            testSaveThisRun = testSave;
+            if (testSave)
+            {
+                string seed = SeedTestSave();   // test mode only ever reads the normal save, and only to seed a test save that does not exist yet
+                if (seed != null) { Status("Not started: test save not made."); MessageBox.Show(this, seed + "\n\nThe game was not started.", Text); return; }
+            }
+            if (unlockBox.Checked && !testSave &&
+                MessageBox.Show(this, "Unlock everything will change your NORMAL save (a dated backup is made first).\n\nTo try it on a separate copy, choose the Test save on the Cheats tab.\n\nUnlock the normal save?",
+                                Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            { Status("Not started: unlock not confirmed."); return; }
             if (unlockBox.Checked)
             {
                 string why = BackupSave();
@@ -1678,6 +1803,7 @@ namespace JStarsLauncher
             }
             gameRunning = true;
             startBtn.Enabled = false;
+            rbSaveNormal.Enabled = rbSaveTest.Enabled = false;   // the save in use is fixed while the game runs
             var t = new Thread(RunGame); t.IsBackground = false; t.Start();
         }
 
@@ -1747,6 +1873,10 @@ namespace JStarsLauncher
                 psi.EnvironmentVariables["JSP_SETTINGS_FILE"] = settingsFile;   // the in-game settings pages write this file (jsp_settings.cpp)
                 psi.EnvironmentVariables.Remove("JSP_UNLOCK_ALL");   // never from the settings file: only the Cheats box, after its backup
                 if (unlockThisRun) { psi.EnvironmentVariables["JSP_UNLOCK_ALL"] = "1"; Log("Unlock everything: on for this start (save backed up)."); }
+                // The save in use. Test: its own root, set after the settings file so no line there can point the test at the normal save.
+                // Normal: left to the settings file or the port's default (<hdd0>_gamedata), as before.
+                if (testSaveThisRun) { psi.EnvironmentVariables["PS3_GAMEDATA_ROOT"] = SaveRoot(true).Replace('\\', '/'); Log("Save in use: TEST save " + SaveRoot(true)); }
+                else Log("Save in use: normal save.");
 
                 Status("Starting the game...");
                 game = Process.Start(psi);
@@ -1799,6 +1929,7 @@ namespace JStarsLauncher
                 try {
                     BeginInvoke((MethodInvoker)delegate {
                         startBtn.Enabled = true;
+                        rbSaveNormal.Enabled = rbSaveTest.Enabled = true;
                         if (closingAfterGame || hiddenForGame) { Close(); return; }   // nothing left running
                         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
                         Activate();

@@ -82,10 +82,21 @@ Name: "desktopicon"; Description: "A shortcut on the desktop"; Flags: unchecked
 ; ENHANCEMENT: portable task (layout from the installer of Project Pyrrhus, undecuple's Killzone 2 port): saves and settings in the install folder, not in
 ; %APPDATA%\JSP Fan Revival. Off by default; silent installs use /TASKS=portable.
 Name: "portable"; Description: "&Portable: saves and settings in the install folder (else in %APPDATA%)"; Flags: unchecked
+; ENHANCEMENT (opt-in, unchecked): "Unlock everything (cheat)" for the launcher's Cheats tab, with the save it applies to. The task only
+; writes jsp-install.ini [install] unlock= and savemode=; the launcher still backs the save up and asks before it touches a normal save,
+; and nothing here unlocks anything by itself. Silent installs: /TASKS="unlock,unlock\testsave" or /TASKS="unlock,unlock\normalsave".
+Name: "unlock"; Description: "&Unlock everything (cheat): all cards, characters, titles and more, when you press Start Game"; Flags: unchecked
+Name: "unlock\testsave"; Description: "Use a separate TEST save for the unlocked play (recommended; your normal save is not touched)"; Flags: exclusive
+Name: "unlock\normalsave"; Description: "Apply it to the normal save (the launcher asks, and copies the save to a dated backup first)"; Flags: exclusive unchecked
 
 [INI]
 Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "portable"; String: "1"; Tasks: portable
 Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "portable"; String: "0"; Tasks: not portable
+Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "unlock"; String: "1"; Tasks: unlock
+Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "unlock"; String: "0"; Tasks: not unlock
+; savemode names the save the launcher uses: test only when the test-save choice is selected, otherwise normal (the default for everyone else).
+Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "savemode"; String: "test"; Tasks: unlock\testsave
+Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "savemode"; String: "normal"; Tasks: not unlock\testsave
 
 [Icons]
 Name: "{group}\{#AppDirName}"; Filename: "{app}\jsp-settings.exe"; WorkingDir: "{app}"; IconFilename: "{app}\jsp-launcher.ico"; Check: SettingsBuilt
