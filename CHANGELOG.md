@@ -6,6 +6,8 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Setup's EBOOT check now names the file it checked and shows the full SHA-256. When the file is not a build this port knows, it says whether the path looks like the game update's EBOOT (inside an RPCS3 dev_hdd0 game folder) and which file to pick instead.
+
 ## [0.1.0] - 2026-11-11
 
 First pre-release. J-Stars Victory VS+ for Windows: the game is built on your PC (ps3recomp, Direct3D 12) from your own copy of the disc, no game

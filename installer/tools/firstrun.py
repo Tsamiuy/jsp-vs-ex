@@ -374,14 +374,24 @@ def segment_hash(data):
         return ""
 
 
-def identify_eboot(data, tid=None, allow_unknown=False):
+def eboot_path_hint(path):
+    """Hint for an unknown build: a path under an RPCS3 dev_hdd0\\game\\<id>\\ folder is most likely the update's EBOOT."""
+    if path and re.search(r"dev_hdd0[\\/]+game[\\/]+[^\\/]+[\\/]", str(path), re.I):
+        return ("This path is inside an RPCS3 dev_hdd0 game folder, so it is likely the update's EBOOT. Pick the EBOOT.elf made from the "
+                "disc's PS3_GAME\\USRDIR\\EBOOT.BIN instead (from your own copy, see RPCS3 and its documentation)")
+    return ("Check which EBOOT.elf was chosen in setup (for Build again, the --eboot path in build-again.cmd): it must be the one made "
+            "from your disc's EBOOT.BIN")
+
+
+def identify_eboot(data, tid=None, allow_unknown=False, path=None):
     """Check E3: which known build the ELF bytes are. OK: a known EBOOT of the disc's region. WARN: the same program as a known one in a
     file laid out differently (another tool), it should work. FAIL: a known EBOOT of the other region (the lift takes the code
     range of the disc's region, so it would lift wrong), or a build this port does not know: its hooks sit at fixed addresses of the
-    1.00 code, so an update, another edition or a changed file would not run. The message names only the region, id and a hash prefix.
+    1.00 code, so an update, another edition or a changed file would not run. The messages name the file checked (path, when given) and its full SHA-256, so a wrong file is easy to spot.
     allow_unknown (--allow-unknown-eboot, an explicit opt-in): a build this port does not know becomes a WARN that says it is unsupported;
     a known EBOOT of the other region stays a FAIL with or without it."""
     whole = hashlib.sha256(data).hexdigest()
+    of = f"the file checked is {path}, SHA-256 {whole}" if path else f"SHA-256 {whole}"
     known = known_eboots()
     if not known:
         return ("FAIL", "E3", "eboot_ids.json, the list of known EBOOT builds, is missing beside firstrun.py: the install is incomplete, run setup again")
@@ -392,21 +402,21 @@ def identify_eboot(data, tid=None, allow_unknown=False):
         hit = next((e for e in known if seg and e["segment_sha256"] == seg), None)
         how = "the program code"
     if hit is None and allow_unknown:
-        return ("WARN", "E3", f"UNSUPPORTED build: this EBOOT.elf is not one this port knows (SHA-256 {whole[:12]}); you asked to go on "
+        return ("WARN", "E3", f"UNSUPPORTED build: this EBOOT.elf is not one this port knows ({of}); you asked to go on "
                               "(--allow-unknown-eboot). The port's hooks sit at fixed places in the 1.00 disc program, so the build may fail or "
                               "the game may misbehave; problems with this file are not supported")
     if hit is None:
-        return ("FAIL", "E3", f"this EBOOT.elf is not a build this port knows (SHA-256 {whole[:12]}): it may be from game update 1.02, a "
+        return ("FAIL", "E3", f"this EBOOT.elf is not a build this port knows ({of}): it may be from game update 1.02, a "
                               "digital edition or a changed file. Setup supports the 1.00 disc EBOOT of " + " or ".join(TITLE_IDS) +
                               ", made without the update installed, because the port's hooks sit at fixed places in that program. "
-                              "To try it anyway at your own risk, run again with --allow-unknown-eboot")
+                              "To try it anyway at your own risk, run again with --allow-unknown-eboot. " + eboot_path_hint(path))
     name = f"J-Stars Victory VS+ {hit['app_ver'].lstrip('0')}, {hit['region']} disc ({hit['title_id']})"
     if tid and tid != hit["title_id"]:
         return ("FAIL", "E3", f"this EBOOT.elf is from the {hit['region']} disc ({hit['title_id']}), but the disc folder is the "
                               f"{TITLE_IDS.get(tid, '?')} disc ({tid}). Use the EBOOT.elf made from the same copy as the disc folder")
     if how == "the file":
         return ("OK", "E3", name + (" (matches the disc folder)" if tid else ""))
-    return ("WARN", "E3", f"{name}: the program code matches, but the file differs from the known one (SHA-256 {whole[:12]}), for "
+    return ("WARN", "E3", f"{name}: the program code matches, but the file differs from the known one ({of}), for "
                           "example padded or laid out differently by another tool. It should work; if the build fails, make the EBOOT.elf "
                           "again from your own copy")
 
@@ -420,13 +430,13 @@ def check_eboot(path, disc=None, tid=None, allow_unknown=False):
     if h[:4] == b"SCE\0":
         return [("FAIL", "E1", "this is the encrypted EBOOT.BIN; setup needs the decrypted EBOOT.elf (see RPCS3 and its documentation)")]
     ok = len(h) == 20 and h[:4] == b"\x7fELF" and h[4] == 2 and h[5] == 2 and h[18:20] == b"\0\x15"
-    out = [("OK" if ok else "FAIL", "E1", "decrypted PowerPC64 ELF" if ok else "not a PlayStation 3 (PowerPC64) ELF program")]
+    out = [("OK" if ok else "FAIL", "E1", f"{p}: decrypted PowerPC64 ELF" if ok else f"{p}: not a PlayStation 3 (PowerPC64) ELF program")]
     if ok:
         lvl = "OK" if ELF_MIN_BYTES <= size <= ELF_MAX_BYTES else "FAIL"
         out.append((lvl, "E2", f"size {size / 1e6:.1f} MB" + ("" if lvl == "OK" else
                     f" is outside {ELF_MIN_BYTES / 1e6:.1f} to {ELF_MAX_BYTES / 1e6:.0f} MB: cut off or not this game's EBOOT")))
         if lvl == "OK":
-            out.append(identify_eboot(p.read_bytes(), tid, allow_unknown))
+            out.append(identify_eboot(p.read_bytes(), tid, allow_unknown, p))
     return out
 
 
