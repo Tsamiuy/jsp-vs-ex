@@ -51,9 +51,13 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include "jsp_version_line.h"   // the version line (text and value choice, host-tested: installer/tools/version_line_test.cpp)
 
 #ifndef JSP_PORT_MENU_TEST
 #include <mutex>
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void*, char*, unsigned long);   // no <windows.h>: its macros clash with the recomp headers
+#endif
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
 #include "jsp_overlay_api.h"
@@ -379,6 +383,43 @@ void draw_online_edit(uint32_t white, uint32_t gold)
     jsp_overlay_text_style(260, 598, g_menu.editing ? "L1 / R1: ten letters at a time" : "Online play cannot change in a session: saved settings apply on the next start.", 0.5f, white, 0);
 }
 
+// ---- ENHANCEMENT (display, default on): the version line on the main menu's top list (jsp_version_line.h) ----
+// "Top list up" = jpv::top_menu(): the main-menu object (r3 of 0x001E0830) is alive, and the panel's per-frame update
+// (0x001E7238, vtable 0x87D910 +0x10) ran within the last two flips with panel state (+0x38) 0 = closed. ASSUMPTION: that update is
+// called every frame also while the panel is closed (it is the panel's state machine, state 0 included; a scene that is gone stops
+// calling it, which is what hides the line). The [version] log line prints every change with its inputs; a run decides.
+jpv::Lines g_ver;                       // chosen once at start; empty = nothing is drawn
+bool g_ver_vis = false;
+bool g_ver_seen = false;                // the panel update has run at least once since the object was built
+uint32_t g_ver_flip = 0;                // flip count at the last panel update
+int g_ver_state = -1;                   // panel state at the last panel update
+
+void draw_page();
+
+// Caller holds g_mu. Re-evaluates visibility; redraws on a change (the page is closed whenever the top list is up).
+void ver_refresh()
+{
+    if (!g_ver.any()) return;
+    const uint32_t now = (uint32_t)cellGcm_flip_request_count();
+    const bool alive = g_obj && g_obj_vt && vm_read32(g_obj) == g_obj_vt;
+    const bool vis = jpv::top_menu(alive, g_ver_seen, now - g_ver_flip, g_ver_state) && g_menu.page == jpm::CLOSED;
+    if (vis == g_ver_vis) return;
+    g_ver_vis = vis;
+    std::fprintf(stderr, "[version] top menu %s: obj 0x%08X alive %d, panel state %d, flips since panel update %u (flip %u)\n", vis ? "up, line drawn" : "gone, line cleared",
+                 g_obj, (int)alive, g_ver_state, (unsigned)(now - g_ver_flip), now);
+    draw_page();
+}
+
+void ver_draw()
+{
+    if (!jsp_overlay_begin(1280, 720)) return;
+    const uint32_t white = JSP_RGBA(255, 255, 255, 255);
+    const float w1 = jsp_overlay_text_width(g_ver.line1.c_str(), jpv::kScale1);
+    if (w1 > 0) jsp_overlay_text_style(jpv::kRight - w1, jpv::kY1, g_ver.line1.c_str(), jpv::kScale1, white, 0);
+    jsp_overlay_end();
+    g_drawn = true;
+}
+
 void draw_page()
 {
     using namespace jpm;
@@ -392,6 +433,7 @@ void draw_page()
             g_drawn = true;
             return;
         }
+        if (g_ver_vis) { ver_draw(); return; }
         if (g_drawn) { jsp_overlay_close(); g_drawn = false; }
         return;
     }
@@ -441,6 +483,8 @@ void pad_filter(uint32_t port, uint16_t* buttons, uint16_t* lx, uint16_t* ly)
     if (g_prev_filter) g_prev_filter(port, buttons, lx, ly);
     if (port != 0) return;
     std::lock_guard<std::mutex> lk(g_mu);
+    ver_refresh();   // also hides the line once the scene has stopped updating the panel
+    if (!port_menu_env()) return;
     int panel, open, row;
     poll_panel(&panel, &open, &row);
     const bool in_row = g_obj && open && panel == 8 && row == jpm::kPortRow;
@@ -488,6 +532,8 @@ void on_build_options(ppu_context* c)
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_obj != obj) std::fprintf(stderr, "[portmenu] main-menu object 0x%08X (was 0x%08X)\n", obj, g_obj);
     g_obj = obj; g_obj_vt = vm_read32(obj); g_dead_logged = false;
+    g_ver_seen = false; g_ver_vis = false;   // a new menu object: the panel must be seen again before the line shows
+    if (!port_menu_env()) return;            // the hook also runs for the version line alone
     if (jpm::six_rows(&total, &vis, &last)) {
         vm_write32(obj + k_cursor, (uint32_t)total); vm_write32(obj + k_cursor + 8, (uint32_t)vis); vm_write32(obj + k_cursor + 0x10, (uint32_t)last);
         std::fprintf(stderr, "[portmenu] Options panel built (+0xF4): cursor struct {total %d, vis %d, last %d} -> {6, 6, 5}, cursor %d\n", t0, v0, l0,
@@ -508,6 +554,12 @@ void on_panel_update(ppu_context* c)
 {
     const uint32_t obj = (uint32_t)c->gpr[3];
     g_orig_update(c);
+    if (g_ver.any()) {   // panel state and time of this update, for the version line
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_ver_seen = true; g_ver_flip = (uint32_t)cellGcm_flip_request_count(); g_ver_state = (int)vm_read32(obj + k_panel_state);
+        ver_refresh();
+    }
+    if (!port_menu_env()) return;
     if (g_trampoline_fn != (void (*)(void*))func_001E6E98) return;
     g_trampoline_fn = nullptr;
     func_001E6E98(c);
@@ -523,6 +575,36 @@ void on_panel_update(ppu_context* c)
                      (unsigned)vm_read32(obj + k_panel_open), (unsigned)vm_read32(obj + k_panel_state));
         s4 = a4; s5 = a5; s6 = a6; sid = id;
     }
+}
+
+// The inputs of the version line: env, then release.txt beside the exe or in its parent folder.
+std::string read_text(const std::string& path)
+{
+    std::string t;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) { char b[4096]; size_t n; while ((n = std::fread(b, 1, sizeof b, f)) > 0 && t.size() < 65536) t.append(b, n); std::fclose(f); }
+    return t;
+}
+
+void load_version_line()
+{
+    jpv::Inputs in;
+    in.switch_env = std::getenv("JSP_VERSION_LINE");
+    in.port_version = std::getenv("JSP_PORT_VERSION");
+#ifdef _WIN32
+    char exe[1024] = "";
+    const unsigned long n = GetModuleFileNameA(nullptr, exe, sizeof exe);
+    std::string dir(exe, n < sizeof exe ? n : 0);
+    const size_t sl = dir.find_last_of("\\/");
+    dir = sl == std::string::npos ? "" : dir.substr(0, sl);
+    const size_t sl2 = dir.find_last_of("\\/");
+    const std::string dirs[2] = { dir, sl2 == std::string::npos ? "" : dir.substr(0, sl2) };
+    for (const auto& d : dirs) {
+        if (d.empty()) continue;
+        if (in.file_version.empty()) in.file_version = jpv::parse_version_txt(read_text(d + "\\release.txt"));
+    }
+#endif
+    g_ver = jpv::choose(in);
+    if (!g_ver.any()) std::fprintf(stderr, "[version] no version line (no release.txt, no JSP_PORT_VERSION, JSP_VERSION_LINE=%s)\n", in.switch_env ? in.switch_env : "unset");
 }
 
 bool install(uint32_t addr, fn_t wrapper, fn_t* orig)
@@ -541,14 +623,21 @@ bool install(uint32_t addr, fn_t wrapper, fn_t* orig)
 
 extern "C" void jsp_register_port_menu_overrides(void)
 {
-    if (!port_menu_env()) return;
+    load_version_line();
+    if (!port_menu_env() && !g_ver.any()) return;
     if (vm_read32(k_row_count_insn) != 0x3B200005u) {   // the hooks' addresses are those of the US 1.00 code only
-        std::fprintf(stderr, "[portmenu] JSP_PORT_MENU is set, but this is not the US 1.00 build (0x%08X holds 0x%08X): the page stays off\n", k_row_count_insn, vm_read32(k_row_count_insn));
+        std::fprintf(stderr, "[portmenu] JSP_PORT_MENU or a version line is set, but this is not the US 1.00 build (0x%08X holds 0x%08X): the page and the line stay off\n", k_row_count_insn, vm_read32(k_row_count_insn));
         return;
     }
     const bool a = install(k_build_options, on_build_options, &g_orig_build);
     const bool b = install(k_panel_update, on_panel_update, &g_orig_update);
     if (!a || !b) return;
+    if (!port_menu_env()) {   // the version line alone: only the pad hook (a once-per-read tick), no Port Settings behaviour
+        install_pad_filter();
+        std::fprintf(stderr, "[version] line \"%s\" (hooks 0x%08X, 0x%08X, pad tick)\n", g_ver.line1.c_str(),
+                     k_build_options, k_panel_update);
+        return;
+    }
     // Label mask: bit 0 (Training on the Free Battle panel) as before, from the environment; bit 1 Port Settings.
     int mask = 2;
     const char* m = std::getenv("JSP_MENU_LABEL_MASK"), *t = std::getenv("JSP_MENU_TRAINING_LABEL");

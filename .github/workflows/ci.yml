@@ -49,6 +49,9 @@ jobs:
       - name: Port Settings page host test
         run: bash installer/tools/port_menu_test.sh
 
+      - name: Version line host test
+        run: bash installer/tools/version_line_test.sh
+
       - name: Version numbers agree (tools/release.py)
         run: |
           python3 tools/test_release.py

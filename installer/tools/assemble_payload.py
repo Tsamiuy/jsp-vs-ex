@@ -211,6 +211,9 @@ def main(argv=None):
                     help="which port to build on the player's PC: current (the default; the port on the pinned ps3recomp toolkit, "
                          "today v0.19.0) or legacy (the earlier port on v0.15). The older names v18/v19 and v15 are still accepted.")
     ap.add_argument("--toolkit-repo", default=str(ROOT / "third_party/ps3recomp"), help="git checkout the current tree's toolkit is exported from")
+    ap.add_argument("--release", default="", metavar="X.Y.Z",
+                    help="a release build (release.yml passes the tag's version): must equal installer/VERSION; writes release.txt, "
+                         "which the game shows in its main menu. Without it the payload has no release.txt and the game shows no version")
     ap.add_argument("--no-fetch", action="store_true", help="do not fetch the current tree's toolkit tag when the checkout lacks it")
     a = ap.parse_args(argv)
     a.tree = TREE_IDS[a.tree]   # tree.txt and firstrun.py keep the internal ids "v18" and "v15"
@@ -219,6 +222,10 @@ def main(argv=None):
         shutil.rmtree(out)
     (out / "licenses").mkdir(parents=True)
     (out / "VERSION.txt").write_text((ROOT / "installer/VERSION").read_text().strip() + "\n")
+    if a.release:
+        if a.release != (ROOT / "installer/VERSION").read_text().strip():
+            sys.exit(f"--release {a.release} differs from installer/VERSION")
+        (out / "release.txt").write_text(a.release + "\n")
     (out / "NOTICE.txt").write_text(NOTICE_V18 if a.tree == "v18" else NOTICE)
     (out / "tree.txt").write_text(a.tree + "\n")
     (out / "tools").mkdir()

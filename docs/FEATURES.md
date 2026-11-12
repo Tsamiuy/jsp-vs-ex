@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 12 available, 4 in progress, 14 planned.
+Port features: 12 available, 5 in progress, 14 planned.
 
 ## 1. What the port adds
 
@@ -43,6 +43,7 @@ Port features: 12 available, 4 in progress, 14 planned.
 | <a id="own-music"></a>Your own music | Your own music files in place of the game's tracks (your files, never shipped) | planned | off |  |
 | <a id="unlock-all"></a>Unlock all | ENHANCEMENT (opt-in, off by default): all cards, J-Points, gauges, characters, supports, titles, icons, decks and coins, written by the game into its own save at its next save. The launcher backs the save folder up first and the box unticks after one start. Titles and icons are visible to online opponents; the cheat is accepted online by the project's choice | available | Windows test 2026-11-11 (#73) | JSP_UNLOCK_ALL=1 or the launcher's Cheats tab; tested on Windows with the switch on and off, and the launcher's backup and refusal were run. The EU save folder is not tested. [UNLOCK_ALL.md](notes/UNLOCK_ALL.md) |
 | <a id="port-settings"></a>Port Settings page | ENHANCEMENT (opt-in, off by default): a sixth row on the Options list opens a page of the port's own settings; the Online sub-page edits and saves Method, Server, Online name and Community preset (applied on the next start; JSP_PORT_MENU_EDIT=0 keeps it read only). US 1.00 build only | in progress | Proton run | JSP_PORT_MENU=1. Built with the setup steps and run in the game under Proton (US disc): the Online page edits, saves and closes, and without the switch the Options list keeps its five rows. Not yet tested on Windows; the EU build stays off by design; see [PORT_SETTINGS.md](notes/PORT_SETTINGS.md) |
+| <a id="version-line"></a>Version line on the main menu | ENHANCEMENT (display only): “J-Stars Victory VS-EX X.Y.Z” in the lower right of the main menu's top list, drawn with the port overlay. Shown in release builds only (the version comes from release.txt, which only a release build writes); a local or pull request build shows no line. US 1.00 build only | in progress | Proton run in the development tree | JSP_VERSION_LINE=0 turns it off. The text and value choice have a host test (installer/tools/version_line_test.sh). The line was seen in the main menu in a Proton run of the maintainers' development tree (US disc, version from the test switch JSP_PORT_VERSION); not run on this tree, not run from a release payload, not tested on Windows |
 
 ### Rendering
 

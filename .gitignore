@@ -186,6 +186,8 @@ __pycache__/
 !/installer/tools/online_settings_test.sh
 !/installer/tools/port_menu_test.cpp
 !/installer/tools/port_menu_test.sh
+!/installer/tools/version_line_test.cpp
+!/installer/tools/version_line_test.sh
 !/installer/tools/port_overlay_test.c
 !/installer/tools/overlay_font_test.cpp
 !/installer/tools/overlay_font_test.sh
