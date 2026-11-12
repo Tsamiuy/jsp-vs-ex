@@ -33,33 +33,11 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: python3 tools/ci/repo_checks.py --commits "$BASE..$HEAD"
 
-      - name: Features page matches docs/features.tsv and ROADMAP.md
-        run: |
-          python3 tools/test_features.py
-          python3 tools/features.py --check
-
-      - name: Save import preserves progress on failure
-        run: |
-          python3 installer/tools/rpcs3_wizard_test.py
-          python3 installer/tools/test_rpcs3_locate.py
-
-      - name: Steam shortcut writer
-        run: python3 -I installer/tools/steam_shortcut_test.py
-
-      - name: Online settings reader host test
-        run: bash installer/tools/online_settings_test.sh
-
-      - name: Port Settings page host test
-        run: bash installer/tools/port_menu_test.sh
-
-      - name: Version line host test
-        run: bash installer/tools/version_line_test.sh
+      - name: Features page matches docs/features.tsv and ROADMAP.md (generator)
+        run: python3 tools/features.py --check
 
       - name: Version numbers agree (tools/release.py)
-        run: |
-          python3 tools/test_release.py
-          python3 tools/ci/test_release_tag.py
-          python3 tools/release.py --check
+        run: python3 tools/release.py --check
 
       - name: Shell scripts parse
         # .gitattributes keeps *.sh stored and checked out with LF.
@@ -121,3 +99,128 @@ jobs:
           python tools/toolkit/apply_toolkit.py --out "$env:RUNNER_TEMP\ps3recomp"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (-not (Test-Path "$env:RUNNER_TEMP\ps3recomp\.toolkit-stamp")) { exit 1 }
+
+  # The host tests (no game data, no GPU) are listed once in tools/ci/host-tests.txt and run by tools/ci/run_host_tests.py:
+  # one named result per test. A test file in git that is neither listed nor excluded there fails the coverage step.
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Same pinned font as installer.yml (the overlay font test draws the glyph atlas from it); never committed or shipped.
+      FIRA_URL: https://raw.githubusercontent.com/bBoxType/FiraSans/f54eeb3124c63fe9b5bcd36d09d1cd46788cd15e/Fira_Sans_4_3/Fonts/Fira_Sans_TTF_4301/Normal/Italic/FiraSans-HeavyItalic.ttf
+      FIRA_SHA256: a30804a11e8ad1b38d6cabc725644a1048aab6fb7e2811507f0e208a469c8ef9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Pillow and numpy (as installer.yml pins them), Mono compiler for the launcher's LAN test
+        run: |
+          python3 -m pip install --disable-pip-version-check pillow==12.3.0 numpy==2.5.3
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mono-mcs mono-runtime
+
+      - name: Fira Sans file (pinned download)
+        run: |
+          mkdir -p build/installer/fonts
+          curl -sSfL -o build/installer/fonts/FiraSans-HeavyItalic.ttf "$FIRA_URL"
+          echo "$FIRA_SHA256  build/installer/fonts/FiraSans-HeavyItalic.ttf" | sha256sum -c -
+
+      - name: Patched ps3recomp folder (for the tests that read the toolkit headers)
+        run: python3 installer/tools/export_toolkit.py --out "$RUNNER_TEMP/ps3recomp"
+
+      - name: Every test file is listed or excluded in tools/ci/host-tests.txt
+        run: python3 tools/ci/run_host_tests.py --check-coverage
+
+      - name: Host tests (one result per test; a self-skipping test fails)
+        run: python3 tools/ci/run_host_tests.py --strict-skip --toolkit "$RUNNER_TEMP/ps3recomp" --scratch "$RUNNER_TEMP/host-tests"
+
+  # The patch series are what every player's build depends on: a hunk that no longer applies would only show up when a
+  # release is built. Same tools as the installer build (export_toolkit.py, assemble_payload.apply_patches, git apply only).
+  patches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Both patch series apply to scratch copies of the pinned ps3recomp
+        # current: installer/port/patches on v0.19.0; legacy: installer/patches on the v0.15 tree
+        run: python3 tools/ci/check_patch_series.py --scratch "$RUNNER_TEMP/series"
+
+  # The host tests that need Windows (the launcher's settings order, the generated build script and path quoting) plus the
+  # Python tests whose path and quoting handling differs there, run as the installer build runs them: core.autocrlf false
+  # and a python3 on PATH.
+  host-tests-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: python3 on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec python "$@"\n' > "$RUNNER_TEMP/bin/python3"
+          chmod +x "$RUNNER_TEMP/bin/python3"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: llvm-mingw from toolchain.json (pinned, SHA-256 checked)
+        run: python installer/tools/fetch_toolchain.py --only llvm-mingw
+
+      - name: Launcher and the stand-in game exe the tests start
+        run: |
+          cc=build/installer/toolchain-cache/trees/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe
+          mkdir -p "$RUNNER_TEMP/exes"
+          "$cc" -O2 -mwindows -s -o "$RUNNER_TEMP/exes/jsp-launcher.exe" installer/launcher/launcher.c
+          "$cc" -O2 -o "$RUNNER_TEMP/exes/fake_tool.exe" installer/tools/fake_tool.c
+
+      - name: Host tests on Windows (one result per test)
+        run: python tools/ci/run_host_tests.py --strict-skip --launcher "$RUNNER_TEMP/exes/jsp-launcher.exe" --fake-tool "$RUNNER_TEMP/exes/fake_tool.exe" --scratch "$RUNNER_TEMP/host-tests"
+
+  # The port's own sources against the patched toolkit, with the compiler the installer bundles. Syntax only: the lifted game code
+  # and the runtime library link are made on the player's PC from their EBOOT, so a full build and link are not possible here.
+  port-compile:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: llvm-mingw from toolchain.json (pinned, SHA-256 checked)
+        run: python installer/tools/fetch_toolchain.py --only llvm-mingw
+
+      - name: Patched ps3recomp folder
+        run: python installer/tools/export_toolkit.py --out "$RUNNER_TEMP/ps3recomp"
+
+      - name: Port sources and boot scaffold compile (syntax only, stand-in ppu_recomp.h)
+        run: |
+          bin="$PWD/build/installer/toolchain-cache/trees/llvm-mingw/bin"
+          python tools/ci/port_syntax_check.py --toolkit "$RUNNER_TEMP/ps3recomp" --cxx "$bin/x86_64-w64-mingw32-clang++.exe" --cc "$bin/x86_64-w64-mingw32-clang.exe"
