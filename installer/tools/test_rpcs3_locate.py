@@ -103,6 +103,9 @@ class FindTests(Base):
         root = self.tree("home/me/.config/rpcs3")
         with mock.patch.object(L, "_is_windows", return_value=True), \
                 mock.patch.dict(os.environ, {"WINEHOMEDIR": "\\??\\" + str(self.tmp / "home" / "me")}):
+            # a real Windows runner has these set: the Wine candidates are looked at after them, so drop the Windows ones
+            os.environ.pop("LOCALAPPDATA", None)
+            os.environ.pop("APPDATA", None)
             cands = L._candidate_paths(None)
         self.assertEqual(cands[0][1], "wine-z-linux-config")
         self.assertTrue(cands[0][0].as_posix().endswith(".config/rpcs3") or

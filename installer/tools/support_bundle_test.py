@@ -61,6 +61,7 @@ def main():
         names = set(z.namelist())
         want = {"facts.txt", "logs/firstrun-20260101-000000.log", "build/configure.log", "build/analysis/lift.log", "game/run/launcher_log.txt",
                 "jsp-install.ini", "build-again.cmd", "VERSION.txt", "appdata/play_settings.txt", "setup-logs/Setup Log 2026-01-01 #001.txt"}
+        # (zip files are closed as soon as they are read: Windows cannot delete an open file when the temp folder goes)
         check(names == want, f"zip lists the expected names (extra {sorted(names - want)}, missing {sorted(want - names)})")
         alltext = b"".join(z.read(n) for n in names).decode()
         check("tester42" not in alltext.lower(), "the user name is redacted everywhere")
@@ -73,6 +74,7 @@ def main():
         check("root.sav" in f and "SLOT.sav" not in body, "facts.txt names a refused save; the hdd0 folder is never entered")
         check("VERSION.txt: 0.18.0-test" in f and "tree.txt: absent" in f, "facts: version, and tree.txt absent is fine")
         check("markers: lift, spu" in f, "facts: step markers")
+        z.close()
         check("JStarsRecomp.exe: present, 12 bytes" in f, "facts: game exe size")
         cur = t / "app-current"                  # the current tree (tree.txt v18) places jsp.exe, not JStarsRecomp.exe
         w(cur / "tree.txt", "v18\n")
@@ -104,6 +106,7 @@ def main():
         check(big.startswith("[support_bundle: the oldest ") and big.rstrip().endswith("NEWEST LINE") and "old line 0\n" not in big, "oldest lines cut, newest kept, note on top")
         check("cut" in z2.read("facts.txt").decode().split("shortened:")[1].split("\n")[0], "facts.txt says what was cut")
         check(z2.read("VERSION.txt") == b"0.18.0-test\n", "small files are untouched by the cap")
+        z2.close()
 
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")

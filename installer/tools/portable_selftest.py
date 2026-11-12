@@ -69,7 +69,7 @@ def main(scratch, payload=None, disc=None, eboot=None):
     check("pack folder itself", firstrun.pack_path("/x/JSP", root) == "@APP@")
     check("pack outside/sibling", firstrun.pack_path("/x/JSP2/hdd0", root) == "/x/JSP2/hdd0" and
           firstrun.pack_path("/y/disc", root) == "/y/disc")
-    check("unpack", firstrun.unpack_path("@APP@/hdd0", pathlib.Path("/z/Renamed")) == "/z/Renamed/hdd0")
+    check("unpack", firstrun.unpack_path("@APP@/hdd0", pathlib.Path("/z/Renamed")) == str(pathlib.Path("/z/Renamed") / "hdd0"))   # backslashes on Windows
     check("disc root accepts PS3_GAME", firstrun.disc_root(fx / "disc" / "PS3_GAME") == fx / "disc")
     # the fixture's EBOOT.elf is not a known build: without --allow-unknown-eboot the portable flow refuses it (E3), with it only warns
     app0 = scratch / "app0"
@@ -126,7 +126,7 @@ def main(scratch, payload=None, disc=None, eboot=None):
     check("place step", firstrun.step_place(c))
     pt = (old / "paths.txt").read_text()
     check("paths.txt: hdd0 relative, disc outside absolute",
-          "PS3_HDD0_ROOT=@APP@/hdd0" in pt and f"PS3_VFS_ROOT={fx}/disc/" in pt.replace("\\", "/"), pt.splitlines()[1])
+          "PS3_HDD0_ROOT=@APP@/hdd0" in pt and f"PS3_VFS_ROOT={fx}/disc/".replace("\\", "/") in pt.replace("\\", "/"), pt.splitlines()[1])
     (old / "build" / "port" / "CMakeCache.txt").write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={old.as_posix()}/port\n")
     (old / "build" / "location.txt").write_text(str(old) + "\n")
     c.mark("place")

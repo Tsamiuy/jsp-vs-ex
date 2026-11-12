@@ -17,7 +17,14 @@ import os, pathlib, shutil, socket, struct, subprocess, sys, tempfile, threading
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[2])
 mcs, mono = os.environ.get("MCS") or shutil.which("mcs"), os.environ.get("MONO") or shutil.which("mono")
-if not mcs or not mono:
+if os.name == "nt" and not mcs:
+    # Windows: the C# compiler that ships with .NET Framework (the one the launcher job and setup use); its exe runs without Mono
+    for d in ("Framework64", "Framework"):
+        csc = pathlib.Path(os.environ.get("WINDIR", "C:\\Windows")) / "Microsoft.NET" / d / "v4.0.30319" / "csc.exe"
+        if csc.is_file():
+            mcs, mono = str(csc), ""
+            break
+if not mcs or (mono is None):
     print("SKIP: mcs/mono not found (set MCS and MONO)")
     sys.exit(0)
 
@@ -82,7 +89,7 @@ head = "using System;\nusing System.Collections.Generic;\nusing System.Diagnosti
 (tmp / "lan.cs").write_text(head + code + "\n}\n", encoding="utf-8")
 exe = tmp / "h.exe"
 (tmp / "harness.cs").write_text(HARNESS, encoding="utf-8")
-r = subprocess.run([mcs, "-out:" + str(exe), str(tmp / "lan.cs"), str(tmp / "harness.cs")],
+r = subprocess.run([mcs] + (["-nologo"] if not mono else []) + ["-out:" + str(exe), str(tmp / "lan.cs"), str(tmp / "harness.cs")],
                    capture_output=True, text=True)
 check("harness compiles with no errors or warnings", r.returncode == 0 and "warning" not in r.stdout + r.stderr)
 if r.returncode:
@@ -90,7 +97,7 @@ if r.returncode:
     sys.exit(1)
 
 def run(*a, timeout=20):
-    return subprocess.run([mono, str(exe)] + [str(x) for x in a], capture_output=True, text=True, timeout=timeout).stdout.strip().splitlines()
+    return subprocess.run(([mono] if mono else []) + [str(exe)] + [str(x) for x in a], capture_output=True, text=True, timeout=timeout).stdout.strip().splitlines()
 
 def reply(nonce, tcp=4242, udp=36100, flags=1, players=3, name=b"lan box", ver=b"v0.5.0", magic=b"PSNR", typ=0x84):
     return (magic + bytes([typ]) + struct.pack(">IHHBH", nonce, tcp, udp, flags, players)

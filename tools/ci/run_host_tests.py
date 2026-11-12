@@ -68,7 +68,9 @@ def command(cmd, subs, scratch):
             a = str(v)
         args.append(a)
     if path.suffix == ".py":
-        return [sys.executable, "-I", str(path), *args], ""
+        # -I ignores PYTHONUTF8 and PYTHONIOENCODING, so UTF-8 output (the tests print Japanese and accented paths) is asked for here:
+        # without it a Windows console code page (cp1252) raises UnicodeEncodeError in the test's own print
+        return [sys.executable, "-I", "-X", "utf8", str(path), *args], ""
     if path.suffix == ".sh":
         return ["bash", str(path), *args], ""
     if path.suffix == ".c":

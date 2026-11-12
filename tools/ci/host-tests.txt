@@ -18,7 +18,8 @@ all     | installer/tools/unlock_option_test.py
 all     | tools/test_features.py
 all     | tools/test_release.py
 all     | tools/test_contributors.py
-all     | tools/ci/test_release_tag.py
+# release.yml runs the tag step on ubuntu-latest, and this test fakes `gh` with an extension-less script that Windows' CreateProcess cannot start (not a product problem)
+posix   | tools/ci/test_release_tag.py
 posix   | installer/tools/online_settings_test.sh
 posix   | installer/tools/port_menu_test.sh
 posix   | installer/tools/version_line_test.sh
