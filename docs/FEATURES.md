@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 12 available, 5 in progress, 14 planned.
+Port features: 12 available, 6 in progress, 18 planned.
 
 ## 1. What the port adds
 
@@ -17,6 +17,8 @@ Port features: 12 available, 5 in progress, 14 planned.
 | <a id="split-screen-layout"></a>Split-screen layout | Larger views and a solo-style HUD in 2-player split screen | planned | - | Parked in the notes |
 | <a id="brightness-glare"></a>Brightness and glare | Brightness and glare options | planned | - | Parked in the notes |
 | <a id="dlss"></a>DLSS | DLSS upscaling | planned | - | Parked in the notes |
+| <a id="wide-screens"></a>Wide and ultrawide screens | 16:10, 21:9 and 32:9 without stretching: a wider view to the sides, the HUD kept at the edges or in a 16:9 box, movies and menus with side bars. Display only | planned | - | A wider view shows more of the arena; ranked may stay 16:9 |
+| <a id="vr"></a>VR | A PC VR headset through OpenXR: first the game on a large virtual screen, later the fights in 3D. Research only; needs a steady 60 frames per second first | planned | - |  |
 | <a id="fps-counter"></a>FPS counter | The game's own frames per second, bottom left, fading in with the title screen | available | off | FPS_COUNTER=1 or the launcher's “FPS counter (bottom left)” box |
 
 ### Input and launcher
@@ -24,6 +26,7 @@ Port features: 12 available, 5 in progress, 14 planned.
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
 | <a id="launcher"></a>Launcher | A window to start the game, pick resolution and window size, choose how to play, rebind keys, set the fight HUD size and pick the online method (off, re-psn or a community server) | available | on | [LAUNCHER.md](notes/LAUNCHER.md) |
+| <a id="steam-shortcut"></a>Add to Steam | An unchecked box on the installer's last page adds the game to Steam as a non-Steam shortcut for each Steam account; it changes nothing while Steam runs and backs up the shortcut list first | in progress | off | Merged (#140); not yet tried on Windows with a real Steam |
 | <a id="input-modes"></a>Keyboard, mouse or controller | Keyboard, keyboard and mouse (mouse camera and clickable main menu) or controller, each with its own bindings | available | controller | Hands-on tests of mouse mode and rebinds are pending in the notes |
 | <a id="dualsense"></a>DualSense | A DualSense or DualSense Edge over USB or Bluetooth is read directly | in progress | on | Hands-on tests of the buttons are pending |
 | <a id="second-player"></a>Second player | A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before | available | on |  |
@@ -43,6 +46,7 @@ Port features: 12 available, 5 in progress, 14 planned.
 | <a id="own-music"></a>Your own music | Your own music files in place of the game's tracks (your files, never shipped) | planned | off |  |
 | <a id="unlock-all"></a>Unlock all | ENHANCEMENT (opt-in, off by default): all cards, J-Points, gauges, characters, supports, titles, icons, decks and coins, written by the game into its own save at its next save. The launcher backs the save folder up first and the box unticks after one start. Titles and icons are visible to online opponents; the cheat is accepted online by the project's choice | available | Windows test 2026-11-11 (#73) | JSP_UNLOCK_ALL=1 or the launcher's Cheats tab; tested on Windows with the switch on and off, and the launcher's backup and refusal were run. The EU save folder is not tested. [UNLOCK_ALL.md](notes/UNLOCK_ALL.md) |
 | <a id="port-settings"></a>Port Settings page | ENHANCEMENT (opt-in, off by default): a sixth row on the Options list opens a page of the port's own settings; the Online sub-page edits and saves Method, Server, Online name and Community preset (applied on the next start; JSP_PORT_MENU_EDIT=0 keeps it read only). US 1.00 build only | in progress | Proton run | JSP_PORT_MENU=1. Built with the setup steps and run in the game under Proton (US disc): the Online page edits, saves and closes, and without the switch the Options list keeps its five rows. Not yet tested on Windows; the EU build stays off by design; see [PORT_SETTINGS.md](notes/PORT_SETTINGS.md) |
+| <a id="ingame-settings"></a>All launcher settings in the game | Every launcher setting editable from the Port Settings page; settings that need a restart say so | planned | - |  |
 | <a id="version-line"></a>Version line on the main menu | ENHANCEMENT (display only): “J-Stars Victory VS-EX X.Y.Z” in the lower right of the main menu's top list, drawn with the port overlay. Shown in release builds only (the version comes from release.txt, which only a release build writes); a local or pull request build shows no line. US 1.00 build only | in progress | Proton run in the development tree | JSP_VERSION_LINE=0 turns it off. The text and value choice have a host test (installer/tools/version_line_test.sh). The line was seen in the main menu in a Proton run of the maintainers' development tree (US disc, version from the test switch JSP_PORT_VERSION); not run on this tree, not run from a release payload, not tested on Windows |
 
 ### Rendering
@@ -67,6 +71,7 @@ Port features: 12 available, 5 in progress, 14 planned.
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
 | <a id="colour-palettes"></a>Colour palettes | Character palettes made on your PC from your own game's textures; packs by other people stay outside this repository | planned | off |  |
+| <a id="modding"></a>Modding | A mods folder for textures, HUDs, music and data, and tools that export models and scenes from your own copy to common formats on your PC (exports stay on your PC) | planned | - |  |
 
 ## 2. The PS3 game's features in the port
 

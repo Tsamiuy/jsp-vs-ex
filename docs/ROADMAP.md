@@ -18,7 +18,7 @@ build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree curren
 | ✅ | **Long sessions:** the fight freeze (capped log counters overflowed after minutes in a fight) is fixed; a 30-minute scripted run and a 20-minute normal session had no freeze ([details](FEATURES.md#long-sessions)) |
 | 🔧 | A fight that stayed a flat brown screen on one launch was seen once and not reproduced |
 | ✅ | The glow layer around effects was compared with RPCS3 screenshots and matches, so no fix was needed (by eye, not a pixel comparison) ([details](FEATURES.md#effects-glow)) |
-| 📋 | A tagged pre-release once a fresh install on Windows reaches a fight without hand steps |
+| ✅ | Tagged pre-releases: 0.1.0 and 0.2.0 ([releases](https://github.com/Tsamiuy/jsp-vs-ex/releases)) |
 
 ## 2. Display and controls  🔧
 
@@ -28,6 +28,10 @@ build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree curren
 - ✅ Launcher with resolution, window size, input choice, rebinds and the fight HUD size ([details](FEATURES.md#launcher), [more](FEATURES.md#hud-size))
 - 🔧 "EX" in place of the "+" in the title logo, matching the port's name (optional, `JSP_EX_LOGO=0` keeps the "+"; merged; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy of the logo is not yet confirmed) ([details](FEATURES.md#ex-logo))
 - 📋 Split-screen layout, brightness and glare, DLSS (parked in the notes) ([details](FEATURES.md#split-screen-layout), [more](FEATURES.md#brightness-glare), [more](FEATURES.md#dlss))
+- 🔧 Add to Steam from the installer (merged; not yet tried with a real Steam) ([details](FEATURES.md#steam-shortcut))
+- 📋 Every launcher setting editable in the game, on the Port Settings page ([details](FEATURES.md#ingame-settings))
+- 📋 Wide and ultrawide screens (16:10, 21:9, 32:9) without stretching ([details](FEATURES.md#wide-screens))
+- 📋 VR through OpenXR: first a virtual screen, later 3D fights (research) ([details](FEATURES.md#vr))
 
 ## 3. Modes and match options (opt-in)  🔧
 
@@ -42,7 +46,7 @@ build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree curren
 - 📋 **Cross-Save with RPCS3, without PSN:** one save that moves both ways between the port and RPCS3 as a plain copy,
   since RPCS3 keeps this game's save unencrypted. Setup can already import an RPCS3 save once; not tested yet: an RPCS3
   save in the newer tree (`--tree current`) and a port save in RPCS3. Saves from a real PS3 are encrypted and are a separate
-  question ([issue #30](https://github.com/Tsamiuy/jsp-vs-ex/issues/30))
+  question (findings in [issue #30](https://github.com/Tsamiuy/jsp-vs-ex/issues/30), closed)
 
 ## 4. Online with rollback netcode  📋
 
@@ -66,6 +70,8 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 - 📋 **Colour palettes** for characters, made on your PC from your own game's textures (for example Super Saiyan Blue
   for Goku and Vegeta, Kurama mode for Naruto); packs made by other people stay outside this repository
   ([details](FEATURES.md#colour-palettes))
+- 📋 **Modding:** a mods folder for textures, HUDs, music and data, and export tools for models and scenes that run on
+  your PC from your own copy ([details](FEATURES.md#modding))
 
 ## Platforms
 
