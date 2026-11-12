@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 12 available, 6 in progress, 18 planned.
+Port features: 12 available, 6 in progress, 20 planned.
 
 ## 1. What the port adds
 
@@ -41,6 +41,7 @@ Port features: 12 available, 6 in progress, 18 planned.
 | <a id="training-options"></a>Training options | Infinite Stamina, infinite support, unlimited Victory Burst | planned | off |  |
 | <a id="hide-hud"></a>Hide HUD in Training | A “Hide HUD” row in the Training settings hides every HUD draw of the fight, name tags included, for screenshots; the HUD shows again while the pause menu is open | available | off | Scripted keyboard run passes. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
 | <a id="training-2p"></a>Two players in Training | Two local players in Training | planned | off |  |
+| <a id="arcade-2p"></a>Arcade for two players | Two players play Arcade's fights together on one PC (a tester request) | planned | off | Online version: online-arcade-2p |
 | <a id="ko-count"></a>KO count | KO count up to 5 as a match option in every mode except Training | planned | off |  |
 | <a id="match-sizes"></a>1v1 and 3v3 matches | 1v1 and 3v3 beside the usual 2v2 (3v3 only if the engine allows it) | planned | off |  |
 | <a id="own-music"></a>Your own music | Your own music files in place of the game's tracks (your files, never shipped) | planned | off |  |
@@ -64,6 +65,7 @@ Port features: 12 available, 6 in progress, 18 planned.
 | <a id="spectating"></a>Spectating | The host opens the lobby to watchers; each watcher's camera changes only what they see | planned | opt-in |  |
 | <a id="lobbies-ranked"></a>Lobbies, matchmaking, ranked | Lobbies, matchmaking and a ranked mode with one fixed rule set | planned | opt-in |  |
 | <a id="online-training"></a>Online Training | Training for up to 4 players online | planned | opt-in |  |
+| <a id="online-arcade-2p"></a>Online Arcade for two players | Two players play Arcade together online, as a smaller co-op step before Victory Road | planned | opt-in |  |
 | <a id="online-victory-road"></a>Online co-op Victory Road | Victory Road together online (the largest online item) | planned | opt-in |  |
 
 ### After 1.0
