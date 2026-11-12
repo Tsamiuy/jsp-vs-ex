@@ -156,6 +156,35 @@ def main():
         d = repo()
         (d / "README.md").write_text("A <!-- version -->latest<!-- /version -->\n", encoding="utf-8")
         expect("holds no X.Y.Z" in run("--root", str(d), "--check")[1], "a span without a version fails")
+        # .recomp.json: x-version follows VERSION; status turns "released" from 1.0.0 on
+        rj = '{\n  "game": "G",\n  "status": "in-progress",\n  "x-version": "0.1.0",\n  "notes": "n"\n}\n'
+        d = repo()
+        (d / release.RECOMP_JSON).write_text(rj, encoding="utf-8")
+        expect(run("--root", str(d), "--check")[0] == 0, ".recomp.json x-version equal to VERSION passes")
+        code, out = run("--root", str(d), "bump", "minor")
+        got = snapshot(d)[release.RECOMP_JSON]
+        expect(code == 0 and release.RECOMP_JSON in out, "bump lists .recomp.json")
+        expect('"x-version": "0.2.0"' in got and '"status": "in-progress"' in got, "0.x bump rewrites x-version, keeps status")
+        expect(got.replace("0.2.0", "0.1.0") == rj, "nothing else in .recomp.json changes")
+        code, out = run("--root", str(d), "bump", "1.0.0")
+        expect(code == 1, "bump refused: the Unreleased section is empty after the first bump")
+        d = repo()
+        (d / release.RECOMP_JSON).write_text(rj, encoding="utf-8")
+        code, out = run("--root", str(d), "bump", "major")
+        got = snapshot(d)[release.RECOMP_JSON]
+        expect(code == 0 and '"x-version": "1.0.0"' in got and '"status": "released"' in got, "1.0.0 sets status released")
+        d = repo()
+        (d / release.RECOMP_JSON).write_text(rj.replace("in-progress", "paused"), encoding="utf-8")
+        run("--root", str(d), "bump", "major")
+        expect('"status": "paused"' in snapshot(d)[release.RECOMP_JSON], "a paused status is left alone")
+        d = repo()
+        (d / release.RECOMP_JSON).write_text(rj.replace('"x-version": "0.1.0"', '"x-version": "0.0.9"'), encoding="utf-8")
+        code, out = run("--root", str(d), "--check")
+        expect(code == 1 and "x-version is 0.0.9" in out, "stale x-version fails the check")
+        refused(d, "patch", "x-version is 0.0.9")
+        d = repo()
+        (d / release.RECOMP_JSON).write_text(rj.replace('  "x-version": "0.1.0",\n', ""), encoding="utf-8")
+        expect('no "x-version" field' in run("--root", str(d), "--check")[1], "missing x-version fails the check")
     print(f"test_release: ok ({CASES} cases)")
 
 

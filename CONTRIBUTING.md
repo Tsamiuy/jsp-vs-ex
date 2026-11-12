@@ -48,6 +48,10 @@ Docs that name the current release (the README's download link and status line) 
 every X.Y.Z inside the spans, and `python3 tools/release.py --check` (CI) fails when a span names another version than
 `installer/VERSION`. Text outside the spans, such as "since 0.1.0", is history and stays as written.
 
+`.recomp.json` (the project's entry for recomp.fyi) carries the version in `"x-version"`; the bump rewrites it and the check
+fails when it differs. From 1.0.0 on, the bump also sets `"status"` from `"in-progress"` to `"released"`. Its `"notes"` text
+is written by hand: read it at each release.
+
 Merging a change to `installer/VERSION` into `main` starts the `release` workflow: it tags `vX.Y.Z`, builds the installer
 and creates a **draft** GitHub release with the files and the notes (`python3 tools/release.py notes X.Y.Z`). Look at the
 draft and publish it by hand; a 0.x version is created as a pre-release. If a build fails after tagging, rerun the release workflow: a tag at the same commit with no release resumes
