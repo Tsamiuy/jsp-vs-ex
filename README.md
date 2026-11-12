@@ -30,8 +30,8 @@ The frame rates were measured on one Windows machine; see [Status](#status).
 
 Caveat: the first build takes a while and needs several GB of free space, and `Build again` in the Start menu resumes it.
 
-**A ready-made download:** the [0.1.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.1.0) has
-`jsp-setup.exe` and a portable zip (`jsp-0.1.0-portable.zip`), with SHA-256 sums. Both still build the game on your PC from
+**A ready-made download:** the <!-- version -->[0.2.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.2.0)<!-- /version --> has
+`jsp-setup.exe` and a portable zip (<!-- version -->`jsp-0.2.0-portable.zip`<!-- /version -->), with SHA-256 sums. Both still build the game on your PC from
 your own copy.
 
 **Linux and Steam Deck (Proton):** coming soon. Not supported yet; an earlier v18 build of the newer tree reached fights under Proton in tests.
@@ -57,7 +57,7 @@ your own copy.
 
 ## Status
 
-> **Pre-release (0.1.0), work in progress.** The default build (the v19 tree, built on ps3recomp v0.19.0; the installer switch is
+> **Pre-release (<!-- version -->0.2.0<!-- /version -->), work in progress.** The default build (the v19 tree, built on ps3recomp v0.19.0; the installer switch is
 > `--tree current`) lifts and builds on Windows (Direct3D 12) and boots, plays the opening movie, the menus and fights
 > with sound, at about 30 frames per second in the demo and in Free Battle on one Windows machine (its earlier v18 build, on
 > toolkit v0.18.0, ran at 16 to 22). It has had fewer tests than the earlier v15 tree (`--tree legacy`, about 29 frames per second):

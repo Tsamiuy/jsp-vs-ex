@@ -420,6 +420,7 @@ This page uses only the fonts already on your system (placeholder notice).
 # ---------------------------------------------------------------- build
 
 def build(readme, notice, out):
+    readme = re.sub(r"<!--.*?-->", "", readme, flags=re.S)  # HTML comments (the release version spans) are repository markup
     pre, secs = sections(readme)
     pre = re.sub(r"(?m)^<[a-zA-Z][^\n]*\n?", "", pre)  # raw HTML before the first section (the README banner): the page has its own logo
     pre = re.sub(r"(?m)^(?:\[?!\[|\*\*\[)[^\n]*\n?", "", pre)  # badge rows (remote images) and the bold link nav: repository-only
@@ -489,6 +490,8 @@ def build(readme, notice, out):
 
 def check(page, css):
     errs = []
+    if "&lt;!--" in page:
+        errs.append("an HTML comment from the README shows as text")
     if re.search(r"<script", page, re.I):
         errs.append("script tag")
     if re.search(r"<[^>]*\son[a-z]+\s*=", page, re.I):
