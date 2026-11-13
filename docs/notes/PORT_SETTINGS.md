@@ -46,7 +46,7 @@ Each page ends in "Reset this page to the defaults" (the launcher's defaults). W
 where the launcher would write FXAA).
 
 Launcher only (the page "Launcher only" says why): Unlock everything (the save is backed up before the game starts and the game loads its save first; the key is never taken from the
-file), CPU boost and "boost off at exit" (the launcher changes the power plan around the game), the game disc folder, EBOOT and rebuild options (chosen at install), and the Online tab's preset list and Find on LAN.
+file), CPU boost and "boost off at exit" (the launcher changes the power plan around the game), Two-thread drawing (`PIPE`; the drawing thread starts with the game), the game disc folder, EBOOT and rebuild options (chosen at install), and the Online tab's preset list and Find on LAN.
 
 Code: `installer/port/jsp/jsp_settings.h` (key table, file model, key and button rules; header only), `jsp_settings.cpp` (file path, atomic save, live values),
 the pages in `jsp_port_menu.cpp`. Host test: `bash installer/tools/settings_test.sh` (file round trip, the rules the launcher applies, the pages against a fake file, and a check

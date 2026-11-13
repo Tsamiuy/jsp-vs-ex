@@ -1,0 +1,88 @@
+Patch 2914: a fragment program's inline constants are walked out of guest memory once per batch (FPK_MEMO, default on,
+FPK_MEMO=0 off; experiment).
+
+rsx_fp_extract_consts ran per draw at record time and again per draw at replay (patch 2058 FPK_REPLAY, which overwrites
+the record-time values), walking the whole program each time: rsx_fp_extract_consts 2.4% + rsx_fp_read_word 0.7% of the
+FIFO thread in a 2 vs 2 with about 4,500 draws a frame (sampling profile). With FPK_REPLAY on (the default) the
+record-time walk is skipped, and the replay keeps each program's constants in a 256-entry table for the batch
+(s_fpk_batch, bumped in render_frame_prepare) and copies them to the next draw of the same program. Every draw of one
+program in a batch read the same memory at replay, so the values are the same as before.
+
+Tested (Experiments workbench, heavy 2 vs 2 on Hidden Leaf at 4K, PIPE=1, alternating): FPK_MEMO on 27.11 and 28.29
+flips/s (FTL draw 24.5, 21.7), off 27.49 and 25.01 (25.1, 26.9): a small gain within the run-to-run spread. Picture correct.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 88ff904..2b23d89 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5209,6 +5209,35 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
+ /* Snapshot the VP constant bank + viewport epilogue for one draw into its
+  * vp_cb slot. Runs at record time so every draw keeps the constants that
+  * were live when the guest issued it. */
++/* FPK_REPLAY (patch 2058) switch, shared by the record side and the replay. */
++static int fpk_replay_on(void)
++{
++    static int rp = -1;
++    if (rp < 0) { const char* e = getenv("FPK_REPLAY"); rp = (e && *e == '0') ? 0 : 1; }
++    return rp;
++}
++/* FPK_MEMO (experiment 2026-11-13, default on, =0 off): a fragment program's inline constants are walked out of guest
++ * memory once per batch and copied to every draw of that program, instead of walking the program again for each draw
++ * (a 2 vs 2 has ~4,500 draws a frame over a few hundred programs). s_fpk_batch is bumped at the start of each
++ * render_frame_prepare; the replay of one batch reads every program at the same moment, so the values are the same. */
++typedef struct { u32 fp_addr, batch; int nk; float k[FP_K_MAX * 4]; } FpkMemo;
++static FpkMemo s_fpkm[256];
++static u32 s_fpk_batch = 1;
++static void fpk_fill(u32 fp_addr, const u8* code, float* out)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("FPK_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++    if (!on) { rsx_fp_extract_consts(code, 0x10000, out, FP_K_MAX); return; }
++    FpkMemo* m = &s_fpkm[((fp_addr >> 2) * 2654435761u) >> 24];
++    if (m->fp_addr != fp_addr || m->batch != s_fpk_batch) {
++        int nk = rsx_fp_extract_consts(code, 0x10000, m->k, FP_K_MAX);
++        if (nk < 0) nk = 0;
++        if (nk > FP_K_MAX) nk = FP_K_MAX;
++        m->nk = nk; m->fp_addr = fp_addr; m->batch = s_fpk_batch;
++    }
++    if (m->nk) memcpy(out, m->k, (size_t)m->nk * 16);
++}
++
+ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+ {
+     const rsx_state* st = s_d3d.current_rsx_state;
+@@ -5257,7 +5286,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+             extern u32 cellGcmResolveLocated(int, u32);
+             u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
+                                              dr->fp_addr & ~0x3u);
+-            if (vm_base && foff != 0xFFFFFFFFu)
++            if (vm_base && foff != 0xFFFFFFFFu && !fpk_replay_on())   /* FPK_REPLAY on: the replay fills them (fpk_fill) */
+                 rsx_fp_extract_consts(vm_base + foff, 0x10000, &ts[20], FP_K_MAX);   /* fp_k[FP_K_MAX] */
+             /* FPK_DBG=1: the fragment constants as the shader will see them.
+              * A program whose only output is fp_k[0].xxxx renders black if
+@@ -7838,6 +7867,7 @@ static void gput_end(void)
+  * render_frame_submit (the draw loop, post passes, Close/Execute, Present). RfFrame carries what both halves share. */
+ static void render_frame_prepare(RfFrame* f)
+ {
++    s_fpk_batch++;   /* FPK_MEMO: constants are read again for this batch */
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
+ 
+@@ -8473,7 +8503,7 @@ static void render_frame_prepare(RfFrame* f)
+               if (vm_base && foff != 0xFFFFFFFFu) {
+                   float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
+                       + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+-                  rsx_fp_extract_consts(vm_base + foff, 0x10000, &ts[20], FP_K_MAX);
++                  fpk_fill(dr->fp_addr, vm_base + foff, &ts[20]);
+                   { static int sk = -1; static unsigned long long lt = 0; static int nl = 0;   /* DIAG SHK_DBG at replay */
+                     if (sk < 0) sk = getenv("SHK_DBG") ? 1 : 0;
+                     const unsigned long long nw = GetTickCount64();
+@@ -9025,7 +9055,7 @@ static void render_frame_submit(const RfFrame* f)
+                       if (vm_base && foff != 0xFFFFFFFFu) {
+                           float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
+                               + ((u64)f->parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+-                          rsx_fp_extract_consts(vm_base + foff, 0x10000, &ts[20], FP_K_MAX);
++                          fpk_fill(dr->fp_addr, vm_base + foff, &ts[20]);
+                       }
+                   } }
+                 if (s_d3d.vp_fpcb)

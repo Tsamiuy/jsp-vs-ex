@@ -96,6 +96,7 @@ static const LauncherOnly k_launcher_only[] = {
     { "JSP_UNLOCK_ALL", "Unlock everything (cheat)", "the save is backed up before the game starts; the game loads its save first, so it cannot back itself up" },
     { "BOOST_OFF_ON_EXIT", "CPU boost off again at exit", "the launcher sets and restores the power plan around the game" },
     { "CPU_BOOST", "CPU boost while playing", "the launcher changes the power plan before the game starts" },
+    { "PIPE", "Two-thread drawing", "the drawing thread starts with the game, so choose it before starting" },
     { "(disc, EBOOT)", "Game disc folder, EBOOT, rebuild", "chosen at install; changing them needs a build of the port" },
     { "(Online tab)", "Preset list, Find on LAN", "list editing and a network scan; the Online page here edits the active choice" },
 };

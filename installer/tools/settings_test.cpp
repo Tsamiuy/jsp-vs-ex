@@ -67,7 +67,8 @@ int main(int argc, char** argv)
             for (auto it = std::sregex_iterator(src->begin(), src->end(), w); it != std::sregex_iterator(); ++it) written.insert((*it)[1]);
         // every key the launchers write: a table item, the key pages (PAD_KEY_/KB_KEY_/KBM_KEY_/PAD_BTN_ are written with a prefix, not matched here), or launcher only
         for (const auto& k : written) {
-            const bool known = jps::find_item(k.c_str()) != nullptr || k == "BOOST_OFF_ON_EXIT" || k == "MOUSE_SENS";
+            bool known = jps::find_item(k.c_str()) != nullptr || k == "BOOST_OFF_ON_EXIT" || k == "MOUSE_SENS";
+            for (int i = 0; i < jps::k_launcher_only_count; i++) if (k == jps::k_launcher_only[i].key) known = true;
             if (!known) std::printf("launcher writes %s: not in the table\n", k.c_str());
             CHECK(known);
         }
