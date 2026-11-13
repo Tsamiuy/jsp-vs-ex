@@ -412,6 +412,7 @@ namespace JStarsLauncher
         CheckBox fxFullBox;
         CheckBox statsBox;
         CheckBox fpsBox;
+        CheckBox pipeBox;   // PIPE for the game: two-thread drawing (toolkit patch 2912), off by default
         static readonly string[] AaIds = { "off", "fxaa", "fxaa2", "smaa" };
         Panel kbPanel, kbmPanel, padPanel;
         TabControl tabs;
@@ -601,7 +602,7 @@ namespace JStarsLauncher
             using (Graphics g = CreateGraphics()) dpiScale = g.DpiX / 96F;
             Font = new Font("Segoe UI", 9F);
             Text = "J-Stars Victory VS+";
-            ClientSize = Z(640, 718);
+            ClientSize = Z(640, 748);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -619,21 +620,21 @@ namespace JStarsLauncher
             header.Controls.Add(title); header.Controls.Add(sub);
             Controls.Add(header);
 
-            tabs = new TabControl { Location = P(12, 76), Size = Z(616, 574) };
+            tabs = new TabControl { Location = P(12, 76), Size = Z(616, 604) };
             tabs.TabPages.Add(BuildDisplayTab());
             tabs.TabPages.Add(BuildControlsTab());
             tabs.TabPages.Add(BuildOnlineTab());
             Controls.Add(tabs);
 
             // Bottom bar
-            statusLabel = new Label { Location = P(14, 670), Size = Z(340, 36), Text = "Ready.", TextAlign = ContentAlignment.MiddleLeft };
+            statusLabel = new Label { Location = P(14, 700), Size = Z(340, 36), Text = "Ready.", TextAlign = ContentAlignment.MiddleLeft };
             startBtn = new Button {
-                Text = "Start Game", Location = P(366, 666), Size = Z(150, 40),
+                Text = "Start Game", Location = P(366, 696), Size = Z(150, 40),
                 BackColor = Accent, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 11F, FontStyle.Bold) };
             startBtn.FlatAppearance.BorderSize = 0;
             startBtn.Click += delegate { StartGame(); };
-            exitBtn = new Button { Text = "Exit", Location = P(526, 666), Size = Z(100, 40), Font = new Font("Segoe UI", 10F) };
+            exitBtn = new Button { Text = "Exit", Location = P(526, 696), Size = Z(100, 40), Font = new Font("Segoe UI", 10F) };
             exitBtn.Click += delegate { Close(); };
             Controls.Add(statusLabel); Controls.Add(startBtn); Controls.Add(exitBtn);
             AcceptButton = null;   // Enter must stay bindable on the Controls page
@@ -688,6 +689,15 @@ namespace JStarsLauncher
             fpsBox.CheckedChanged += delegate { SaveIfReady(); };
             p.Controls.Add(fpsBox);
             y += 32;
+
+            // PIPE for the game: the drawing work runs on a second thread (toolkit patch 2912). Off by default.
+            pipeBox = new CheckBox { Text = "Two-thread drawing", Location = P(16, y), AutoSize = true, Checked = false };
+            pipeBox.CheckedChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(pipeBox);
+            p.Controls.Add(new Label {
+                Text = "Uses one more CPU core; can help in busy fights. Off = the usual single thread.",
+                Location = P(170, y + 2), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
 
             boostOffBox = new CheckBox { Text = "Turn CPU boost off again when the game closes (keeps the PC cool)", Location = P(16, y), AutoSize = true, Checked = true };
             boostOffBox.CheckedChanged += delegate { SaveIfReady(); };
@@ -1424,7 +1434,7 @@ namespace JStarsLauncher
                     int eq = t.IndexOf('=');
                     if (t.Length == 0 || t.StartsWith("#") || eq <= 0) continue;
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
-                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" ||
+                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "PIPE" ||
                         k == "INPUT_MODE" || k == "MOUSE_SENS" || k.StartsWith("PAD_KEY_") || k.StartsWith("KB_KEY_") ||
                         k.StartsWith("KBM_KEY_") || k.StartsWith("PAD_BTN_"))
                         cur[k] = v;
@@ -1455,6 +1465,7 @@ namespace JStarsLauncher
             fxFullBox.Checked = !(cur.TryGetValue("FX_FULL", out s) && s == "0");
             statsBox.Checked = cur.TryGetValue("TITLE_STATS", out s) ? s == "1" : !installed;
             fpsBox.Checked = cur.TryGetValue("FPS_COUNTER", out s) && s == "1";
+            pipeBox.Checked = cur.TryGetValue("PIPE", out s) && s == "1";
             // Keyboard page: KB_KEY_*, or PAD_KEY_* from before the input types existed.
             // Keyboard & Mouse page: KBM_KEY_*, else a copy of the keyboard page.
             string kbPrefix = HasPrefix(cur, "KB_KEY_") ? "KB_KEY_" : "PAD_KEY_";
@@ -1502,6 +1513,7 @@ namespace JStarsLauncher
             lines.Add("FX_FULL=" + (fxFullBox.Checked ? "1" : "0"));
             lines.Add("TITLE_STATS=" + (statsBox.Checked ? "1" : "0"));
             lines.Add("FPS_COUNTER=" + (fpsBox.Checked ? "1" : "0"));
+            lines.Add("PIPE=" + (pipeBox.Checked ? "1" : "0"));
             lines.Add("INPUT_MODE=" + ModeIds[Mode]);
             lines.Add("# Keys the game uses: the active page's keys as Windows virtual-key codes (0x01-0x06 = mouse buttons).");
             foreach (PadAction a in CurrentKeys())

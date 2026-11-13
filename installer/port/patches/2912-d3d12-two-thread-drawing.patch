@@ -1,0 +1,560 @@
+Patch 2912: two-thread drawing, PIPE=1 (default off; experiment). After the PIPE work of another v19 port.
+
+render_frame is split into render_frame_prepare (stays on the FIFO thread: GPU wait, shader and pipeline work, texture
+uploads, descriptor writes, everything that reads guest memory or live state) and render_frame_submit (draw loop, post
+passes, Close/Execute, Present). With PIPE=1 the submit half runs on its own thread for batch N while the FIFO thread
+records batch N+1 into the other draw list (s_draws_buf[2]) and the other half of every upload ring. RfFrame carries the
+batch (list, count, parity, present flag, MVP snapshot); rf_detach hands it over and resets the per-batch state;
+pipe_wait (delivers sent window messages while waiting) runs before the next prepare, before a VS slot is reused, before
+the base VS is built and at shutdown. Debug switches that read records or guest memory from the submit half keep the old
+path.
+
+J-Stars specific: the draw loop looked the pipeline up again (vp_get_fp_pso hashes the fragment program in guest memory
+at that moment) and patch 2058 filled the fragment constants there too. On the submit thread the game has moved on by
+then (first try: pipelines 1280, [FPA] queue full storm, cyan picture, 2 flips/s). With PIPE=1 the prepare half keeps
+the pipeline and "still building" in the record (pso_pre, pso_pend) and fills the constants; the submit half uses them.
+PIPE off: the old path, unchanged.
+
+Tested (Experiments workbench, all-CPU 2 vs 2 on Hidden Leaf at 4K, SHADOW_SCALE=4, MODEL_DETAIL=4, SMAA): PIPE off 24.16,
+27.17; PIPE=1 23.41, 25.41, 24.18 flips/s (fights differ run to run); picture correct; [PIPE] FIFO thread waits 0.10-0.17 ms
+per batch. No gain by itself in this fight: the game thread and the FIFO thread take turns (sampling profile: FIFO thread
+62% busy, 39% of its samples waiting), so the submit half was not the limit.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index c4e63c9..b8c679d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -175,6 +175,8 @@ typedef struct {
+     int   vpull;
+     int   aa_after;     /* 2511: smooth this target after this draw (the game's scene copy), aa_pass */
+     u32   vpull_base;
++    ID3D12PipelineState* pso_pre;   /* 2912 PIPE=1: the pipeline the prepare half found for this draw */
++    int   pso_pend;                 /* 2912 PIPE=1: none yet, its program is still building (2057): skip the draw */
+ } D3D12DrawRecord;
+ /* An indexed run (upload_tris_vp_ix) may take the next batch; cleared with the records. */
+ static int s_ix_run_valid;
+@@ -451,7 +453,7 @@ typedef struct {
+     /* Per-frame draw recording */
+     int                   frame_recording; /* 1 if cmd list is open for recording */
+     u32                   draw_count;      /* draws this frame */
+-    D3D12DrawRecord       draws[MAX_DRAWS];
++    D3D12DrawRecord*      draws;           /* s_draws_buf[0], or [1]: PIPE=1 swaps them per batch (patch 2912) */
+ 
+     /* Pointer to current RSX state (set before draw calls) */
+     const rsx_state*      current_rsx_state;
+@@ -468,6 +470,75 @@ typedef struct {
+ } D3D12State;
+ 
+ static D3D12State s_d3d;
++static D3D12DrawRecord s_draws_buf[2][MAX_DRAWS];
++
++/* Two-thread drawing (patch 2912; PIPE=1, default off; after another title's port). render_frame_prepare stays on the
++ * FIFO thread; render_frame_submit (draw loop, post passes, Close/Execute, Present) runs on its own thread for batch N
++ * while the FIFO thread records batch N+1 into the other draw list and the other half of every upload ring (vp_parity).
++ * RfFrame is the batch the submit half reads: its own draw list, count and parity, plus snapshots of the live state it
++ * used to read (present flag, legacy MVP). The FIFO thread waits for the submit thread (pipe_wait) before the next
++ * prepare and before anything that would change what a submit in flight reads (VS slot reuse, base VS build, shutdown). */
++typedef struct RfFrame {
++    double rf0; u32 fi;
++    D3D12DrawRecord* draws; u32 n; int parity; int present; int piped;
++    int have_st; float vc[16];
++} RfFrame;
++static void render_frame_submit(const RfFrame* f);
++static struct {
++    int on;                 /* -1 unknown, 0 off, 1 on */
++    HANDLE go, done, th;
++    volatile LONG busy;     /* a submit is queued or running (FIFO thread's view) */
++    RfFrame f;
++    u64 n_sub, n_wait; double wait_ms;   /* [PIPE] stats */
++} s_pipe = { -1 };
++static DWORD WINAPI pipe_thread(LPVOID arg)
++{
++    (void)arg;
++    for (;;) {
++        WaitForSingleObject(s_pipe.go, INFINITE);
++        render_frame_submit(&s_pipe.f);
++        SetEvent(s_pipe.done);
++    }
++    return 0;
++}
++static int pipe_on(void)
++{
++    if (s_pipe.on < 0) {
++        const char* e = getenv("PIPE");
++        int on = (e && *e == '1') ? 1 : 0;
++        /* Debug switches that read or edit records, guest memory or readbacks from the submit half keep the old path. */
++        static const char* const dbg[] = { "RSX_DRAWLOG", "RSX_CAP", "RTT_SAVERT", "D3D12_IQ", "VP_TESTTRI", "RT_CLEARLOG",
++            "DRAWARGS", "VP_SUBMIT", "CELLMARK_DUMP_MINDRAWS", "GPU_OVERLAP", NULL };
++        for (int i = 0; on && dbg[i]; i++)
++            if (getenv(dbg[i])) { on = 0; fprintf(stderr, "[PIPE] off: %s is set%c", dbg[i], 10); }
++        if (on) {
++            s_pipe.go = CreateEventA(NULL, FALSE, FALSE, NULL);
++            s_pipe.done = CreateEventA(NULL, FALSE, FALSE, NULL);
++            s_pipe.th = (s_pipe.go && s_pipe.done) ? CreateThread(NULL, 0, pipe_thread, NULL, 0, NULL) : NULL;
++            if (!s_pipe.th) { on = 0; fprintf(stderr, "[PIPE] off: thread not created%c", 10); }
++            else fprintf(stderr, "[PIPE] on: draw loop, Execute and Present on their own thread (tid %lu)%c", (unsigned long)GetThreadId(s_pipe.th), 10);
++        }
++        s_pipe.on = on;
++    }
++    return s_pipe.on;
++}
++/* FIFO thread: wait until the submit half has finished the batch in flight. The window belongs to this thread, and
++ * Present on the submit thread can SendMessage to it, so sent messages keep being delivered while waiting (a plain
++ * wait deadlocked at the first frames in another title's port). Posted messages stay queued for the normal pump. */
++static void pipe_wait(void)
++{
++    if (!s_pipe.busy) return;
++    LARGE_INTEGER q0, q1, fq; QueryPerformanceCounter(&q0);
++    for (;;) {
++        const DWORD r = MsgWaitForMultipleObjects(1, &s_pipe.done, FALSE, INFINITE, QS_SENDMESSAGE);
++        if (r == WAIT_OBJECT_0) break;
++        MSG m; PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
++    }
++    QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&fq);
++    s_pipe.wait_ms += (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)fq.QuadPart;
++    s_pipe.n_wait++;
++    s_pipe.busy = 0;
++}
+ /* RES_SCALE=n (1-4): render n times the guest resolution (2 = 1440p, 3 = 4K
+  * for a 1280x720 game). The guest keeps its own sizes everywhere (surface
+  * clips, viewports, texture sizes, s_d3d.width/height); only the D3D12
+@@ -1724,11 +1795,12 @@ static int gpu_overlap_on(void)
+     return on;
+ }
+ /* The draw's SRV window: the frame parity's half when overlapping. */
+-static u32 draw_srv_win(u32 d)
++static u32 draw_srv_win_p(int parity, u32 d)
+ {
+-    return DRAW_SRV_BASE + (gpu_overlap_on() ? (u32)s_d3d.vp_parity * MAX_DRAWS * DRAW_SRV_STRIDE : 0u)
++    return DRAW_SRV_BASE + (gpu_overlap_on() ? (u32)parity * MAX_DRAWS * DRAW_SRV_STRIDE : 0u)
+          + d * DRAW_SRV_STRIDE;
+ }
++static u32 draw_srv_win(u32 d) { return draw_srv_win_p(s_d3d.vp_parity, d); }
+ static void grave_add(IUnknown* o, u64 frame);
+ static void grave_sweep(u64 frame_now)
+ {
+@@ -2827,6 +2899,7 @@ static int vp_get_vs_lookup(const rsx_state* st)
+     int slot;
+     if (s_d3d.vp_vs_n < VP_VS_CACHE) slot = s_d3d.vp_vs_n++;
+     else {  /* full: reuse a slot in turn; no shifting (recorded vs_idx values stay valid), released later */
++        pipe_wait();   /* PIPE=1: the batch in flight indexes vp_vs[] */
+         static int next = 0;
+         slot = next; next = (next + 1) % VP_VS_CACHE;
+         grave_add((IUnknown*)s_d3d.vp_vs[slot].vs, s_d3d.frame_count);
+@@ -2856,6 +2929,7 @@ static int vp_get_vs_lookup(const rsx_state* st)
+      * pass it gates dropped every recorded is_vp draw. Here we are at RECORD
+      * time with a live state that definitely has microcode. */
+     if (!s_d3d.vp_ready && st && st->vp_ucode_bytes >= 16) {
++        pipe_wait();
+         const rsx_state* prev = s_d3d.current_rsx_state;
+         s_d3d.current_rsx_state = st;
+         compile_vp();
+@@ -7757,7 +7831,10 @@ static void gput_end(void)
+                                                  fi * GPUT_MAX, s_gput_n[fi], s_gput_rb[fi], 0);
+ }
+ 
+-static void render_frame_hz_impl(void)
++/* Two-thread drawing (patch 2912, after another title's port): render_frame is render_frame_prepare (GPU wait, shader and
++ * pipeline work, texture uploads, descriptor writes: everything that reads guest memory or live state) and
++ * render_frame_submit (the draw loop, post passes, Close/Execute, Present). RfFrame carries what both halves share. */
++static void render_frame_prepare(RfFrame* f)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
+@@ -8374,12 +8451,37 @@ static void render_frame_hz_impl(void)
+         double _ps0 = perf_on() ? perf_now() : 0.0;
+         u32 unnorm_dim[16][3];
+         u32 unnorm_mask = dr_unnorm_units(dr, unnorm_dim);
+-        if (dr->fp_addr) vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
++        dr->pso_pre = dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+                                        dr_num_rts(dr),
+                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                        dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr),
+-                                       unnorm_mask, unnorm_dim, dr->zs_key, dr);
++                                       unnorm_mask, unnorm_dim, dr->zs_key, dr) : NULL;
++        dr->pso_pend = (!dr->pso_pre && dr->fp_addr && s_fp_pending) ? 1 : 0;
++        /* PIPE=1 (patch 2912): the fragment constants are read from guest memory here, not on the submit thread. */
++        /* FPK_REPLAY (default on, =0 off; patch 2058): fill fp_k[] from the program as it is in memory now,
++         * the same bytes vp_get_fp_pso compiled and keyed the pipeline on. At record time J-Stars' character
++         * programs were not in place yet (0x0F500981: 1 constant of zeros at record, 34 at replay), so with
++         * patch 2056 the skin and hair read zeros and came out near black. */
++        { static int rp = -1; /* prepare half */ if (rp < 0) { const char* e = getenv("FPK_REPLAY"); rp = (e && *e == '0') ? 0 : 1; }
++          if (rp && pipe_on() && s_d3d.vp_fpcb_mapped && dr->fp_addr && dr->cb_slot < MAX_DRAWS) {
++              extern uint8_t* vm_base;
++              extern u32 cellGcmResolveLocated(int, u32);
++              const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
++              if (vm_base && foff != 0xFFFFFFFFu) {
++                  float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
++                      + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
++                  rsx_fp_extract_consts(vm_base + foff, 0x10000, &ts[20], FP_K_MAX);
++                  { static int sk = -1; static unsigned long long lt = 0; static int nl = 0;   /* DIAG SHK_DBG at replay */
++                    if (sk < 0) sk = getenv("SHK_DBG") ? 1 : 0;
++                    const unsigned long long nw = GetTickCount64();
++                    if (sk && dr->fp_addr == 0x0F4FFFC1u && nw - lt > 2000 && nl < 80) { lt = nw; nl++;
++                        static float kk[FP_K_MAX * 4]; rsx_fp_extract_consts(vm_base + foff, 0x10000, kk, FP_K_MAX);
++                        fprintf(stderr, "[SHK3] t=%llu", nw);
++                        for (int q = 0; q < 12; q++) fprintf(stderr, " [%d](%.7g %.7g %.7g %.7g)", q, kk[q*4], kk[q*4+1], kk[q*4+2], kk[q*4+3]);
++                        fputc(10, stderr); } }
++              }
++          } }
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+ 
+@@ -8402,6 +8504,56 @@ static void render_frame_hz_impl(void)
+     s_d3d.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.dsv_heap, &dsv_handle);
+ 
+     if (perf_on()) s_perf_pre += perf_now() - _pre0;
++    (void)rtv_handle; (void)dsv_handle;
++    f->rf0 = _rf0; f->fi = fi;
++}
++
++/* The per-batch reset that used to sit in the middle of render_frame. */
++static void rf_batch_reset(void)
++{
++    s_d3d.vb_offset  = 0; /* reset for next frame */
++    s_d3d.vp_vb_offset = 0;
++    s_d3d.vp_ib_offset = 0;
++    for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++) { s_d3d.draws[_i].indexed = 0; s_d3d.draws[_i].vpull = 0; }
++    s_ix_run_valid = 0;
++    s_vpull.off = 0; s_vpull.open = 0; s_vpull_gen++;   /* VPULL records end with the batch too */
++    s_d3d.draw_count = 0;
++    if (s_vpull.ring_mapped) vpull_report();
++    s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
++}
++/* End of prepare: what submit reads, taken from the live state. With PIPE=1 the FIFO thread then gets a fresh draw list
++ * and the other ring half at once (the old reset minus the per-record flags, which the submit half clears on its own
++ * list when it is done). */
++static void rf_detach(RfFrame* f, int piped)
++{
++    f->draws = s_d3d.draws; f->n = s_d3d.draw_count; f->parity = s_d3d.vp_parity;
++    f->present = s_present_this_frame; f->piped = piped;
++    const rsx_state* st = s_d3d.current_rsx_state;
++    f->have_st = st != NULL;
++    if (st) for (u32 r = 0; r < 4; r++) for (u32 c = 0; c < 4; c++) f->vc[r * 4 + c] = st->vertex_constants[r][c];
++    if (!piped) return;
++    s_d3d.vb_offset = 0; s_d3d.vp_vb_offset = 0; s_d3d.vp_ib_offset = 0;
++    s_ix_run_valid = 0;
++    s_vpull.off = 0; s_vpull.open = 0; s_vpull_gen++;
++    if (s_vpull.ring_mapped) vpull_report();
++    s_d3d.draws = (s_d3d.draws == s_draws_buf[0]) ? s_draws_buf[1] : s_draws_buf[0];
++    s_d3d.draw_count = 0;
++    s_d3d.vp_parity ^= 1;
++}
++
++static void render_frame_submit(const RfFrame* f)
++{
++    const double _rf0 = f->rf0;
++    u32 fi = f->fi;
++    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle;
++    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv_handle);
++    rtv_handle.ptr += fi * s_d3d.rtv_descriptor_size;
++    D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle;
++    s_d3d.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.dsv_heap, &dsv_handle);
++    D3D12_RESOURCE_BARRIER barrier = {0};   /* the back buffer: dumps and the PRESENT transition at the end */
++    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barrier.Transition.pResource = s_d3d.render_targets[fi];
++    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+     /* Set render target + depth */
+     s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
+ 
+@@ -8420,7 +8572,7 @@ static void render_frame_hz_impl(void)
+     s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &scissor);
+ 
+     /* Bind pipeline state and push MVP if anything to draw */
+-    if (s_d3d.pipeline_ready && s_d3d.draw_count > 0) {
++    if (s_d3d.pipeline_ready && f->n > 0) {
+         s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.root_signature);
+         s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &s_d3d.vb_view);
+ 
+@@ -8438,15 +8590,11 @@ static void render_frame_hz_impl(void)
+          * If the game hasn't written any constants (e.g. placeholder data
+          * already in clip space), fall back to identity. */
+         float mvp[16];
+-        const rsx_state* st = s_d3d.current_rsx_state;
+         int have_mvp = 0;
+-        if (st) {
+-            for (u32 r = 0; r < 4; r++) {
+-                for (u32 c = 0; c < 4; c++) {
+-                    float v = st->vertex_constants[r][c];
+-                    mvp[r * 4 + c] = v;
+-                    if (v != 0.0f) have_mvp = 1;
+-                }
++        if (f->have_st) {   /* snapshot of the live state's c0-c3 (rf_detach) */
++            for (u32 r = 0; r < 16; r++) {
++                mvp[r] = f->vc[r];
++                if (f->vc[r] != 0.0f) have_mvp = 1;
+             }
+         }
+         if (!have_mvp) {
+@@ -8466,7 +8614,7 @@ static void render_frame_hz_impl(void)
+           if (_vd && _n < 3) {
+             _n++;
+             fprintf(stderr, "[D3D12-DBG] have_mvp=%d draw_count=%u vb_offset=%u\n",
+-                    have_mvp, s_d3d.draw_count, s_d3d.vb_offset);
++                    have_mvp, f->n, s_d3d.vb_offset);
+             fprintf(stderr, "[D3D12-DBG] mvp rows: [%.2f %.2f %.2f %.2f][%.2f %.2f %.2f %.2f]"
+                             "[%.2f %.2f %.2f %.2f][%.2f %.2f %.2f %.2f]\n",
+                     mvp[0],mvp[1],mvp[2],mvp[3], mvp[4],mvp[5],mvp[6],mvp[7],
+@@ -8480,8 +8628,8 @@ static void render_frame_hz_impl(void)
+                             k, v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+                 }
+             }
+-            for (u32 d = 0; d < s_d3d.draw_count && d < 3; d++) {
+-                const D3D12DrawRecord* dr = &s_d3d.draws[d];
++            for (u32 d = 0; d < f->n && d < 3; d++) {
++                const D3D12DrawRecord* dr = &f->draws[d];
+                 fprintf(stderr, "[D3D12-DBG]  draw[%u] is_vp=%d is_clear=%d topo=%u cnt=%u vbofs=%u startv=%u rt=%u\n",
+                         d, dr->is_vp, dr->is_clear, dr->topology, dr->vertex_count,
+                         dr->vb_byte_offset, dr->vb_byte_offset / VERTEX_STRIDE, dr->rt_off);
+@@ -8494,10 +8642,10 @@ static void render_frame_hz_impl(void)
+          * must match the topology or D3D12 rejects the draw. */
+         u32 last_topo = 0xFFFFFFFFu;
+         ID3D12PipelineState* last_pso = NULL;
+-        u32 draws = s_d3d.draw_count;
++        u32 draws = f->n;
+         if (draws > MAX_DRAWS) draws = MAX_DRAWS;
+         for (u32 d = 0; d < draws; d++) {
+-            const D3D12DrawRecord* dr = &s_d3d.draws[d];
++            const D3D12DrawRecord* dr = &f->draws[d];
+             if (dr->is_vp) continue; /* drawn by the VP pass below */
+ 
+             /* Select PSO: textured triangles (dbgfont) use the atlas PSO;
+@@ -8529,10 +8677,10 @@ static void render_frame_hz_impl(void)
+ 
+     /* VP pass: real decompiled vertex program + atlas alpha-test PS. Feeds raw
+      * float4 attrib0 from vp_vb and the vp_c[] constant bank. */
+-    if (s_d3d.vp_ready && s_d3d.draw_count > 0) {
++    if (s_d3d.vp_ready && f->n > 0) {
+         int any = 0;
+-        for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++)
+-            if (s_d3d.draws[d].is_vp) { any = 1; break; }
++        for (u32 d = 0; d < f->n && d < MAX_DRAWS; d++)
++            if (f->draws[d].is_vp) { any = 1; break; }
+         /* Textured geometry (dbgfont atlas) uses the sampling PS; untextured 3D
+          * (vkcube) uses the colour-only PS. Fall back to whichever exists. */
+         ID3D12PipelineState* vpso =
+@@ -8543,12 +8691,12 @@ static void render_frame_hz_impl(void)
+           if (cap < 0) { const char* e = getenv("VP_SUBMIT"); cap = e ? atoi(e) : 0; }
+           if (cap && n < cap) { n++;
+             u32 nvp = 0, nclr = 0;
+-            for (u32 d2 = 0; d2 < s_d3d.draw_count && d2 < MAX_DRAWS; d2++) {
+-                if (s_d3d.draws[d2].is_vp)    nvp++;
+-                if (s_d3d.draws[d2].is_clear) nclr++;
++            for (u32 d2 = 0; d2 < f->n && d2 < MAX_DRAWS; d2++) {
++                if (f->draws[d2].is_vp)    nvp++;
++                if (f->draws[d2].is_clear) nclr++;
+             }
+             fprintf(stderr, "[VPPASS] records=%u is_vp=%u clears=%u any=%d vpso=%p rootsig=%p\n",
+-                    s_d3d.draw_count, nvp, nclr, any,
++                    f->n, nvp, nclr, any,
+                     (void*)vpso, (void*)s_d3d.vp_root_sig); } }
+         if (any && vpso) {
+             s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.vp_root_sig);
+@@ -8565,7 +8713,7 @@ static void render_frame_hz_impl(void)
+             for (int _s = 0; _s < 16; _s++) samp_bound[_s] = -1;
+             D3D12_VERTEX_BUFFER_VIEW vbv;
+             vbv.BufferLocation = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb)
+-                               + (u64)s_d3d.vp_parity * MAX_VERTICES * 256;
++                               + (u64)f->parity * MAX_VERTICES * 256;
+             vbv.SizeInBytes    = MAX_VERTICES * 256;
+             vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
+             s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+@@ -8584,14 +8732,14 @@ static void render_frame_hz_impl(void)
+             /* VPULL: this batch's halves of the byte ring and the tables. */
+             const u64 vpull_ring_va = s_vpull.ring_mapped
+                 ? s_vpull.ring->lpVtbl->GetGPUVirtualAddress(s_vpull.ring)
+-                  + (u64)s_d3d.vp_parity * ((u64)s_vpull.ring_bytes + VPULL_RING_SLACK) : 0;
++                  + (u64)f->parity * ((u64)s_vpull.ring_bytes + VPULL_RING_SLACK) : 0;
+             const u64 vpull_tab_va = s_vpull.tab_mapped
+                 ? s_vpull.tab->lpVtbl->GetGPUVirtualAddress(s_vpull.tab)
+-                  + (u64)s_d3d.vp_parity * MAX_DRAWS * RSX_VPULL_TAB_BYTES : 0;
++                  + (u64)f->parity * MAX_DRAWS * RSX_VPULL_TAB_BYTES : 0;
+             const u64 vpull_lut_va = s_vpull.ring_mapped
+                 ? s_vpull.lut->lpVtbl->GetGPUVirtualAddress(s_vpull.lut) : 0;
+-            for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
+-                const D3D12DrawRecord* dr = &s_d3d.draws[d];
++            for (u32 d = 0; d < f->n && d < MAX_DRAWS; d++) {
++                const D3D12DrawRecord* dr = &f->draws[d];
+                 if (!dr->is_vp) continue;
+                 for (int _u = 0; _u < 16; _u++) {
+                     const int ds = dr->tex_ds[_u];
+@@ -8720,7 +8868,7 @@ static void render_frame_hz_impl(void)
+                       if (tt < 0) { const char* e = getenv("VP_TESTTRI"); tt = e ? atoi(e) : 0; }
+                       if (tt && want >= 0 && s_d3d.vp_vb_mapped) {
+                           float* vtx = (float*)((char*)s_d3d.vp_vb_mapped
+-                              + (u64)s_d3d.vp_parity * MAX_VERTICES * 256u
++                              + (u64)f->parity * MAX_VERTICES * 256u
+                               + (u64)1000 * 256u);
+                           static const float tri[3][4] = {
+                               {-2.0f, -2.0f, 0.0f, 1.0f},
+@@ -8780,14 +8928,14 @@ static void render_frame_hz_impl(void)
+                  * back to the hardcoded atlas/colour PS pair. */
+                 u32 unnorm_dim[16][3];
+                 u32 unnorm_mask = dr_unnorm_units(dr, unnorm_dim);
+-                ID3D12PipelineState* dpso =
++                ID3D12PipelineState* dpso = f->piped ? dr->pso_pre :   /* PIPE=1: found by the prepare half (no guest memory here) */
+                     dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+                                                 dr_num_rts(dr),
+                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                 dr->fp_ctrl, dr->cmask, dr->cull,
+                                                 dr_cube_mask(dr), unnorm_mask, unnorm_dim, dr->zs_key, dr) : NULL;
+-                if (!dpso && dr->fp_addr && s_fp_pending) continue;   /* 2057: its program is still building */
++                if (!dpso && dr->fp_addr && (f->piped ? dr->pso_pend : s_fp_pending)) continue;   /* 2057: its program is still building */
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+                                                          dpso ? dpso : vpso);
+                 s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
+@@ -8830,7 +8978,7 @@ static void render_frame_hz_impl(void)
+                     /* RES_SCALE: WPOS divisor of this draw (rsx_alphatest.w). */
+                     if (s_rs > 1 && s_d3d.vp_fpcb_mapped && dr->cb_slot < MAX_DRAWS)
+                         ((float*)((char*)s_d3d.vp_fpcb_mapped
+-                            + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE))[19]
++                            + ((u64)f->parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE))[19]
+                             = 1.0f / (float)cur_sc;
+                 }
+                 /* Per-draw textures: bind this draw's t0-t3 SRV window.
+@@ -8845,7 +8993,7 @@ static void render_frame_hz_impl(void)
+                         off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                 }
+                 D3D12_GPU_DESCRIPTOR_HANDLE gh = gh_base;
+-                gh.ptr += (u64)draw_srv_win(d) * s_d3d.srv_inc;   /* patch 2907 */
++                gh.ptr += (u64)draw_srv_win_p(f->parity, d) * s_d3d.srv_inc;   /* patch 2907 */
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+                 if (s_d3d.samp_heap) {
+                     D3D12_GPU_DESCRIPTOR_HANDLE sb;
+@@ -8862,26 +9010,26 @@ static void render_frame_hz_impl(void)
+                 /* Per-draw constants: this draw's vp_cb + FP texscale slots. */
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
+                     s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb)
+-                    + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->vcb_slot) * VP_CB_STRIDE);
++                    + ((u64)f->parity * MAX_DRAWS + dr->vcb_slot) * VP_CB_STRIDE);
+                 /* FPK_REPLAY (default on, =0 off; patch 2058): fill fp_k[] from the program as it is in memory now,
+                  * the same bytes vp_get_fp_pso compiled and keyed the pipeline on. At record time J-Stars' character
+                  * programs were not in place yet (0x0F500981: 1 constant of zeros at record, 34 at replay), so with
+                  * patch 2056 the skin and hair read zeros and came out near black. */
+                 { static int rp = -1; if (rp < 0) { const char* e = getenv("FPK_REPLAY"); rp = (e && *e == '0') ? 0 : 1; }
+-                  if (rp && s_d3d.vp_fpcb_mapped && dr->fp_addr && dr->cb_slot < MAX_DRAWS) {
++                  if (rp && !f->piped && s_d3d.vp_fpcb_mapped && dr->fp_addr && dr->cb_slot < MAX_DRAWS) {
+                       extern uint8_t* vm_base;
+                       extern u32 cellGcmResolveLocated(int, u32);
+                       const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
+                       if (vm_base && foff != 0xFFFFFFFFu) {
+                           float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
+-                              + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
++                              + ((u64)f->parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+                           rsx_fp_extract_consts(vm_base + foff, 0x10000, &ts[20], FP_K_MAX);
+                       }
+                   } }
+                 if (s_d3d.vp_fpcb)
+                     s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
+                         s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
+-                        + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
++                        + ((u64)f->parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+                 /* DRAWARGS=<N>: the arguments actually handed to the GPU, plus
+                  * the target they are aimed at. A zero vertex count, or a start
+                  * vertex past the buffer, rasterises nothing while every other
+@@ -8921,7 +9069,7 @@ static void render_frame_hz_impl(void)
+                     if (!ib_bound) {
+                         D3D12_INDEX_BUFFER_VIEW ibv;
+                         ibv.BufferLocation = s_d3d.vp_ib->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_ib)
+-                                           + (u64)s_d3d.vp_parity * VP_MAX_INDICES * 4;
++                                           + (u64)f->parity * VP_MAX_INDICES * 4;
+                         ibv.SizeInBytes = VP_MAX_INDICES * 4;
+                         ibv.Format = DXGI_FORMAT_R32_UINT;
+                         s_d3d.cmd_list->lpVtbl->IASetIndexBuffer(s_d3d.cmd_list, &ibv);
+@@ -9080,16 +9228,10 @@ static void render_frame_hz_impl(void)
+         s_lock_valid = 1;
+         s_lock_sx = s_lock_sy = 0.0; s_lock_n = 0;
+     }
+-    s_dbg_last_draws = s_d3d.draw_count;
+-    s_d3d.vb_offset  = 0; /* reset for next frame */
+-    s_d3d.vp_vb_offset = 0;
+-    s_d3d.vp_ib_offset = 0;
+-    for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++) { s_d3d.draws[_i].indexed = 0; s_d3d.draws[_i].vpull = 0; }
+-    s_ix_run_valid = 0;
+-    s_vpull.off = 0; s_vpull.open = 0; s_vpull_gen++;   /* VPULL records end with the batch too */
+-    s_d3d.draw_count = 0;
+-    if (s_vpull.ring_mapped) vpull_report();
+-    s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
++    s_dbg_last_draws = f->n;
++    if (!f->piped) rf_batch_reset();
++    else   /* PIPE=1: the FIFO thread reset the batch state at rf_detach; this list is ours */
++        for (u32 _i = 0; _i < f->n && _i < MAX_DRAWS; _i++) { f->draws[_i].indexed = 0; f->draws[_i].vpull = 0; }
+ 
+     /* Debug: RTT_SAVERT=<hex raw offset>[:frame] copies that offscreen RT
+      * into a readback buffer this frame and writes rt_save.bmp (half-float
+@@ -9396,7 +9538,7 @@ skip_dump_consider: ;
+ 
+     /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
+      * title past the display's rate. Skipped for an offscreen-only batch. */
+-    if (s_present_this_frame) {
++    if (f->present) {
+         if (!d3d12_vsync_off())
+             s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0);
+         else
+@@ -9411,7 +9553,7 @@ skip_dump_consider: ;
+      * the GPU first (wait_for_gpu) before it reuses the allocator, texture ring
+      * and SRV heap, and the vertex/constant/index halves flip with the parity,
+      * so recording after a flush overlaps with the GPU rendering it. */
+-    if (s_present_this_frame || s_midflush_wait)
++    if (f->present || s_midflush_wait)
+         move_to_next_frame();
+ 
+     s_d3d.frame_count++;
+@@ -9423,7 +9565,7 @@ skip_dump_consider: ;
+         static u64 s_tframes = 0;
+         static u64 s_tpres = 0;
+         s_tframes++;
+-        s_tpres += s_present_this_frame ? 1 : 0;
++        s_tpres += f->present ? 1 : 0;
+         ULONGLONG tnow = GetTickCount64();
+         if (s_tt0 == 0) s_tt0 = tnow;
+         if (tnow - s_tt0 >= 1000)
+@@ -9457,8 +9599,29 @@ skip_dump_consider: ;
+         }
+     }
+ }
++static void render_frame_run(void)
++{
++    RfFrame f;
++    if (!pipe_on()) {
++        render_frame_prepare(&f);
++        rf_detach(&f, 0);
++        render_frame_submit(&f);
++        return;
++    }
++    pipe_wait();               /* batch N-1's submit is done (and with it its Present) */
++    render_frame_prepare(&f);  /* waits for the GPU, uploads, descriptors, PSOs */
++    rf_detach(&f, 1);          /* the FIFO thread records the next batch into the other list */
++    s_pipe.f = f;
++    s_pipe.busy = 1;
++    s_pipe.n_sub++;
++    if ((s_pipe.n_sub % 600) == 0)
++        fprintf(stderr, "[PIPE] %llu batches handed off, FIFO thread waited %llu times %.1f ms total (%.2f ms avg)%c",
++                (unsigned long long)s_pipe.n_sub, (unsigned long long)s_pipe.n_wait, s_pipe.wait_ms,
++                s_pipe.n_wait ? s_pipe.wait_ms / (double)s_pipe.n_wait : 0.0, 10);
++    SetEvent(s_pipe.go);
++}
+ static void render_frame(void)
+-{ const double t0 = hz_ms() ? hz_now() : 0; render_frame_hz_impl(); if (t0) { s_hz_t[5] += hz_now() - t0; s_hz_n[5]++; } }
++{ const double t0 = hz_ms() ? hz_now() : 0; render_frame_run(); if (t0) { s_hz_t[5] += hz_now() - t0; s_hz_n[5]++; } }
+ 
+ 
+ /* ---------------------------------------------------------------------------
+@@ -12164,6 +12327,7 @@ static rsx_backend s_d3d12_backend = {0};
+ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+ {
+     memset(&s_d3d, 0, sizeof(s_d3d));
++    s_d3d.draws = s_draws_buf[0];
+     s_d3d.width = width;
+     s_d3d.height = height;
+     jsp_overlay_set_output((int)width, (int)height);   /* patch 2517 */
+@@ -12250,6 +12414,7 @@ void rsx_d3d12_backend_shutdown(void)
+ {
+     if (!s_d3d.initialized) return;
+ 
++    pipe_wait();     /* PIPE=1: the batch in flight first */
+     wait_for_gpu();
+ 
+     /* Release D3D12 resources */
