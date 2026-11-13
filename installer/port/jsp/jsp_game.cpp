@@ -961,6 +961,23 @@ unsigned long long g_combo_end = 0;   /* when the last combo number went away */
 bool g_combo_up = false;
 TrainFighter g_train[8];
 volatile int g_train_count = 0;
+/* The motion each fighter is in. A fighter's motion object (class 0x00873128) is at its health object +0x3C, and
+ * 0x00029E04 (object, motion, action) starts a motion on it. Motion 0 is standing: a hit fighter is back in it when
+ * its hit reaction, the knockdown and the get-up are over (a knocked-down dummy: about 3 s after the last hit). */
+struct TrainMotion { uint32_t obj, motion; unsigned long long since; };
+TrainMotion g_tmot[16];
+volatile int g_ntmot = 0;
+void train_motion(uint32_t obj, uint32_t motion)
+{
+    const unsigned long long now = GetTickCount64();
+    const int n = g_ntmot;
+    for (int i = 0; i < n; i++)
+        if (g_tmot[i].obj == obj) {
+            if (g_tmot[i].motion != motion) { g_tmot[i].motion = motion; g_tmot[i].since = now; }
+            return;
+        }
+    if (n < 16) { g_tmot[n].obj = obj; g_tmot[n].motion = motion; g_tmot[n].since = now; g_ntmot = n + 1; }
+}
 
 bool training_fight_scene()
 {
@@ -1427,7 +1444,7 @@ struct PauseSetting { const char* name; bool* on; uint32_t text; };
 const PauseSetting k_settings[] = {
     { "Unlimited Stamina", &g_set_stamina, 15 },
     { "Free Camera", &g_set_freecam, 18 },
-    { "Hide HUD", &g_set_hidehud, 21 },
+    { "Hide HUD", &g_set_hidehud, 25 },   /* 25 "Return to the battle replay menu?"; 21 was the title of Restart's Yes/No box (the maintainer 11-13) */
 #if JSP_EXPERIMENTS
     { "Group Camera", &g_set_groupcam, 23 },
 #endif
@@ -1493,6 +1510,19 @@ void pause_open(uint64_t* gpr)
             vm_write32(to + 4, back ? k_text_back : k_settings[r - 1].text);
             vm_write32(to + 8, k_next_back);
             vm_write32(to + 0x48, r == 1 ? 5u : 1u);
+        }
+        /* A text slot the settings borrow must not be one this menu shows itself: said in the log if the pause menu
+         * or a box it opens uses one (Hide HUD sat on 21, the title of Restart's Yes/No box, until 11-13). */
+        for (uint32_t r = 0; r < rows; r++) {
+            const uint32_t row = table + 0x10u + r * k_pause_row, next = vm_read32(row + 8);
+            const bool isbox = r > 0 && next > 0 && next <= 0x54u && next < vm_read32(pack + 8) && next != k_table_settings;
+            const uint32_t sub = isbox ? pack + vm_read32(pack + 16 + next * 48) : 0, n = isbox ? vm_read32(sub) : 1;
+            for (uint32_t q = 0; q < n && q < 16; q++) {
+                const uint32_t tx = isbox ? vm_read32(sub + 0x10u + q * k_pause_row + 4) : vm_read32(row + 4);
+                bool clash = tx == k_text_row || tx == k_text_back;
+                for (const PauseSetting& st : k_settings) clash = clash || st.text == tx;
+                if (clash) std::printf("[pause] WARNING: text slot %u is borrowed by Training settings, but %s %u shows it\n", tx, isbox ? "the box table" : "the pause menu row", isbox ? next : r);
+            }
         }
         g_pause_offset = vm_read32(entry); g_settings_offset = vm_read32(entry2);
         vm_write32(entry, k_pause_copy - pack);
@@ -2499,7 +2529,10 @@ int training_icall(uint32_t target, uint64_t* gpr)
     }
     if (training_active()) {
         if (target == 0x0004296Cu) bal_action((uint32_t)gpr[3]);
-        else if (target == 0x00029E04u) bal_motion((uint32_t)gpr[3], (uint32_t)gpr[4], (uint32_t)gpr[5]);
+        else if (target == 0x00029E04u) {
+            train_motion((uint32_t)gpr[3], (uint32_t)gpr[4]);
+            bal_motion((uint32_t)gpr[3], (uint32_t)gpr[4], (uint32_t)gpr[5]);
+        }
     }
     if (target == 0x0004296Cu && g_auto.on && vm_read32((uint32_t)gpr[3] + 4) == 0) g_auto.p1_moved = true;
     screens_note(target, (uint32_t)gpr[3]);
@@ -2592,8 +2625,10 @@ int training_icall(uint32_t target, uint64_t* gpr)
 }
 
 
-/* Once per pad poll: refill whoever has been hit, 1 s after the combo number has gone away (the maintainer 11-03).
- * If no combo number came up after the hit, the old rule: 1.5 s without a hit. */
+/* Once per pad poll: refill whoever has been hit, 1.5 s after the combo has ended (the maintainer 11-13): the fighter stands
+ * again (motion 0) and no new hit has come. The rule before, 1.5 s after the last hit, refilled a dummy that was
+ * still lying on the ground, and the next hit of the combo landed on a full bar. A fighter that does not come back
+ * to standing (a CPU that walks off) refills 6 s after its last hit; one whose motion was never seen, 1.5 s after. */
 void training_tick()
 {
     { /* KD_STUNFILE=<file> (test only): when the number in the file changes, write it to the last hit fighter's
@@ -2641,7 +2676,7 @@ void training_tick()
     if (training_no_knockdown() && training_fight_scene())   /* the too-many-hits build-up (health object +0x1A4, knockdown at 150) */
         for (int i = 0; i < g_train_count; i++) vm_write32(g_train[i].obj + 0x1A4, 0);
     kd_dump(false);
-    if (!training_fight_scene()) { g_train_count = 0; g_npads = 0; g_ndummy = 0; g_ncombo_gauge = 0; g_combo_up = false; kd_restore(); return; }
+    if (!training_fight_scene()) { g_train_count = 0; g_ntmot = 0; g_npads = 0; g_ndummy = 0; g_ncombo_gauge = 0; g_combo_up = false; kd_restore(); return; }
     const unsigned long long now = GetTickCount64();
     bool up = false;
     for (int k = 0; k < g_ncombo_gauge; k++)
@@ -2652,14 +2687,25 @@ void training_tick()
         const uint32_t obj = g_train[i].obj;
         const unsigned long long hit = g_train[i].last_hit;
         if (hit == 0 || up) continue;   /* 0: not hit yet; up: the combo number is still showing */
-        const bool shown = g_combo_end > hit;   /* a combo number came and went after this hit */
-        if (shown ? now - g_combo_end < 1000 : now - hit < 1500) continue;
+        unsigned long long ready = hit + 6000, standing = 0;
+        bool known = false;
+        const uint32_t mot = vm_read32(obj + 0x3C);
+        const int nm = g_ntmot;
+        for (int k = 0; k < nm; k++) {
+            if (g_tmot[k].obj != mot) continue;
+            known = true;
+            if (g_tmot[k].motion == 0) { standing = g_tmot[k].since > hit ? g_tmot[k].since : hit; ready = standing + 1500; }
+            break;
+        }
+        if (!known) ready = hit + 1500;
+        if (now < ready) continue;
         const uint32_t max = vm_read32(obj + 0x98);
         if (max == 0 || max > 1000000) continue;
         if (vm_read32(obj + 0x90) < max || vm_read32(obj + 0x94) < max) {
             vm_write32(obj + 0x94, max);
             vm_write32(obj + 0x90, max);
-            std::printf("[training] refill 0x%08X to %u at %llu (combo number gone at %llu)\n", obj, max / 100, now, g_combo_end);
+            std::printf("[training] refill 0x%08X to %u at %llu (last hit %llu, standing again %llu%s)\n", obj, max / 100, now, hit, standing,
+                        !known ? ", motion not seen" : standing ? "" : ", never stood: 6 s rule");
         }
     }
 }
@@ -3109,7 +3155,10 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
         /* AUTO_MENU="<row>" (test only): the same walk, stopping on that main menu row (from 0)
          * and handing the pad back. Off in normal play. */
         if (const char* e = std::getenv("AUTO_MENU")) {
-            menu_row = std::atoi(e);
+            /* AUTO_MENU=title (test only, demo-fight speed tests): the same walk through the logos and the opening
+             * movie, stopping when the title screen is up (scene 3; scene 2 is the opening movie, which Cross skips),
+             * so the game's attract demo starts by itself. menu_row -2 marks it. */
+            menu_row = (std::strcmp(e, "title") == 0) ? -2 : std::atoi(e);
             g_auto.on = true; g_auto.t0 = GetTickCount64();
             auto_log("started");
         }
@@ -3125,8 +3174,36 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
           std::fflush(stdout);
       } }
     const bool menu = main_list_open();
+    { static int last_step = -1; static unsigned long long step_t = 0, said_t = 0;   /* a step that does not move on shows in the log */
+      if (g_auto.step != last_step) { last_step = g_auto.step; step_t = said_t = now; }
+      else if (now - said_t >= 15000) { said_t = now;
+          std::printf("[auto] still at step %d after %.0f s (character select %d, stage select %d, main menu %d)\n",
+                      g_auto.step, (now - step_t) / 1000.0, (int)on_charsel(), (int)on_stagesel(), (int)menu);
+          std::fflush(stdout); } }
+    /* AUTO_FB: Player 1 is a CPU too, so all four fight (AUTO_FB_P1=1 keeps Player 1 on the pad). Written on every poll
+     * from character select until the fight starts: on character select alone it did not hold (Player 1 stood still). */
+    if (g_auto.step >= 3 && std::getenv("AUTO_FB")) {
+        static int p1cpu = -1;
+        if (p1cpu < 0) { const char* p1 = std::getenv("AUTO_FB_P1"); p1cpu = (p1 && p1[0] == '1') ? 0 : 1; }
+        if (p1cpu) { vm_write32(setup_field(0, 0x00), 2);
+                     if (g_auto.step >= 4) {   /* battle world unit 0 +0x20: 1 on Player 1's unit, 3 on the CPU units (six dump) */
+                         const uint32_t w = vm_read32(vm_read32(0x008D3888u - 0x7A90u));
+                         if (w > 0x10000u && w < 0xF0000000u && vm_read32(w + 0x60u + 0x20u) == 1u) vm_write32(w + 0x60u + 0x20u, 3u);
+                     } }
+    }
     switch (g_auto.step) {
     case 0:   /* movie, title, save dialog: Cross until the main menu is up */
+        if (menu_row == -2 && vm_read32(0x0094DEC4u) == 3u) {   /* AUTO_MENU=title: the title screen is up */
+            g_auto.press_until = 0; g_auto.button = 0;
+            g_auto.on = false;
+            auto_log("title screen reached");
+            return;
+        }
+        if (menu_row == -2 && vm_read32(0x0094DEC4u) == 2u) {   /* the opening movie: one Cross skips it; no more presses, */
+            static unsigned long long t_skip = 0;               /* or one is still down when the title comes up */
+            if (!t_skip || now - t_skip > 6000) { t_skip = now; g_auto.t = now; g_auto.button = CROSS; g_auto.press_until = now + 120; }
+            break;
+        }
         if (menu) { g_auto.step = 1; g_auto.t = now; g_auto.press_until = 0; auto_log("main menu"); break; }
         /* Left and Cross in turn: with no save yet the game asks first, and Left then Cross goes on to the main
          * menu without making one (the maintainer 11-04); on the title and with a save, Left is just another button. */
@@ -3146,7 +3223,9 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
             return;
         }
         if (vm_read32(0x00956550u) != 3) { auto_press(DOWN, now, 80, 300); break; }
-        g_training_mode = true;
+        /* AUTO_FB="<my partner> <opponent's partner>" (test only): a 2 vs 2 Free Battle instead of Training, for
+         * repeatable heavy speed tests. */
+        if (!std::getenv("AUTO_FB")) g_training_mode = true;
         for (int k = 0; k < 4; k++) g_dummy[k] = false;
         g_auto.step = 2; g_auto.t = now; g_auto.button = CROSS; g_auto.press_until = now + 120;
         auto_log("Free Battle");
@@ -3156,11 +3235,31 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
         auto_press(CROSS, now, 120, 1500);
         break;
     case 3:   /* the picks are written below on every poll; Start until stage select is up */
+        if (const char* fb = std::getenv("AUTO_FB")) {   /* 2 vs 2 Free Battle: all four fighters and my support */
+            static int pa = -2, pb = -2;
+            if (pa == -2) { pa = pb = -1; std::sscanf(fb, "%d %d", &pa, &pb); }
+            if (on_charsel() && force_me >= 0) {
+                vm_write32(setup_field(0, 0x08), 0); vm_write32(setup_field(0, 0x0C), (uint32_t)force_me);
+                vm_write32(setup_field(2, 0x08), 0); vm_write32(setup_field(2, 0x0C), (uint32_t)force_opp);
+                if (pa >= 0) { vm_write32(setup_field(1, 0x08), 0); vm_write32(setup_field(1, 0x0C), (uint32_t)pa); }
+                if (pb >= 0) { vm_write32(setup_field(3, 0x08), 0); vm_write32(setup_field(3, 0x0C), (uint32_t)pb); }
+                if (force_sup >= 0) { vm_write32(setup_field(4, 0x08), 0); vm_write32(setup_field(4, 0x0C), (uint32_t)force_sup); }
+                /* Player 1 is a CPU too, so all four fight (AUTO_FB_P1=1 keeps Player 1 on the pad) */
+                { const char* p1 = std::getenv("AUTO_FB_P1"); if (!(p1 && p1[0] == '1')) vm_write32(setup_field(0, 0x00), 2); }
+            }
+        }
         if (on_stagesel()) { g_auto.step = 4; g_auto.t = now; g_auto.press_until = 0; auto_log("stage select"); break; }
         if (now - g_auto.t >= 1500) auto_press(START, now, 120, 1500);
         break;
     case 4:   /* the port sets Unlimited time first, then the stage is written and Start goes in */
-        if (!on_stagesel()) { g_auto.step = 5; g_auto.t = now; break; }
+        { static unsigned long long off_since = 0;   /* gone for 0.7 s, not for one poll */
+          if (!on_stagesel()) {
+              if (!off_since) off_since = now;
+              if (now - off_since >= 700) { off_since = 0; g_auto.step = 5; g_auto.t = now; }
+              break;
+          }
+          off_since = 0; }
+        if (std::getenv("AUTO_FB")) { vm_write32(g_seen_stage.obj + 0x78, 0); vm_write32(g_seen_stage_time.obj + 0x40, 0); }   /* no time limit */
         if (now - g_auto.t >= 500 && (stage_time() == 0 || now - g_auto.t > 10000)) {
             /* a chosen stage: Cross opens the stage list, the value goes in, Cross confirms it (m99) */
             static int stage_phase = 0;
@@ -3192,6 +3291,11 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
         break;
     case 5:   /* loading and intros: until P1 enters its first state, the moment it can move (af12) */
         if (g_auto.p1_moved) { g_auto.on = false; g_auto.press_until = 0; auto_log("fight"); break; }
+        { static unsigned long long back_since = 0;   /* stage select is up again: back to that step */
+          if (on_stagesel()) {
+              if (!back_since) back_since = now;
+              if (now - back_since >= 1500) { back_since = 0; g_auto.step = 4; g_auto.t = now; g_auto.press_until = 0; auto_log("stage select again"); break; }
+          } else back_since = 0; }
         auto_press((uint16_t)(CROSS | START), now, 120, 1000);
         break;
     }

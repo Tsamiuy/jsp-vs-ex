@@ -13,6 +13,7 @@
  * the object still has that vtable. Addresses are the US 1.00 EBOOT's (as the rest of the port). */
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 
 #define WIN32_LEAN_AND_MEAN
@@ -90,9 +91,25 @@ void pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
           std::fflush(stdout);
       } }
     const bool menu = main_list_open();
+    { static int last_step = -1; static unsigned long long step_t = 0, said_t = 0;   /* a step that does not move on shows in the log */
+      if (g.step != last_step) { last_step = g.step; step_t = said_t = now; }
+      else if (now - said_t >= 15000) { said_t = now;
+          std::printf("[auto] still at step %d after %.0f s (character select %d, stage select %d, main menu %d)\n",
+                      g.step, (now - step_t) / 1000.0, (int)on_charsel(), (int)on_stagesel(), (int)menu);
+          std::fflush(stdout); } }
     switch (g.step) {
     case 0:   /* movie, title, save dialog: Left and Cross in turn until the main menu is up (with no save, Left then
                * Cross goes on without making one) */
+        if (g.menu_row == -2 && vm_read32(0x0094DEC4u) == 3u) {   /* AUTO_MENU=title: the title screen is up */
+            g.on = false; g.press_until = 0; g.button = 0;
+            log_step("title screen reached");
+            return;
+        }
+        if (g.menu_row == -2 && vm_read32(0x0094DEC4u) == 2u) {   /* the opening movie: one Cross skips it; no more presses, */
+            static unsigned long long t_skip = 0;                 /* or one is still down when the title comes up */
+            if (!t_skip || now - t_skip > 6000) { t_skip = now; g.t = now; g.button = CROSS; g.press_until = now + 120; }
+            break;
+        }
         if (menu) { g.step = 1; g.t = now; g.press_until = 0; log_step("main menu"); break; }
         if (now - g.t0 > 3000 && now - g.t >= 1000) {
             static bool left = false;
@@ -129,7 +146,13 @@ void pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     case 4: { /* no time limit (the screen's seconds +0x78 and the box's choice +0x40, as Training's lock), then the
                * stage: Cross opens the list, the value goes in at +0x2E4, Cross confirms; then Start and Cross in turn
                * (Start does nothing while the list is open) until the screen is gone */
-        if (!on_stagesel()) { g.step = 5; g.t = now; break; }
+        { static unsigned long long off_since = 0;   /* gone for 0.7 s, not for one poll */
+          if (!on_stagesel()) {
+              if (!off_since) off_since = now;
+              if (now - off_since >= 700) { off_since = 0; g.step = 5; g.t = now; }
+              break;
+          }
+          off_since = 0; }
         vm_write32(s_stage.obj + 0x78, 0);
         vm_write32(s_stage_time.obj + 0x40, 0);
         if (now - g.t < 500) break;
@@ -151,6 +174,11 @@ void pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
         break; }
     case 5:   /* loading and intros (Cross + Start skips them) until player 1 can move */
         if (g.p1_moved) { g.on = false; g.press_until = 0; log_step("fight"); break; }
+        { static unsigned long long back_since = 0;   /* stage select is up again: back to that step */
+          if (on_stagesel()) {
+              if (!back_since) back_since = now;
+              if (now - back_since >= 1500) { back_since = 0; g.step = 4; g.t = now; g.press_until = 0; log_step("stage select again"); break; }
+          } else back_since = 0; }
         press((uint16_t)(CROSS | START), now, 120, 1000);
         break;
     }
@@ -170,7 +198,9 @@ extern "C" void jsp_register_autopilot_overrides(void)
             g.me = me; g.opp = opp; g.sup = sup; g.stage = stage; g.on = true;
         }
     }
-    if (const char* e = std::getenv("AUTO_MENU")) { g.menu_row = std::atoi(e); g.on = true; }
+    /* AUTO_MENU=title (test only, demo-fight speed tests): stop when the title screen is up (scene 3; 2 is the opening
+     * movie, which Cross skips), so the attract demo starts by itself. menu_row -2 marks it. */
+    if (const char* e = std::getenv("AUTO_MENU")) { g.menu_row = (std::strcmp(e, "title") == 0) ? -2 : std::atoi(e); g.on = true; }
     if (!g.on) return;
     if (g_ppu_icall_hook || g_cellpad_filter) { g.on = false; return; }
     g.t0 = GetTickCount64();
