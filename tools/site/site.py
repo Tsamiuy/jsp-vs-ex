@@ -509,14 +509,15 @@ def check(page, css):
         if not re.search(r'\balt="[^"]+"', m.group(0)):
             errs.append("image without alt: " + m.group(0)[:60])
     flat = html.unescape(re.sub(r"<[^>]+>", " ", page)) + " " + " ".join(re.findall(r'(?:href|src)="([^"]*)"', page))
+    # Setup check codes D1 to D3 (installer/tools/firstrun.py, the README lists them) are not decision ids: only D4 and up match.
     for pat, lab in ((r"/home/", "/home/"), (r"/mnt/", "/mnt/"), (r"/run/", "/run/"), (r"(?<![\w-])work/", "work/"),
-                     (r"file:", "file:"), (r"\bD\d{1,3}\b", "decision id (D<number>)")):
+                     (r"file:", "file:"), (r"\bD(?![123]\b)\d{1,3}\b", "decision id (D<number>)")):
         if re.search(pat, flat):
             errs.append("internal path or word: " + lab)
     ids = set(re.findall(r'<section id="([^"]+)" class="nfo"', page))
     # The real README has "No game data" (own copy, no files here) where the placeholder sample had "Getting it".
     # The README carries the requirements under "How to play" (Windows version, tools, disk space).
-    for need, alts in (("status", ("status",)), ("requirements", ("requirements", "how-to-play")), ("licence", ("licence",))):
+    for need, alts in (("status", ("status",)), ("requirements", ("requirements", "how-to-play", "download-and-play")), ("licence", ("licence",))):
         if not any(a in i for i in ids for a in alts):
             errs.append("missing section: " + need)
     # Own-copy notice: a section of its own, or the leading notice in the About box.

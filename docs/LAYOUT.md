@@ -38,7 +38,7 @@ Kept where they are, on purpose: `jstars/` (its name is also the run folder writ
 | `jstars/toolkit/` | `ps3recomp-local.patch`, every change the port makes to the toolkit, and `apply_toolkit.py`, which builds the patched toolkit folder from the submodule |
 | `docs/archive/jstars-notes/` | Patches with READMEs (`patches/`), analysis tools (`tools/`), and menu, perf, reference and sample material |
 | `docs/balance/`, `docs/character-details/` | Balance notes in progress: how combat numbers are stored and read, shared rules, and one page per character (damage, Stamina, skills). Start with `docs/balance/README.md` |
-| `docs/` | Features, building, scripts and this layout; the notes are in `docs/notes/` |
+| `docs/` | Install and troubleshooting pages (`INSTALL.md`, `TROUBLESHOOTING.md`), features, building, scripts and this layout; the notes are in `docs/notes/` |
 | `tools/boost/` | Performance "boost" helper scripts (they change the Windows power plan; read `tools/boost/README.txt` first) |
 | `.github/workflows/ci.yml`, `tools/ci/` | Checks run on every pull request; run `python3 tools/ci/repo_checks.py` before you push |
 | `assets/`, `tools/site/` | Banner, social preview and icon (our own ASCII-style art); the fan-site generator, which builds a static page from `README.md` and `NOTICE.md` (`python3 tools/site/site.py --check`) |
