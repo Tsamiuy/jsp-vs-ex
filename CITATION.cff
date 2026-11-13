@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "J-Stars Victory VS-EX"
+type: software
+abstract: "An unofficial fan port of J-Stars Victory VS+ to Windows that is built on the player's own PC from the player's own copy of the game; no game data is included."
+authors:
+  - alias: "Tsamiuy"
+  - alias: "undecuple"
+repository-code: "https://github.com/Tsamiuy/jsp-vs-ex"
+url: "https://github.com/Tsamiuy/jsp-vs-ex"
+license: MIT
+version: 0.3.0
+date-released: 2026-11-13

@@ -182,6 +182,22 @@ def main():
         code, out = run("--root", str(d), "--check")
         expect(code == 1 and "x-version is 0.0.9" in out, "stale x-version fails the check")
         refused(d, "patch", "x-version is 0.0.9")
+        # CITATION.cff: version follows VERSION, date-released is the bump date
+        cff = 'cff-version: 1.2.0\ntitle: "T"\nversion: 0.1.0\ndate-released: 2026-01-01\n'
+        d = repo()
+        (d / release.CITATION).write_text(cff, encoding="utf-8")
+        expect(run("--root", str(d), "--check")[0] == 0, "CITATION.cff version equal to VERSION passes")
+        code, out = run("--root", str(d), "bump", "minor")
+        got = snapshot(d)[release.CITATION]
+        expect(code == 0 and release.CITATION in out, "bump lists CITATION.cff")
+        expect("\nversion: 0.2.0\n" in got and "date-released: 2026-01-01" not in got and "date-released: 20" in got,
+               "bump rewrites version and date-released")
+        expect(got.startswith('cff-version: 1.2.0\ntitle: "T"\nversion: 0.2.0\n'), "nothing else in CITATION.cff changes")
+        d = repo()
+        (d / release.CITATION).write_text(cff.replace("version: 0.1.0", "version: 0.0.9"), encoding="utf-8")
+        expect("CITATION.cff: version is 0.0.9" in run("--root", str(d), "--check")[1], "stale CITATION.cff version fails")
+        (d / release.CITATION).write_text(cff.replace("\nversion: 0.1.0", ""), encoding="utf-8")
+        expect("no 'version:' line" in run("--root", str(d), "--check")[1], "CITATION.cff without version fails")
         d = repo()
         (d / release.RECOMP_JSON).write_text(rj.replace('  "x-version": "0.1.0",\n', ""), encoding="utf-8")
         expect('no "x-version" field' in run("--root", str(d), "--check")[1], "missing x-version fails the check")

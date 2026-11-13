@@ -6,7 +6,10 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
-- Docs: the README follows the shared port skeleton (Download and play first, then Status, with "How AI was used" as the AI heading), and new docs/INSTALL.md and docs/TROUBLESHOOTING.md hold requirements, setup refusals, troubleshooting by symptom, the support bundle, saves, updating, uninstalling and SHA-256 checks.
+### Changed
+
+- Releases carry one checksum file, `SHA256SUMS` (the `sha256sum` format with LF line ends, so `sha256sum -c SHA256SUMS` works), instead of `SHA256SUMS.txt` plus a `.sha256` file for the portable zip. Applies from the next release; v0.3.0 keeps its old files. `CITATION.cff` is new, for the citation box on the repository page.
+- Docs: the README follows the shared port skeleton (Status first, then Download and play, with "How AI was used" as the AI heading), and new docs/INSTALL.md and docs/TROUBLESHOOTING.md hold requirements, setup refusals, troubleshooting by symptom, the support bundle, saves, updating, uninstalling and SHA-256 checks.
 
 ## [0.3.0] - 2026-11-13
 

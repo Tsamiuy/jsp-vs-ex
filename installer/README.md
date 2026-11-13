@@ -100,8 +100,8 @@ ISCC.exe /DPayload=%CD%\build\installer\payload /O%CD%\build\installer\out %CD%\
 python installer\tools\assemble_portable.py
 ```
 
-The results are `build\installer\out\jsp-setup.exe` and `build\installer\out\jsp-<version>-portable.zip` (with a `.sha256`
-file). Give `/DPayload` and `/O` as full paths as above: ISCC resolves a relative `/DPayload` from the script's folder and
+The results are `build\installer\out\jsp-setup.exe` and `build\installer\out\jsp-<version>-portable.zip` (its SHA-256 is printed; the
+workflow's `SHA256SUMS` file covers both). Give `/DPayload` and `/O` as full paths as above: ISCC resolves a relative `/DPayload` from the script's folder and
 fails with "Invalid file handle". `fetch_toolchain.py --check --strict` validates the pins without a download.
 `<version>` is the text in `installer/VERSION`; change it only with `python3 tools/release.py bump` (see CONTRIBUTING.md, Releases).
 The FFmpeg entry is GitHub's zip of the n9.0.1 tag: GitHub does not promise the same bytes forever, so a hash mismatch there
@@ -117,7 +117,7 @@ The `clang.exe` launcher line, `ISCC` on Windows and the finished package are un
 compiled with MinGW-w64 GCC on Linux; the wizard and the payload ran under Wine/Proton).
 
 On GitHub: the `installer` workflow (`.github/workflows/installer.yml`, Actions tab, **Run workflow**) runs the same steps on a
-Windows runner and keeps `jsp-setup.exe`, the portable zip if asked and `SHA256SUMS.txt` as a workflow artifact for 7 days
+Windows runner and keeps `jsp-setup.exe`, the portable zip if asked and `SHA256SUMS` (`sha256sum` format, one line per file) as a workflow artifact for 7 days
 (changeable when started), visible to whoever can see the repository. It downloads the embeddable Python and the font itself,
 pinned by SHA-256 in the workflow. Started by hand, or by `release.yml`, which builds a release's files with it and creates a draft release; nothing is published until the draft is published by hand.
 
