@@ -13,8 +13,8 @@ port sources, patched toolkit, bundled Windows Python, launcher, licences), plus
     python installer/tools/assemble_portable.py [--payload build/installer/payload] [--out build/installer/out] [--top NAME]
 
 Refuses (exit 1) when the payload holds a file of a kind the game ships (.elf .bin .sfo .psarc .edat .self .sprx), when it lacks the bundled Python, firstrun.py, the launcher
-or the licence texts, or when it already holds first-run output (build, hdd0, game, paths.txt, logs). Writes <zip>.sha256
-beside the zip. Nothing is downloaded and nothing game-derived goes in. Exit 0 = written.
+or the licence texts, or when it already holds first-run output (build, hdd0, game, paths.txt, logs). The zip's SHA-256 is
+printed (the release carries one SHA256SUMS file, written by installer.yml). Nothing is downloaded and nothing game-derived goes in. Exit 0 = written.
 """
 import argparse
 import hashlib
@@ -125,7 +125,6 @@ def main(argv=None):
             zi.create_system = 0
             z.writestr(zi, extra[n] if n in extra else entries[n].read_bytes(), zipfile.ZIP_DEFLATED, 9)
     h = hashlib.sha256(zp.read_bytes()).hexdigest()
-    (out / (zp.name + ".sha256")).write_text(f"{h}  {zp.name}\n")
     print(f"{zp}: {len(names)} entries, {zp.stat().st_size / 1e6:.1f} MB, sha256 {h[:16]}")
     return 0
 

@@ -6,6 +6,10 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Releases carry one checksum file, `SHA256SUMS` (the `sha256sum` format with LF line ends, so `sha256sum -c SHA256SUMS` works), instead of `SHA256SUMS.txt` plus a `.sha256` file for the portable zip. Applies from the next release; v0.3.0 keeps its old files. `CITATION.cff` is new, for the citation box on the repository page.
+
 ## [0.3.0] - 2026-11-13
 
 ### Added
