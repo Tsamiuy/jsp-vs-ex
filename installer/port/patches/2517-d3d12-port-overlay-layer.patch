@@ -466,8 +466,8 @@ index b334712..6ce20bb 100644
 +    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv);
 +    rtv.ptr += (u64)fi * s_d3d.rtv_descriptor_size;
 +    cl->lpVtbl->OMSetRenderTargets(cl, 1, &rtv, FALSE, NULL);
-+    D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
-+    D3D12_RECT sc = {0, 0, (LONG)s_d3d.width, (LONG)s_d3d.height};
++    D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.bb_w, (float)s_d3d.bb_h, 0.0f, 1.0f};
++    D3D12_RECT sc = {0, 0, (LONG)s_d3d.bb_w, (LONG)s_d3d.bb_h};
 +    cl->lpVtbl->RSSetViewports(cl, 1, &vp);
 +    cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
 +    cl->lpVtbl->SetGraphicsRootSignature(cl, s_jov_rs);
@@ -481,7 +481,7 @@ index b334712..6ce20bb 100644
 +    cl->lpVtbl->IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 +    cl->lpVtbl->DrawInstanced(cl, 3, 1, 0, 0);
 +    static int logged;
-+    if (PS3_LOG_FIRST(logged, 2)) fprintf(stderr, "[OVERLAY] first present with the layer %dx%d -> %ux%u%c", jov.w, jov.h, s_d3d.width, s_d3d.height, 10);
++    if (PS3_LOG_FIRST(logged, 2)) fprintf(stderr, "[OVERLAY] first present with the layer %dx%d -> %ux%u%c", jov.w, jov.h, s_d3d.bb_w, s_d3d.bb_h, 10);
 +}
 +
 +
