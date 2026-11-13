@@ -6,6 +6,7 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Releases: publishing a release (or pre-release) posts one message with its link to the project's Discord channel (`.github/workflows/release-notify.yml`); the webhook URL is kept only in the repository secret `DISCORD_RELEASE_WEBHOOK`, and without it the workflow sends nothing.
 - Setup: when RPCS3 lists the game as a single disc image (.iso file), the locate helper recognises it (`is_iso`) instead of refusing it as "not a folder", never searches it for an EBOOT.elf, and the wizard says plainly that setup needs an extracted disc folder (the disc folder page stays empty); setup has no ISO reader (`rpcs3_locate.py`, `rpcs3_wizard.py`).
 - Version line on the main menu: it is drawn only on the idle Main Menu (flow state 4, menu mode 0) and hides when the menu starts to leave, and it is smaller (scale 0.65) and placed inside the button bar, clear of the bar's slanted right end (`jsp_version_line.h`, `jsp_port_menu.cpp`; host test `installer/tools/version_line_test.sh`).
 - Docs: `docs/ROLLBACK.md` step 3 updated: the fight-state snapshot restores and replays 60 ticks with the same state hashes; a full copy is too slow, so copying only changed pages is next.
