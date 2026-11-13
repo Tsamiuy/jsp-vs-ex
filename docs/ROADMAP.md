@@ -51,8 +51,8 @@ build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree curren
 
 ## 4. Online with rollback netcode  📋
 
-A goal, not started. It needs fights that run the same on every machine and a way to save and restore the fight state
-each frame. Online is opt-in: the port connects only when you choose online play, and only to the players or server you
+In research. It needs fights that run the same on every machine and a way to save and restore the fight state
+each frame. How it works and the plan, with what we use and fall back to: [ROLLBACK.md](ROLLBACK.md). Online is opt-in: the port connects only when you choose online play, and only to the players or server you
 pick.
 Every gameplay option in a match is the same for all players; ranked uses one fixed rule set.
 

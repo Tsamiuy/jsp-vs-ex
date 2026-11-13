@@ -10,6 +10,7 @@ Where things are, by who needs them. All paths are relative to this folder.
 | [../installer/README.md](../installer/README.md) | The installer and the build on your PC |
 | [FEATURES.md](FEATURES.md) | What the port adds (generated from `features.tsv`) |
 | [ONLINE.md](ONLINE.md) | Online Battle quick start (experimental, opt-in) |
+| [ROLLBACK.md](ROLLBACK.md) | How rollback netcode works, and how this port plans to add it (with diagrams) |
 | [ROADMAP.md](ROADMAP.md) | What is planned |
 | [SCRIPTS.md](SCRIPTS.md) | The `.bat` and PowerShell scripts, and what they change on your PC |
 
