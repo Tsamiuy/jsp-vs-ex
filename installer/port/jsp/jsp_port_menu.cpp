@@ -688,17 +688,22 @@ int g_ver_state = -1;                   // panel state at the last panel update
 
 void draw_page();
 
+// Flow object S (@0x009535F0 -> +0x30 state) and the menu-mode global (0x0095653C +0x10 mode): the idle Main Menu is state 4 with mode 0.
+constexpr uint32_t k_flow_ptr = 0x009535F0, k_mode_g = 0x0095653C;
+int flow_state() { const uint32_t s = vm_read32(k_flow_ptr); return s ? (int)vm_read32(s + 0x30) : -1; }
+
 // Caller holds g_mu. Re-evaluates visibility; redraws on a change (the page is closed whenever the top list is up).
 void ver_refresh()
 {
     if (!g_ver.any()) return;
     const uint32_t now = (uint32_t)cellGcm_flip_request_count();
     const bool alive = g_obj && g_obj_vt && vm_read32(g_obj) == g_obj_vt;
-    const bool vis = jpv::top_menu(alive, g_ver_seen, now - g_ver_flip, g_ver_state) && g_menu.page == jpm::CLOSED;
+    const int fs = flow_state(), mode = (int)vm_read32(k_mode_g + 0x10);
+    const bool vis = jpv::top_menu(alive, g_ver_seen, now - g_ver_flip, g_ver_state, fs, mode) && g_menu.page == jpm::CLOSED;
     if (vis == g_ver_vis) return;
     g_ver_vis = vis;
-    std::fprintf(stderr, "[version] top menu %s: obj 0x%08X alive %d, panel state %d, flips since panel update %u (flip %u)\n", vis ? "up, line drawn" : "gone, line cleared",
-                 g_obj, (int)alive, g_ver_state, (unsigned)(now - g_ver_flip), now);
+    std::fprintf(stderr, "[version] top menu %s: obj 0x%08X alive %d, panel state %d, flips since panel update %u, flow state %d, mode %d (flip %u)\n", vis ? "up, line drawn" : "gone, line cleared",
+                 g_obj, (int)alive, g_ver_state, (unsigned)(now - g_ver_flip), fs, mode, now);
     draw_page();
 }
 

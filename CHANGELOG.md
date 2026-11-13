@@ -6,6 +6,7 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Version line on the main menu: it is drawn only on the idle Main Menu (flow state 4, menu mode 0) and hides when the menu starts to leave, and it is smaller (scale 0.65) and placed inside the button bar, clear of the bar's slanted right end (`jsp_version_line.h`, `jsp_port_menu.cpp`; host test `installer/tools/version_line_test.sh`).
 - Docs: `docs/ROLLBACK.md` step 3 updated: the fight-state snapshot restores and replays 60 ticks with the same state hashes; a full copy is too slow, so copying only changed pages is next.
 - Docs: `docs/ROLLBACK.md` explains rollback netcode and this port's plan for it: the library (GekkoNet, with GGPO and GGRS as fallbacks), the transport (direct UDP, then a relay), the two ways to save the fight state, and the steps so far.
 - Installer: `assemble_payload.py --tree legacy` (and `v15`) no longer builds the earlier v0.15 tree and exits with a pointer to the git tag `legacy-v15` (issue #152); `firstrun.py` builds only the current tree and stops with an error when `tree.txt` is missing or unknown; CI no longer builds or tests the legacy tree (the `toolkit` job and the legacy patch series check are gone, the `tree` input of `installer.yml` too).
