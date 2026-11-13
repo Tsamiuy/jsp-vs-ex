@@ -1,0 +1,186 @@
+Diagnostic 2905: HITCH=<ms> prints, for a present slower than <ms>, the time in VS compiles, shader compiles,
+pipeline builds, GPU waits and render_frame. Off by default.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 44e1142..d1cbd3b 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1731,7 +1731,13 @@ static int s_fp_hint[4096];
+  * Frame sync helpers
+  * -----------------------------------------------------------------------*/
+ 
+-static void wait_for_gpu(void)
++/* HITCH=<ms> (diagnostic, off by default; 2905): a present that takes longer than <ms> prints where its time
++ * went: VS compiles (compile_vp), shader compiles, pipeline builds, GPU waits, render_frame, Present. */
++static double s_hz_t[8]; static u32 s_hz_n[8];
++static double hz_now(void) { LARGE_INTEGER f, c; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
++                             return (double)c.QuadPart * 1000.0 / (double)f.QuadPart; }
++static int hz_ms(void) { static int v = -1; if (v < 0) { const char* e = getenv("HITCH"); v = e ? atoi(e) : 0; } return v; }
++static void wait_for_gpu_hz_impl(void)
+ {
+     u32 fi = s_d3d.frame_index;
+     s_d3d.fence_values[fi]++;
+@@ -1768,8 +1774,11 @@ static void wait_for_gpu(void)
+         }
+     }
+ }
++static void wait_for_gpu(void)
++{ const double t0 = hz_ms() ? hz_now() : 0; wait_for_gpu_hz_impl(); if (t0) { s_hz_t[3] += hz_now() - t0; s_hz_n[3]++; } }
+ 
+-static void move_to_next_frame(void)
++
++static void move_to_next_frame_hz_impl(void)
+ {
+     u64 current_fence = s_d3d.fence_values[s_d3d.frame_index];
+     s_d3d.cmd_queue->lpVtbl->Signal(s_d3d.cmd_queue, s_d3d.fence, current_fence);
+@@ -1790,6 +1799,9 @@ static void move_to_next_frame(void)
+ 
+     s_d3d.fence_values[s_d3d.frame_index] = current_fence + 1;
+ }
++static void move_to_next_frame(void)
++{ const double t0 = hz_ms() ? hz_now() : 0; move_to_next_frame_hz_impl(); if (t0) { s_hz_t[4] += hz_now() - t0; s_hz_n[4]++; } }
++
+ 
+ /* ---------------------------------------------------------------------------
+  * Render a frame (clear + present)
+@@ -2086,7 +2098,7 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+ 
+ /* Decompile the captured RSX vertex program to HLSL and build the VP PSO
+  * (decompiled VS + atlas alpha-test PS). One-shot per program. */
+-static void compile_vp(void)
++static void compile_vp_hz_impl(void)
+ {
+     extern int rsx_vp_decompile(const uint8_t*, u32, char*, u32);
+     const rsx_state* st = s_d3d.current_rsx_state;
+@@ -2229,6 +2241,9 @@ static void compile_vp(void)
+         }
+     }
+ }
++static void compile_vp(void)
++{ const double t0 = hz_ms() ? hz_now() : 0; compile_vp_hz_impl(); if (t0) { s_hz_t[0] += hz_now() - t0; s_hz_n[0]++; } }
++
+ 
+ /* Build (or fetch) a PSO pairing the current decompiled VS with the guest's
+  * FRAGMENT program at fp_addr: read the FP ucode from guest memory, decompile
+@@ -2354,13 +2369,20 @@ static void sc_store_locked(SCache* c, u64 key, const void* data, u32 size)
+     ReleaseSRWLockExclusive(&s_sc_lock);
+ }
+ /* D3DCompile with main as the entry point and no flags, as the guest paths call it. */
+-static HRESULT sc_compile(const char* hlsl, const char* name, const char* target, ID3DBlob** out, ID3DBlob** err)
++static HRESULT sc_compile_hz_impl(const char* hlsl, const char* name, const char* target, ID3DBlob** out, ID3DBlob** err)
+ {
+     SCache* c = &s_sc_shader;
+     const size_t n = strlen(hlsl);
+     if (!sc_ready(c)) return D3DCompile(hlsl, n, name, NULL, NULL, "main", target, 0, 0, out, err);
+     const u64 key = sc_hash(sc_hash(14695981039346656037ull, hlsl, n), target, strlen(target)) | 1u;
+     if (sc_lookup_blob(c, key, out)) return S_OK;
++    if (hz_ms()) {   /* 2905: which shaders miss the disk cache, and when (the text is kept for a diff) */
++        static volatile long nm = 0; const long k = InterlockedIncrement(&nm);
++        fprintf(stderr, "[HZC] miss #%ld frame %llu %s key %016llx len %u%c", k, (unsigned long long)s_d3d.frame_count,
++                name ? name : "?", (unsigned long long)key, (unsigned)n, 10);
++        if (k <= 400) { char fn[64]; snprintf(fn, sizeof fn, "hzc_%03ld_%016llx.hlsl", k, (unsigned long long)key);
++                        FILE* f = fopen(fn, "wb"); if (f) { fwrite(hlsl, 1, n, f); fclose(f); } }
++    }
+     HRESULT hr = D3DCompile(hlsl, n, name, NULL, NULL, "main", target, 0, 0, out, err);
+     if (SUCCEEDED(hr) && *out)
+         sc_store_locked(c, key, (*out)->lpVtbl->GetBufferPointer(*out), (u32)(*out)->lpVtbl->GetBufferSize(*out));
+@@ -2555,8 +2577,11 @@ static HRESULT sc_pipeline_warm(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12Pi
+     }
+     return sc_pipeline(pd, out);
+ }
++static HRESULT sc_compile(const char* hlsl, const char* name, const char* target, ID3DBlob** out, ID3DBlob** err)
++{ const double t0 = hz_ms() ? hz_now() : 0; HRESULT r = sc_compile_hz_impl(hlsl, name, target, out, err); if (t0) { s_hz_t[1] += hz_now() - t0; s_hz_n[1]++; } return r; }
++
+ /* CreateGraphicsPipelineState from the blob of an earlier run. */
+-static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out)
++static HRESULT sc_pipeline_hz_impl(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out)
+ {
+     SCache* c = &s_sc_pso;
+     if (!sc_ready(c)) return s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, pd, &IID_ID3D12PipelineState, (void**)out);
+@@ -2589,6 +2614,9 @@ static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12Pipelin
+     }
+     return hr;
+ }
++static HRESULT sc_pipeline(D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, ID3D12PipelineState** out)
++{ const double t0 = hz_ms() ? hz_now() : 0; HRESULT r = sc_pipeline_hz_impl(pd, out); if (t0) { s_hz_t[2] += hz_now() - t0; s_hz_n[2]++; } return r; }
++
+ 
+ /* Patch 2070: new vertex programs compiled on worker threads (VS_ASYNC=0 off). */
+ static int vs_async_on(void)
+@@ -7566,7 +7594,7 @@ float (*g_rsx_ui_scale)(u32 rt_off, const float box[4], float* ax, float* ay) =
+ int (*g_rsx_aa_mode)(u32 rt_off) = 0;
+ int (*g_rsx_cutout)(float* out) = 0;
+ 
+-static void render_frame(void)
++static void render_frame_hz_impl(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
+@@ -9259,6 +9287,9 @@ skip_dump_consider: ;
+         }
+     }
+ }
++static void render_frame(void)
++{ const double t0 = hz_ms() ? hz_now() : 0; render_frame_hz_impl(); if (t0) { s_hz_t[5] += hz_now() - t0; s_hz_n[5]++; } }
++
+ 
+ /* ---------------------------------------------------------------------------
+  * RSX backend callbacks
+@@ -9306,6 +9337,7 @@ static int blink_dbg(void)
+ 
+ static void d3d12_present(void* ud, u32 buffer_id)
+ {
++    const double hz_t0 = hz_ms() ? hz_now() : 0;
+     (void)ud;
+     s_d3d.present_buffer_id = buffer_id & 7u;
+ 
+@@ -9328,6 +9360,17 @@ static void d3d12_present(void* ud, u32 buffer_id)
+ 
+     if (s_d3d.initialized && flip_has_display)
+         render_frame();
++    if (hz_t0) {
++        static double last_end = 0; static u32 n_hitch = 0;
++        const double t1 = hz_now(), dt = t1 - hz_t0, gap = last_end ? hz_t0 - last_end : 0;
++        if (dt > hz_ms() || gap > 3 * hz_ms())
++            fprintf(stderr, "[HITCH] #%u frame %llu: present %.1f ms (gap before %.1f): vs compile %.1f/%u  shader %.1f/%u  "
++                    "pso %.1f/%u  gpu wait %.1f/%u  next-frame wait %.1f/%u  render_frame %.1f  draws %u%c",
++                    ++n_hitch, (unsigned long long)s_d3d.frame_count, dt, gap, s_hz_t[0], s_hz_n[0], s_hz_t[1], s_hz_n[1],
++                    s_hz_t[2], s_hz_n[2], s_hz_t[3], s_hz_n[3], s_hz_t[4], s_hz_n[4], s_hz_t[5], s_dbg_last_draws, 10);
++        for (int k = 0; k < 8; k++) { s_hz_t[k] = 0; s_hz_n[k] = 0; }
++        last_end = t1;
++    }
+ 
+     /* FPS tracking */
+     ULONGLONG now = GetTickCount64();
+@@ -12089,7 +12132,7 @@ int rsx_d3d12_backend_pump_messages(void)
+     return s_d3d.window_closed ? -1 : 0;
+ }
+ 
+-void rsx_d3d12_backend_present(void)
++static void rsx_d3d12_backend_present_hz_impl(void)
+ {
+     if (blink_dbg())
+         printf("[PRESENT] draws=%u clears_since_last=%u clear_presents=%u\n",
+@@ -12181,6 +12224,22 @@ void rsx_d3d12_backend_present(void)
+         s_present_this_frame = 1;
+     }
+ }
++void rsx_d3d12_backend_present(void)
++{
++    const double hz_t0 = hz_ms() ? hz_now() : 0;
++    rsx_d3d12_backend_present_hz_impl();
++    if (hz_t0) {
++        static double last_end = 0; static u32 n_hitch = 0;
++        const double t1 = hz_now(), dt = t1 - hz_t0, gap = last_end ? hz_t0 - last_end : 0;
++        if (dt > hz_ms() || gap > 3 * hz_ms())
++            fprintf(stderr, "[HITCH] #%u frame %llu: present %.1f ms (gap before %.1f): vs compile %.1f/%u  shader %.1f/%u  "
++                    "pso %.1f/%u  gpu wait %.1f/%u  next-frame wait %.1f/%u  render_frame %.1f  draws %u%c",
++                    ++n_hitch, (unsigned long long)s_d3d.frame_count, dt, gap, s_hz_t[0], s_hz_n[0], s_hz_t[1], s_hz_n[1],
++                    s_hz_t[2], s_hz_n[2], s_hz_t[3], s_hz_n[3], s_hz_t[4], s_hz_n[4], s_hz_t[5], s_dbg_last_draws, 10);
++        for (int k = 0; k < 8; k++) { s_hz_t[k] = 0; s_hz_n[k] = 0; }
++        last_end = t1;
++    }
++}
+ 
+ #else /* !_WIN32 */
+ 

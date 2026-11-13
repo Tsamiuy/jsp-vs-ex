@@ -1,0 +1,34 @@
+Patch 2910: the fragment program's code hash, size and texture units are worked out once per program address per
+frame build (FP_FRAME_MEMO=0 off).
+vp_get_fp_pso runs for every draw at frame-build time and walked, copied and compared the program bytes each time
+(rsx_fp_code_hash_memo). During one render_frame the guest memory it reads does not change (the frame is built after
+the whole frame's commands), so every draw of the same program address gets the same answer: a small table keyed on
+the address and the frame number gives it back without the walk.
+
+Tested (US disc, low-end: no CPU boost, 8 threads, integrated GPU; auto-pilot 2v2 Free Battle on Hidden Leaf, AUTO_FB): with 2909-2911 26.06 / 27.13 flips/s, all three off 25.72 / 23.09; FTL tick 7.6-7.7 vs 9.0-9.3 ms. Picture unchanged.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 6f31c39..5fa3691 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4023,8 +4023,18 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
+     if (off == 0xFFFFFFFFu) return NULL;
+     /* Code hash, size and texture-unit mask in one memoised walk (SHADER_HASH_MEMO=0: three full walks). */
+-    u32 fpm_size = 0, fpm_units = 0;
+-    const u32 fpm_hash = rsx_fp_code_hash_memo(vm_base + off, 0x10000, &fpm_size, &fpm_units);
++    u32 fpm_size = 0, fpm_units = 0, fpm_hash;
++    {   /* patch 2910: once per address per frame build */
++        static int on = -1; if (on < 0) { const char* e = getenv("FP_FRAME_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++        static u32 m_off[1024], m_hash[1024], m_size[1024], m_units[1024]; static u64 m_frame[1024];
++        const u32 k = (off >> 4) & 1023u;
++        const u64 fr = s_d3d.frame_count + 1;
++        if (on && m_frame[k] == fr && m_off[k] == off) { fpm_hash = m_hash[k]; fpm_size = m_size[k]; fpm_units = m_units[k]; }
++        else {
++            fpm_hash = rsx_fp_code_hash_memo(vm_base + off, 0x10000, &fpm_size, &fpm_units);
++            if (on) { m_frame[k] = fr; m_off[k] = off; m_hash[k] = fpm_hash; m_size[k] = fpm_size; m_units[k] = fpm_units; }
++        }
++    }
+     u8 shsig[16]; vp_shadow_pack(sdr, off, shsig, fpm_units);
+ 
+     /* Content hash: inline constants are patched in place per frame (wave's

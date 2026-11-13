@@ -1,0 +1,58 @@
+Patch 2911: off_rt_find answers from a small cache while the offscreen target table is unchanged (OFFRT_CACHE=0 off).
+off_rt_find scans all 64 offscreen targets and is called several times for every texture unit of every draw at frame
+build (and for every render-target switch); most answers are "not a render target". A 512-entry table keyed on the
+offset remembers the answer, found or not, until the table changes: a generation counter moves whenever an entry is
+created, resized or released (off_rt_get, its eviction).
+
+Tested (US disc, low-end: no CPU boost, 8 threads, integrated GPU; auto-pilot 2v2 Free Battle on Hidden Leaf, AUTO_FB): with 2909-2911 26.06 / 27.13 flips/s, all three off 25.72 / 23.09; FTL tick 7.6-7.7 vs 9.0-9.3 ms. Picture unchanged.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 5fa3691..c4e63c9 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5508,12 +5508,19 @@ static DXGI_FORMAT rsx_surface_dxgi(u32 fmt)
+     }
+ }
+ 
++static u32 s_offrt_gen = 1;   /* patch 2911: moves whenever an off_rt entry is created, resized or released */
+ static int off_rt_find(u32 off)
+ {
+     if (!off) return -1;
++    static int on = -1; if (on < 0) { const char* e = getenv("OFFRT_CACHE"); on = (e && *e == '0') ? 0 : 1; }
++    static u32 c_off[512], c_gen[512]; static int c_idx[512];
++    const u32 k = (off ^ (off >> 9) ^ (off >> 18)) & 511u;
++    if (on && c_gen[k] == s_offrt_gen && c_off[k] == off) return c_idx[k];
++    int r = -1;
+     for (int i = 0; i < MAX_OFF_RTS; i++)
+-        if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) return i;
+-    return -1;
++        if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) { r = i; break; }
++    if (on) { c_gen[k] = s_offrt_gen; c_off[k] = off; c_idx[k] = r; }
++    return r;
+ }
+ 
+ /* Ensure an RT resource exists for this surface; (re)creates the RTV at
+@@ -5549,6 +5556,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, float want_sc)
+          * replacement reads back empty. Let the GPU finish first. Recreations are
+          * rare (a surface changing size), so the stall costs nothing. */
+         wait_for_gpu();
++        s_offrt_gen++;   /* patch 2911 */
+         r->res->lpVtbl->Release(r->res); r->res = NULL;   /* dims/format changed */
+         if (r->up) { r->up->lpVtbl->Release(r->up); r->up = NULL; }
+     } else {
+@@ -5559,6 +5567,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, float want_sc)
+                 if (!s_d3d.off_rt[i].used) { slot = i; break; }
+             if (slot < 0) return -1;
+             wait_for_gpu();   /* same hazard as above: the frame may still use it */
++            s_offrt_gen++;   /* patch 2911 */
+             s_d3d.off_rt[slot].res->lpVtbl->Release(s_d3d.off_rt[slot].res);
+             s_d3d.off_rt[slot].res = NULL;
+             if (s_d3d.off_rt[slot].up) {
+@@ -5585,6 +5594,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt, float want_sc)
+             D3D12_RESOURCE_STATE_COPY_DEST, &cv,
+             &IID_ID3D12Resource, (void**)&r->res)))
+         return -1;
++    s_offrt_gen++;   /* patch 2911 */
+     r->off = off; r->w = w; r->h = h; r->dxgi = (u32)want_fmt; r->sc = sc;
+     r->st = D3D12_RESOURCE_STATE_COPY_DEST;
+     r->used = 1;
