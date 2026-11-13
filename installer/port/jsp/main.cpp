@@ -125,6 +125,7 @@ void     cellGcmTickVBlank(void);
 void     cellGcm_fifo_kick_wait(unsigned ms);   /* idle wait, woken by a FIFO kick (cellGcmSys) */
 void     cellGcmTickFlip(void);
 int      cellGcm_take_flip_pending(void);
+int      cellGcm_flip_ready(void);            /* a flip is waiting and the drain has executed it */
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
 unsigned cellGcm_flip_request_count(void);
 }
@@ -238,13 +239,80 @@ static DWORD WINAPI frame_clock(LPVOID)
             const double left = q_next - qms;
             unsigned w = left <= 0.0 ? 0u : (unsigned)(left + 0.999);
             if (w > 4) w = 4;
+            /* LATE_FLIP (experiment 2026-11-13, default on, LATE_FLIP=0 off). J-Stars paces itself by the vblank ticks and
+             * waits for a vblank after each flip. A frame that took a little over 33.3 ms had its flip completed by the
+             * overdue tick as soon as the drain and the present were through, but the vblank the game waits for after
+             * it only came with the next 60 Hz tick, so 36 ms of work ran at 20 fps. Two rules now:
+             *   1. After a flip that completed off the 60 Hz grid (late: more than 33.3 + 1 ms since the last completed
+             *      flip; or at the end of a hold, rule 2) the next vblank tick comes LATE_VBLANK_MS (default 2.5; 0 = a
+             *      full period, the old way) later, and the tick clock continues from there.
+             *   2. A flip never completes sooner than 33.3 ms after the previous one. A flip that is ready earlier is
+             *      held and completed exactly when its 33.3 ms are up. Without this the extra vblanks of rule 1 let a
+             *      light frame after a late one finish in 27-30 ms (the game counts vblanks), and the title demo read
+             *      30.5-30.7 flips/s.
+             * On-time frames keep the 60 Hz ticks. LATE_FLIP_DBG=1 logs 80 flip completions after 90 s. */
+            static int late = -1, late_dbg = 0, q_held = 0;
+            static double q_last_done = 0.0, late_vb = 2.5, q_t0 = 0.0;
+            static unsigned n_late = 0, n_gate = 0, n_dbg = 0;
+            const double q_gap = 2.0 * q_period;   /* one flip per 33.3 ms */
+            if (late < 0) { const char* e = getenv("LATE_FLIP"); late = (e && *e == '0') ? 0 : 1;
+                            const char* v = getenv("LATE_VBLANK_MS"); if (v && *v) late_vb = atof(v);
+                            late_dbg = getenv("LATE_FLIP_DBG") != NULL; q_t0 = qms;
+                            if (late) fprintf(stderr, "[rsx] LATE_FLIP: after a late flip the next vblank comes %.1f ms later; one flip per %.1f ms\n", late_vb > 0.0 ? late_vb : q_period, q_gap); }
+            if (late && q_last_done > 0.0 && cellGcm_flip_ready()) {
+                const double since = qms - q_last_done;
+                const int gate_done = q_held && since >= q_gap;                      /* a held flip: its 33.3 ms are up */
+                const int late_now = !q_held && left > 0.0 && since > q_gap + 1.0;   /* became ready between ticks, slot missed */
+                if (gate_done || late_now) {
+                    if (late_dbg && qms - q_t0 > 90000.0 && n_dbg < 80) { n_dbg++;
+                        fprintf(stderr, "[LATEDBG] t=%.0f flip completed %s: %.1f ms since the last\n", qms - q_t0, gate_done ? "at the end of its hold" : "between ticks (late)", since); }
+                    if (late_now) cellGcmTickVBlank();
+                    cellGcmTickFlip();
+                    q_last_done = qms; q_held = 0;
+                    if (rsx_ok && cellGcm_take_flip_pending()) {
+                        present_guest_frame();
+                        last_flip = cellGcm_flip_request_count();
+                    }
+                    if (rsx_ok) cellGcm_rsx_process_fifo();
+                    if (late_vb > 0.0) q_next = qms + late_vb;
+                    else if (late_now) q_next = qms + q_period;
+                    if (gate_done) { if ((++n_gate % 600) == 1) fprintf(stderr, "[rsx] LATE_FLIP: %u early flips held to 33.3 ms so far\n", n_gate); }
+                    else if ((++n_late % 600) == 1) fprintf(stderr, "[rsx] LATE_FLIP: %u late flips so far\n", n_late);
+                    goto outer_cadence;
+                }
+                if (q_held) {   /* wake when the hold is up, not at the next tick */
+                    const double lh = q_gap - since;
+                    if (lh <= 1.5) {   /* the last stretch on the clock itself: the kick wait counts whole milliseconds
+                                        * (a held flip completed 0.7 ms late on average, 29.4 flips/s instead of 30.0) */
+                        const double q_target = q_last_done + q_gap;
+                        for (;;) {
+                            QueryPerformanceCounter(&qn);
+                            if ((double)qn.QuadPart * 1000.0 / (double)qf.QuadPart >= q_target) break;
+                            YieldProcessor();
+                        }
+                        continue;      /* back to the top: the hold is up now */
+                    }
+                    const unsigned wh = (unsigned)(lh - 1.0);   /* whole milliseconds, ending 1-2 ms before the hold is up */
+                    if (wh < w) w = wh;
+                }
+            }
             if (w) cellGcm_fifo_kick_wait(w);
             QueryPerformanceCounter(&qn);
             const double qnow = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
             int qfired = 0;
             while (qnow >= q_next && qfired < 240) {
+                const int ready = cellGcm_flip_ready();
+                const int held = late && ready && q_last_done > 0.0 && qnow - q_last_done < q_gap - 0.2;   /* rule 2 */
+                const int fr = ready && !held;
+                const int was_late = late && fr && q_last_done > 0.0 && qnow - q_last_done > q_gap + 1.0;
+                if (held) q_held = 1;
+                if (fr) {
+                    if (late_dbg && qnow - q_t0 > 90000.0 && n_dbg < 80) { n_dbg++;
+                        fprintf(stderr, "[LATEDBG] t=%.0f flip completed by a tick %.1f ms overdue: %.1f ms since the last%s\n", qnow - q_t0, qnow - q_next, qnow - q_last_done, was_late ? " (late)" : ""); }
+                    q_last_done = qnow; q_held = 0;
+                }
                 cellGcmTickVBlank();
-                cellGcmTickFlip();
+                if (!held) cellGcmTickFlip();
                 if (rsx_ok && cellGcm_take_flip_pending()) {
                     present_guest_frame();
                     last_flip = cellGcm_flip_request_count();
@@ -252,6 +320,11 @@ static DWORD WINAPI frame_clock(LPVOID)
                 if (rsx_ok) cellGcm_rsx_process_fifo();
                 q_next += q_period;
                 qfired++;
+                if (was_late && late_vb > 0.0) {   /* rule 1: the vblank the game waits for after this flip comes soon */
+                    q_next = qnow + late_vb;
+                    if ((++n_late % 600) == 1) fprintf(stderr, "[rsx] LATE_FLIP: %u late flips so far\n", n_late);
+                    break;
+                }
             }
             if (qfired >= 240) q_next = qnow + q_period;   /* fell too far behind -- resync */
             goto outer_cadence;
