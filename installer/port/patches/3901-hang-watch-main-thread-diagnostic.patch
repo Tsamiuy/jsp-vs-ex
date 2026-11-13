@@ -1,0 +1,84 @@
+Patch 3901: HANG_WATCH=<seconds> prints where every guest thread is when the guest stops requesting flips (diagnostic, off by default).
+
+For a guest that stops after several minutes: the pad clock and the draw count stop, SPU jobs and the event-queue polls of
+the helper threads keep running, and no wait is logged for the main thread. A thread inside a lifted-code spin and a thread
+blocked in a lwmutex/cond/semaphore look the same in the log. This counts import calls per guest thread (g_hle_ncalls), and a
+watcher thread (started by the first import, Windows only) prints, when the guest requested no flip for the given seconds and
+then every 10 s: per thread the calls in the last second, the import it is inside (g_hle_inflight; "(guest code)" = none),
+the last one it entered (g_hle_last), its last direct-call lr (ppu_report_guest_lrs) and its guest call chain
+(ppu_dump_guest_stack). Needs patch 6001 (ppu_resv_ctx_at) and 6002 (g_hle_last). General ps3recomp candidate.
+
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 0000000..0000000 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -279,8 +279,12 @@
+     for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
+ }
+ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
++extern "C" uint32_t g_hle_ncalls[64];          /* HANG_WATCH (patch 3901): import calls per guest thread */
++extern "C" void ps3_hang_watch_start(void);
+ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+ {
++    { unsigned t0 = (unsigned)ctx->thread_id; if (t0 < 64) g_hle_ncalls[t0]++; }
++    { static int armed = 0; if (!armed) { armed = 1; ps3_hang_watch_start(); } }
+     /* The fast path skips _TocGuard below, but the caller still reloads r2 with
+      * `ld r2,0x28(r1)` after the import: the glink stub it called would have
+      * stored r2 there first (`std r2,40(r1)`), and our stub does not. Without
+@@ -898,3 +902,56 @@
+         fflush(stderr);
+     }
+ }
++
++/* HANG_WATCH=<seconds> (patch 3901, diagnostic, off by default): a watcher thread that, when the guest has requested no flip for that many seconds, prints once every 10 s where every guest thread is:
++ * calls made in the last interval, the import it is inside now (g_hle_inflight, empty = in guest code), the last import
++ * it entered (g_hle_last), and its last direct-call lr. A lost wake-up shows as thread 1 inside a wait while the
++ * thread that should wake it is elsewhere; a guest spin shows as thread 1 with no import in flight. */
++extern "C" const char* g_hle_last[64];
++extern "C" void ppu_report_guest_lrs(void);
++extern "C" uint32_t cellGcm_flip_request_count(void);
++extern "C" ppu_context* ppu_resv_ctx_at(long i);
++extern "C" void ppu_dump_guest_stack(ppu_context*, const char*);
++extern "C" uint32_t g_hle_ncalls[64] = { 0 };
++#ifdef _WIN32
++#include <windows.h>
++static DWORD WINAPI hang_watch_main(LPVOID)
++{
++    const char* e = getenv("HANG_WATCH");
++    const unsigned limit = (e && *e) ? (unsigned)atoi(e) : 0;
++    uint32_t prev[64] = { 0 };
++    unsigned still = 0, since_dump = 0; uint32_t prev_flips = 0;
++    for (;;) {
++        Sleep(1000);
++        const uint32_t fl = cellGcm_flip_request_count();   /* guest flips: the main loop's heartbeat */
++        if (fl != prev_flips || fl == 0) still = 0; else still++;
++        prev_flips = fl;
++        if (still >= limit && still > 0 && (still == limit || ++since_dump >= 10)) {
++            since_dump = 0;
++            fprintf(stderr, "[HANGWATCH] the guest made no flip for %us\n", still);
++            for (unsigned t = 1; t < 64; t++) {
++                if (!g_hle_ncalls[t]) continue;
++                fprintf(stderr, "[HANGWATCH]   tid %-2u calls+%-6u total %-9u in=%-28s last=%s\n", t,
++                        (unsigned)(g_hle_ncalls[t] - prev[t]), (unsigned)g_hle_ncalls[t],
++                        g_hle_inflight[t] ? g_hle_inflight[t] : "(guest code)", g_hle_last[t] ? g_hle_last[t] : "-");
++            }
++            ppu_report_guest_lrs();
++            for (long i = 0; i < 40; i++) {      /* guest call chain of every registered thread */
++                ppu_context* c = ppu_resv_ctx_at(i); if (!c) break;
++                char tag[40]; snprintf(tag, sizeof tag, "hangwatch tid=%u", (unsigned)c->thread_id);
++                ppu_dump_guest_stack(c, tag);
++            }
++            fflush(stderr);
++        }
++        for (unsigned t = 0; t < 64; t++) prev[t] = g_hle_ncalls[t];
++    }
++    return 0;
++}
++extern "C" void ps3_hang_watch_start(void)
++{
++    const char* e = getenv("HANG_WATCH");
++    if (e && *e && atoi(e) > 0) CreateThread(NULL, 0, hang_watch_main, NULL, 0, NULL);
++}
++#else
++extern "C" void ps3_hang_watch_start(void) {}
++#endif
