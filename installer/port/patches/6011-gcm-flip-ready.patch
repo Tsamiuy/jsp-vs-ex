@@ -1,0 +1,23 @@
+Patch 6011: cellGcm_flip_ready(): is a flip waiting that the drain has already executed (the next cellGcmTickFlip would
+complete it)? For the host frame clock's LATE_FLIP (port main.cpp), which shortens the wait for the next vblank after a flip
+that completed late. No behaviour change by itself.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 4a805bf..696ae69 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1078,6 +1078,14 @@ void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
+  * and its handler runs code that puts the status back to WAITING, so the
+  * poll never saw DONE and the game never rendered another frame. On hardware
+  * the callback IS the flip interrupt -- no flip, no callback. */
++/* Is a flip waiting that the drain has already executed (the next cellGcmTickFlip would complete it)? For the host's
++ * frame clock: LATE_FLIP completes such a flip at once when its 30 fps slot has already passed. */
++int cellGcm_flip_ready(void)
++{
++    return s_flip_status == CELL_GCM_FLIP_STATUS_WAITING &&
++           (s_fifo_flips_reached != s_fifo_flips_completed || s_flip_direct_pending);
++}
++
+ void cellGcmTickFlip(void)
+ {
+     /* Same rule as cellGcm_request_tick: a flip still ahead of the drain has

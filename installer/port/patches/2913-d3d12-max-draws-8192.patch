@@ -1,0 +1,25 @@
+Patch 2913: MAX_DRAWS 4096 -> 8192 (experiment).
+
+A 2 vs 2 on Hidden Leaf with the town in view has about 4,200-4,800 draws a frame. Above 4096 every frame was cut in two
+batches (vp_flush_if_full, [MIDFLUSH] records=4088) and the second render_frame waited for the GPU to finish the first:
+FTL draw about 33 ms instead of 16. With 8192 such a frame is one batch.
+
+Tested (Experiments workbench, all-CPU 2 vs 2 on Hidden Leaf at 4K, SHADOW_SCALE=4, MODEL_DETAIL=4): [MIDFLUSH] 40+ lines
+-> 1-2 per run, FTL draw about 33 -> 23 ms. The frame rate only followed with the frame clock's LATE_FLIP (port main.cpp).
+The per-draw constant buffers grow with MAX_DRAWS.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b8c679d..88ff904 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -66,7 +66,9 @@
+                                  * ~7.5k verts/frame; leave generous headroom) */
+ #define VP_MAX_INDICES  (1u << 21)  /* per-frame index buffer of indexed VP draws, x2 parity */
+ #define VP_TEX_UNITS      16    /* RSX texture units: t0-t15 / s0-s15 end to end (upstream #600 sizes its tables 16) */
+-#define MAX_DRAWS         4096  /* per-frame draw records. Sized from the
++#define MAX_DRAWS         8192  /* 8192 since 2026-11-13 (was 4096): a 2 vs 2 on Hidden Leaf has 4,200-4,800 draws a
++                                 * frame, and at 4096 every such frame was cut in two batches (mid-frame flush).
++                                 * per-frame draw records. Sized from the
+                                  * measured worst case (~1841, FRAME_BUDGET);
+                                  * the per-draw constant buffer is
+                                  * VP_CB_STRIDE * MAX_DRAWS * 2 bytes, so 16384
