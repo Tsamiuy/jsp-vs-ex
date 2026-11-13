@@ -51,6 +51,8 @@ every X.Y.Z inside the spans, and `python3 tools/release.py --check` (CI) fails 
 `.recomp.json` (the project's entry for recomp.fyi) carries the version in `"x-version"`; the bump rewrites it and the check
 fails when it differs. From 1.0.0 on, the bump also sets `"status"` from `"in-progress"` to `"released"`. Its `"notes"` text
 is written by hand: read it at each release.
+`CITATION.cff` carries the same version and a `date-released` line; the bump rewrites both and `--check` fails when the version differs.
+The release's files are `jsp-setup.exe`, the portable zip and one `SHA256SUMS` (written by `installer.yml`; check with `sha256sum -c SHA256SUMS`).
 
 Merging a change to `installer/VERSION` into `main` starts the `release` workflow: it tags `vX.Y.Z`, builds the installer
 and creates a **draft** GitHub release with the files and the notes (`python3 tools/release.py notes X.Y.Z`). Look at the

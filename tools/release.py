@@ -24,7 +24,8 @@ text outside the spans (history such as "since 0.1.0") is left alone.
 .recomp.json (the project's entry for recomp.fyi) carries the version in its extension field "x-version"; --check requires
 it to equal installer/VERSION and bump rewrites it. From 1.0.0 on, bump also sets "status" from "exploring" or
 "in-progress" to "released" (the schema's "public build, still maintained"); 0.x versions are pre-releases and leave it.
-A repository without .recomp.json is not checked.
+CITATION.cff carries "version:" (and "date-released:", set to the bump's date); --check requires the version to equal
+installer/VERSION and bump rewrites both. A repository without .recomp.json or CITATION.cff is not checked for it.
 """
 import argparse
 import datetime
@@ -46,6 +47,9 @@ ANY_VERSION = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])")
 RECOMP_JSON = ".recomp.json"
 RECOMP_VERSION = re.compile(r'("x-version"\s*:\s*")([^"]*)(")')
 RECOMP_STATUS = re.compile(r'("status"\s*:\s*")(exploring|in-progress)(")')
+CITATION = "CITATION.cff"
+CITATION_VERSION = re.compile(r"(?m)^(version:[ \t]*)(\S*)([ \t]*)$")
+CITATION_DATE = re.compile(r"(?m)^(date-released:[ \t]*)(\S*)([ \t]*)$")
 SKIP_DIRS = {".git", "node_modules", "build", "work", "vendor"}
 
 
@@ -147,6 +151,12 @@ def check(root):
             problems.append(f'{RECOMP_JSON}: no "x-version" field')
         elif m.group(2) != version:
             problems.append(f'{RECOMP_JSON}: x-version is {m.group(2)}, {VERSION_FILE} is {version}')
+    if (root / CITATION).exists():
+        m = CITATION_VERSION.search(read(root, CITATION))
+        if m is None:
+            problems.append(f"{CITATION}: no 'version:' line")
+        elif m.group(2).strip("'\"") != version:
+            problems.append(f"{CITATION}: version is {m.group(2)}, {VERSION_FILE} is {version}")
     return problems
 
 
@@ -191,6 +201,9 @@ def bump(root, arg, today=None):
         if parse(new)[0] >= 1:
             text = RECOMP_STATUS.sub(lambda m: m.group(1) + "released" + m.group(3), text, count=1)
         out[RECOMP_JSON] = text
+    if (root / CITATION).exists():
+        text = CITATION_VERSION.sub(lambda m: m.group(1) + new + m.group(3), read(root, CITATION), count=1)
+        out[CITATION] = CITATION_DATE.sub(lambda m: m.group(1) + today + m.group(3), text, count=1)
     for rel, text in out.items():
         (root / rel).write_text(text, encoding="utf-8", newline="")
     return list(out), []

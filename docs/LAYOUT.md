@@ -4,7 +4,7 @@
 
 | Path | For | Current or legacy |
 |---|---|---|
-| `README.md`, `LICENSE`, `NOTICE.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CONTRIBUTORS.md`, `SECURITY.md`, `AGENTS.md`, `.recomp.json` | Everyone: start here, licences, release notes, how to send a change | current |
+| `README.md`, `LICENSE`, `NOTICE.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CONTRIBUTORS.md`, `SECURITY.md`, `AGENTS.md`, `CITATION.cff`, `.recomp.json` | Everyone: start here, licences, release notes, how to send a change | current |
 | `installer/` | Players and the build: Windows installer, the build-on-your-PC steps and the port on ps3recomp v0.19.0 (`installer/port/`) | current |
 | `launcher/` | The launcher window source: `JStarsLauncher19.cs` (current) and `JStarsLauncher.cs` (v0.15 tree) | both |
 | `docs/` | Players and contributors, see [docs/README.md](README.md) | current, plus `docs/archive/` (legacy) |
@@ -43,7 +43,7 @@ Kept where they are, on purpose: `jstars/` (its name is also the run folder writ
 | `.github/workflows/ci.yml`, `tools/ci/` | Checks run on every pull request; run `python3 tools/ci/repo_checks.py` before you push |
 | `assets/`, `tools/site/` | Banner, social preview and icon (our own ASCII-style art); the fan-site generator, which builds a static page from `README.md` and `NOTICE.md` (`python3 tools/site/site.py --check`) |
 | `.github/workflows/pages.yml` | Publishes that page with GitHub Pages when run by hand (Actions > pages) |
-| `CHANGELOG.md`, `tools/release.py` | Release notes and the tool that keeps `installer/VERSION`, the CMake project versions and the changelog in step (`--check`, `bump`, `notes`); the workflows `prepare-release.yml` and `release.yml` use it. See [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| `CHANGELOG.md`, `tools/release.py` | Release notes and the tool that keeps `installer/VERSION`, the CMake project versions and the changelog in step (`--check`, `bump`, `notes`; `CITATION.cff` and `.recomp.json` versions follow it); the workflows `prepare-release.yml` and `release.yml` use it. See [CONTRIBUTING.md](../CONTRIBUTING.md) |
 | `.github/workflows/release-notify.yml` | Posts a message with the link to the project's Discord channel when a release is published; the webhook URL is the repository secret `DISCORD_RELEASE_WEBHOOK` (no message without it) |
 | `LICENSE`, `NOTICE.md` | MIT licence; third-party software and licences |
 | `SECURITY.md`, `CONTRIBUTING.md` | How to report a problem and how to send a change |

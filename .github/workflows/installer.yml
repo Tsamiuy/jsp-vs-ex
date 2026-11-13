@@ -146,12 +146,17 @@ jobs:
       - name: Checksums
         shell: pwsh
         run: |
+          # One SHA256SUMS file in `sha256sum` format (lower-case hash, two spaces, relative name, LF line ends, so that
+          # `sha256sum -c SHA256SUMS` works on Linux and Git Bash), one line per file in the artifact, sorted by name.
+          # It is the only checksum file of a release (no per-file .sha256).
           # -Exclude filters only with a wildcard in the path (out\*); without it the list is empty and nothing is written.
-          $sums = Get-ChildItem build\installer\out\* -File -Exclude *.sha256, SHA256SUMS.txt | ForEach-Object {
+          $sums = Get-ChildItem build\installer\out\* -File -Exclude SHA256SUMS | Sort-Object Name | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
           }
           if (-not $sums) { Write-Output 'no files to checksum'; exit 1 }
-          $sums | Tee-Object -FilePath build\installer\out\SHA256SUMS.txt
+          $sums | ForEach-Object { Write-Output $_ }
+          # Set-Content would add CRLF on Windows: write the bytes ourselves.
+          [System.IO.File]::WriteAllText("$PWD\build\installer\out\SHA256SUMS", (($sums -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
