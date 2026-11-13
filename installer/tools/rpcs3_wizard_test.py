@@ -86,6 +86,15 @@ class T(unittest.TestCase):
         self.assertNotIn(str(self.tmp), out)   # the logged form holds no real path
         self.assertIn("<RPCS3>", js["root"])
 
+    def test_iso_entry_is_not_a_disc_folder(self):
+        root = self.tree()
+        iso = w(self.tmp / "isos" / "g.dec.iso", b"x" * 16)
+        w(root / "config" / "games.yml", f"BLUS31519: {iso}\n")
+        rc, ini, js, out = self.find(root)
+        self.assertEqual((ini["found"], ini["disc"], ini["eboot"]), ("1", "", ""))
+        self.assertIn("disc_is_iso", js["problems"])
+        self.assertNotIn("missing_disc", js["problems"])
+
     def test_eu_disc(self):
         rc, ini, js, _ = self.find(self.tree(serial="BLES02136"))
         self.assertEqual(ini["title_id"], "BLES02136")
