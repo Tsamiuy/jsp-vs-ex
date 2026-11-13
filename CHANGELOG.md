@@ -6,6 +6,7 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Docs: `docs/ROLLBACK.md` step 3 updated: the fight-state snapshot restores and replays 60 ticks with the same state hashes; a full copy is too slow, so copying only changed pages is next.
 - Docs: `docs/ROLLBACK.md` explains rollback netcode and this port's plan for it: the library (GekkoNet, with GGPO and GGRS as fallbacks), the transport (direct UDP, then a relay), the two ways to save the fight state, and the steps so far.
 - Installer: `assemble_payload.py --tree legacy` (and `v15`) no longer builds the earlier v0.15 tree and exits with a pointer to the git tag `legacy-v15` (issue #152); `firstrun.py` builds only the current tree and stops with an error when `tree.txt` is missing or unknown; CI no longer builds or tests the legacy tree (the `toolkit` job and the legacy patch series check are gone, the `tree` input of `installer.yml` too).
 - Repository layout: `Play J-Stars.bat` and `Test Fight.bat` (legacy v0.15 tree only) moved from the root into `jstars/`, next to `play.ps1` which they start; the installer never shipped them.

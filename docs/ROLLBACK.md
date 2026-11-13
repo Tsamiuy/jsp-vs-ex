@@ -159,8 +159,8 @@ flowchart LR
 |---|---|
 | 1. Determinism | Done: two runs with the same seed and inputs gave identical per-tick state hashes from the fight's start |
 | 2. Library | Done: GekkoNet passed the acceptance test above |
-| 3. Snapshot prototype (route A) | In progress. The first run in the game reached the fight and saved and restored: save 10.5 ms, restore 3.5 ms. The replay did not match from the first tick. The prototype had saved only low memory and missed the heap, where the fight lives. The fixed version also saves the heap, and its first run is next. |
-| 4. Shipping snapshot | After step 3's numbers |
+| 3. Snapshot prototype (route A) | Done for correctness. The first run missed the heap and did not match. With the heap saved, the game was restored 60 ticks back and replayed them, and every per-tick state hash matched the first pass. Saving the full 144 MB takes 15 ms and restoring it 23 ms, more than one 33 ms tick together, so copying everything each tick is too slow. Over those 60 ticks, 1,634 of 35,278 memory pages changed. |
+| 4. Shipping snapshot | Next: copy only the pages that changed since the last save, then longer replays (300 and 1,800 ticks) |
 | 5 to 7 | Not started |
 
 What does not change: rollback play stays opt-in. The port connects only when you choose online play, and only to the
@@ -168,6 +168,6 @@ players or server you pick. Every gameplay option in a match is the same for all
 
 ## Further reading
 
-- [Rollback Networking in Fighting Games](https://ki.infil.net/w02-netcode.html): an illustrated explanation of rollback.
+- [Rollback Networking in Fighting Games](https://words.infil.net/w02-netcode.html): an illustrated explanation of rollback.
 - [GekkoNet](https://github.com/HeatXD/GekkoNet), [GGPO](https://github.com/pond3r/ggpo), [GGRS](https://github.com/gschup/ggrs), [iroh](https://github.com/n0-computer/iroh)
 - [ONLINE.md](ONLINE.md): today's online play over re-psn.
