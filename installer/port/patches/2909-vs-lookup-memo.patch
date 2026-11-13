@@ -1,0 +1,43 @@
+Patch 2909: vp_get_vs remembers its last answer while the vertex program is unchanged (VS_MEMO=0 off).
+Every draw looked its vertex shader up again: the program's size walk, a byte-at-a-time FNV hash of the whole program
+(often several KB) and a scan of the cache. The line-level profile of a low-end 2v2 fight put the hash loop alone at
+2.5% of the drawing thread. rsx_commands.c already raises rsx_state.vp_dirty when a program word or the program start
+changes (patch 2051), but nothing read it. Now: while vp_dirty is clear, the same state, start and pulling variant
+return the cached index (checked against the slot's hash, so a reused slot is never returned); a real lookup clears
+vp_dirty.
+
+Tested (US disc, low-end: no CPU boost, 8 threads, integrated GPU; auto-pilot 2v2 Free Battle on Hidden Leaf, AUTO_FB): with 2909-2911 26.06 / 27.13 flips/s, all three off 25.72 / 23.09; FTL tick 7.6-7.7 vs 9.0-9.3 ms. Picture unchanged.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 94e6651..6f31c39 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2705,7 +2705,28 @@ static u32 vp_hash_ucode(const u8* p, u32 n)
+ }
+ 
+ static int s_vs_pull_req = 0;   /* VPULL: vp_get_vs_pull wants the pulling variant */
++static int vp_get_vs_lookup(const rsx_state* st);
++/* Patch 2909 (VS_MEMO=0 off): the last answer per pulling variant, reused while rsx_state.vp_dirty is clear (set by
++ * rsx_commands.c when a program word or the program start changes). */
+ static int vp_get_vs(const rsx_state* st)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("VS_MEMO"); on = (e && *e == '0') ? 0 : 1; }
++    static const rsx_state* m_st[2]; static int m_idx[2] = { -1, -1 }; static u32 m_hash[2], m_start[2];
++    const int pv = s_vs_pull_req ? 1 : 0;
++    if (on && st && st == m_st[pv] && !st->vp_dirty && m_idx[pv] >= 0 && m_idx[pv] < s_d3d.vp_vs_n &&
++        m_start[pv] == st->transform_program_start && s_d3d.vp_vs[m_idx[pv]].hash == m_hash[pv] &&
++        s_d3d.vp_vs[m_idx[pv]].pull == s_vs_pull_req)
++        return m_idx[pv];
++    const int r = vp_get_vs_lookup(st);
++    if (on && st && r >= 0) {
++        m_st[pv] = st; m_idx[pv] = r; m_hash[pv] = s_d3d.vp_vs[r].hash; m_start[pv] = st->transform_program_start;
++        m_st[pv ^ 1] = NULL;   /* the other variant's answer was for the old program */
++        ((rsx_state*)st)->vp_dirty = 0;
++    }
++    return r;
++}
++static int vp_get_vs_lookup(const rsx_state* st)
+ {
+     extern int rsx_vp_decompile(const uint8_t*, u32, char*, u32);
+     extern void rsx_vp_set_pull(int on);

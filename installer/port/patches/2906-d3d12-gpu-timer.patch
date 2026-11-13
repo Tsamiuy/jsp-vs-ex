@@ -1,0 +1,146 @@
+Patch 2906 (diagnostic, experiment line): GPU_TIME=1 measures the GPU time of each render-target pass with timestamp
+queries and logs the costliest every 120 frames ([GPUT]: total ms/frame, then key ms (switches)). Key: the colour
+target guest offset, depth-only offset | 1, 2 the display, 0xE after the replay, F0000000 frame start.
+
+Tested (US disc, Training fight, 720p): an integrated GPU 18.7 ms/frame, 54% in 0x0E610000; a fast discrete GPU 0.64 ms.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index d1cbd3b..1dccb83 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7594,6 +7594,103 @@ float (*g_rsx_ui_scale)(u32 rt_off, const float box[4], float* ax, float* ay) =
+ int (*g_rsx_aa_mode)(u32 rt_off) = 0;
+ int (*g_rsx_cutout)(float* out) = 0;
+ 
++/* Patch 2906 (diagnostic, experiment line): GPU_TIME=1 puts a timestamp query at the start of each frame's command
++ * list, at every render-target switch of the replay (key: the colour target's guest offset, or the depth surface's
++ * offset | 1 for a depth-only pass, 2 for the display), before the after-replay work (key 0xE: composite, edge
++ * smoothing, HUD pictures, present) and before Close. The previous use of a frame index is read back after its
++ * allocator reset (the GPU is done with it), the time between consecutive marks goes to the earlier mark's key, and
++ * every 120 frames [GPUT] lists GPU ms per frame for the total and the costliest keys. Off: nothing is recorded. */
++#define GPUT_MAX 1024
++static int gput_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("GPU_TIME"); on = (e && *e == '1') ? 1 : 0; }
++    return on;
++}
++static ID3D12QueryHeap* s_gput_heap = NULL;
++static ID3D12Resource* s_gput_rb[FRAME_COUNT];
++static u32 s_gput_n[FRAME_COUNT], s_gput_key[FRAME_COUNT][GPUT_MAX];
++static u32 s_gput_cur_fi = 0;
++static u64 s_gput_freq = 0;
++typedef struct { u32 key; double ms; u32 n; } GputAcc;
++static GputAcc s_gput_acc[128];
++static int s_gput_nacc = 0, s_gput_frames = 0;
++static double s_gput_total = 0;
++
++static void gput_mark(u32 key)
++{
++    if (!gput_on() || !s_gput_heap) return;
++    const u32 fi = s_gput_cur_fi, i = s_gput_n[fi];
++    if (i >= GPUT_MAX) return;
++    s_d3d.cmd_list->lpVtbl->EndQuery(s_d3d.cmd_list, s_gput_heap, D3D12_QUERY_TYPE_TIMESTAMP, fi * GPUT_MAX + i);
++    s_gput_key[fi][i] = key; s_gput_n[fi] = i + 1;
++}
++
++static void gput_acc(u32 key, double ms)
++{
++    for (int k = 0; k < s_gput_nacc; k++) if (s_gput_acc[k].key == key) { s_gput_acc[k].ms += ms; s_gput_acc[k].n++; return; }
++    if (s_gput_nacc < 128) { s_gput_acc[s_gput_nacc].key = key; s_gput_acc[s_gput_nacc].ms = ms; s_gput_acc[s_gput_nacc].n = 1; s_gput_nacc++; }
++}
++
++/* After the frame index's allocator reset: read its last frame, then start this one. */
++static void gput_begin(u32 fi)
++{
++    if (!gput_on()) return;
++    if (!s_gput_heap) {
++        D3D12_QUERY_HEAP_DESC qd = {0};
++        qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; qd.Count = GPUT_MAX * FRAME_COUNT;
++        if (FAILED(s_d3d.device->lpVtbl->CreateQueryHeap(s_d3d.device, &qd, &IID_ID3D12QueryHeap, (void**)&s_gput_heap))) {
++            s_gput_heap = NULL; return; }
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_READBACK;
++        D3D12_RESOURCE_DESC rd = {0};
++        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = GPUT_MAX * 8; rd.Height = 1; rd.DepthOrArraySize = 1;
++        rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        for (int f = 0; f < FRAME_COUNT; f++) {
++            s_gput_rb[f] = NULL; s_gput_n[f] = 0;
++            s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
++                D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&s_gput_rb[f]);
++        }
++        UINT64 fq = 0; s_d3d.cmd_queue->lpVtbl->GetTimestampFrequency(s_d3d.cmd_queue, &fq); s_gput_freq = fq;
++        fprintf(stderr, "[GPUT] on, timestamp frequency %llu Hz%c", (unsigned long long)fq, 10);
++    }
++    const u32 n = s_gput_n[fi];
++    if (n > 1 && s_gput_rb[fi] && s_gput_freq) {
++        void* p = NULL; D3D12_RANGE r = {0, (SIZE_T)n * 8};
++        if (SUCCEEDED(s_gput_rb[fi]->lpVtbl->Map(s_gput_rb[fi], 0, &r, &p)) && p) {
++            const u64* t = (const u64*)p;
++            for (u32 i = 0; i + 1 < n; i++)
++                if (t[i + 1] >= t[i]) gput_acc(s_gput_key[fi][i], (double)(t[i + 1] - t[i]) * 1000.0 / (double)s_gput_freq);
++            if (t[n - 1] >= t[0]) s_gput_total += (double)(t[n - 1] - t[0]) * 1000.0 / (double)s_gput_freq;
++            D3D12_RANGE w = {0, 0}; s_gput_rb[fi]->lpVtbl->Unmap(s_gput_rb[fi], 0, &w);
++            if (++s_gput_frames == 120) {
++                fprintf(stderr, "[GPUT] %.2f ms/frame GPU (120 frames):", s_gput_total / 120.0);
++                for (int k = 0; k < 10; k++) {
++                    int best = -1;
++                    for (int j = 0; j < s_gput_nacc; j++)
++                        if (s_gput_acc[j].n && (best < 0 || s_gput_acc[j].ms > s_gput_acc[best].ms)) best = j;
++                    if (best < 0) break;
++                    fprintf(stderr, " %08X %.2f (%u)", s_gput_acc[best].key, s_gput_acc[best].ms / 120.0, s_gput_acc[best].n);
++                    s_gput_acc[best].n = 0;
++                }
++                fprintf(stderr, "%c", 10);
++                s_gput_nacc = 0; s_gput_frames = 0; s_gput_total = 0;
++            }
++        }
++    }
++    s_gput_cur_fi = fi; s_gput_n[fi] = 0;
++    gput_mark(0xF0000000u);   /* frame start: uploads and work before the first switch */
++}
++
++static void gput_end(void)
++{
++    if (!gput_on() || !s_gput_heap) return;
++    gput_mark(0xFFFFFFFFu);
++    const u32 fi = s_gput_cur_fi;
++    if (s_gput_rb[fi] && s_gput_n[fi])
++        s_d3d.cmd_list->lpVtbl->ResolveQueryData(s_d3d.cmd_list, s_gput_heap, D3D12_QUERY_TYPE_TIMESTAMP,
++                                                 fi * GPUT_MAX, s_gput_n[fi], s_gput_rb[fi], 0);
++}
++
+ static void render_frame_hz_impl(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -7651,6 +7748,7 @@ static void render_frame_hz_impl(void)
+     s_d3d.cmd_allocators[fi]->lpVtbl->Reset(s_d3d.cmd_allocators[fi]);
+     s_d3d.cmd_list->lpVtbl->Reset(s_d3d.cmd_list, s_d3d.cmd_allocators[fi], NULL);
+     s_d3d.tex_ring_used[fi] = 0;   /* this frame index's copies are done */
++    gput_begin(fi);   /* patch 2906 */
+ 
+     /* Upload the bound font atlas into an R8_UNORM texture and create its SRV.
+      * The atlas is a linear 8-bit coverage map, so a straight row copy (no
+@@ -8508,6 +8606,7 @@ static void render_frame_hz_impl(void)
+                     cur_sc = bsc;
+                     D3D12_RECT sc = {0, 0, (LONG)vp.Width, (LONG)vp.Height};
+                     vp_last_w = vp.Width; vp_last_h = vp.Height;
++                    gput_mark(dr->no_color ? (dr->zeta_off | 1u) : (dr->rt_off ? dr->rt_off : 2u));   /* patch 2906 */
+                     s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, dr->no_color ? 0 : nrt,
+                                                                dr->no_color ? NULL : rh, FALSE, &cur_dsv);
+                     s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
+@@ -8815,6 +8914,7 @@ static void render_frame_hz_impl(void)
+         }
+     }
+ 
++    gput_mark(0xEu);   /* patch 2906: after the replay */
+     if (perf_on()) s_perf_rf += perf_now() - _rf0;
+     /* MEMPEEK=<hex addr>:<n>: n big-endian floats at a guest address each frame,
+      * with a min/max so a buffer of constants is distinguishable from real data. */
+@@ -9068,6 +9168,7 @@ skip_dump_consider: ;
+     }
+ 
+     rtread_issue();
++    gput_end();   /* patch 2906 */
+     /* Close and execute */
+     s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
