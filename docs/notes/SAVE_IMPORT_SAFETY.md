@@ -26,7 +26,7 @@ start, after every replacement succeeds, or after rollback completes. Injected `
 cleanup defect in the initial fix and now preserve the recovery originals.
 
 Preview and copy both reject links/reparse points in the save or incoming target paths, file/directory
-collisions, and resolved destinations inside RPCS3. The vendored `rpcs3_locate.py` remains unchanged.
+collisions, and resolved destinations inside RPCS3. The vendored `rpcs3_locate.py` changed only in how it reads a games.yml entry that is an .iso file (recognised, flagged `is_iso`, never an EBOOT search folder); the save copy code is untouched.
 The safeguard is per save directory: a later save's failure does not undo an earlier completed save.
 Close both programs for import. Power loss and concurrent filesystem changes are outside this guarantee.
 
@@ -44,7 +44,7 @@ These tests create temporary synthetic data only. Coverage includes source-copy 
 write, failure after earlier files have been published, failed rollback retaining recovery originals,
 links present at preview or introduced afterwards, an alias into RPCS3, unchanged stale files, and
 byte-identical import of a plain `SYS-DATA` plus metadata without synthesizing a `PARAM.PFD`.
-On Linux, all 22 wizard tests and 35 unchanged shared-helper tests pass. The initial 20-case wizard suite
+On Linux, all 23 wizard tests and 37 shared-helper tests (35 unchanged, 2 added for the .iso entry) pass. The initial 20-case wizard suite
 against the original upstream wizard produced six failures. The partial-write data loss and accepted
 destination links are direct reproductions of old defects. Two tests inject failures in the new publish
 and rollback operations; their failures against old code show that the new recovery behavior is absent,

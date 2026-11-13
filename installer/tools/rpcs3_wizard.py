@@ -42,6 +42,8 @@ SAY = {
                  "or fill in the next pages yourself.",
     "no_titles": "Nothing to look for.",
     "missing_disc": "RPCS3 does not list " + GAME_NAME + " (BLUS31519 or BLES02136) with a game folder that exists, so the disc folder was not filled in.",
+    "disc_is_iso": "RPCS3 lists " + GAME_NAME + " as a single disc image (.iso file). Setup needs the disc's files as an extracted game folder, "
+                   "so the disc folder was not filled in. Pick an extracted disc folder yourself: see RPCS3 and its documentation.",
     "no_decrypted_eboot": "No decrypted EBOOT.elf was found beside the game. Setup needs one from your own copy: see RPCS3 and its documentation.",
     "missing_flash": "RPCS3's dev_flash folder was not found, so that page was not filled in.",
     "wrong_version": "RPCS3 lists a different version of the game than this port supports.",
@@ -56,7 +58,7 @@ def pick(loc):
     """The first title that has a disc, else None."""
     for tid in TITLES:
         t = loc["titles"].get(tid)
-        if t and t["disc"].get("ok"):
+        if t and t["disc"].get("ok") and not t["disc"].get("is_iso"):   # setup reads the disc's folders; it has no ISO reader
             return tid, t
     return None, None
 
@@ -72,7 +74,8 @@ def find(rpcs3):
     f["root"] = loc["root"]
     tid, t = pick(loc)
     if t is None:
-        probs.append("missing_disc")
+        iso = any(x["disc"].get("is_iso") for x in loc["titles"].values())
+        probs.append("disc_is_iso" if iso else "missing_disc")
     else:
         f["title_id"] = tid
         f["disc"] = t["disc"]["disc_dir"]

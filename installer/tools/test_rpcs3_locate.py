@@ -156,6 +156,31 @@ class TitleTests(Base):
         self.assertEqual(L.game_path(root, "NOPE00000")["code"], "not_found")
         self.assertEqual(L.game_path(root, "OTHER00001")["code"], "missing_disc")
 
+    def test_game_path_iso_entry(self):
+        root = self.tree()
+        for name in ("game.iso", "Game.DEC.ISO", "game.dec.iso"):
+            iso = w(self.tmp / "isos" / name, b"x" * 16)
+            w(root / "config" / "games.yml", f"{SERIAL}: {iso}\n")
+            r = L.game_path(root, SERIAL)
+            self.assertTrue(r["ok"] and r["is_iso"], name)
+            self.assertEqual(r["disc_dir"], str(iso))
+        # a file that is not an .iso is still refused, and the text says why
+        other = w(self.tmp / "isos" / "game.bin", b"x")
+        w(root / "config" / "games.yml", f"{SERIAL}: {other}\n")
+        r = L.game_path(root, SERIAL)
+        self.assertEqual(r["code"], "missing_disc")
+        self.assertIn("not an .iso", r["text"])
+        self.assertNotIn("is_iso", L.game_path(self.tree(), SERIAL))
+
+    def test_locate_iso_not_an_eboot_folder(self):
+        root = self.tree()
+        iso = w(self.tmp / "isos" / "g.dec.iso", b"x" * 16)
+        w(root / "config" / "games.yml", f"{SERIAL}: {iso}\n")
+        r = L.locate(str(root), {SERIAL: "disc"})
+        t = r["titles"][SERIAL]
+        self.assertTrue(t["disc"]["is_iso"])
+        self.assertEqual(t["decrypted_eboot"]["code"], "no_decrypted_eboot")
+
     def test_update_ok_missing_wrong(self):
         root = self.tree()
         self.assertTrue(L.update_dir(root, SERIAL, "01.29")["ok"])
