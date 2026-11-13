@@ -6,6 +6,8 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
 - Settings window: a Graphics tab after Display with four drop-downs: Shadows (`SHADOW_SCALE`), Shadow distance (`SHADOW_RANGE`), Model detail (`MODEL_DETAIL`) and Object draw distance (`OBJECT_DISTANCE`), the same keys and choices as the in-game Graphics page. A missing or unknown value shows the default.
 - Settings window: a Cheats tab with one box, "Unlock everything (cheat)". Ticking it makes a checked backup of the save first, then starts the next game with `JSP_UNLOCK_ALL=1` for that one start only and unticks itself; it refuses when the game has run but no save can be found or copied. A `JSP_UNLOCK_ALL` line written by hand into `play_settings.txt` is dropped when the window loads and saves the file.
 - Two-thread drawing, an option for busy fights: with `PIPE=1` (the settings window's new "Two-thread drawing" box on the Display page, off by default) the preparing half of drawing runs on its own thread while the other half submits (toolkit patch 2912); the fragment program constants are written once per draw batch instead of once per draw (toolkit patch 2914, always on). Needs one more CPU core. Measured on the title demo: 29.65 flips per second (29.84 with the box ticked).

@@ -9,7 +9,7 @@
   },
   "project": "jsp-vs-ex",
   "status": "in-progress",
-  "x-version": "0.2.0",
+  "x-version": "0.3.0",
   "targets": ["Windows"],
   "toolchain": ["ps3recomp"],
   "approach": "Static recompilation of the PPU code and the SPU jobs with ps3recomp, HLE system libraries, Direct3D 12 RSX backend",
