@@ -44,7 +44,7 @@ CI) reports any version that disagrees. To release, either way:
   into `## [X.Y.Z] - date`; commit it and open a pull request as usual.
 
 Docs that name the current release (the README's download link and status line) wrap it in a span on one line:
-`<!-- version -->[0.2.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.2.0)<!-- /version -->`. The bump rewrites
+`<!-- version -->[0.3.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.3.0)<!-- /version -->`. The bump rewrites
 every X.Y.Z inside the spans, and `python3 tools/release.py --check` (CI) fails when a span names another version than
 `installer/VERSION`. Text outside the spans, such as "since 0.1.0", is history and stays as written.
 
