@@ -7,6 +7,8 @@ Where things are, by who needs them. All paths are relative to this folder.
 | Page | What |
 |---|---|
 | [../README.md](../README.md) | What this is, status, how to install |
+| [INSTALL.md](INSTALL.md) | Install and play, what setup refuses, saves, update, uninstall |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Problems by symptom, logs, support bundle, reporting a bug |
 | [../installer/README.md](../installer/README.md) | The installer and the build on your PC |
 | [FEATURES.md](FEATURES.md) | What the port adds (generated from `features.tsv`) |
 | [ONLINE.md](ONLINE.md) | Online Battle quick start (experimental, opt-in) |

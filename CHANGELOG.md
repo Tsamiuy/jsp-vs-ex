@@ -6,6 +6,8 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+- Docs: the README follows the shared port skeleton (Download and play first, then Status, with "How AI was used" as the AI heading), and new docs/INSTALL.md and docs/TROUBLESHOOTING.md hold requirements, setup refusals, troubleshooting by symptom, the support bundle, saves, updating, uninstalling and SHA-256 checks.
+
 ## [0.3.0] - 2026-11-13
 
 ### Added
