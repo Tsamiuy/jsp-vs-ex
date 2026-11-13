@@ -409,6 +409,15 @@ namespace JStarsLauncher
 
         // ---- controls ----
         ComboBox resBox, winBox, modeBox, aaBox;
+        ComboBox shadowBox, shadowRangeBox, modelDetailBox, objectDistBox;   // the Graphics tab
+        static readonly string[] ShadowNames = {
+            "Low      (the game's own: 2048 x 1024)",
+            "Medium   (2x)",
+            "High     (3x)",
+            "Ultra    (4x)",
+        };
+        static readonly string[] ModelDetailIds = { "1", "2", "4" };          // MODEL_DETAIL
+        static readonly string[] ObjectDistIds = { "0.75", "1", "2", "0" };   // OBJECT_DISTANCE (0 = never hidden)
         CheckBox fxFullBox;
         CheckBox statsBox;
         CheckBox fpsBox;
@@ -540,10 +549,11 @@ namespace JStarsLauncher
             int mode = modeBox.SelectedIndex;
             Directory.CreateDirectory(ShotDir);
             Shot("display", 0, -1);
-            Shot("controls_keyboard", 1, 0);
-            Shot("controls_kbm", 1, 1);
-            Shot("controls_controller", 1, 2);
-            Shot("cheats", 2, -1);
+            Shot("graphics", 1, -1);
+            Shot("controls_keyboard", 2, 0);
+            Shot("controls_kbm", 2, 1);
+            Shot("controls_controller", 2, 2);
+            Shot("cheats", 3, -1);
             Shot("online", tabs.TabPages.Count - 1, -1);
             modeBox.SelectedIndex = mode;
             Close();
@@ -628,6 +638,7 @@ namespace JStarsLauncher
 
             tabs = new TabControl { Location = P(12, 76), Size = Z(616, 604) };
             tabs.TabPages.Add(BuildDisplayTab());
+            tabs.TabPages.Add(BuildGraphicsTab());
             tabs.TabPages.Add(BuildControlsTab());
             tabs.TabPages.Add(BuildCheatsTab());
             tabs.TabPages.Add(BuildOnlineTab());
@@ -867,6 +878,63 @@ namespace JStarsLauncher
             }
             catch { }
             return Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JSP Fan Revival"), "hdd0");
+        }
+
+        // Graphics: shadow quality and distance, model detail, object draw distance. The game reads the four keys from its
+        // environment or through the settings file (SHADOW_SCALE in the toolkit's D3D12 backend, the others in
+        // installer/port/jsp/jsp_game.cpp); installer/port/jsp/jsp_settings.h lists the same keys and values.
+        TabPage BuildGraphicsTab()
+        {
+            var p = new TabPage("Graphics") { Padding = new Padding(12), AutoScroll = true };
+            int y = 16;
+            p.Controls.Add(new Label { Text = "Shadows", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            shadowBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            shadowBox.Items.AddRange(ShadowNames);
+            shadowBox.SelectedIndex = 1;
+            shadowBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(shadowBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Sharper, steadier shadows on characters and stages. Higher costs a little GPU.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
+            p.Controls.Add(new Label { Text = "Shadow distance", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            shadowRangeBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            shadowRangeBox.Items.AddRange(new object[] { "Normal   (the game's own)", "Far      (2x: shadows reach further)" });
+            shadowRangeBox.SelectedIndex = 0;
+            shadowRangeBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(shadowRangeBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Far keeps buildings', plants' and other fighters' shadows sharp further away.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
+            p.Controls.Add(new Label { Text = "Model detail", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            modelDetailBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            modelDetailBox.Items.AddRange(new object[] { "Normal   (the game's own)", "High     (full detail 2x further)", "Ultra    (full detail 4x further)" });
+            modelDetailBox.SelectedIndex = 0;
+            modelDetailBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(modelDetailBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Characters and stage models keep their detailed version further from the camera.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
+            p.Controls.Add(new Label { Text = "Object draw distance", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            objectDistBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
+            objectDistBox.Items.AddRange(new object[] { "Near     (a little closer than the game)", "Normal   (the game's own)", "Far      (2x)", "Max      (objects never disappear)" });
+            objectDistBox.SelectedIndex = 1;
+            objectDistBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(objectDistBox);
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Map objects (plants, props) that the game hides when the camera is far from them.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            return p;
         }
 
         TabPage BuildControlsTab()
@@ -1561,6 +1629,7 @@ namespace JStarsLauncher
                     if (t.Length == 0 || t.StartsWith("#") || eq <= 0) continue;
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
                     if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "PIPE" ||
+                        k == "SHADOW_SCALE" || k == "SHADOW_RANGE" || k == "MODEL_DETAIL" || k == "OBJECT_DISTANCE" ||
                         k == "INPUT_MODE" || k == "MOUSE_SENS" || k.StartsWith("PAD_KEY_") || k.StartsWith("KB_KEY_") ||
                         k.StartsWith("KBM_KEY_") || k.StartsWith("PAD_BTN_"))
                         cur[k] = v;
@@ -1592,6 +1661,15 @@ namespace JStarsLauncher
             statsBox.Checked = cur.TryGetValue("TITLE_STATS", out s) ? s == "1" : !installed;
             fpsBox.Checked = cur.TryGetValue("FPS_COUNTER", out s) && s == "1";
             pipeBox.Checked = cur.TryGetValue("PIPE", out s) && s == "1";
+            // Graphics tab: an unknown or missing value shows the default (Medium, Normal, Normal, Normal).
+            int sh;
+            if (!cur.TryGetValue("SHADOW_SCALE", out s) || !int.TryParse(s, out sh)) sh = 2;
+            shadowBox.SelectedIndex = Math.Max(1, Math.Min(4, sh)) - 1;
+            shadowRangeBox.SelectedIndex = cur.TryGetValue("SHADOW_RANGE", out s) && s.Trim() == "2" ? 1 : 0;
+            int mdi = cur.TryGetValue("MODEL_DETAIL", out s) ? Array.IndexOf(ModelDetailIds, s.Trim()) : 0;
+            modelDetailBox.SelectedIndex = mdi < 0 ? 0 : mdi;
+            int odi = cur.TryGetValue("OBJECT_DISTANCE", out s) ? Array.IndexOf(ObjectDistIds, s.Trim()) : 1;
+            objectDistBox.SelectedIndex = odi < 0 ? 1 : odi;
             // Keyboard page: KB_KEY_*, or PAD_KEY_* from before the input types existed.
             // Keyboard & Mouse page: KBM_KEY_*, else a copy of the keyboard page.
             string kbPrefix = HasPrefix(cur, "KB_KEY_") ? "KB_KEY_" : "PAD_KEY_";
@@ -1640,6 +1718,10 @@ namespace JStarsLauncher
             lines.Add("TITLE_STATS=" + (statsBox.Checked ? "1" : "0"));
             lines.Add("FPS_COUNTER=" + (fpsBox.Checked ? "1" : "0"));
             lines.Add("PIPE=" + (pipeBox.Checked ? "1" : "0"));
+            lines.Add("SHADOW_SCALE=" + (shadowBox.SelectedIndex + 1));
+            lines.Add("SHADOW_RANGE=" + (shadowRangeBox.SelectedIndex == 1 ? "2" : "1"));
+            lines.Add("MODEL_DETAIL=" + ModelDetailIds[modelDetailBox.SelectedIndex]);
+            lines.Add("OBJECT_DISTANCE=" + ObjectDistIds[objectDistBox.SelectedIndex]);
             lines.Add("INPUT_MODE=" + ModeIds[Mode]);
             lines.Add("# Keys the game uses: the active page's keys as Windows virtual-key codes (0x01-0x06 = mouse buttons).");
             foreach (PadAction a in CurrentKeys())
