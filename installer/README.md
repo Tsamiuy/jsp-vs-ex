@@ -29,9 +29,9 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 |---|---|
 | `installer/jsp.iss` | The Inno Setup 6 script: disc and EBOOT checks, RPCS3 page, Portable task, install, build step, uninstall; it compiles the settings window (`launcher/JStarsLauncher.cs` as `jsp-settings.exe`, with the C# compiler that comes with Windows) that the shortcuts open |
 | `installer/launcher/launcher.c` | `jsp-launcher.exe`, a small program the installer's shortcuts start. It checks that the disc folder exists (message box if not), reads `paths.txt` and `play_settings.txt`, leaves the power plan alone (`CPU_BOOST=1` sets its maximum processor state to 100 % while the game runs and puts the old values back afterwards) and starts the built game. It does not replace `launcher/JStarsLauncher.cs` |
-| `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`--tree current`, the default: `installer/port`, today ps3recomp v0.19.0; or `--tree legacy`: `jstars/port`; the older names `v18`/`v19` and `v15` still work), the patched toolkit (current: `export_toolkit.py`; legacy: `jstars/toolkit/apply_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
+| `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`installer/port`, today ps3recomp v0.19.0; `--tree current` is the default and the only tree built, `v18`/`v19` are other names for it; `--tree legacy`/`v15` exit with a pointer to the git tag `legacy-v15`, see issue #152), the patched toolkit (`export_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
 | `installer/tools/firstrun.py` | The build step that runs on the player's PC after setup copied the files. Preflight checks with named codes, then resumable steps whose markers hold an input fingerprint; a new log per run in `logs\firstrun-<time>.log` (the newest five are kept) |
-| `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them with the v0.15 tools (from `jstars/spu_jobs/`, arguments instead of fixed folders); used by the `v15` tree |
+| `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them with the v0.15 tools (from `jstars/spu_jobs/`, arguments instead of fixed folders); no longer used (the retired `v15` tree; see tag `legacy-v15`) |
 | `installer/tools/lift_jobs.py` | The same for the v0.19.0 tools (the current tree): scan, wrap, lift, `spu_workloads.c` |
 | `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.19.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
 | `installer/port/jsp/`, `installer/port/patches/` | The current port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
@@ -53,7 +53,7 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/tools/assemble_portable.py` | Packs the same payload as `jsp-<version>-portable.zip` with `run.cmd` and a short readme |
 | `installer/tools/fetch_toolchain.py`, `toolchain.json` | Downloads llvm-mingw, CMake, Ninja, their licence texts and the FFmpeg source (its libavcodec/libavutil headers only go into the payload, for the opening-movie decoder) on the machine that builds the installer, checks the pinned SHA-256 of each, unpacks them into a cache. Nothing downloaded is committed |
 | `installer/tools/llvm-mingw.cmake` | CMake toolchain file for the bundled compiler |
-| `installer/patches/` | Small patches the payload applies to its own copy of the port and the toolkit (this repository's files are not changed): 0001 to 0003 so that clang builds them, 0004 the optional startup shader loader, 0005 the Windows 10 fix for DXT textures whose size is not a multiple of 4, 0006 the optional "EX" in the title logo, 0007 the window icon and the plain title the launcher asks for |
+| `installer/patches/` | No longer applied (the retired `v15` tree; see tag `legacy-v15`). It held small patches for the payload's copy of the port and the toolkit: 0001 to 0003 so that clang builds them, 0004 the optional startup shader loader, 0005 the Windows 10 fix for DXT textures whose size is not a multiple of 4, 0006 the optional "EX" in the title logo, 0007 the window icon and the plain title the launcher asks for |
 | `installer/licenses/LGPL-2.1.txt` | The one licence text kept in the tree (some MinGW-w64 headers are LGPL-2.1+); the others are fetched with pinned hashes |
 | `installer/tools/firstrun_selftest.py`, `portable_selftest.py`, `make_fixture.py` | Host checks of `firstrun.py` and the portable path, up to the compile; `make_fixture.py` writes a small fake disc folder (no game data) |
 
@@ -95,7 +95,7 @@ python installer\tools\installer_art.py
 python installer\tools\installer_music.py
 build\installer\toolchain-cache\trees\llvm-mingw\bin\x86_64-w64-mingw32-clang.exe -O2 -mwindows -s -o build\installer\jsp-launcher.exe installer\launcher\launcher.c
 python installer\tools\assemble_payload.py
-rem (--tree legacy stages the earlier v0.15 port in jstars/port instead; the default is --tree current, today the v0.19.0 port in installer/port; --toolkit-repo and --no-fetch: see the script)
+rem (--tree current is the default, today the v0.19.0 port in installer/port; the earlier v0.15 port is no longer built, see tag legacy-v15; --toolkit-repo and --no-fetch: see the script)
 ISCC.exe /DPayload=%CD%\build\installer\payload /O%CD%\build\installer\out %CD%\installer\jsp.iss
 python installer\tools\assemble_portable.py
 ```
@@ -208,7 +208,7 @@ Quick start for players: [docs/ONLINE.md](../docs/ONLINE.md).
 The game's own Online Battle can run against a [re-psn](https://github.com/undecuple/re-psn) server instead of PSN: a small
 matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
 match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in
-the default tree (`--tree current`, see above), not in `--tree legacy`. Online is off unless these settings are
+the installer's only tree (`--tree current`, see above); the retired legacy tree (tag `legacy-v15`) never had them. Online is off unless these settings are
 present. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.

@@ -42,16 +42,23 @@ def units():
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="jspunits"))
     root = tmp / "app"
-    for rel, txt in (("ps3recomp/tools/ppu_lifter.py", "a"), ("ps3recomp/src/x.c", "x"), ("port/main.cpp", "m"), ("tools/jsp_spu.py", "j")):
+    for rel, txt in (("ps3recomp/tools/ppu_lifter.py", "a"), ("ps3recomp/src/x.c", "x"), ("port/main.cpp", "m"), ("tools/lift_jobs.py", "j")):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(txt)
-    # which tree a payload holds: tree.txt, none = v15; the v18 tree has its own exe name and its own SPU tool in the step fingerprint
-    check("payload_tree: no file is v15", firstrun.payload_tree(root) == "v15")
+    # which tree a payload holds: tree.txt says v18; none or another value is an error (the v15 tree is retired)
+    def tree_error():
+        try:
+            firstrun.payload_tree(root)
+        except SystemExit as e:
+            return str(e)
+        return ""
+    check("payload_tree: no file is an error", "tree.txt" in tree_error() and "legacy-v15" in tree_error())
+    (root / "tree.txt").write_text("nonsense\n")
+    check("payload_tree: unknown value is an error", "nonsense" in tree_error())
+    (root / "tree.txt").write_text("v15\n")
+    check("payload_tree: v15 is an error", "'v15'" in tree_error())
     (root / "tree.txt").write_text("v18\n")
     check("payload_tree: v18", firstrun.payload_tree(root) == "v18")
-    (root / "tree.txt").write_text("nonsense\n")
-    check("payload_tree: unknown value is v15", firstrun.payload_tree(root) == "v15")
-    (root / "tree.txt").unlink()
     eboot = tmp / "EBOOT.elf"
     eboot.write_bytes(b"\x7fELF" + b"1")
     vs = tmp / "tc"

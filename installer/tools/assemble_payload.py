@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """Assemble the installer payload (what jsp.iss copies into {app}): a port of the game, built on the player's PC.
 
-Two trees (--tree): "current" (the default) is installer/port, the glue for the port on the ps3recomp toolkit that this repository
-pins, with installer/port/patches applied to the exported toolkit (installer/tools/export_toolkit.py); today that is ps3recomp v0.19.0.
-"legacy" is this repository's earlier port (jstars/port) on the v0.15 toolkit as described below. The names do not change when the
-toolkit does. The older names v18 and v19 (= current) and v15 (= legacy) are still accepted. The payload's tree.txt keeps the
-internal ids "v18" (current) and "v15" (legacy), which firstrun.py reads to know which recipe to run.
+One tree: installer/port, the glue for the port on the ps3recomp toolkit that this repository pins, with installer/port/patches
+applied to the exported toolkit (installer/tools/export_toolkit.py); today that is ps3recomp v0.19.0. The names do not change when
+the toolkit does. The payload's tree.txt holds the internal id "v18", which firstrun.py reads. The earlier port (jstars/port on the
+v0.15 toolkit) is no longer built: --tree legacy (or v15) exits with a pointer to the git tag legacy-v15 and issue #152.
 
 Layout adapted from the installer of undecuple's Killzone 2 port, Project Pyrrhus (same MIT licence). The payload holds only code that
-is MIT-licensed or ours: the port sources (jstars/port), the ps3recomp v0.15 toolkit with this repository's patch already
-applied (jstars/toolkit/apply_toolkit.py, run here when the installer is built, so the player needs no Git), the embeddable
-Windows Python, firstrun.py + jsp_spu.py, the launcher, icons, NOTICE and licence texts. Never any game file, lifted code or
+is MIT-licensed or ours: the port sources (installer/port/jsp), the ps3recomp toolkit with installer/port/patches already
+applied (installer/tools/export_toolkit.py, run here when the installer is built, so the player needs no Git), the embeddable
+Windows Python, firstrun.py + lift_jobs.py, the launcher, icons, NOTICE and licence texts. Never any game file, lifted code or
 image in git; the compiler is the bundled llvm-mingw (toolchain.json); no Visual Studio is needed.
 
     python installer/tools/assemble_payload.py [--out build/installer/payload] [--repo DIR] [--python DIR]
                                                [--launcher EXE] [--art DIR] [--toolchain-cache DIR]
-                                               [--tree current|legacy] [--toolkit-repo GIT_DIR] [--no-fetch]
+                                               [--tree current] [--toolkit-repo GIT_DIR] [--no-fetch]
 
 Toolchain: llvm-mingw, CMake and Ninja come from the cache that fetch_toolchain.py filled from installer/tools/toolchain.json
 (hash-pinned; each tree must carry the manifest's hash in fetched.json), minus the entries' "prune" globs, with their licence
-texts in licenses/<group>/. The patches in installer/patches/ are applied to the payload's copy of the port and the toolkit.
+texts in licenses/<group>/.
 
-Needs Git on PATH and the submodule checked out (apply_toolkit.py / export_toolkit.py export the pinned commit; the v18 toolkit
+Needs Git on PATH and the submodule checked out (export_toolkit.py exports the pinned commit; the v18 toolkit
 tag is fetched into the submodule once, on the machine that builds the installer, when it is not there yet). Refuses to finish when the
 payload holds a file of a kind the game ships (.elf .bin .sfo .psarc .edat .self .sprx).
 """
@@ -59,9 +58,7 @@ exit /b 0
 """
 
 FORBIDDEN = {".elf", ".bin", ".sfo", ".psarc", ".edat", ".self", ".sprx"}
-PORT_FILES = ("CMakeLists.txt", "config.toml", "main.cpp", "stubs.cpp", "jstars_fiber.cpp", "jstars_debug.cpp",
-              "jstars_game.cpp", "jstars_sysutil.cpp", "exit_label_dark.inc", "exit_label_light.inc")
-NOTICE_V18 = """J-Stars Victory VS-EX: Fan Revival
+NOTICE = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
@@ -74,20 +71,6 @@ Python (PSF licence, toolchain/python/LICENSE.txt) is the Windows embeddable pac
 (LLVM: Apache-2.0 with LLVM exception; MinGW-w64 and winpthreads: see licenses/llvm-mingw/), CMake (BSD-3-Clause) and Ninja
 (Apache-2.0); their licence texts are in licenses/. Nothing from Microsoft is needed or included.
 """
-NOTICE = """J-Stars Victory VS-EX: Fan Revival
-An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
-No game files are included or downloaded: the port is built on your PC from your own copy of the game.
-This program contacts no server: no update check, no crash report, no telemetry.
-
-The game port is the work of Tsamiuy and contributors (the J-Stars port, MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
-Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.15.0 with the port's patch). The
-patched video library uses SMAA by Jorge Jimenez et al. (MIT, header text kept in its files). More in licenses/jstars-port-NOTICE.md.
-Python (PSF licence, toolchain/python/LICENSE.txt) is the Windows embeddable package. The build uses the bundled llvm-mingw
-(LLVM: Apache-2.0 with LLVM exception; MinGW-w64 and winpthreads: see licenses/llvm-mingw/), CMake (BSD-3-Clause) and Ninja
-(Apache-2.0); their licence texts are in licenses/. Nothing from Microsoft is needed or included.
-"""
-
-
 def tree_bytes(p):
     return sum(f.stat().st_size for f in pathlib.Path(p).rglob("*") if f.is_file())
 
@@ -164,34 +147,11 @@ def collect_toolchain(cache):
     return files, problems
 
 
-def apply_patches(out):
-    """installer/patches/*.patch, in name order, to the payload's copy (git apply works outside a repository; paths a/ b/ relative
-    to the payload). The checked-out repository is never edited."""
-    # The payload lies inside this repository's checkout (build/installer/payload). There git apply works relative to the
-    # checkout's top folder and silently skips every path outside the current folder, so it "succeeds" without changing a
-    # file. Stopping the repository search at the payload's parent makes it apply to the payload as a plain folder; the reverse
-    # check afterwards proves each patch is really in.
-    # core.autocrlf=false: the patches carry the line endings of the files they change (some toolkit files are CRLF), so they
-    # must apply byte for byte. With Git for Windows' default (true) git apply normalised the files first, and a
-    # checkout with false (Linux, CI) failed on spu_drain.c.
-    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(pathlib.Path(out).resolve().parent))
-    for p in sorted((ROOT / "installer/patches").glob("*.patch")):
-        r = subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "--recount", "-p1", str(p)],
-                           cwd=out, capture_output=True, text=True, env=env)
-        if r.returncode:
-            print(f"patch {p.name} failed:\n" + r.stdout + r.stderr, file=sys.stderr)
-            return False
-        r = subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "-R", "--check", "--recount", "-p1", str(p)],
-                           cwd=out, capture_output=True, text=True, env=env)
-        if r.returncode:
-            print(f"patch {p.name} reported success but is not in the payload:\n" + r.stdout + r.stderr, file=sys.stderr)
-            return False
-        print(f"patch {p.name} applied")
-    return True
-
-
-# --tree names -> the internal ids written to tree.txt (firstrun.py reads them): "v18" = installer/port, "v15" = jstars/port
+# --tree names -> the internal id written to tree.txt (firstrun.py reads it): "v18" = installer/port. legacy/v15 are accepted only to
+# print the pointer to the tag (decision 7 of the retirement plan: kept for one release, then removed).
 TREE_IDS = {"current": "v18", "v19": "v18", "v18": "v18", "legacy": "v15", "v15": "v15"}
+LEGACY_GONE = ("the legacy tree (jstars/port on the v0.15 toolkit) is no longer built by the installer. Its last buildable state is the "
+               "git tag legacy-v15 (check it out and run this script from there); see issue #152 on Tsamiuy/jsp-vs-ex.")
 
 
 def main(argv=None):
@@ -209,14 +169,17 @@ def main(argv=None):
                          "headers so the game is built with the opening-movie decoder (skipped with a warning when absent)")
     ap.add_argument("--tree", choices=tuple(TREE_IDS), default="current",
                     help="which port to build on the player's PC: current (the default; the port on the pinned ps3recomp toolkit, "
-                         "today v0.19.0) or legacy (the earlier port on v0.15). The older names v18/v19 and v15 are still accepted.")
+                         "today v0.19.0), also named v18/v19. legacy/v15 no longer build: they exit with a pointer to the tag legacy-v15.")
     ap.add_argument("--toolkit-repo", default=str(ROOT / "third_party/ps3recomp"), help="git checkout the current tree's toolkit is exported from")
     ap.add_argument("--release", default="", metavar="X.Y.Z",
                     help="a release build (release.yml passes the tag's version): must equal installer/VERSION; writes release.txt, "
                          "which the game shows in its main menu. Without it the payload has no release.txt and the game shows no version")
     ap.add_argument("--no-fetch", action="store_true", help="do not fetch the current tree's toolkit tag when the checkout lacks it")
     a = ap.parse_args(argv)
-    a.tree = TREE_IDS[a.tree]   # tree.txt and firstrun.py keep the internal ids "v18" and "v15"
+    a.tree = TREE_IDS[a.tree]   # tree.txt and firstrun.py use the internal id "v18"
+    if a.tree == "v15":
+        print(LEGACY_GONE, file=sys.stderr)
+        return 2
     pub, out = pathlib.Path(a.repo), pathlib.Path(a.out)
     if out.exists():
         shutil.rmtree(out)
@@ -226,11 +189,10 @@ def main(argv=None):
         if a.release != (ROOT / "installer/VERSION").read_text().strip():
             sys.exit(f"--release {a.release} differs from installer/VERSION")
         (out / "release.txt").write_text(a.release + "\n")
-    (out / "NOTICE.txt").write_text(NOTICE_V18 if a.tree == "v18" else NOTICE)
+    (out / "NOTICE.txt").write_text(NOTICE)
     (out / "tree.txt").write_text(a.tree + "\n")
     (out / "tools").mkdir()
-    spu_tool = "lift_jobs.py" if a.tree == "v18" else "jsp_spu.py"
-    for n in ("firstrun.py", spu_tool, "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
+    for n in ("firstrun.py", "lift_jobs.py", "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
         shutil.copy2(ROOT / "installer/tools" / n, out / "tools" / n)
     shutil.move(out / "tools" / "firstrun.py", out / "firstrun.py")
     shutil.copy2(ROOT / "installer/tools/eboot_ids.json", out / "eboot_ids.json")   # known EBOOT builds, read by firstrun.py (check E3)
@@ -246,15 +208,14 @@ def main(argv=None):
         print("ex_logo_art failed (it needs Pillow and numpy):\n" + r.stdout + r.stderr, file=sys.stderr)
         return 1
     print(r.stdout.strip())
-    if a.tree == "v18":
-        # the art of the in-game Port Settings page (toolkit patches 2516-2518, JSP_PORT_MENU=1): the two menu labels and the glyph atlas,
-        # drawn here from Fira Sans Heavy Italic (SIL OFL 1.1; the font file is not in the repository, see menu_label_art.py)
-        for tool in ("menu_label_art.py", "menu_font_art.py"):
-            r = subprocess.run([sys.executable, "-I", str(ROOT / "installer/tools" / tool), str(out)], capture_output=True, text=True)
-            if r.returncode:
-                print(f"{tool} failed (it needs Pillow, numpy and build/installer/fonts/FiraSans-HeavyItalic.ttf):\n" + r.stdout + r.stderr, file=sys.stderr)
-                return 1
-            print(r.stdout.strip())
+    # the art of the in-game Port Settings page (toolkit patches 2516-2518, JSP_PORT_MENU=1): the two menu labels and the glyph atlas,
+    # drawn here from Fira Sans Heavy Italic (SIL OFL 1.1; the font file is not in the repository, see menu_label_art.py)
+    for tool in ("menu_label_art.py", "menu_font_art.py"):
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "installer/tools" / tool), str(out)], capture_output=True, text=True)
+        if r.returncode:
+            print(f"{tool} failed (it needs Pillow, numpy and build/installer/fonts/FiraSans-HeavyItalic.ttf):\n" + r.stdout + r.stderr, file=sys.stderr)
+            return 1
+        print(r.stdout.strip())
     # the settings window (C# 5 source; setup and firstrun.py compile it on the player's PC with Windows' own csc)
     shutil.copy2(pub / "launcher/JStarsLauncher.cs", out / "tools" / "jsp-settings.cs")
     shutil.copy2(a.launcher, out / "jsp-launcher.exe")
@@ -262,39 +223,17 @@ def main(argv=None):
         shutil.copy2(pathlib.Path(a.art) / f"jsp-{n}.ico", out / f"jsp-{n}.ico")
     shutil.copy2(pub / "LICENSE", out / "licenses/jstars-port-LICENSE.txt")
     shutil.copy2(pub / "NOTICE.md", out / "licenses/jstars-port-NOTICE.md")
-    if a.tree == "v18":
-        # the glue (installer/port/jsp) and the pinned toolkit with installer/port/patches applied
-        shutil.copytree(ROOT / "installer/port/jsp", out / "port")
-        sys.path.insert(0, str(ROOT / "installer/tools"))
-        import export_toolkit
-        try:
-            names = export_toolkit.export(a.toolkit_repo, out / "ps3recomp", fetch=not a.no_fetch)
-        except RuntimeError as e:
-            print("export_toolkit failed:\n" + str(e), file=sys.stderr)
-            return 1
-        print(f"ps3recomp {export_toolkit.TAG} exported, {len(names)} patches applied")
-        shutil.copy2(out / "ps3recomp/LICENSE", out / "licenses/ps3recomp-LICENSE.txt")
-    else:
-        # the port sources
-        (out / "port").mkdir()
-        for n in PORT_FILES:
-            # As the repository stores them (LF): Git for Windows' default core.autocrlf=true checks them out with CRLF, and
-            # patch 0002 (LF, applied byte for byte with core.autocrlf=false) then fails on port/CMakeLists.txt.
-            data = (pub / "jstars/port" / n).read_bytes()
-            if b"\0" not in data:
-                data = data.replace(b"\r\n", b"\n")
-            (out / "port" / n).write_bytes(data)
-            shutil.copystat(pub / "jstars/port" / n, out / "port" / n)
-        # the toolkit: pinned v0.15.0 + this repository's patch + SMAA files, applied here
-        r = subprocess.run([sys.executable, "-I", str(pub / "jstars/toolkit/apply_toolkit.py"), "--out", str(out / "ps3recomp")],
-                           capture_output=True, text=True)
-        if r.returncode:
-            print("apply_toolkit failed:\n" + r.stdout + r.stderr, file=sys.stderr)
-            return 1
-        print(r.stdout.strip().splitlines()[0])
-        shutil.copy2(out / "ps3recomp/LICENSE", out / "licenses/ps3recomp-LICENSE.txt")
-        if not apply_patches(out):
-            return 1
+    # the glue (installer/port/jsp) and the pinned toolkit with installer/port/patches applied
+    shutil.copytree(ROOT / "installer/port/jsp", out / "port")
+    sys.path.insert(0, str(ROOT / "installer/tools"))
+    import export_toolkit
+    try:
+        names = export_toolkit.export(a.toolkit_repo, out / "ps3recomp", fetch=not a.no_fetch)
+    except RuntimeError as e:
+        print("export_toolkit failed:\n" + str(e), file=sys.stderr)
+        return 1
+    print(f"ps3recomp {export_toolkit.TAG} exported, {len(names)} patches applied")
+    shutil.copy2(out / "ps3recomp/LICENSE", out / "licenses/ps3recomp-LICENSE.txt")
     (out / "cmake").mkdir()
     shutil.copy2(ROOT / "installer/tools/llvm-mingw.cmake", out / "cmake/llvm-mingw.cmake")
     tfiles, tprob = collect_toolchain(os.path.abspath(a.toolchain_cache))

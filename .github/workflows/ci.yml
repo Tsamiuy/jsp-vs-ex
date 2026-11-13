@@ -79,27 +79,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (-not (Test-Path "$out\J-Stars Launcher.exe")) { exit 1 }
 
-  toolkit:
-    # The patched toolkit as a Windows builder makes it: submodule at the pin, jstars/toolkit/ps3recomp-local.patch applied
-    # by jstars/toolkit/apply_toolkit.py (Git for Windows' default line-ending conversion stays on, as on a player's PC).
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          submodules: true
-          persist-credentials: false
-
-      - name: The toolkit patch applies to the pinned ps3recomp
-        run: python jstars/toolkit/apply_toolkit.py --check
-
-      - name: Build the patched toolkit folder
-        shell: pwsh
-        run: |
-          python jstars/toolkit/apply_toolkit.py --out "$env:RUNNER_TEMP\ps3recomp"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          if (-not (Test-Path "$env:RUNNER_TEMP\ps3recomp\.toolkit-stamp")) { exit 1 }
-
   # The host tests (no game data, no GPU) are listed once in tools/ci/host-tests.txt and run by tools/ci/run_host_tests.py:
   # one named result per test. A test file in git that is neither listed nor excluded there fails the coverage step.
   host-tests:
@@ -141,7 +120,7 @@ jobs:
         run: python3 tools/ci/run_host_tests.py --strict-skip --toolkit "$RUNNER_TEMP/ps3recomp" --scratch "$RUNNER_TEMP/host-tests"
 
   # The patch series are what every player's build depends on: a hunk that no longer applies would only show up when a
-  # release is built. Same tools as the installer build (export_toolkit.py, assemble_payload.apply_patches, git apply only).
+  # release is built. Same tool as the installer build (export_toolkit.py: git archive of the pin, git apply only).
   patches:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -151,8 +130,8 @@ jobs:
           submodules: true
           persist-credentials: false
 
-      - name: Both patch series apply to scratch copies of the pinned ps3recomp
-        # current: installer/port/patches on v0.19.0; legacy: installer/patches on the v0.15 tree
+      - name: The patch series applies to a scratch copy of the pinned ps3recomp
+        # installer/port/patches on v0.19.0 (the legacy series, installer/patches, is no longer checked: tag legacy-v15)
         run: python3 tools/ci/check_patch_series.py --scratch "$RUNNER_TEMP/series"
 
   # The host tests that need Windows (the launcher's settings order, the generated build script and path quoting) plus the

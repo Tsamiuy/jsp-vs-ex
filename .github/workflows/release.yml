@@ -61,7 +61,6 @@ jobs:
     uses: ./.github/workflows/installer.yml
     with:
       portable: true
-      tree: current
       keep_days: 30
       release_version: ${{ needs.tag.outputs.version }}
 

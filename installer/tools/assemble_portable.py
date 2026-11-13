@@ -87,9 +87,9 @@ def main(argv=None):
     ap.add_argument("--top", default="JSP Fan Revival", help="top folder inside the zip")
     a = ap.parse_args(argv)
     pay, out = pathlib.Path(a.payload), pathlib.Path(a.out)
-    tree = (pay / "tree.txt").read_text().split()[0] if (pay / "tree.txt").is_file() else "v15"   # which port assemble_payload.py staged
-    spu_tool = "tools/lift_jobs.py" if tree == "v18" else "tools/jsp_spu.py"
-    problems = [f"missing from the payload: {r}" for r in (*REQUIRED, spu_tool, "tree.txt") if not (pay / r).is_file() and not (r == "tree.txt" and tree == "v15")]
+    problems = [f"missing from the payload: {r}" for r in (*REQUIRED, "tools/lift_jobs.py", "tree.txt") if not (pay / r).is_file()]
+    if (pay / "tree.txt").is_file() and (pay / "tree.txt").read_text().split()[:1] != ["v18"]:
+        problems.append("tree.txt is not v18 (only the current tree is built; the v15 tree is retired, tag legacy-v15)")
     problems += [f"first-run output in the payload: {n}" for n in FIRST_RUN_OUTPUT if (pay / n).exists()]
     entries = {}
     for p in sorted(pay.rglob("*")):

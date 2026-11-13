@@ -16,10 +16,6 @@ on:
         description: Days to keep the files (1-90)
         type: number
         default: 7
-      tree:
-        description: Which port to build (current is the default; legacy is the earlier v0.15 port)
-        type: string
-        default: current
   workflow_call:
     inputs:
       release_version:
@@ -34,10 +30,6 @@ on:
         description: Days to keep the files (1-90)
         type: number
         default: 7
-      tree:
-        description: Which port to build (current is the default; legacy is the earlier v0.15 port)
-        type: string
-        default: current
 
 permissions:
   contents: read
@@ -138,11 +130,10 @@ jobs:
       - name: Payload and setup
         shell: pwsh
         env:
-          TREE: ${{ inputs.tree || 'current' }}
           RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           $rel = @(); if ($env:RELEASE_VERSION) { $rel = @('--release', $env:RELEASE_VERSION) }
-          python installer\tools\assemble_payload.py --tree $env:TREE @rel
+          python installer\tools\assemble_payload.py @rel
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & $env:ISCC "/DPayload=$PWD\build\installer\payload" "/O$PWD\build\installer\out" "$PWD\installer\jsp.iss"
           if ($LASTEXITCODE -ne 0) { exit 1 }

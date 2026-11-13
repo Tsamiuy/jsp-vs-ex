@@ -41,6 +41,11 @@ def scripted(answers):
 
 
 def run_main(argv, answers=()):
+    if "--root" in argv:   # a real install folder always has the payload's tree.txt (firstrun.py refuses one without)
+        root = pathlib.Path(argv[argv.index("--root") + 1])
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / "tree.txt").exists():
+            (root / "tree.txt").write_text("v18\n")
     out = io.StringIO()
     old = sys.stdout
     sys.stdout = out
@@ -121,7 +126,8 @@ def main(scratch, payload=None, disc=None, eboot=None):
     ns = firstrun.argparse.Namespace(root=str(old), disc=str(fx / "disc"), eboot=str(fx / "EBOOT.elf"), devflash=str(fx / "dev_flash"),
                                      hdd0=str(old / "hdd0"), force=[], toolchain=str(scratch / "none"))
     (old / "build" / "port").mkdir(parents=True)
-    (old / "build" / "port" / firstrun.EXE).write_bytes(b"MZ")
+    (old / "tree.txt").write_text("v18\n")
+    (old / "build" / "port" / firstrun.TREE_EXE["v18"]).write_bytes(b"MZ")
     c = firstrun.Ctx(ns, "US", "BLUS31519")
     check("place step", firstrun.step_place(c))
     pt = (old / "paths.txt").read_text()
