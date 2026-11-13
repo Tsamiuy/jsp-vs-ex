@@ -44,6 +44,7 @@ Kept where they are, on purpose: `jstars/` (its name is also the run folder writ
 | `assets/`, `tools/site/` | Banner, social preview and icon (our own ASCII-style art); the fan-site generator, which builds a static page from `README.md` and `NOTICE.md` (`python3 tools/site/site.py --check`) |
 | `.github/workflows/pages.yml` | Publishes that page with GitHub Pages when run by hand (Actions > pages) |
 | `CHANGELOG.md`, `tools/release.py` | Release notes and the tool that keeps `installer/VERSION`, the CMake project versions and the changelog in step (`--check`, `bump`, `notes`); the workflows `prepare-release.yml` and `release.yml` use it. See [CONTRIBUTING.md](../CONTRIBUTING.md) |
+| `.github/workflows/release-notify.yml` | Posts a message with the link to the project's Discord channel when a release is published; the webhook URL is the repository secret `DISCORD_RELEASE_WEBHOOK` (no message without it) |
 | `LICENSE`, `NOTICE.md` | MIT licence; third-party software and licences |
 | `SECURITY.md`, `CONTRIBUTING.md` | How to report a problem and how to send a change |
 | `AGENTS.md` | Rules for AI coding agents: branches, pull requests, CI, who merges |
