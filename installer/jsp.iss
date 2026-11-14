@@ -114,6 +114,8 @@ Filename: "{cmd}"; Parameters: "/C """"{app}\toolchain\python\python.exe"" -X ut
 
 [UninstallDelete]
 Type: files; Name: "{app}\jsp-settings.exe"
+Type: files; Name: "{app}\jsp-settings.exe.src-sha256"
+Type: files; Name: "{app}\jsp-settings.exe.new"
 Type: filesandordirs; Name: "{app}\build"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: filesandordirs; Name: "{app}\toolchain\python\__pycache__"
