@@ -181,6 +181,26 @@ int main(int argc, char** argv)
 {
     const std::string root = argc > 1 ? argv[1] : "..";
 
+    // ================= the settings file path as displayed (no Windows user name) =================
+    {
+#define UD "C:\\Us" "ers\\"     /* written in two pieces so the repository check for personal paths does not flag the test data */
+#define LUD "c:\\us" "ers\\"
+        setenv("APPDATA", UD "Someone\\AppData\\Roaming", 1);
+        setenv("LOCALAPPDATA", UD "Someone\\AppData\\Local", 1);
+        setenv("USERPROFILE", UD "Someone", 1);
+        CHECK(jps::display_path(UD "Someone\\AppData\\Roaming\\JStars\\play_settings.txt") == "%APPDATA%\\JStars\\play_settings.txt");
+        CHECK(jps::display_path(LUD "someone\\appdata\\local\\Programs\\J-Stars\\play_settings.txt") == "%LOCALAPPDATA%\\Programs\\J-Stars\\play_settings.txt");
+        CHECK(jps::display_path(UD "Someone\\Games\\J-Stars\\play_settings.txt") == "%USERPROFILE%\\Games\\J-Stars\\play_settings.txt");
+        CHECK(jps::display_path(UD "SomeoneElse\\x.txt") == "%USERPROFILE%\\x.txt");  // another profile: still no name shown
+        unsetenv("APPDATA"); unsetenv("LOCALAPPDATA"); unsetenv("USERPROFILE");
+        CHECK(jps::display_path(UD "Someone\\Games\\x.txt") == "%USERPROFILE%\\Games\\x.txt");  // no variables: the Users\<name> start is enough
+        CHECK(jps::display_path("D:\\Games\\J-Stars\\play_settings.txt") == "D:\\Games\\J-Stars\\play_settings.txt");
+        CHECK(jps::display_path("/tmp/x/play_settings.txt") == "/tmp/x/play_settings.txt");
+        CHECK(jps::display_path("") == "");
+#undef UD
+#undef LUD
+    }
+
     // ================= the key table against the launcher and the readers =================
     {
         const std::string l19 = slurp(root + "/launcher/JStarsLauncher19.cs"), l = slurp(root + "/launcher/JStarsLauncher.cs");

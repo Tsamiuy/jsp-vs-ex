@@ -754,7 +754,7 @@ void draw_page()
         }
         if (g_menu.io) {
             if (!g_menu.smsg.empty()) jsp_overlay_text_style(260, 520, g_menu.smsg.c_str(), 0.7f, g_menu.smsg_err ? JSP_RGBA(255, 150, 110, 255) : white, 0);
-            std::string pth = g_menu.io->path();
+            std::string pth = jps::display_path(g_menu.io->path());
             if (pth.size() > 78) pth = "..." + pth.substr(pth.size() - 75);
             jsp_overlay_text_style(260, 548, ("Settings file: " + pth).c_str(), 0.5f, white, 0);
         }
