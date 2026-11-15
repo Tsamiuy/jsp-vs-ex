@@ -22,13 +22,10 @@ BANNED_EXT = {".iso", ".elf", ".self", ".sprx", ".prx", ".pup", ".pkg", ".rap", 
               ".dll", ".exe", ".pdb", ".lib", ".obj", ".log"}
 # Our own generated art, allowed by exact path (also allowed in .gitignore). Nothing from the game.
 ART_ALLOW = {"assets/banner-2x.png", "assets/social-preview.png", "assets/logo-mark-512.png"}
-# Third-party SMAA 1x files (MIT, github.com/iryoku/smaa), kept byte for byte with their licence headers. They are
-# allowed by exact path: the shader source has a banned extension, and the headers carry the authors' e-mail
-# addresses, which the licence asks us to keep. The toolkit patch that adds the same files to the ps3recomp export
-# (patch 2511) carries those headers too, so its e-mail lines are allowed by its exact path.
-SMAA_DIR = "jstars/toolkit/third_party_smaa/"
-SMAA_ALLOW = {SMAA_DIR + n for n in ("AreaTex.h", "SearchTex.h", "SMAA.hlsl", "SMAA_hlsl.inc")}
-SMAA_ALLOW.add("installer/port/patches/2511-d3d12-edge-smoothing-fxaa-smaa.patch")
+# Third-party SMAA 1x files (MIT, github.com/iryoku/smaa), kept byte for byte with their licence headers, which carry the
+# authors' e-mail addresses (the licence asks us to keep them) and include a shader source with a banned extension. They
+# reach the repository only inside toolkit patch 2511, so that patch is allowed by its exact path.
+SMAA_ALLOW = {"installer/port/patches/2511-d3d12-edge-smoothing-fxaa-smaa.patch"}
 BANNED_NAMES = re.compile(r"(^|/)(EBOOT\.[^/]*|PARAM\.SFO)$", re.I)
 
 TEXT_RULES = [

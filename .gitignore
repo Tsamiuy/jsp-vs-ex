@@ -34,32 +34,6 @@
 /docs/character-details/*
 !/docs/character-details/*.md
 
-# Port code and scripts
-!/jstars/
-/jstars/*
-!/jstars/run_test.ps1
-!/jstars/play.ps1
-!/jstars/test_fight.txt
-!/jstars/Play J-Stars.bat
-!/jstars/Test Fight.bat
-!/jstars/snap_window.ps1
-!/jstars/toolkit/
-/jstars/toolkit/*
-!/jstars/toolkit/*.py
-!/jstars/toolkit/README.md
-!/jstars/toolkit/ps3recomp-local.patch
-!/jstars/port/
-/jstars/port/*
-!/jstars/port/*.cpp
-!/jstars/port/CMakeLists.txt
-!/jstars/port/README.md
-!/jstars/port/build.bat
-!/jstars/port/build_pdb.bat
-!/jstars/port/config.toml
-!/jstars/spu_jobs/
-/jstars/spu_jobs/*
-!/jstars/spu_jobs/*.py
-
 # Notes: text, patches and scripts only
 !/docs/archive/jstars-notes/
 /docs/archive/jstars-notes/**
