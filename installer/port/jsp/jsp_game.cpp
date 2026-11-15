@@ -37,6 +37,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -57,6 +58,7 @@
 
 #include "ps3emu/error_codes.h"
 #include "ppu_recomp.h"     /* ppu_context, vm_base */
+#include "jsp_lod_lifetime.h"
 
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name,
                                      void (*fn)(ppu_context*));
@@ -2401,14 +2403,25 @@ void six_watch_tick(bool picking)
     }
 }
 /* MODEL_DETAIL / OBJECT_DISTANCE ("Model detail" and "Object draw distance" in the launcher). Map objects placed by
- * locators each own a LOD object (vtable 0x008843D0, 0x70 bytes, at instance+0x80C) whose virtual select method
+ * locators each own a LOD object (vtable 0x008843D0, 0x70 bytes, pointer at instance+0x80C) whose virtual select method
  * func_003959C8 runs every frame with the object in r3: squared distance to the camera against +0x50 (LOD 0 up to,
  * default 30), +0x54 (LOD 1 up to, 60), and when +0x58 != 0 a cull distance +0x5C (100) beyond which nothing is
  * drawn; the chosen level goes to +0x60. Defaults from func_003955B4, per-object values from the stage's
  * LODModelInfo chunk (func_00366398 -> func_003629E4). Each object's own values are kept and scaled here, just before
  * the game reads them. docs/archive/jstars-notes/GRAPHICS_MAP.md. */
 struct LodOrig { float d0, d1, cull; uint32_t w0, w1, wc, flag; };
+std::mutex g_lod_mutex;
 std::unordered_map<uint32_t, LodOrig> g_lod_orig;
+std::atomic<int> g_lod_idle_generation{-1};
+// Base initialization resets the tracked fields; it does not prove allocator
+// ownership. Destruction retires them before free. Neither event reads guest
+// storage, whose vtable may still describe the old object or uninitialized data.
+void lod_baseline_reset(uint32_t o)
+{
+    if (o < 0x10000u || o >= 0xF0000000u) return;
+    std::lock_guard<std::mutex> lock(g_lod_mutex);
+    g_lod_orig.erase(o);
+}
 // Fields changed by the game are new originals; unchanged fields can still be
 // this hook's scaled output. Reconcile each field before a generation sweep.
 void lod_original_changes(LodOrig& lo, uint32_t r0, uint32_t r1, uint32_t rc, uint32_t flag, float prior_od)
@@ -2420,6 +2433,11 @@ void lod_original_changes(LodOrig& lo, uint32_t r0, uint32_t r1, uint32_t rc, ui
 }
 void lod_select_hook(uint32_t o)
 {
+    const int generation = jsp_setting_gen();
+    // Published only after a normal restoration and ledger discard under the
+    // mutex. A later settings generation always takes the synchronized path.
+    if (g_lod_idle_generation.load(std::memory_order_acquire) == generation) return;
+    std::lock_guard<std::mutex> lock(g_lod_mutex);
     /* VEGETATION is an experiment. Keep its existing suppression bookkeeping
      * separate: a hidden object's zero cull distance is this hook's output. */
     static const float veg = [] { const char* e = exp_env("VEGETATION");
@@ -2430,7 +2448,6 @@ void lod_select_hook(uint32_t o)
     static float md = 1.0f, od = 1.0f;
     static int lgen = -1;
     bool refreshed = false;
-    const int generation = jsp_setting_gen();
     if (lgen != generation) {
         const float prior_od = od;
         const auto inputs = jpss::reader_snapshot();
@@ -2456,8 +2473,10 @@ void lod_select_hook(uint32_t o)
         // Overrides are restored. Retaining their ledger would let a later
         // local preference edit overwrite a new stage's objects at reused EAs.
         if (refreshed) g_lod_orig.clear();
+        if (g_lod_orig.empty()) g_lod_idle_generation.store(generation, std::memory_order_release);
         return;
     }
+    g_lod_idle_generation.store(-1, std::memory_order_release);
     if (o < 0x10000u || o >= 0xF0000000u || vm_read32(o) != 0x008843D0u) return;
     const uint32_t r0 = vm_read32(o + 0x50), r1 = vm_read32(o + 0x54), rc = vm_read32(o + 0x5C), flag = vm_read32(o + 0x58);
     auto it = g_lod_orig.find(o);
@@ -2494,7 +2513,10 @@ void lod_select_hook(uint32_t o)
 
 int training_icall(uint32_t target, uint64_t* gpr)
 {
-    if (target == 0x003959C8u) { lod_select_hook((uint32_t)gpr[3]); return 0; }
+    if (target == 0x003959C8u) {
+        if (!JSP_LOD_ENTRY_HOOKS_VERIFIED || !jsp_lod_hooks_active()) lod_select_hook((uint32_t)gpr[3]);
+        return 0; // the verified entry wrapper applies it exactly once
+    }
     if (g_probe_on == 1) probe_icall(target, (uint32_t)gpr[3], (uint32_t)gpr[4]);
     /* SIX_ICALL=1 (test only): calls into the setup-table functions (0x00183528..0x00186E00) while the match loads,
      * each target with its first arguments, the first 6 times each, to find what asks which slot is a Support. */
@@ -3858,6 +3880,26 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 }
 
 }  // namespace
+
+extern "C" void jsp_lod_initialize_enter(ppu_context* ctx)
+{
+    if (jsp_lod_hooks_active()) lod_baseline_reset((uint32_t)ctx->gpr[3]);
+}
+extern "C" void jsp_lod_retire_enter(ppu_context* ctx)
+{
+    if (jsp_lod_hooks_active()) lod_baseline_reset((uint32_t)ctx->gpr[3]);
+}
+extern "C" void jsp_lod_select_enter(ppu_context* ctx)
+{
+    if (jsp_lod_hooks_active()) lod_select_hook((uint32_t)ctx->gpr[3]);
+}
+extern "C" void jsp_lod_hook_leave(ppu_context* ctx) { (void)ctx; }
+extern "C" void jsp_lod_lifetime_reset(void)
+{
+    std::lock_guard<std::mutex> lock(g_lod_mutex);
+    g_lod_orig.clear();
+    g_lod_idle_generation.store(-1,std::memory_order_release);
+}
 
 extern "C" void jsp_register_game_overrides(void)
 {

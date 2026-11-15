@@ -79,6 +79,8 @@
  * -----------------------------------------------------------------------*/
 extern "C" {
 uint32_t ppu_load_elf(const char* path);      /* ELF -> guest RAM, returns entry OPD */
+extern int (*g_ppu_image_load_hook)(const uint8_t*,size_t);
+int jsp_lod_bind_loaded_image(const uint8_t*,size_t);
 void     ppu_recomp_register(void);           /* generated: lifted table -> address map */
 void     ppu_hle_init(void);                  /* firmware import NID -> HLE handler */
 void     ppu_sysprx_register(void);           /* boot-critical CRT (sys_initialize_tls, ...) */
@@ -625,6 +627,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    g_ppu_image_load_hook = jsp_lod_bind_loaded_image;
     uint32_t entry = ppu_load_elf(argv[1]);
     if (!entry) {
         fprintf(stderr, "ERROR: could not load %s\n", argv[1]);

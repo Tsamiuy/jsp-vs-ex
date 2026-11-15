@@ -1,0 +1,34 @@
+Patch 6016: optional title guard for the exact PPU ELF loader input buffer.
+
+The null notification revokes prior title evidence before each load attempt, including open/read/header failures. A non-null
+buffer notification runs after basic ELF validation and before guest memory writes; returning zero rejects that load. Default
+null callback preserves the existing loader behavior. The port uses this to bind verified lifecycle entries to the actual loaded
+program, without separately reopening a path and racing a file replacement. Authored SDK contexts only; no original game data.
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -3587,8 +3587,12 @@
+ /* Default used by the PS3 executable entry path when PROC_PARAM is absent. */
+ static int32_t g_ppu_primary_priority = 1001;
+
++// Optional title guard sees the exact owned input buffer before guest writes.
++// nullptr revokes prior evidence even when the next open/read/header check fails.
++extern "C" { int (*g_ppu_image_load_hook)(const uint8_t*, size_t) = nullptr; }
+ extern "C" uint32_t ppu_load_elf(const char* path)
+ {
++    if (g_ppu_image_load_hook) g_ppu_image_load_hook(nullptr, 0);
+     g_ppu_primary_priority = 1001;
+     FILE* f = fopen(path, "rb");
+     if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
+@@ -3602,6 +3606,10 @@
+     if (sz < 64 || memcmp(file, "\x7F""ELF", 4) != 0 || file[4] != 2 /*ELFCLASS64*/ || file[5] != 2 /*MSB*/) {
+         fprintf(stderr, "[ppu] not a 64-bit big-endian ELF\n"); free(file); return 0;
+     }
++    if (g_ppu_image_load_hook && !g_ppu_image_load_hook(file, (size_t)sz)) {
++        fprintf(stderr, "[ppu] input image rejected by title guard\n");
++        free(file); return 0;
++    }
+     uint64_t fsz = (uint64_t)sz;
+     uint32_t entry = (uint32_t)be64(file + 24);
+     uint64_t phoff = be64(file + 32);

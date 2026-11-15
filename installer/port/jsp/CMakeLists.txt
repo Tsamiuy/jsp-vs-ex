@@ -74,6 +74,31 @@ endif()
 list(LENGTH RECOMP_SOURCES RECOMP_SOURCE_COUNT)
 message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 
+# Entry hooks are a property of the actual generated functions and input image,
+# never a manually enabled compile definition. Verify now and before every build
+# so a changed/partial lift cannot retain a previous configure's capability.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(JSP_LOD_VERIFY_ARGS
+    "${CMAKE_CURRENT_SOURCE_DIR}/lod_hooks.py"
+    --out "${RECOMP_DIR}"
+    --manifest "${CMAKE_CURRENT_SOURCE_DIR}/lift_lod_hooks.json"
+    --lifter "${PS3RECOMP_DIR}/tools/ppu_lifter.py"
+    --header "${CMAKE_CURRENT_BINARY_DIR}/jsp_lod_hooks_build.h")
+if(JSP_EBOOT)
+    list(APPEND JSP_LOD_VERIFY_ARGS --image "${JSP_EBOOT}" --region "${JSP_GAME_REGION}")
+endif()
+execute_process(COMMAND "${Python3_EXECUTABLE}" ${JSP_LOD_VERIFY_ARGS}
+                RESULT_VARIABLE JSP_LOD_VERIFY_RESULT)
+if(NOT JSP_LOD_VERIFY_RESULT EQUAL 0)
+    message(FATAL_ERROR "LOD entry-hook output verification failed; rerun lift")
+endif()
+add_custom_target(jsp_verify_lod_hooks
+    COMMAND "${Python3_EXECUTABLE}" ${JSP_LOD_VERIFY_ARGS}
+    COMMENT "Verifying LOD entry hooks against their input program and lift")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/lod_hooks.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lift_lod_hooks.json")
+
 # ---------------------------------------------------------------------------
 # ps3recomp runtime library
 # ---------------------------------------------------------------------------
@@ -206,6 +231,7 @@ add_executable(${PROJECT_NAME}
     jsp_port_menu.cpp  # ENHANCEMENT: in-game Port Settings page, JSP_PORT_MENU=1 (needs toolkit patches 2516-2518 and 6501; US build only)
     jsp_settings.cpp   # ENHANCEMENT: settings file, live values for the in-game settings pages (jsp_settings.h)
     jsp_session_startup.cpp # ENHANCEMENT: actual startup state; no session/ACK activation
+    jsp_lod_lifetime.cpp # verified emitted entries + actual loader-buffer identity
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -219,6 +245,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jsp_render60.cpp")
     message(FATAL_ERROR "Update session startup capability before adding render60")
 endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_SESSION_RENDER60_ABSENT=1)
+add_dependencies(${PROJECT_NAME} jsp_verify_lod_hooks)
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
@@ -245,6 +272,7 @@ if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}"              # verified LOD capability header
     "${RECOMP_DIR}"                            # the generated ppu_recomp.h
     "${PS3RECOMP_DIR}/include"
     "${PS3RECOMP_DIR}/runtime/ppu"

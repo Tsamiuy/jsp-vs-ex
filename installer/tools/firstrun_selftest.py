@@ -126,6 +126,12 @@ def units():
     check("E3 table: jsp.iss lists the same EBOOT.elf hashes", all(e["sha256"] in iss and e["title_id"] in iss for e in real))
     firstrun.check_eboot = lambda e, d=None, t=None, u=False: [("OK", "E1", "stub")]
     firstrun.check_space = lambda r: [("OK", "S1", "stub")]
+    # This unit section mocks the entire lift/build steps. Actual emitted-hook
+    # refusal and receipt verification are exercised by lod_hooks_test.py.
+    for filename in ("lod_hooks.py", "lift_lod_hooks.json"):
+        __import__("shutil").copy2(pathlib.Path(firstrun.__file__).resolve().parents[1] / "port/jsp" / filename,
+                                  root / "port" / filename)
+    firstrun.verify_lod_hooks = lambda c: False
     for st in ("lift", "spu", "build", "place"):
         def fn(c, st=st):
             ran.append(st)
