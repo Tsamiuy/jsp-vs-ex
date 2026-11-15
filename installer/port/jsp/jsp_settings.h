@@ -21,6 +21,31 @@
 
 namespace jps {
 
+// The settings file path as the pages show it: the user's folders spelled as %APPDATA%, %LOCALAPPDATA% or %USERPROFILE%, so a
+// screenshot of the page does not carry the Windows user name. Only the displayed text changes, never the path that is used.
+inline std::string display_path(const std::string& path)
+{
+    auto norm = [](std::string t) { for (char& c : t) { if (c == '/') c = '\\'; } return t; };
+    auto lower = [](std::string t) { for (char& c : t) { if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); } return t; };
+    const std::string p = norm(path), pl = lower(p);
+    static const char* const names[] = { "LOCALAPPDATA", "APPDATA", "USERPROFILE" };
+    for (const char* n : names) {
+        const char* v = std::getenv(n);
+        if (!v || !*v) continue;
+        std::string pre = norm(v);
+        while (pre.size() > 3 && pre.back() == '\\') pre.pop_back();
+        const std::string prl = lower(pre);
+        if (pl.size() > prl.size() && pl.compare(0, prl.size(), prl) == 0 && p[prl.size()] == '\\')
+            return std::string("%") + n + "%" + p.substr(prl.size());
+    }
+    // no variable matched (not set, or the file lives elsewhere): any "<drive>:\\Users\\<name>\\" start still names the user
+    if (p.size() > 10 && p[1] == ':' && p[2] == '\\' && lower(p.substr(3, 6)) == "users\\") {
+        const size_t e = p.find('\\', 9);
+        if (e != std::string::npos) return "%USERPROFILE%" + p.substr(e);
+    }
+    return path;
+}
+
 enum Apply { LIVE = 0, NEXT_START = 1 };
 enum Group { G_DISPLAY = 0, G_GRAPHICS = 1, G_CONTROLS = 2 };
 
@@ -77,8 +102,8 @@ static const Item k_items[] = {
     { "OBJECT_DISTANCE", G_GRAPHICS, "Object draw distance", k_odist_v, k_odist_n, 4, 1, 1, LIVE, "jsp_game.cpp lod_select_hook" },
     { "UI_SCALE",        G_GRAPHICS, "Fight HUD size", k_ui_v, k_ui_n, 11, 10, 10, LIVE, "jsp_game.cpp ui_scale" },
     { "AA_MODE",         G_GRAPHICS, "Edge smoothing", k_aa_v, k_aa_n, 4, 1, 0, LIVE, "jsp_game.cpp aa_mode (unset = off; the launcher writes fxaa)" },
-    { "FX_FULL",         G_GRAPHICS, "Full-size smoke and effects", k_off_on_v, k_off_n, 2, 1, 0, NEXT_START, "toolkit 2512, static cache (unset = off; the launcher writes 1)" },
-    { "FPS_COUNTER",     G_GRAPHICS, "FPS counter (bottom left)", k_off_on_v, k_off_n, 2, 0, 0, LIVE, "jsp_game.cpp, g_rsx_stamp2 hook" },
+    { "FX_FULL",         G_GRAPHICS, "Full-size effects", k_off_on_v, k_off_n, 2, 1, 0, NEXT_START, "toolkit 2512, static cache (unset = off; the launcher writes 1)" },
+    { "FPS_COUNTER",     G_GRAPHICS, "FPS counter", k_off_on_v, k_off_n, 2, 0, 0, LIVE, "jsp_game.cpp, g_rsx_stamp2 hook" },
     { "INPUT_MODE",      G_CONTROLS, "Input", k_mode_v, k_mode_n, 3, 0, 0, NEXT_START, "toolkit 6500 pad_input_mode, static cache (unset = a keyboard fills in when no pad is on port 0)" },
     { "MOUSE_SENS",      G_CONTROLS, "Mouse sensitivity", k_sens_v, k_sens_n, 20, 3, 3, NEXT_START, "toolkit 6500, static cache" },
 };
