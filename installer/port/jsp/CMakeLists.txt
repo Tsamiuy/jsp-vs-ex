@@ -226,6 +226,7 @@ add_executable(${PROJECT_NAME}
     jsp_hle.cpp        # UCS2toUTF8, NetCtl GetState, BGM status (after the v0.15 stubs.cpp)
     jsp_autopilot.cpp  # test auto-pilot (AUTO_FIGHT / AUTO_MENU), off unless set
     jsp_game.cpp       # the v0.15 jstars_game.cpp: PC text, Exit Game, menus, HUD size, FPS counter, Training
+    jsp_net_probe.cpp  # experimental default-off socket-call discovery
     jsp_online.cpp     # ENHANCEMENT: reads repsn.ini / community.ini at startup, sets the runtime's online environment
     jsp_unlock.cpp     # ENHANCEMENT: unlock-everything cheat, JSP_UNLOCK_ALL=1 (the launcher's Cheats tab)
     jsp_port_menu.cpp  # ENHANCEMENT: in-game Port Settings page, JSP_PORT_MENU=1 (needs toolkit patches 2516-2518 and 6501; US build only)
@@ -270,6 +271,9 @@ endif()
 if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
     target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
 endif()
+
+set_source_files_properties(jsp_net_probe.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/network")
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"              # verified LOD capability header

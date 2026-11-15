@@ -31,6 +31,9 @@ posix   | installer/tools/pipe_state_test.py --runtime {toolkit} --already-patch
 posix   | installer/tools/lod_hooks_test.py --lifter {toolkit}/tools/ppu_lifter.py --native
 posix   | installer/tools/lod_image_guard_test.py --loader {toolkit}/runtime/ppu/ppu_loader.cpp
 posix   | installer/tools/lod_lifetime_test.py
+posix   | installer/tools/net_probe_consumer_test.py --sdk {toolkit}
+posix   | installer/tools/net_probe_core_test.py --sdk {toolkit}
+posix   | installer/tools/net_probe_test.py --sdk {toolkit}
 posix   | installer/tools/overlay_font_test.sh {font}
 posix   | installer/tools/port_overlay_test.c {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
