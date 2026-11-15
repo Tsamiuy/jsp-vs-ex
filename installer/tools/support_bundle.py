@@ -11,7 +11,8 @@ What goes in (text only: .log .txt .ini .cmd), every file through firstrun.scrub
   (play_settings.txt, jsp-install.ini, build-again.cmd, paths.txt, VERSION.txt, tree.txt when present), the settings file in
   %APPDATA%\\JSP Fan Revival, and the newest two Inno Setup logs in %TEMP% that mention this app. Plus facts.txt.
 facts.txt: version, Windows, CPU count and model, AVX2, RAM, free space, the game exe, step markers, the GPU (from the game's log) and
-each display adapter's driver version (read from the registry, never changed).
+each display adapter's driver version (read from the registry, never changed), and each display (monitor name, size, refresh rate, which one
+the game window is on when the game is running; no serial numbers).
 What never goes in: the EBOOT, disc files, saves (hdd0, .sav), lift output (.c/.h), shader caches, binaries, environment dumps.
 A total cap (CAP_BYTES, uncompressed) applies: over it, the oldest lines of the largest logs go first and facts.txt says what was cut.
 
@@ -231,6 +232,144 @@ def gpu_drivers(subkeys=reg_subkeys, read=reg_values):
     return out
 
 
+# ---- the displays (Windows only; read only): model, size, refresh rate, and the one the game window is on ----
+# A 60 Hz screen turns missed 30 fps frames into 20 fps, and some PCs run a virtual display (Parsec, a headset, a capture card), so
+# facts.txt names every display. No serial numbers or device IDs are read.
+class _Rect(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _Rect), ("rcWork", _Rect), ("dwFlags", ctypes.c_ulong), ("szDevice", ctypes.c_wchar * 32)]
+
+
+class _DisplayDevice(ctypes.Structure):
+    _fields_ = [("cb", ctypes.c_ulong), ("DeviceName", ctypes.c_wchar * 32), ("DeviceString", ctypes.c_wchar * 128),
+                ("StateFlags", ctypes.c_ulong), ("DeviceID", ctypes.c_wchar * 128), ("DeviceKey", ctypes.c_wchar * 128)]
+
+
+class _DevMode(ctypes.Structure):   # DEVMODEW; only the display fields are used
+    _fields_ = [("dmDeviceName", ctypes.c_wchar * 32), ("dmSpecVersion", ctypes.c_ushort), ("dmDriverVersion", ctypes.c_ushort),
+                ("dmSize", ctypes.c_ushort), ("dmDriverExtra", ctypes.c_ushort), ("dmFields", ctypes.c_ulong), ("_pos", ctypes.c_byte * 16),
+                ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short), ("dmYResolution", ctypes.c_short), ("dmTTOption", ctypes.c_short),
+                ("dmCollate", ctypes.c_short), ("dmFormName", ctypes.c_wchar * 32), ("dmLogPixels", ctypes.c_ushort),
+                ("dmBitsPerPel", ctypes.c_ulong), ("dmPelsWidth", ctypes.c_ulong), ("dmPelsHeight", ctypes.c_ulong),
+                ("dmDisplayFlags", ctypes.c_ulong), ("dmDisplayFrequency", ctypes.c_ulong), ("_rest", ctypes.c_ulong * 8)]
+
+
+def displays():
+    """[{name, adapter, monitor, width, height, hz, primary, handle}] for each attached display; [] off Windows or on any error."""
+    try:
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        u.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.c_void_p, ctypes.c_void_p, wintypes.LPARAM]
+        u.EnumDisplayMonitors.restype = wintypes.BOOL
+        u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MonitorInfo)]
+        u.GetMonitorInfoW.restype = wintypes.BOOL
+        u.EnumDisplayDevicesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(_DisplayDevice), wintypes.DWORD]
+        u.EnumDisplayDevicesW.restype = wintypes.BOOL
+        u.EnumDisplaySettingsW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(_DevMode)]
+        u.EnumDisplaySettingsW.restype = wintypes.BOOL
+        handles = []
+        cb = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.LPARAM)(
+            lambda h, _dc, _r, _l: (handles.append(h), True)[1])
+        u.EnumDisplayMonitors(None, None, cb, 0)
+        adapters = {}
+        i = 0
+        while True:
+            dd = _DisplayDevice()
+            dd.cb = ctypes.sizeof(dd)
+            if not u.EnumDisplayDevicesW(None, i, ctypes.byref(dd), 0):
+                break
+            adapters[dd.DeviceName] = dd.DeviceString
+            i += 1
+        out = []
+        for h in handles:
+            mi = _MonitorInfo()
+            mi.cbSize = ctypes.sizeof(mi)
+            if not u.GetMonitorInfoW(h, ctypes.byref(mi)):
+                continue
+            mon = _DisplayDevice()
+            mon.cb = ctypes.sizeof(mon)
+            monitor = mon.DeviceString if u.EnumDisplayDevicesW(mi.szDevice, 0, ctypes.byref(mon), 0) else ""
+            dm = _DevMode()
+            dm.dmSize = ctypes.sizeof(dm)
+            ok = u.EnumDisplaySettingsW(mi.szDevice, 0xFFFFFFFF, ctypes.byref(dm))   # ENUM_CURRENT_SETTINGS
+            out.append({"name": mi.szDevice, "adapter": adapters.get(mi.szDevice, ""), "monitor": monitor,
+                        "width": dm.dmPelsWidth if ok else 0, "height": dm.dmPelsHeight if ok else 0,
+                        "hz": dm.dmDisplayFrequency if ok else 0, "primary": bool(mi.dwFlags & 1), "handle": h})
+        return out
+    except (AttributeError, OSError, ValueError, ImportError, TypeError):
+        return []
+
+
+def game_display(exe_name):
+    """(display handle or None, 'WxH' or '') of the biggest visible top-level window of the running game exe; (None, '') when it is not running."""
+    try:
+        from ctypes import wintypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.OpenProcess.restype = ctypes.c_void_p
+        k.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        u.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Rect)]
+        u.MonitorFromWindow.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        u.MonitorFromWindow.restype = ctypes.c_void_p
+        best = []
+        cache = {}
+
+        def is_game(pid):
+            if pid not in cache:
+                ok = False
+                hp = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+                if hp:
+                    buf, n = ctypes.create_unicode_buffer(1040), wintypes.DWORD(1040)
+                    if k.QueryFullProcessImageNameW(hp, 0, buf, ctypes.byref(n)):
+                        ok = buf.value.replace("/", "\\").rsplit("\\", 1)[-1].lower() == exe_name.lower()
+                    k.CloseHandle(hp)
+                cache[pid] = ok
+            return cache[pid]
+
+        def each(hwnd, _l):
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if u.IsWindowVisible(hwnd) and is_game(pid.value):
+                r = _Rect()
+                if u.GetWindowRect(hwnd, ctypes.byref(r)):
+                    best.append(((r.right - r.left) * (r.bottom - r.top), hwnd, f"{r.right - r.left}x{r.bottom - r.top}"))
+            return True
+
+        u.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+        u.EnumWindows(ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, wintypes.LPARAM)(each), 0)
+        if not best:
+            return None, ""
+        _a, hwnd, size = max(best)
+        return u.MonitorFromWindow(hwnd, 2), size   # MONITOR_DEFAULTTONEAREST
+    except (AttributeError, OSError, ValueError, ImportError, TypeError):
+        return None, ""
+
+
+def display_lines(mons, game):
+    """The facts.txt lines for the displays (pure: tested on any OS). game = (handle or None, window size)."""
+    if not mons:
+        return ["Displays: not found (not Windows, or the query failed)"]
+    out = []
+    gh, gsize = game
+    for i, m in enumerate(mons, 1):
+        hz = f"{m['hz']} Hz" if m.get("hz", 0) > 1 else "default Hz (the driver did not say)"
+        size = f"{m['width']}x{m['height']}" if m.get("width") else "size unknown"
+        on = "   <- game window" if gh is not None and m.get("handle") == gh else ""
+        out.append(f"Display {i}{' (primary)' if m.get('primary') else ''}: {m.get('name', '')}, monitor: {m.get('monitor') or 'unnamed'}, "
+                   f"on adapter: {m.get('adapter') or 'unknown'}, {size} at {hz}{on}")
+    if gh is None:
+        out.append("Game window: not running when this bundle was made (a bundle made while the game is open, even frozen, names its display)")
+    else:
+        out.append(f"Game window: {gsize or 'size unknown'}, on the display marked above")
+    return out
+
+
 def gpu_name(blobs):
     """The GPU from the toolkit's Direct3D 12 start-up line ("[D3D12] adapter: NAME (VRAM N MB)", printed to the game's stdout,
     which the launcher keeps in game\\run\\play_stdout.txt); else the first other log line that names a GPU or adapter."""
@@ -271,6 +410,7 @@ def facts(app, blobs, refused, not_text, cuts, names):
     L.append(f"GPU: {gpu_name(blobs)}")
     drivers = gpu_drivers()
     L.append("GPU driver: " + ("; ".join(drivers) if drivers else "not found (not Windows, or no display driver key)"))
+    L += display_lines(displays(), game_display(exe_name))
     L.append("")
     L.append("files in this zip:")
     L += [f"  {n}" for n in names]

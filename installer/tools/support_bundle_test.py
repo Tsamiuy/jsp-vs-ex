@@ -94,6 +94,15 @@ def main():
         check(sb.cpu_model(rd) == "Test CPU 8-Core", "CPU: the registry name, spaces collapsed")
         check(sb.gpu_drivers(lambda _p: ["0000", "0001", "Properties"], rd) == ["Test GPU: driver 32.0.15.6094 (10-1-2026)"], "GPU driver: numbered adapter keys with a version only")
         check(sb.gpu_drivers(lambda _p: [], rd) == [], "GPU driver: none found")
+        mons = [{"name": "\\\\.\\DISPLAY1", "adapter": "Test GPU", "monitor": "Test Monitor", "width": 2560, "height": 1440, "hz": 60, "primary": True, "handle": 11},
+                {"name": "\\\\.\\DISPLAY2", "adapter": "Test GPU", "monitor": "Virtual Display", "width": 1920, "height": 1080, "hz": 1, "primary": False, "handle": 22}]
+        dl = sb.display_lines(mons, (22, "1280x720"))
+        check(len(dl) == 3 and "(primary)" in dl[0] and "2560x1440 at 60 Hz" in dl[0] and "<- game window" not in dl[0], "displays: primary, size and refresh rate")
+        check("<- game window" in dl[1] and "default Hz" in dl[1] and "Virtual Display" in dl[1] and "1280x720" in dl[2], "displays: the game window's display is marked; Hz 1 means default")
+        check("not running" in sb.display_lines(mons, (None, ""))[-1], "displays: the game is not running")
+        check(sb.display_lines([], (None, "")) == ["Displays: not found (not Windows, or the query failed)"], "displays: none found")
+        check(sb.displays() == [] and sb.game_display("jsp.exe") == (None, ""), "displays: off Windows both queries return nothing")
+        check("\nDisplays: not found" in f or "\nDisplay 1" in f, "facts: a displays line is always present")
 
         # the cap: two big logs, the oldest lines of the largest go first, with a note
         w(app / "logs/firstrun-20260102-000000.log", "".join(f"old line {i}\n" for i in range(50000)) + "NEWEST LINE\n")
