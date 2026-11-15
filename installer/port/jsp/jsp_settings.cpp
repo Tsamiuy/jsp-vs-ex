@@ -10,6 +10,7 @@
  * Size limit 64 KB (a larger file is neither read nor overwritten). Save: temp file beside it, then renamed over it.
  */
 #include "jsp_settings.h"
+#include "jsp_session_reader.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -36,8 +37,56 @@ namespace {
 std::mutex g_mu;
 std::map<std::string, std::string> g_live;   // key -> value set from the in-game page
 std::atomic<int> g_gen{0};
+jpss::SettingsAgreement g_session_guard;
+jpss::SessionLayer g_session_layer;
+jpss::Profile g_session_required{};
+jpss::Token g_session_token{};
+uint64_t g_bound_session = 0, g_reader_generation = 1;
 std::string g_path;                          // resolved once
 bool g_path_done = false;
+
+jpss::ReaderState reader_state_locked()
+{
+    return {g_reader_generation, g_bound_session, g_session_token, g_session_layer.active()};
+}
+
+void changed_locked()
+{
+    ++g_reader_generation;
+    g_gen.fetch_add(1, std::memory_order_release);
+}
+
+// Live/session lookups and updates made here are serialized by g_mu. Other
+// modules mutating the environment retain their existing ownership rules.
+int setting_get_locked(const char* key, char* out, int n)
+{
+    if (!key || n < 0 || (!out && n > 0)) return 0;
+    if (n > 0) out[0] = 0;
+    if (g_session_layer.active()) {
+        for (size_t i = 0; i < jpss::kCount; ++i) {
+            const auto& r = jpss::kRules[i];
+            if (r.policy == jpss::Policy::SessionLive && !std::strcmp(key, r.name)) {
+                std::snprintf(out, (size_t)n, "%s", r.values[g_session_required.choices[i]]);
+                return 1;
+            }
+        }
+    }
+    const auto it = g_live.find(key);
+    const char* value = it != g_live.end() ? it->second.c_str() : std::getenv(key);
+    if (!value) return 0;
+    std::snprintf(out, (size_t)n, "%s", value);
+    return 1;
+}
+
+void session_end_locked()
+{
+    g_session_layer.clear();
+    g_session_guard.reset();
+    g_session_required = {};
+    g_session_token = {};
+    g_bound_session = 0;
+    changed_locked();
+}
 
 bool exists(const std::string& p) { FILE* f = std::fopen(p.c_str(), "rb"); if (!f) return false; std::fclose(f); return true; }
 
@@ -56,34 +105,102 @@ std::string exe_folder()
 }
 }  // namespace
 
-extern "C" int jsp_setting_gen(void) { return g_gen.load(std::memory_order_relaxed); }
+extern "C" int jsp_setting_gen(void) { return g_gen.load(std::memory_order_acquire); }
 
-// 1 = a value is known (an in-game change, else the environment), copied to out; 0 = unset (out is empty)
+// Session live override, else local in-game change, else environment. A session
+// install never changes the local map, process environment or preferences file.
 extern "C" int jsp_setting_get(const char* key, char* out, int n)
 {
-    if (n > 0) out[0] = 0;
-    { std::lock_guard<std::mutex> lk(g_mu);
-      const auto it = g_live.find(key);
-      if (it != g_live.end()) { std::snprintf(out, (size_t)n, "%s", it->second.c_str()); return 1; } }
-    const char* e = std::getenv(key);
-    if (!e) return 0;
-    std::snprintf(out, (size_t)n, "%s", e);
-    return 1;
+    std::lock_guard<std::mutex> lk(g_mu);
+    return setting_get_locked(key, out, n);
 }
 
 // An in-game change of a live setting: the readers see it at their next call. "" = back to unset.
 extern "C" void jsp_setting_set_live(const char* key, const char* value)
 {
-    { std::lock_guard<std::mutex> lk(g_mu);
-      if (value && *value) g_live[key] = value; else g_live.erase(key); }
+    if (!key) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (value && *value) g_live[key] = value; else g_live.erase(key);
     // other getenv readers of the same name (and a child process) see the new value too; "" removes it on Windows
 #ifdef _WIN32
     _putenv_s(key, value ? value : "");
 #else
     if (value && *value) setenv(key, value, 1); else unsetenv(key);
 #endif
-    g_gen.fetch_add(1, std::memory_order_relaxed);
+    changed_locked();
 }
+
+namespace jpss {
+
+Result reader_begin(uint64_t session)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    const Result r = g_session_guard.begin_session(session);
+    if (r == Result::Ok && !g_bound_session) {
+        g_bound_session = session;
+        changed_locked();
+    }
+    return r;
+}
+
+Result reader_install(const Token& token, const Profile& required, const ReaderStartup& startup)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!startup.available) return Result::NotStaged;
+    // Stage copies first: failed validation cannot disturb the active layer or
+    // advance its revision, even when the rejected proposal claims a newer one.
+    SettingsAgreement guard = g_session_guard;
+    SessionLayer layer = g_session_layer;
+    Result r = guard.stage(token, required, Capabilities{});
+    if (r != Result::Ok) return r;
+    r = layer.install(required, startup.applied);
+    if (r != Result::Ok) return r;
+    if (g_session_layer.active() && token == g_session_token && required == g_session_required)
+        return Result::Ok;
+    g_session_guard = guard;
+    g_session_layer = layer;
+    g_session_required = required;
+    g_session_token = token;
+    changed_locked();
+    return Result::Ok;
+}
+
+Result reader_clear(const Token& token)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_session_layer.active()) return Result::NotStaged;
+    if (token != g_session_token) return Result::Stale;
+    session_end_locked();
+    return Result::Ok;
+}
+
+Result reader_end(uint64_t session)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!session) return Result::InvalidToken;
+    if (!g_bound_session) return Result::NotStaged;
+    if (session != g_bound_session) return Result::Stale;
+    session_end_locked();
+    return Result::Ok;
+}
+
+ReaderSnapshot reader_snapshot()
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    ReaderSnapshot s;
+    s.state = reader_state_locked();
+    for (size_t i = 0; i < s.live.size(); ++i)
+        s.live[i].present = setting_get_locked(kRules[i].name, s.live[i].text, sizeof s.live[i].text) != 0;
+    return s;
+}
+
+bool reader_current(const ReaderState& state)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    return state == reader_state_locked();
+}
+
+} // namespace jpss
 
 namespace jps {
 

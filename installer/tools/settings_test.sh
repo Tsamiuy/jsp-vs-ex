@@ -7,5 +7,5 @@ d=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$d/../.." && pwd)
 out=$(mktemp "${TMPDIR:-/tmp}/jsp_settings_test.XXXXXX")
 trap 'rm -f "$out"' EXIT
-g++ -std=c++20 -Wall -o "$out" "$d/settings_test.cpp" "$d/../port/jsp/jsp_settings.cpp"
+g++ -std=c++20 -Wall -pthread -o "$out" "$d/settings_test.cpp" "$d/../port/jsp/jsp_settings.cpp"
 "$out" "$root"

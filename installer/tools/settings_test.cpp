@@ -13,15 +13,139 @@
 #include <sstream>
 #include <set>
 #include <unistd.h>
+#include <atomic>
+#include <thread>
+#include "../port/jsp/jsp_session_reader.h"
 
 namespace jps { std::string io_path(); bool io_load(std::string& text, std::string& note); bool io_save(const std::string& text, std::string& err); }
 extern "C" int jsp_setting_gen(void);
 extern "C" int jsp_setting_get(const char* key, char* out, int n);
 extern "C" void jsp_setting_set_live(const char* key, const char* value);
 
-static int fails = 0;
-#define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
+static int fails = 0, checks = 0;
+#define CHECK(c) do { ++checks; if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 using namespace jpm;
+static std::string slurp(const std::string& p);
+
+static bool reader_values(const jpss::ReaderSnapshot& s, const char* md, const char* od, const char* sr)
+{
+    const char* expected[] = {md, od, sr};
+    for (size_t i = 0; i < s.live.size(); ++i)
+        if (!s.live[i].present || std::strcmp(s.live[i].text, expected[i])) return false;
+    return true;
+}
+
+static void session_reader_test(const std::string& path)
+{
+    using namespace jpss;
+    const std::string file_before = slurp(path);
+    const Profile normal = conservative();
+    ReaderStartup startup{true, normal}; // Synthetic trusted reader witness, not environment evidence.
+    Token token{100, 1, 0, 3};
+    for (const char* key : {"MODEL_DETAIL", "OBJECT_DISTANCE", "SHADOW_RANGE"}) jsp_setting_set_live(key, "");
+    const auto unset = reader_snapshot();
+    CHECK(!unset.state.active && unset.state.bound_session == 0);
+    for (const auto& v : unset.live) CHECK(!v.present && !v.text[0]);
+    char untouched = 'x';
+    CHECK(jsp_setting_get("MODEL_DETAIL", nullptr, 0) == 0);
+    CHECK(jsp_setting_get("MODEL_DETAIL", &untouched, 0) == 0 && untouched == 'x');
+    CHECK(reader_install(token, normal, startup) == Result::NotStaged);
+    CHECK(reader_begin(0) == Result::InvalidToken);
+    CHECK(reader_current(unset.state));
+    jsp_setting_set_live("MODEL_DETAIL", "4");
+    jsp_setting_set_live("OBJECT_DISTANCE", "0.75");
+    jsp_setting_set_live("SHADOW_RANGE", "2");
+    jsp_setting_set_live("PIPE", "1");
+    jsp_setting_set_live("JSP_RENDER60", "a");
+    CHECK(reader_values(reader_snapshot(), "4", "0.75", "2"));
+    CHECK(jsp_setting_get("MODEL_DETAIL", nullptr, 0) == 1);
+    CHECK(jsp_setting_get("MODEL_DETAIL", &untouched, 0) == 1 && untouched == 'x');
+    CHECK(jsp_setting_get("MODEL_DETAIL", &untouched, -1) == 0 && untouched == 'x');
+    CHECK(jsp_setting_get("MODEL_DETAIL", nullptr, 1) == 0);
+    CHECK(reader_begin(100) == Result::Ok);
+    const auto bound = reader_snapshot();
+    CHECK(reader_begin(100) == Result::Ok && reader_current(bound.state));
+    CHECK(reader_begin(200) == Result::Stale && reader_current(bound.state));
+    CHECK(reader_install(token, normal) == Result::NotStaged && reader_current(bound.state));
+    Profile other = normal; other.choices[(size_t)Key::Pipe] = 1;
+    CHECK(reader_install(token, other, startup) == Result::UnsupportedProfile && reader_current(bound.state));
+    CHECK(reader_install(token, normal, {true, other}) == Result::RestartRequired && reader_current(bound.state));
+    other = normal; other.choices[0] = 255;
+    CHECK(reader_install(token, normal, {true, other}) == Result::InvalidValue && reader_current(bound.state));
+    CHECK(reader_install(token, normal, startup) == Result::Ok);
+    auto view = reader_snapshot();
+    CHECK(view.state.active && view.state.token == token && reader_values(view, "1", "1", "1"));
+    CHECK(!reader_current(bound.state) && reader_current(view.state));
+    CHECK(jsp_setting_get("MODEL_DETAIL", nullptr, 0) == 1);
+    CHECK(jsp_setting_get("MODEL_DETAIL", &untouched, 0) == 1 && untouched == 'x');
+    CHECK(jsp_setting_get("JSP_UNKNOWN_SETTING", nullptr, 0) == 0);
+    // Session overrides never change ordinary local values, even startup keys.
+    CHECK(!std::strcmp(getenv("MODEL_DETAIL"), "4") && !std::strcmp(getenv("OBJECT_DISTANCE"), "0.75"));
+    char b[64];
+    CHECK(jsp_setting_get("MODEL_DETAIL", b, sizeof b) && !std::strcmp(b, "1"));
+    CHECK(jsp_setting_get("PIPE", b, sizeof b) && !std::strcmp(b, "1"));
+    CHECK(jsp_setting_get("JSP_RENDER60", b, sizeof b) && !std::strcmp(b, "a"));
+    CHECK(slurp(path) == file_before);
+    // Preferences edited while overridden remain local and become visible on clear.
+    const std::string custom = std::string(47, ' ') + "4";
+    jsp_setting_set_live("MODEL_DETAIL", custom.c_str());
+    jsp_setting_set_live("OBJECT_DISTANCE", "1.234567890123456789");
+    CHECK(!reader_current(view.state) && reader_values(reader_snapshot(), "1", "1", "1"));
+    CHECK(getenv("MODEL_DETAIL") == custom && slurp(path) == file_before);
+    view = reader_snapshot();
+    CHECK(reader_install(token, normal, startup) == Result::Ok && reader_current(view.state));
+    Token replaced = token; replaced.revision = 2;
+    other = normal; other.choices[(size_t)Key::Render60] = 1;
+    CHECK(reader_install(replaced, normal, {true, other}) == Result::RestartRequired && reader_current(view.state));
+    Token occupant = token; occupant.owner = 1;
+    CHECK(reader_install(occupant, normal, startup) == Result::Stale && reader_current(view.state));
+    CHECK(reader_install(replaced, normal, startup) == Result::Ok && !reader_current(view.state));
+    view = reader_snapshot();
+    CHECK(reader_install(token, normal, startup) == Result::Stale && reader_current(view.state));
+    CHECK(reader_clear(token) == Result::Stale && reader_current(view.state));
+    CHECK(reader_end(200) == Result::Stale && reader_current(view.state));
+    CHECK(reader_clear(replaced) == Result::Ok);
+    const auto cleared = reader_snapshot();
+    CHECK(!cleared.state.active && cleared.state.bound_session == 0 && !reader_current(view.state));
+    CHECK(reader_values(cleared, custom.substr(0, 47).c_str(), "1.234567890123456789", "2"));
+    CHECK(std::atof(cleared.live[0].text) == 0.0); // Actual 48-byte reader truncation is preserved and visible.
+    CHECK(jsp_setting_get("MODEL_DETAIL", b, sizeof b) && custom == b);
+    CHECK(reader_install(replaced, normal, startup) == Result::NotStaged);
+    CHECK(reader_clear(replaced) == Result::NotStaged);
+    CHECK(reader_begin(200) == Result::Ok);
+    CHECK(reader_install(token, normal, startup) == Result::Stale);
+    CHECK(reader_end(100) == Result::Stale && reader_end(200) == Result::Ok);
+
+    // Concurrent installs/removals cannot produce mixed-profile snapshots.
+    jsp_setting_set_live("MODEL_DETAIL", "4");
+    jsp_setting_set_live("OBJECT_DISTANCE", "2");
+    std::atomic<bool> go{false}, done{false}, bad{false};
+    std::atomic<unsigned> observed{0};
+    std::thread consumer([&] {
+        while (!go.load()) std::this_thread::yield();
+        do {
+            const auto s = reader_snapshot();
+            if (s.state.active) {
+                if (!reader_values(s, "1", "1", "1") || !valid(s.state.token)
+                    || s.state.bound_session != s.state.token.session) bad.store(true);
+            } else if (!reader_values(s, "4", "2", "2")) bad.store(true);
+            ++observed;
+        } while (!done.load());
+    });
+    go.store(true);
+    while (!observed.load()) std::this_thread::yield();
+    for (uint64_t i = 300; i < 2300; ++i) {
+        const Token next{i, 1, 0, 3};
+        CHECK(reader_begin(i) == Result::Ok);
+        CHECK(reader_install(next, normal, startup) == Result::Ok);
+        std::this_thread::yield();
+        CHECK(reader_clear(next) == Result::Ok);
+    }
+    done.store(true); consumer.join();
+    CHECK(observed.load() > 0 && !bad.load());
+    CHECK(slurp(path) == file_before);
+    for (const char* key : {"MODEL_DETAIL", "OBJECT_DISTANCE", "SHADOW_RANGE", "PIPE", "JSP_RENDER60"}) jsp_setting_set_live(key, "");
+}
 
 static std::string slurp(const std::string& p) { std::ifstream f(p, std::ios::binary); std::stringstream s; s << f.rdbuf(); return s.str(); }
 
@@ -109,7 +233,8 @@ int main(int argc, char** argv)
           for (auto it = std::sregex_iterator(l19.begin(), l19.end(), b); it != std::sregex_iterator(); ++it, ++i)
               CHECK(i < jps::k_padbtn_count && (*it)[1] == jps::k_padbtns[i].id && (*it)[2] == jps::k_padbtns[i].def);
           CHECK(i == jps::k_padbtn_count); }
-        // readers: a LIVE key is read through jsp_setting_get / setting_float in jsp_game.cpp; the others by getenv in the port or a toolkit patch
+        // Source inventory only: LIVE keys use direct settings lookup or the
+        // coherent session tuple. Actual consumer effects need separate tests.
         const std::string game = slurp(root + "/installer/port/jsp/jsp_game.cpp");
         std::string patches;
         for (const char* dir : { "/installer/port/patches/", "/installer/patches/" }) {
@@ -122,9 +247,14 @@ int main(int argc, char** argv)
         for (int i = 0; i < jps::k_item_count; i++) {
             const jps::Item& it = jps::k_items[i];
             const std::string q = std::string("\"") + it.key + "\"";
-            const bool live_read = game.find("setting_float(" + q) != std::string::npos || game.find("jsp_setting_get(" + q) != std::string::npos;
+            const char* session_key = !std::strcmp(it.key, "MODEL_DETAIL") ? "ModelDetail"
+                : !std::strcmp(it.key, "OBJECT_DISTANCE") ? "ObjectDistance"
+                : !std::strcmp(it.key, "SHADOW_RANGE") ? "ShadowRange" : nullptr;
+            const bool snapshot_read = session_key && game.find("jpss::reader_snapshot()") != std::string::npos
+                && game.find(std::string("session_setting_float(inputs.live[(size_t)jpss::Key::") + session_key + "],") != std::string::npos;
+            const bool live_read = snapshot_read || game.find("setting_float(" + q) != std::string::npos || game.find("jsp_setting_get(" + q) != std::string::npos;
             const bool env_read = patches.find("getenv(" + q) != std::string::npos || game.find("getenv(" + q) != std::string::npos;
-            if (it.apply == jps::LIVE) { if (!live_read) std::printf("%s: LIVE but not read through jsp_setting_get\n", it.key); CHECK(live_read); }
+            if (it.apply == jps::LIVE) { if (!live_read) std::printf("%s: LIVE but no settings reader found\n", it.key); CHECK(live_read); }
             else { if (!env_read) std::printf("%s: no reader found\n", it.key); CHECK(env_read || live_read); }
         }
         // every launcher-only entry has a reason; the unlock key is not in the table (never from the file)
@@ -346,10 +476,11 @@ int main(int argc, char** argv)
         CHECK(jsp_setting_gen() == g0 + 1 && jsp_setting_get("UI_SCALE", b, sizeof b) == 1 && !std::strcmp(b, "0.60"));
         jsp_setting_set_live("UI_SCALE", "");                                           // back to unset: not the old environment value
         CHECK(jsp_setting_gen() == g0 + 2 && jsp_setting_get("UI_SCALE", b, sizeof b) == 0 && getenv("UI_SCALE") == nullptr);
+        session_reader_test(path);
         std::remove(path.c_str()); rmdir(dir);
     }
 
     if (fails) { std::printf("%d failure(s)\n", fails); return 1; }
-    std::printf("settings: all checks passed\n");
+    std::printf("settings: all checks passed (%d checks)\n", checks);
     return 0;
 }
