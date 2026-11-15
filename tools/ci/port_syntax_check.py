@@ -24,6 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 INCS = ["include", "runtime/ppu", "runtime/spu", "runtime/memory", "runtime/syscalls", "runtime/platform", "libs/video"]
 FLAGS = ["-fsyntax-only", "-w", "-ffp-contract=off", "-mavx2", "-mfma", "-fno-strict-aliasing", "-fwrapv"]   # CMakeLists.txt: JSP_AVX2 on
 SCAFFOLD = ["ppu_loader", "ppu_hle", "ppu_fs", "ppu_sysprx"]
+FILE_INCS = {"jsp_net_probe.cpp": ["libs/network"]}   # CMakeLists.txt: set_source_files_properties(... INCLUDE_DIRECTORIES)
 
 
 def main():
@@ -51,7 +52,8 @@ def main():
         jobs += [(a.cc, ["-std=c17", "-DSPU_USE_DISPATCH_MT", "-x", "c"], tk / "runtime/spu/spu_dispatch_mt.c")]
         bad = 0
         for cc, std, src in jobs:
-            r = subprocess.run([cc, *FLAGS, *std, *incs, str(src)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+            extra = [f"-I{tk / d}" for d in FILE_INCS.get(src.name, [])]
+            r = subprocess.run([cc, *FLAGS, *std, *incs, *extra, str(src)], capture_output=True, text=True, encoding="utf-8", errors="replace")
             name = src.name
             if r.returncode:
                 bad += 1
