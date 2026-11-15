@@ -34,7 +34,7 @@ import re
 import sys
 
 VERSION_FILE = "installer/VERSION"
-CMAKE_FILES = ("installer/port/jsp/CMakeLists.txt", "jstars/port/CMakeLists.txt")
+CMAKE_FILES = ("installer/port/jsp/CMakeLists.txt",)
 CHANGELOG = "CHANGELOG.md"
 FIRST = "0.0.1"   # the pre-release version that needs no section
 PLAIN = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")

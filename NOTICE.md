@@ -3,23 +3,23 @@
 ## ps3recomp
 
 This project is built on [ps3recomp](https://github.com/sp00nznet/ps3recomp) by Ned Heller (sp00nznet) and
-contributors, licensed under the MIT licence. Parts of `jstars/port/` started as copies of the ps3recomp project
-template (for example `main.cpp`, `stubs.cpp`, `CMakeLists.txt` and `config.toml`). The patches in
+contributors, licensed under the MIT licence. Parts of `installer/port/jsp/` started as copies of the ps3recomp project
+template (for example `main.cpp`, `stubs.cpp` and `CMakeLists.txt`). The patches in `installer/port/patches/` and in
 `docs/archive/jstars-notes/patches/` are written against ps3recomp source files. Keep ps3recomp's copyright and licence
 notice with any of these files that you copy.
 
 The toolkit itself is not part of this tree: `third_party/ps3recomp` is a submodule that points at ps3recomp's
-`v0.15.0` commit, and its files come from the upstream repository. Changes to ps3recomp are kept only as patches:
-`jstars/toolkit/ps3recomp-local.patch` (the set the port builds with) and the single-experiment patches under
-`docs/archive/jstars-notes/patches`.
+`v0.19.0` commit, and its files come from the upstream repository. Changes to ps3recomp are kept only as patches:
+`installer/port/patches/` (the set the port builds with) and the single-experiment patches under
+`docs/archive/jstars-notes/patches`. The earlier v0.15 port (`jstars/`, toolkit v0.15.0) is kept in the git tag `legacy-v15`.
 
 ## SMAA
 
-`jstars/toolkit/third_party_smaa/` holds four files from SMAA (Enhanced Subpixel Morphological Antialiasing) by Jorge
+Toolkit patch `installer/port/patches/2511-d3d12-edge-smoothing-fxaa-smaa.patch` adds four files from SMAA (Enhanced Subpixel Morphological Antialiasing) by Jorge
 Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro and Diego Gutierrez, <https://github.com/iryoku/smaa>,
 licensed under the MIT licence. `AreaTex.h`, `SearchTex.h` and `SMAA.hlsl` are the upstream files with their
 copyright and licence header (it names the authors), unchanged. `SMAA_hlsl.inc` is generated from `SMAA.hlsl` and
-carries a one-line attribution. `jstars/toolkit/apply_toolkit.py` copies them into the patched toolkit, where the
+carries a one-line attribution. The patch puts them into the patched toolkit, where the
 patched video library uses them for the "SMAA" edge smoothing option. Keep the header with any copy of these files.
 
 ## rpcs3_locate
@@ -62,7 +62,7 @@ public-domain parts, some headers derived from Wine under LGPL-2.1 or later; win
 [CMake](https://cmake.org) (Kitware, BSD-3-Clause) and [Ninja](https://ninja-build.org) (Apache-2.0), which whoever builds the
 installer downloads with `installer/tools/fetch_toolchain.py` (versions and SHA-256 in `installer/tools/toolchain.json`;
 their licence texts go into the package under `licenses\`, and `installer/licenses/LGPL-2.1.txt` is the one text kept in this
-tree); the ps3recomp toolkit with `jstars/toolkit/ps3recomp-local.patch`
+tree); the ps3recomp toolkit with `installer/port/patches/`
 applied (MIT, see above; SMAA as above); and the licence texts of this repository. The wizard images are drawn at build
 time in IBM Plex Mono Bold (IBM Corp., SIL Open Font License 1.1; the font file is not included here and the images contain
 only the rendered text). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301

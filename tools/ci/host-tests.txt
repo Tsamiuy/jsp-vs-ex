@@ -34,5 +34,3 @@ exclude | installer/tools/version_line_test.cpp | compiled and run by version_li
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh
 exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh
 exclude | docs/archive/jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner
-exclude | jstars/run_test.ps1 | a manual run script for the game, needs the game and a GPU
-exclude | jstars/test_fight.txt | data file of that manual run script

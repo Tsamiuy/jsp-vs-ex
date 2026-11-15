@@ -30,7 +30,6 @@ CASES = 0
 def repo(version="0.1.0", cmake=None, log=LOG):
     d = pathlib.Path(tempfile.mkdtemp(dir=TMP))
     (d / "installer/port/jsp").mkdir(parents=True)
-    (d / "jstars/port").mkdir(parents=True)
     (d / release.VERSION_FILE).write_text(version + "\n", encoding="utf-8")
     for rel, name in zip(release.CMAKE_FILES, ("jsp", "JStarsRecomp")):
         v = cmake.get(rel, version) if cmake else version
@@ -74,8 +73,6 @@ def main():
         d = repo(cmake={release.CMAKE_FILES[0]: "0.1.1"})
         code, out = run("--root", str(d), "--check")
         expect(code == 1 and release.CMAKE_FILES[0] in out and out.count("\n") == 1, "cmake mismatch, one line")
-        d = repo(cmake={release.CMAKE_FILES[1]: "0.0.9"})
-        expect(release.CMAKE_FILES[1] in run("--root", str(d), "--check")[1], "second cmake mismatch")
         d = repo("1.2")
         expect("not a plain X.Y.Z" in run("--root", str(d), "--check")[1], "version not plain")
         d = repo("0.2.0")

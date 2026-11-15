@@ -68,7 +68,7 @@ jobs:
           persist-credentials: false
 
       - name: Compile the launcher with the C# compiler that ships with Windows
-        # Same flags as launcher/build_launcher.bat; the exe goes to the runner's temp folder.
+        # Same flags as launcher/build_launcher19.bat and firstrun.py; the exe goes to the runner's temp folder.
         shell: pwsh
         run: |
           $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -131,7 +131,7 @@ jobs:
           persist-credentials: false
 
       - name: The patch series applies to a scratch copy of the pinned ps3recomp
-        # installer/port/patches on v0.19.0 (the legacy series, installer/patches, is no longer checked: tag legacy-v15)
+        # installer/port/patches on v0.19.0 (the earlier v0.15 series is gone: tag legacy-v15)
         run: python3 tools/ci/check_patch_series.py --scratch "$RUNNER_TEMP/series"
 
   # The host tests that need Windows (the launcher's settings order, the generated build script and path quoting) plus the
