@@ -21,7 +21,7 @@ EBOOT of another version), then resumable steps whose markers hold a fingerprint
 | `lift` | `ppu_loader` and `ppu_lifter` of the ps3recomp v0.19.0 tools turn the EBOOT into C++ (`build\recompiled`); the code end differs per disc (`0x734330` US, `0x734528` EU) |
 | `spu` | `installer/tools/lift_jobs.py` finds the JOBCRT SPU jobs in the EBOOT, wraps and lifts them, and writes `spu_workloads.c` |
 | `build` | CMake and Ninja with the bundled llvm-mingw compile the port (`installer/port/jsp`) on the exported, patched toolkit; the first build takes several minutes |
-| `place` | Copies the built game and its helper files into the game folder, writes `paths.txt` for the launcher and builds `jsp-settings.exe` if it is missing |
+| `place` | Copies the built game and its helper files into the game folder, writes `paths.txt` for the launcher and builds `jsp-settings.exe` if it is missing or older than its source (a hash of `tools/jsp-settings.cs` is kept in `jsp-settings.exe.src-sha256`) |
 
 A log of each run is `logs\firstrun-<time>.log`. Run one part by hand with `--until checks|lift|spu|build|all` and repeat one with
 `--force STEP` (usage in [../BUILDING.md](../BUILDING.md)). `build-again.cmd` in the install folder repeats the build.

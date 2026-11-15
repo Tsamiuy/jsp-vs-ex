@@ -844,11 +844,29 @@ def step_place(c):
     return True
 
 
+SETTINGS_HASH = "jsp-settings.exe.src-sha256"   # beside the exe: SHA-256 of the tools/jsp-settings.cs it was built from
+
+
+def settings_window_stale(root):
+    """True when jsp-settings.exe is missing, or was not built from the tools/jsp-settings.cs that is there now. The source's hash
+    is kept in a file beside the exe (file dates change with every copy and unzip, so they say nothing). An exe without that file,
+    like the one setup builds, counts as stale once and is rebuilt on the next run."""
+    src, out, mark = root / "tools" / "jsp-settings.cs", root / "jsp-settings.exe", root / SETTINGS_HASH
+    if not out.is_file():
+        return True
+    try:
+        return mark.read_text().strip() != hashlib.sha256(src.read_bytes()).hexdigest()
+    except OSError:
+        return True
+
+
 def build_settings_window(root):
     """jsp-settings.exe (the settings window, tools/jsp-settings.cs) with the C# compiler that comes with Windows (.NET Framework 4),
-    when it is not there yet: setup builds it while copying files; the portable zip gets it here. Never fails the step."""
+    when it is not there yet or is older than the source (an update in place brings a new tools/jsp-settings.cs, and the old window
+    must not stay): setup builds it while copying files; the portable zip gets it here. Never fails the step. The new exe is built
+    beside the old one and replaces it only when it compiled, so a failed build or a window that is still open keeps the old one."""
     src, out = root / "tools" / "jsp-settings.cs", root / "jsp-settings.exe"
-    if out.is_file() or not src.is_file() or os.name != "nt":
+    if not src.is_file() or os.name != "nt" or not settings_window_stale(root):
         return
     win = os.environ.get("WINDIR", r"C:\Windows")
     csc = next((p for p in (pathlib.Path(win) / "Microsoft.NET" / f / "v4.0.30319" / "csc.exe" for f in ("Framework64", "Framework"))
@@ -856,12 +874,24 @@ def build_settings_window(root):
     if not csc:
         say("[place] settings window: no C# compiler of Windows found; start the game with jsp-launcher.exe")
         return
+    tmp = root / "jsp-settings.exe.new"
     cmd = [str(csc), "/nologo", "/target:winexe", "/optimize+", "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
-           f"/out:{out}", str(src)]
+           f"/out:{tmp}", str(src)]
     if (root / "jsp-launcher.ico").is_file():
         cmd.insert(4, f"/win32icon:{root / 'jsp-launcher.ico'}")
+    had = out.is_file()
     r = subprocess.run(cmd, capture_output=True, text=True)
-    say(f"[place] settings window: {'jsp-settings.exe built' if out.is_file() else 'not built (csc exit ' + str(r.returncode) + ')'}")
+    done = False
+    if tmp.is_file():
+        try:
+            os.replace(tmp, out)
+            (root / SETTINGS_HASH).write_text(hashlib.sha256(src.read_bytes()).hexdigest() + "\n")
+            done = True
+        except OSError as e:
+            say(f"[place] settings window: the new build could not replace jsp-settings.exe ({e.strerror or type(e).__name__}); close the window and run this step again")
+        finally:
+            tmp.unlink(missing_ok=True)
+    say(f"[place] settings window: {'jsp-settings.exe ' + ('rebuilt' if had else 'built') if done else ('kept the old jsp-settings.exe' if had else 'not built') + ' (csc exit ' + str(r.returncode) + ')'}")
 
 
 def ask_valid(ask, out, title, saved, check, hint):

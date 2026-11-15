@@ -208,6 +208,19 @@ def units():
           str(len(list(logs.glob("firstrun-*.log")))))
     home = os.environ.get("USERPROFILE") or str(pathlib.Path.home())
     check("profile path scrubbed", firstrun.scrub(f"open {home}\\x and {home.replace(chr(92), '/')}/y").count("%USERPROFILE%") == 2)
+    # the settings window is rebuilt when tools/jsp-settings.cs changes (hash file beside the exe), not by file dates
+    sw = tmp / "sw"
+    (sw / "tools").mkdir(parents=True)
+    (sw / "tools" / "jsp-settings.cs").write_text("class A {}")
+    check("settings window: no exe is stale", firstrun.settings_window_stale(sw))
+    (sw / "jsp-settings.exe").write_bytes(b"MZ")
+    check("settings window: exe without a hash file is stale once", firstrun.settings_window_stale(sw))
+    (sw / firstrun.SETTINGS_HASH).write_text(hashlib.sha256(b"class A {}").hexdigest() + "\n")
+    check("settings window: exe built from this source is current", not firstrun.settings_window_stale(sw))
+    (sw / "tools" / "jsp-settings.cs").write_text("class B {}")
+    check("settings window: changed source is stale", firstrun.settings_window_stale(sw))
+    (sw / "tools" / "jsp-settings.cs").unlink()
+    check("settings window: missing source counts as stale (and the build then does nothing)", firstrun.settings_window_stale(sw))
     print("RESULT:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 
