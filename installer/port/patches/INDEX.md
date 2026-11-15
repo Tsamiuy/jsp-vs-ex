@@ -122,3 +122,4 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 6503 | feature | the DualSense (PS5 controller, also the Edge) over USB or Bluetooth, from the v0.15 port. Windows has no | CMakeLists.txt, cellPad.c | pad_clock, pad_xinput_stick_to_u8 | PAD_NO_DUALSENSE | J-Stars |
 | 7904 | experiment | read the effective PIPE decision without initializing it. | rsx_d3d12_backend.c, rsx_d3d12_backend.h |  |  | J-Stars |
 | 7905 | experiment | Patch 7905 (experimental): default-off, script-report-armed socket API callsite discovery. | sysNet_probe.h, sysNet_probe.inc, sysNet.c, cellPad.c |  | PS3_NET_PROBE_ARM_SCRIPT, PS3_NET_PROBE_DURATION_MS, PS3_NET_PROBE_BUDGET | J-Stars |
+| 7906 | experiment | Patch 7906 (experimental): reject async Matching2 work after context ownership ends. | np_psnr.h, np_psnr.c, sceNpMatching2.c, test_np_matching2.c |  |  | J-Stars |
