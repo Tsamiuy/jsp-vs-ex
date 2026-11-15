@@ -1,0 +1,973 @@
+Patch 7906 (experimental): reject async Matching2 work after context ownership ends.
+
+Persistent owner epochs and serialized state commits; peer registration takes the
+adapter lock before state. Lifecycle invalidation does not wait for that adapter lock.
+Queued callbacks, same-owner room ordering and server cancellation remain separate.
+
+diff --git a/libs/network/np_psnr.h b/libs/network/np_psnr.h
+--- a/libs/network/np_psnr.h
++++ b/libs/network/np_psnr.h
+@@ -88,6 +88,13 @@
+  * it a few times. Our own entry is skipped. */
+ void np_psnr_punch(uint32_t user, const uint8_t ip[4], uint16_t port);
+
++/* Matching2 peer/state commits acquire this adapter lock BEFORE their state
++ * lock. The locked leaf neither relocks nor sends/calls back. Never acquire
++ * this lock while holding Matching2 state, or call ordinary adapter APIs inside. */
++void np_psnr_peer_lock(void);
++void np_psnr_peer_unlock(void);
++void np_psnr_punch_locked(uint32_t user, const uint8_t ip[4], uint16_t port);
++
+ /* The relay (psnr docs/api.md, "Relay"), when psnr runs with -relay.
+  * - A peer that never answered our punches gets our datagrams through the
+  *   relay: np_psnr_p2p_route sends them there and returns 1; 0 means send
+diff --git a/libs/network/np_psnr.c b/libs/network/np_psnr.c
+--- a/libs/network/np_psnr.c
++++ b/libs/network/np_psnr.c
+@@ -22,6 +22,10 @@
+ #  define UNLOCK() pthread_mutex_unlock(&s_lock)
+ #endif
+
++#ifndef NP_PSNR_TEST_PAUSE
++#define NP_PSNR_TEST_PAUSE(site) ((void)0)
++#endif
++
+ /* The fake username from sceNp.c. */
+ extern const char* np_fake_username(void);
+
+@@ -114,7 +118,10 @@
+
+ int np_psnr_connected(void)
+ {
+-    return s_client != NULL;
++    LOCK();
++    int connected = s_client != NULL;
++    UNLOCK();
++    return connected;
+ }
+
+ int np_psnr_connect(const char* comm_id)
+@@ -170,18 +177,23 @@
+         }
+     }
+     UNLOCK();
++    NP_PSNR_TEST_PAUSE("request-return");
+     return req;
+ }
+
+ void np_psnr_on_push(void (*fn)(const psnr_msg*))
+ {
++    LOCK();
+     s_push_fn = fn;
++    UNLOCK();
+ }
+
+ static void (*s_tick_fn)(void);
+ void np_psnr_on_tick(void (*fn)(void))
+ {
++    LOCK();
+     s_tick_fn = fn;
++    UNLOCK();
+ }
+
+ /* ---- NAT traversal and the relay, on the title's P2P socket ---- */
+@@ -295,10 +307,12 @@
+     return 1;
+ }
+
+-void np_psnr_punch(uint32_t user, const uint8_t ip[4], uint16_t port)
++void np_psnr_peer_lock(void) { NP_PSNR_TEST_PAUSE("peer-lock"); LOCK(); }
++void np_psnr_peer_unlock(void) { UNLOCK(); }
++
++void np_psnr_punch_locked(uint32_t user, const uint8_t ip[4], uint16_t port)
+ {
+     if (user == s_user_id || !port) return;
+-    LOCK();
+     struct peer* p = peer_by_user(user);
+     if (!p) p = peer_by_user(0);
+     if (p) {
+@@ -316,6 +330,12 @@
+             p->next_punch = 0;
+         }
+     }
++}
++
++void np_psnr_punch(uint32_t user, const uint8_t ip[4], uint16_t port)
++{
++    LOCK();
++    np_psnr_punch_locked(user, ip, port);
+     UNLOCK();
+ }
+
+@@ -423,13 +443,17 @@
+ void np_psnr_pump(void)
+ {
+     psnr_msg m;
+-    if (s_tick_fn) s_tick_fn();
++    LOCK();
++    void (*tick)(void) = s_tick_fn;
++    UNLOCK();
++    if (tick) tick();
+     nat_tick();
+     if (!s_client) return;
+
+     for (;;) {
+         np_psnr_reply_fn fn = NULL;
+         void* user = NULL;
++        void (*push)(const psnr_msg*) = NULL;
+         LOCK();
+         if (!s_client) { UNLOCK(); return; }
+         int r = psnr_poll(s_client, &m);
+@@ -462,11 +486,12 @@
+                     break;
+                 }
+         }
++        push = s_push_fn;
+         UNLOCK();
+
+         /* Handlers run unlocked: they send follow-up requests. */
+         if (m.req && fn) fn(user, &m);
+-        else if (!m.req && !nat_push(&m) && s_push_fn) s_push_fn(&m);
++        else if (!m.req && !nat_push(&m) && push) push(&m);
+         psnr_msg_free(&m);
+     }
+ }
+diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
+--- a/libs/network/sceNpMatching2.c
++++ b/libs/network/sceNpMatching2.c
+@@ -11,7 +11,8 @@
+  *   request callback (ctxId, reqId, event, eventKey, errorCode, dataSize,
+  *   arg), queued through cellSysutilQueueGuestCallbackArgs and delivered on
+  *   the title's next cellSysutilCheckCallback. The psnr pump runs from there
+- *   too, so the whole round trip happens on the title's polling thread.
++ *   too. Other NP pollers may also dispatch replies; the state lock serializes
++ *   Matching2 ownership checks and publication across those callers.
+  * - Response data is fetched with GetEventData(eventKey, buf). SDK responses
+  *   contain pointers into themselves, so each one is built as a relocatable
+  *   image (rb_t): offsets from its start, plus a list of the pointer fields.
+@@ -49,14 +50,28 @@
+ #  define WIN32_LEAN_AND_MEAN
+ #  include <windows.h>
+ static SRWLOCK s_lock = SRWLOCK_INIT;
++static SRWLOCK s_state_lock = SRWLOCK_INIT;
+ #  define LOCK()   AcquireSRWLockExclusive(&s_lock)
+ #  define UNLOCK() ReleaseSRWLockExclusive(&s_lock)
++#  define STATE_LOCK() AcquireSRWLockExclusive(&s_state_lock)
++#  define STATE_UNLOCK() ReleaseSRWLockExclusive(&s_state_lock)
+ #else
+ #  include <pthread.h>
+ static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_mutex_t s_state_lock = PTHREAD_MUTEX_INITIALIZER;
+ #  define LOCK()   pthread_mutex_lock(&s_lock)
+ #  define UNLOCK() pthread_mutex_unlock(&s_lock)
++#  define STATE_LOCK() pthread_mutex_lock(&s_state_lock)
++#  define STATE_UNLOCK() pthread_mutex_unlock(&s_state_lock)
+ #endif
++
++/* Compile-time fixture seam only; no runtime observer or configuration. */
++/* Lock order: adapter peer lock N -> state M -> event/signal leaf E.
++ * No ordinary adapter API is called with M held. Test pauses compile away. */
++#ifndef M2_TEST_PAUSE
++#define M2_TEST_PAUSE(site) ((void)0)
++#endif
++#define M2_RETURN(value) do { s32 m2_result_ = (value); STATE_UNLOCK(); return m2_result_; } while (0)
+
+ /* ---------------------------------------------------------------------------
+  * SDK constants
+@@ -170,6 +185,9 @@
+
+ static int    s_init;
+ static m2_ctx s_ctx[SCE_NP_MATCHING2_CTX_MAX + 1];   /* ids are 1-based */
++/* Never reset with the context: includes stop/start and term/init ownership. */
++static u64 s_owner[SCE_NP_MATCHING2_CTX_MAX + 1];
++static u8 s_exhausted[SCE_NP_MATCHING2_CTX_MAX + 1];
+ static u32    s_next_req = 1;
+ static u32    s_next_key = 1;
+
+@@ -179,6 +197,41 @@
+ static m2_ctx* ctx_get(u16 id)
+ {
+     return (id >= 1 && id <= SCE_NP_MATCHING2_CTX_MAX && s_ctx[id].in_use) ? &s_ctx[id] : NULL;
++}
++
++/* All context access requires STATE_LOCK. No pointer survives a state unlock. */
++static int owner_advance(u16 id)
++{
++    if (s_owner[id] == UINT64_MAX) { s_exhausted[id] = 1; return 0; }
++    ++s_owner[id];
++    return 1;
++}
++static s32 context_error(u16 id, int started)
++{
++    if (!s_init) return (s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED;
++    m2_ctx* c = ctx_get(id);
++    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (started && (!c->started || s_exhausted[id])) return (s32)SCE_NP_MATCHING2_ERROR_SERVER_NOT_AVAILABLE;
++    return CELL_OK;
++}
++/* Success returns with M held. Initial admission precedes the potentially
++ * unbounded transport wait; invalid local requests never acquire N. */
++static s32 request_enter(u16 id, m2_ctx** out)
++{
++    STATE_LOCK();
++    s32 err = context_error(id, 1);
++    if (err) { STATE_UNLOCK(); return err; }
++    u64 owner = s_owner[id];
++    STATE_UNLOCK();
++    M2_TEST_PAUSE("request-status");
++    int connected = np_psnr_connected();
++    STATE_LOCK();
++    err = context_error(id, 1);
++    if (!err && s_owner[id] != owner) err = (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (!err && !connected) err = (s32)SCE_NP_MATCHING2_ERROR_SERVER_NOT_AVAILABLE;
++    if (err) { STATE_UNLOCK(); return err; }
++    *out = ctx_get(id);
++    return CELL_OK;
+ }
+
+ static u64 now_usec(void)
+@@ -213,6 +266,7 @@
+ /* A request in flight: who to answer and how. */
+ typedef struct {
+     u16 ctx;
++    u64 owner;
+     u32 req;
+     u16 event;
+     u32 cb, arg;
+@@ -227,6 +281,12 @@
+     u8  flags_changed, bins_changed;
+ } m2_op;
+
++static m2_ctx* op_current(const m2_op* op)
++{
++    if (context_error(op->ctx, 1) || s_exhausted[op->ctx] || s_owner[op->ctx] != op->owner) return NULL;
++    return ctx_get(op->ctx);
++}
++
+ static void answer(const m2_op* op, s32 err, rb_t* img)
+ {
+     u32 key = 0, size = 0;
+@@ -239,11 +299,24 @@
+     queue_cb(op->cb, op->ctx, op->req, op->event, key, (u64)(u32)err, size, op->arg, 0);
+ }
+
++
++static void answer_current(const m2_op* op, s32 err, rb_t* img)
++{
++    STATE_LOCK();
++    if (op_current(op)) {
++        M2_TEST_PAUSE("search-commit");
++        answer(op, err, img);
++    }
++    STATE_UNLOCK();
++    if (img) rb_free(img);
++}
++
+ /* Resolve a request's opt param (or the context default) and assign an id. */
+ static m2_op* op_new(m2_ctx* c, u16 ctx, u16 event, u32 opt, u32 req_id_ea)
+ {
+     m2_op* op = (m2_op*)calloc(1, sizeof(m2_op));
+     op->ctx = ctx;
++    op->owner = s_owner[ctx];
+     op->event = event;
+     op->cb = opt ? vm_read32(opt) : c->def_cb;
+     op->arg = opt ? vm_read32(opt + 4) : c->def_arg;
+@@ -378,7 +451,8 @@
+     memcpy(m->online_id, p + 6, 16);
+     memcpy(m->ip, p + 22, 4);
+     m->port = psnr_get16(p + 26);
+-    np_psnr_punch(m->user, m->ip, m->port);   /* open our router toward them */
++    /* The two member-producing handlers acquire N before M. */
++    np_psnr_punch_locked(m->user, m->ip, m->port);
+     *owner = p[28];
+     u16 dl = psnr_get16(p + 29);
+     p += 31;
+@@ -425,7 +499,7 @@
+ static m2_ctx* ctx_for_room(u64 room_id)
+ {
+     for (int i = 1; i <= SCE_NP_MATCHING2_CTX_MAX; i++)
+-        if (s_ctx[i].in_use && s_ctx[i].room.in && s_ctx[i].room.id == room_id) return &s_ctx[i];
++        if (s_init && s_ctx[i].in_use && s_ctx[i].started && s_ctx[i].room.in && s_ctx[i].room.id == room_id) return &s_ctx[i];
+     return NULL;
+ }
+
+@@ -524,7 +598,7 @@
+  * registered its address, and never answered it ("HOMER IS NOT RESPONDING").
+  * PS3_NP_SIGNALING_DELAY_MS sets the delay; default 1000. */
+ #define SIG_PENDING_MAX 16
+-static struct { int used; u16 ctx; u64 room; u16 member; u64 due; } s_sig[SIG_PENDING_MAX];
++static struct { int used; u16 ctx; u64 owner, room; u16 member; u64 due; } s_sig[SIG_PENDING_MAX];
+
+ static u64 now_ms(void)
+ {
+@@ -549,6 +623,7 @@
+         if (!s_sig[i].used) {
+             s_sig[i].used = 1;
+             s_sig[i].ctx = ctx_id(c);
++            s_sig[i].owner = s_owner[ctx_id(c)];
+             s_sig[i].room = c->room.id;
+             s_sig[i].member = member;
+             s_sig[i].due = now_ms() + (u64)delay;
+@@ -569,18 +644,24 @@
+ static void m2_tick(void)
+ {
+     u64 now = now_ms();
++    STATE_LOCK();
++    if (!s_init) { STATE_UNLOCK(); return; }
+     for (int i = 0; i < SIG_PENDING_MAX; i++) {
+         LOCK();
+         int due = s_sig[i].used && s_sig[i].due <= now;
+         u16 ctx = s_sig[i].ctx, member = s_sig[i].member;
+         u64 room = s_sig[i].room;
++        u64 owner = s_sig[i].owner;
+         if (due) s_sig[i].used = 0;
+         UNLOCK();
+         if (!due) continue;
++        M2_TEST_PAUSE("tick-pop");
+         m2_ctx* c = ctx_get(ctx);
+-        if (c && c->room.in && c->room.id == room && room_member(&c->room, member))
++        M2_TEST_PAUSE("tick-commit");
++        if (c && c->started && s_owner[ctx] == owner && c->room.in && c->room.id == room && room_member(&c->room, member))
+             signal_member(c, member, SIG_EV_Established);
+     }
++    STATE_UNLOCK();
+ }
+
+ /* SceNpMatching2RoomMemberUpdateInfo { u32 member; u8 eventCause; u8 pad[3];
+@@ -639,17 +720,19 @@
+ {
+     if (m->len < 8) return;
+     u64 room_id = psnr_get64(m->data);
+-    LOCK();
++    int peer = m->type == PSNR_MEMBER_JOINED;
++    if (peer) np_psnr_peer_lock();
++    STATE_LOCK();
+     m2_ctx* c = ctx_for_room(room_id);
+-    UNLOCK();
+-    if (!c) return;
++    if (!c) goto finished;
++    M2_TEST_PAUSE("push-commit");
+     m2_room* r = &c->room;
+     const u8 *p = m->data + 8, *end = m->data + m->len;
+
+     switch (m->type) {
+     case PSNR_MEMBER_JOINED: {
+         int owner;
+-        if (r->n >= MEMBER_MAX || !parse_member(&r->m[r->n], p, end, &owner)) return;
++        if (r->n >= MEMBER_MAX || !parse_member(&r->m[r->n], p, end, &owner)) goto finished;
+         m2_member* nm = &r->m[r->n++];
+         printf("[sceNpMatching2] room %llu: %s joined as member %u\n",
+                (unsigned long long)r->id, nm->online_id, nm->id);
+@@ -658,10 +741,10 @@
+         break;
+     }
+     case PSNR_MEMBER_LEFT: {
+-        if (end - p < 4) return;
++        if (end - p < 4) goto finished;
+         u16 gone = psnr_get16(p), owner = psnr_get16(p + 2);
+         m2_member* gm = room_member(r, gone);
+-        if (!gm) return;
++        if (!gm) goto finished;
+         printf("[sceNpMatching2] room %llu: %s left\n", (unsigned long long)r->id, gm->online_id);
+         cancel_signal(ctx_id(c), gone);
+         signal_member(c, gone, SIG_EV_Dead);
+@@ -680,21 +763,21 @@
+         break;
+     }
+     case PSNR_ROOM_DATA: {
+-        if (end - p < 3) return;
++        if (end - p < 3) goto finished;
+         u8 which = p[0];
+         u16 l = psnr_get16(p + 1);
+-        if (p + 3 + l > end) return;
++        if (p + 3 + l > end) goto finished;
+         u32 prev_flags = r->flags;
+-        if (which == 0) { attrs_unpack(&r->ext, p + 3, l); return; }   /* external: no event */
++        if (which == 0) { attrs_unpack(&r->ext, p + 3, l); goto finished; }   /* external: no event */
+         if (which == 1) attrs_unpack(&r->in_attrs, p + 3, l);
+         if (which == 2 && l == 4) r->flags = psnr_get32(p + 3);
+         internal_updated(c, which == 2, prev_flags, which == 1);
+         break;
+     }
+     case PSNR_ROOM_MSG: {
+-        if (end - p < 6) return;
++        if (end - p < 6) goto finished;
+         u16 from = psnr_get16(p), to = psnr_get16(p + 2), l = psnr_get16(p + 4);
+-        if (p + 6 + l > end) return;
++        if (p + 6 + l > end) goto finished;
+         m2_member* src = room_member(r, from);
+         /* SceNpMatching2RoomMessageInfo { u8 filtered; u8 castType; u8 pad[2];
+          * u32 dst; u32 srcMember (UserInfo2); u32 msg; u32 msgLen }        20 bytes */
+@@ -728,6 +811,10 @@
+     default:
+         break;
+     }
++
++finished:
++    STATE_UNLOCK();
++    if (peer) np_psnr_peer_unlock();
+ }
+
+ /* ---------------------------------------------------------------------------
+@@ -736,11 +823,17 @@
+
+ static s32 m2_init(void)
+ {
+-    if (s_init) return (s32)SCE_NP_MATCHING2_ERROR_ALREADY_INITIALIZED;
+-    memset(s_ctx, 0, sizeof(s_ctx));
+-    s_init = 1;
++    STATE_LOCK();
++    if (s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_ALREADY_INITIALIZED);
++    STATE_UNLOCK();
++    /* Permanent static hooks: setters acquire N only with M released. */
+     np_psnr_on_push(on_push);
+     np_psnr_on_tick(m2_tick);
++    STATE_LOCK();
++    if (s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_ALREADY_INITIALIZED);
++    memset(s_ctx, 0, sizeof(s_ctx)); /* owner/exhaustion history survives */
++    s_init = 1;
++    STATE_UNLOCK();
+     printf("[sceNpMatching2] Init (%s)\n", np_psnr_enabled() ? "online via psnr" : "offline");
+     return CELL_OK;
+ }
+@@ -767,17 +860,29 @@
+     return m2_init();
+ }
+
+-s32 sceNpMatching2Term(void)  { s_init = 0; return CELL_OK; }
+-s32 sceNpMatching2Term2(void) { s_init = 0; return CELL_OK; }
++s32 sceNpMatching2Term(void)  {
++    STATE_LOCK();
++    s_init = 0;
++    for (u16 id = 1; id <= SCE_NP_MATCHING2_CTX_MAX; ++id) {
++        owner_advance(id);
++        s_ctx[id].in_use = s_ctx[id].started = 0;
++        cancel_signal(id, 0);
++    }
++    M2_RETURN(CELL_OK);
++}
++s32 sceNpMatching2Term2(void) {
++return sceNpMatching2Term();
++}
+
+ /* SceNpCommunicationId { char data[9]; char term; u8 num; u8 pad } -> "NPWR01444_00" */
+ s32 sceNpMatching2CreateContext(u32 npId, u32 commId, u32 passPhrase, u32 ctxIdOut, s32 option)
+ {
++    STATE_LOCK();
+     (void)npId; (void)passPhrase; (void)option;
+-    if (!s_init) return (s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED;
+-    if (!ctxIdOut || !commId) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
++    if (!ctxIdOut || !commId) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     for (u16 i = 1; i <= SCE_NP_MATCHING2_CTX_MAX; i++) {
+-        if (s_ctx[i].in_use) continue;
++        if (s_ctx[i].in_use || s_exhausted[i] || !owner_advance(i)) continue;
+         memset(&s_ctx[i], 0, sizeof(m2_ctx));
+         s_ctx[i].in_use = 1;
+         char data[10] = {0};
+@@ -785,32 +890,47 @@
+         snprintf(s_ctx[i].comm_id, sizeof(s_ctx[i].comm_id), "%s_%02u", data, vm_read8(commId + 10));
+         vm_write16(ctxIdOut, i);
+         printf("[sceNpMatching2] CreateContext(%s) -> %u\n", s_ctx[i].comm_id, i);
+-        return CELL_OK;
+-    }
+-    return (s32)SCE_NP_MATCHING2_ERROR_OUT_OF_MEMORY;
++        M2_RETURN(CELL_OK);
++    }
++    M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_OUT_OF_MEMORY);
+ }
+
+ s32 sceNpMatching2DestroyContext(u16 ctxId)
+ {
+-    m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
+-    c->in_use = 0;
+-    return CELL_OK;
++    STATE_LOCK();
++    s32 err = context_error(ctxId, 0);
++    if (err) M2_RETURN(err);
++    owner_advance(ctxId);
++    s_ctx[ctxId].in_use = s_ctx[ctxId].started = 0;
++    cancel_signal(ctxId, 0);
++    M2_RETURN(CELL_OK);
+ }
+
+ /* (ctxId, event, eventCause, errorCode, arg) */
+ static s32 start(u16 ctxId)
+ {
++    char comm_id[sizeof(s_ctx[0].comm_id)];
++    STATE_LOCK();
++    s32 err = context_error(ctxId, 0);
++    if (err) M2_RETURN(err);
++    if (s_exhausted[ctxId]) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_OUT_OF_MEMORY);
++    u64 owner = s_owner[ctxId];
++    memcpy(comm_id, s_ctx[ctxId].comm_id, sizeof(comm_id));
++    STATE_UNLOCK();
++    int result = np_psnr_connect(comm_id);
++    STATE_LOCK();
++    err = context_error(ctxId, 0);
++    if (!err && (s_owner[ctxId] != owner || s_exhausted[ctxId])) err = (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (err) M2_RETURN(err);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
+-    if (np_psnr_connect(c->comm_id) == 0) {
++    if (result == 0) {
+         c->started = 1;
+         queue_cb(c->ctx_cb, ctxId, CTX_EV_Start, CAUSE_CONTEXT_ACTION, 0, c->ctx_arg, 0, 0, 0);
+     } else {
+         queue_cb(c->ctx_cb, ctxId, CTX_EV_StartOver, CAUSE_CONTEXT_ERROR,
+                  (u64)(u32)SCE_NP_MATCHING2_ERROR_SERVER_NOT_AVAILABLE, c->ctx_arg, 0, 0, 0);
+     }
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ s32 sceNpMatching2ContextStart(u16 ctxId)                     { return start(ctxId); }
+@@ -818,11 +938,15 @@
+
+ s32 sceNpMatching2ContextStop(u16 ctxId)
+ {
++    STATE_LOCK();
++    s32 err = context_error(ctxId, 0);
++    if (err) M2_RETURN(err);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
+     c->started = 0;
++    owner_advance(ctxId);
++    cancel_signal(ctxId, 0);
+     queue_cb(c->ctx_cb, ctxId, CTX_EV_Stop, CAUSE_CONTEXT_ACTION, 0, c->ctx_arg, 0, 0, 0);
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ s32 sceNpMatching2ContextStopAsync(u16 ctxId, u32 timeout) { (void)timeout; return sceNpMatching2ContextStop(ctxId); }
+@@ -830,69 +954,88 @@
+ /* SceNpMatching2RequestOptParam { u32 cbFunc; u32 cbFuncArg; u32 timeout; u16 appReqId; pad } */
+ s32 sceNpMatching2SetDefaultRequestOptParam(u16 ctxId, u32 opt)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
+-    if (!opt) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!c) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
++    if (!opt) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     c->def_cb = vm_read32(opt);
+     c->def_arg = vm_read32(opt + 4);
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ /* Written out rather than generated by a macro: gen_hle_nids.py finds
+  * exports by their definitions, and a macro hides them from it. */
+ s32 sceNpMatching2RegisterContextCallback(u16 ctxId, u32 cb, u32 arg)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (!c) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
+     c->ctx_cb = cb; c->ctx_arg = arg;
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ s32 sceNpMatching2RegisterRoomEventCallback(u16 ctxId, u32 cb, u32 arg)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (!c) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
+     c->room_cb = cb; c->room_arg = arg;
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ s32 sceNpMatching2RegisterRoomMessageCallback(u16 ctxId, u32 cb, u32 arg)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (!c) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
+     c->msg_cb = cb; c->msg_arg = arg;
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ s32 sceNpMatching2RegisterSignalingCallback(u16 ctxId, u32 cb, u32 arg)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (!c) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
+     c->sig_cb = cb; c->sig_arg = arg;
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ /* Lobbies aren't served: registering is accepted, nothing ever fires. */
+ s32 sceNpMatching2RegisterLobbyEventCallback(u16 ctxId, u32 cb, u32 arg)
+-{ (void)cb; (void)arg; return ctx_get(ctxId) ? CELL_OK : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND; }
++{
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
++    (void)cb; (void)arg;
++    M2_RETURN(ctx_get(ctxId) ? CELL_OK : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
++}
+ s32 sceNpMatching2RegisterLobbyMessageCallback(u16 ctxId, u32 cb, u32 arg)
+-{ (void)cb; (void)arg; return ctx_get(ctxId) ? CELL_OK : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND; }
++{
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
++    (void)cb; (void)arg;
++    M2_RETURN(ctx_get(ctxId) ? CELL_OK : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
++}
+
+ /* ---------------------------------------------------------------------------
+  * Server and world: one of each, answered locally
+  * -----------------------------------------------------------------------*/
+
+ #define REQUIRE_STARTED(c, ctxId)                                           \
+-    m2_ctx* c = ctx_get(ctxId);                                             \
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;           \
+-    if (!c->started || !np_psnr_connected())                                \
+-        return (s32)SCE_NP_MATCHING2_ERROR_SERVER_NOT_AVAILABLE;
++    m2_ctx* c = NULL;                                                       \
++    s32 enter_error = request_enter(ctxId, &c);                              \
++    if (enter_error) return enter_error;
+
+ s32 sceNpMatching2GetServerIdListLocal(u16 ctxId, u32 serverId, u32 maxNum)
+ {
+     REQUIRE_STARTED(c, ctxId);
+     if (serverId && maxNum) vm_write16(serverId, SERVER_ID);
+-    return 1;   /* the number of servers */
++    M2_RETURN(1);   /* the number of servers */
+ }
+
+ /* request { u16 serverId } -> SceNpMatching2GetServerInfoResponse { u16 serverId; u8 status; u8 pad } */
+@@ -904,21 +1047,21 @@
+     u32 o = rb_alloc(&img, 4, 4);
+     rb_16(&img, o, SERVER_ID);
+     rb_8(&img, o + 2, SERVER_STATUS_AVAILABLE);
+-    return answer_now(op_new(c, ctxId, EV_GetServerInfo, opt, reqId), 0, &img);
++    M2_RETURN(answer_now(op_new(c, ctxId, EV_GetServerInfo, opt, reqId), 0, &img));
+ }
+
+ s32 sceNpMatching2CreateServerContext(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+     (void)req;
+-    return answer_now(op_new(c, ctxId, EV_CreateServerContext, opt, reqId), 0, NULL);
++    M2_RETURN(answer_now(op_new(c, ctxId, EV_CreateServerContext, opt, reqId), 0, NULL));
+ }
+
+ s32 sceNpMatching2DeleteServerContext(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+     (void)req;
+-    return answer_now(op_new(c, ctxId, EV_DeleteServerContext, opt, reqId), 0, NULL);
++    M2_RETURN(answer_now(op_new(c, ctxId, EV_DeleteServerContext, opt, reqId), 0, NULL));
+ }
+
+ /* -> { u32 world*; u32 worldNum } + SceNpMatching2World (60 bytes:
+@@ -934,7 +1077,7 @@
+     rb_32(&img, w, WORLD_ID);
+     rb_ptr(&img, o, w);
+     rb_32(&img, o + 4, 1);
+-    return answer_now(op_new(c, ctxId, EV_GetWorldInfoList, opt, reqId), 0, &img);
++    M2_RETURN(answer_now(op_new(c, ctxId, EV_GetWorldInfoList, opt, reqId), 0, &img));
+ }
+
+ /* ---------------------------------------------------------------------------
+@@ -971,7 +1114,7 @@
+ {
+     m2_op* op = (m2_op*)user;
+     if (m->type != PSNR_ROOM_LIST || m->len < 4) {
+-        answer(op, psnr_error_to_m2(m), NULL);
++        answer_current(op, psnr_error_to_m2(m), NULL);
+         free(op);
+         return;
+     }
+@@ -1049,7 +1192,7 @@
+     rb_32(&img, o + 4, matched);
+     rb_32(&img, o + 8, listed);
+     printf("[sceNpMatching2] SearchRoom: %u of %u rooms match, %u listed\n", matched, count, listed);
+-    answer(op, 0, &img);
++    answer_current(op, 0, &img);
+     free(op);
+ }
+
+@@ -1061,7 +1204,7 @@
+ s32 sceNpMatching2SearchRoom(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     m2_op* op = op_new(c, ctxId, EV_SearchRoom, opt, reqId);
+     op->start = vm_read32(req + 16);
+     op->max = vm_read32(req + 20);
+@@ -1083,6 +1226,7 @@
+     u8 body[4];
+     psnr_put16(body, 0);
+     psnr_put16(body + 2, 100);   /* ponytail: first 100 rooms, filtered here */
++    STATE_UNLOCK();
+     if (!np_psnr_request(PSNR_SEARCH_ROOMS, body, 4, on_search, op)) {
+         free(op);
+         return (s32)SCE_NP_MATCHING2_ERROR_NOT_CONNECTED;
+@@ -1094,23 +1238,26 @@
+ static void on_joined(void* user, const psnr_msg* m)
+ {
+     m2_op* op = (m2_op*)user;
+-    m2_ctx* c = ctx_get(op->ctx);
+-    if (!c || m->type != PSNR_ROOM_JOINED || parse_joined(&c->room, m) != 0) {
+-        answer(op, c ? psnr_error_to_m2(m) : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND, NULL);
+-        free(op);
+-        return;
++    int peer = m->type == PSNR_ROOM_JOINED;
++    if (peer) np_psnr_peer_lock();
++    STATE_LOCK();
++    m2_ctx* c = op_current(op);
++    if (!c) goto finished;
++    M2_TEST_PAUSE("reply-commit");
++    if (m->type != PSNR_ROOM_JOINED || parse_joined(&c->room, m) != 0) {
++        answer(op, psnr_error_to_m2(m), NULL);
++        goto finished;
+     }
+     m2_room* r = &c->room;
+-    printf("[sceNpMatching2] %s room %llu as member %u (%d/%u)\n",
+-           op->event == EV_CreateJoinRoom ? "created" : "joined",
+-           (unsigned long long)r->id, r->me, r->n, r->max);
+     rb_t img = {0};
+     u32 o = rb_alloc(&img, 4, 8);
+     rb_ptr(&img, o, rb_room_internal(&img, r));
+     answer(op, 0, &img);
+-    /* Mesh signaling: everyone already here is reachable now. */
+     for (int i = 0; i < r->n; i++)
+         if (r->m[i].id != r->me) establish_later(c, r->m[i].id);
++finished:
++    STATE_UNLOCK();
++    if (peer) np_psnr_peer_unlock();
+     free(op);
+ }
+
+@@ -1124,7 +1271,7 @@
+ s32 sceNpMatching2CreateJoinRoom(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u8* body = (u8*)malloc(3 * ATTR_MAX * (BIN_MAX + 8) + 32);
+     m2_attrs ext = {0}, in = {0}, mine = {0};
+     attrs_read_int(&ext, vm_read32(req + 32), vm_read32(req + 36));
+@@ -1142,6 +1289,7 @@
+     l = attrs_pack(&in, p + 2);      psnr_put16(p, (u16)l); p += 2 + l;
+     l = attrs_pack(&mine, p + 2);    psnr_put16(p, (u16)l); p += 2 + l;
+     m2_op* op = op_new(c, ctxId, EV_CreateJoinRoom, opt, reqId);
++    STATE_UNLOCK();
+     u32 sent = np_psnr_request(PSNR_CREATE_ROOM, body, (u32)(p - body), on_joined, op);
+     free(body);
+     if (!sent) { free(op); return (s32)SCE_NP_MATCHING2_ERROR_NOT_CONNECTED; }
+@@ -1153,13 +1301,14 @@
+ s32 sceNpMatching2JoinRoom(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u8* body = (u8*)malloc(ATTR_MAX * (BIN_MAX + 8) + 16);
+     m2_attrs mine = {0};
+     attrs_read_bin(&mine, vm_read32(req + 16), vm_read32(req + 20));
+     u8* p = psnr_put64(body, vm_read64(req));
+     u32 l = attrs_pack(&mine, p + 2); psnr_put16(p, (u16)l); p += 2 + l;
+     m2_op* op = op_new(c, ctxId, EV_JoinRoom, opt, reqId);
++    STATE_UNLOCK();
+     u32 sent = np_psnr_request(PSNR_JOIN_ROOM, body, (u32)(p - body), on_joined, op);
+     free(body);
+     if (!sent) { free(op); return (s32)SCE_NP_MATCHING2_ERROR_NOT_CONNECTED; }
+@@ -1170,7 +1319,10 @@
+ static void on_done(void* user, const psnr_msg* m)
+ {
+     m2_op* op = (m2_op*)user;
+-    m2_ctx* c = ctx_get(op->ctx);
++    STATE_LOCK();
++    m2_ctx* c = op_current(op);
++    if (!c) { STATE_UNLOCK(); free(op); return; }
++    M2_TEST_PAUSE("reply-commit");
+     s32 err = m->type == PSNR_OK ? 0 : psnr_error_to_m2(m);
+     rb_t img = {0};
+     if (op->event == EV_LeaveRoom && c) {
+@@ -1183,6 +1335,7 @@
+     if (op->event == EV_SetRoomDataInternal && !err && c && c->room.in)
+         internal_updated(c, op->flags_changed, op->prev_flags, op->bins_changed);
+     rb_free(&img);
++    STATE_UNLOCK();
+     free(op);
+ }
+
+@@ -1190,6 +1343,7 @@
+                        uint8_t type, const u8* body, u32 len)
+ {
+     m2_op* op = op_new(c, ctxId, event, opt, reqId);
++    STATE_UNLOCK();
+     if (!np_psnr_request(type, body, len, on_done, op)) {
+         free(op);
+         return (s32)SCE_NP_MATCHING2_ERROR_NOT_CONNECTED;
+@@ -1201,7 +1355,7 @@
+ s32 sceNpMatching2LeaveRoom(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u8 body[8];
+     psnr_put64(body, vm_read64(req));
+     return send_simple(c, ctxId, EV_LeaveRoom, opt, reqId, PSNR_LEAVE_ROOM, body, 8);
+@@ -1211,7 +1365,7 @@
+ s32 sceNpMatching2KickoutRoomMember(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u8 body[10];
+     psnr_put16(psnr_put64(body, vm_read64(req)), vm_read16(req + 8));
+     return send_simple(c, ctxId, EV_KickoutRoomMember, opt, reqId, PSNR_KICK_MEMBER, body, 10);
+@@ -1222,7 +1376,7 @@
+ s32 sceNpMatching2SetRoomDataExternal(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req || !c->room.in) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req || !c->room.in) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u8* body = (u8*)malloc(ATTR_MAX * (BIN_MAX + 8) + 16);
+     attrs_read_int(&c->room.ext, vm_read32(req + 8), vm_read32(req + 12));
+     attrs_read_bin(&c->room.ext, vm_read32(req + 16), vm_read32(req + 20));
+@@ -1241,18 +1395,20 @@
+ s32 sceNpMatching2SetRoomDataInternal(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req || !c->room.in) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req || !c->room.in) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u8* body = (u8*)malloc(ATTR_MAX * (BIN_MAX + 8) + 16);
+     u32 filter = vm_read32(req + 8), attr = vm_read32(req + 12);
+     u32 bins = vm_read32(req + 16), nbins = vm_read32(req + 20);
+     u32 prev_flags = c->room.flags;
++    u8 flag_body[15];
++    u32 flag_len = 0;
+     if (filter) {
+         c->room.flags = (c->room.flags & ~filter) | (attr & filter);
+-        u8* p = psnr_put64(body, c->room.id);
++        u8* p = psnr_put64(flag_body, c->room.id);
+         *p++ = 2;
+         p = psnr_put16(p, 4);
+         p = psnr_put32(p, c->room.flags);
+-        np_psnr_request(PSNR_SET_ROOM_DATA, body, (u32)(p - body), NULL, NULL);
++        flag_len = (u32)(p - flag_body);
+     }
+     attrs_read_bin(&c->room.in_attrs, bins, nbins);
+     u8* p = psnr_put64(body, c->room.id);
+@@ -1262,6 +1418,8 @@
+     op->prev_flags = prev_flags;
+     op->flags_changed = filter && c->room.flags != prev_flags;
+     op->bins_changed = nbins != 0;
++    STATE_UNLOCK();
++    if (flag_len) np_psnr_request(PSNR_SET_ROOM_DATA, flag_body, flag_len, NULL, NULL);
+     s32 r = CELL_OK;
+     if (!np_psnr_request(PSNR_SET_ROOM_DATA, body, (u32)(p - body), on_done, op)) {
+         free(op);
+@@ -1277,11 +1435,11 @@
+ s32 sceNpMatching2SendRoomMessage(u16 ctxId, u32 req, u32 opt, u32 reqId)
+ {
+     REQUIRE_STARTED(c, ctxId);
+-    if (!req) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (!req) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u64 room = vm_read64(req);
+     u8 cast = vm_read8(req + 8);
+     u32 msg = vm_read32(req + 20), len = vm_read32(req + 24);
+-    if (len > 0xFF00) return (s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
++    if (len > 0xFF00) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_INVALID_ARGUMENT);
+     u16 targets[MEMBER_MAX];
+     int nt = 0;
+     if (cast == CAST_UNICAST) targets[nt++] = vm_read16(req + 12);
+@@ -1290,17 +1448,23 @@
+         for (u32 i = 0; i < n && nt < MEMBER_MAX && ids; i++) targets[nt++] = vm_read16(ids + i * 2);
+     } else targets[nt++] = 0;   /* broadcast / team: everyone */
+
++    if (!nt) M2_RETURN(CELL_OK); /* baseline: no request id or callback without a target */
+     u8* body = (u8*)malloc(len + 12);
++    if (len) memcpy(body + 12, vm_ptr8(msg), len);
++    m2_op* op = op_new(c, ctxId, EV_SendRoomMessage, opt, reqId);
++    STATE_UNLOCK();
+     s32 r = CELL_OK;
+     for (int i = 0; i < nt; i++) {
+         u8* p = psnr_put64(body, room);
+         p = psnr_put16(p, targets[i]);
+         p = psnr_put16(p, (u16)len);
+-        if (len) memcpy(p, vm_ptr8(msg), len);
+-        if (i == nt - 1)
+-            r = send_simple(c, ctxId, EV_SendRoomMessage, opt, reqId, PSNR_ROOM_MESSAGE, body, 12 + len);
+-        else
++        if (i == nt - 1) {
++            if (!np_psnr_request(PSNR_ROOM_MESSAGE, body, 12 + len, on_done, op)) {
++                free(op); r = (s32)SCE_NP_MATCHING2_ERROR_NOT_CONNECTED;
++            }
++        } else {
+             np_psnr_request(PSNR_ROOM_MESSAGE, body, 12 + len, NULL, NULL);
++        }
+     }
+     free(body);
+     return r;
+@@ -1329,9 +1493,11 @@
+
+ s32 sceNpMatching2AbortRequest(u16 ctxId, u32 reqId)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     /* ponytail: the answer still arrives; titles abort on the way out. */
+     (void)reqId;
+-    return ctx_get(ctxId) ? CELL_OK : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    M2_RETURN(ctx_get(ctxId) ? CELL_OK : (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
+ }
+
+ /* ---------------------------------------------------------------------------
+@@ -1341,15 +1507,17 @@
+ s32 sceNpMatching2SignalingGetConnectionStatus(u16 ctxId, u64 roomId, u16 memberId,
+                                                u32 connStatus, u32 peerAddr, u32 peerPort)
+ {
++    STATE_LOCK();
++    if (!s_init) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_NOT_INITIALIZED);
+     m2_ctx* c = ctx_get(ctxId);
+-    if (!c) return (s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND;
++    if (!c) M2_RETURN((s32)SCE_NP_MATCHING2_ERROR_CONTEXT_NOT_FOUND);
+     m2_member* m = (c->room.in && c->room.id == roomId) ? room_member(&c->room, memberId) : NULL;
+     if (connStatus) vm_write32(connStatus, m ? SIG_CONN_ACTIVE : SIG_CONN_INACTIVE);
+     if (peerAddr) memcpy(vm_ptr8(peerAddr), m ? m->ip : (const u8*)"\0\0\0\0", 4);
+     if (peerPort) vm_write16(peerPort, m ? m->port : 0);
+     if (m) printf("[sceNpMatching2] signaling: member %u (%s) at %u.%u.%u.%u:%u\n", memberId,
+                   m->online_id, m->ip[0], m->ip[1], m->ip[2], m->ip[3], m->port);
+-    return CELL_OK;
++    M2_RETURN(CELL_OK);
+ }
+
+ /* request { u64 roomId; u16 memberId } -> SceNpMatching2SignalingGetPingInfoResponse
+@@ -1363,7 +1531,7 @@
+     rb_32(&img, o + 4, WORLD_ID);
+     rb_64(&img, o + 8, req ? vm_read64(req) : c->room.id);
+     rb_32(&img, o + 16, 30000);   /* ponytail: a nominal 30 ms; measure over the P2P socket if a title shows it */
+-    return answer_now(op_new(c, ctxId, EV_SignalingGetPingInfo, opt, reqId), 0, &img);
++    M2_RETURN(answer_now(op_new(c, ctxId, EV_SignalingGetPingInfo, opt, reqId), 0, &img));
+ }
+
+ /* ---------------------------------------------------------------------------
+diff --git a/libs/network/tests/test_np_matching2.c b/libs/network/tests/test_np_matching2.c
+--- a/libs/network/tests/test_np_matching2.c
++++ b/libs/network/tests/test_np_matching2.c
+@@ -61,6 +61,9 @@
+ void np_psnr_on_push(void (*fn)(const psnr_msg*)) { s_push = fn; }
+ void np_psnr_on_tick(void (*fn)(void)) { (void)fn; }
+ void np_psnr_punch(uint32_t user, const uint8_t ip[4], uint16_t port) { (void)user; (void)ip; (void)port; }
++void np_psnr_peer_lock(void) {}
++void np_psnr_peer_unlock(void) {}
++void np_psnr_punch_locked(uint32_t user, const uint8_t ip[4], uint16_t port) { np_psnr_punch(user, ip, port); }
+
+ /* sysutil: remember the last callback queued */
+ static u32 s_cb_opd;

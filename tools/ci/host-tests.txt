@@ -34,10 +34,13 @@ posix   | installer/tools/lod_lifetime_test.py
 posix   | installer/tools/net_probe_consumer_test.py --sdk {toolkit}
 posix   | installer/tools/net_probe_core_test.py --sdk {toolkit}
 posix   | installer/tools/net_probe_test.py --sdk {toolkit}
+posix   | installer/tools/matching2_context_test.py --sdk {toolkit} --output {scratch}/native
 posix   | installer/tools/overlay_font_test.sh {font}
 posix   | installer/tools/port_overlay_test.c {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
+exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py
+exclude | installer/tools/matching2_stale_test.c | optional baseline fixture compiled and run by matching2_context_test.py only with --baseline-sdk; not run by regular CI
 exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
 exclude | installer/tools/port_menu_test.cpp | compiled and run by port_menu_test.sh
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
