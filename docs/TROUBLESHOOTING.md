@@ -46,7 +46,7 @@ The setup program and the game are not code-signed. See [Check your download](IN
 
 Click **Make a support bundle (JSP Fan Revival)** in the Start menu. For the portable zip, double-click `support-bundle.cmd`.
 
-It writes `jsp-support-<time>.zip` on the Desktop, with the logs and settings as text, with your user profile folder replaced. It never holds the EBOOT, disc files or saves. It sends nothing anywhere. Open the zip and look before you attach it.
+It writes `jsp-support-<time>.zip` on the Desktop, with the logs and settings as text, with your user profile folder replaced. Its `facts.txt` also names your CPU, graphics card and driver, each monitor with its size and refresh rate, the monitor the game is on and how the game shows its frames; that tells us whether a frame-rate drop comes from a 60 Hz monitor. It never holds the EBOOT, disc files or saves. It sends nothing anywhere. Open the zip and look before you attach it.
 
 Details: [installer/README.md, "Support bundle"](../installer/README.md#support-bundle).
 

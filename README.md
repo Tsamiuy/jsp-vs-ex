@@ -35,6 +35,7 @@ J-Stars Victory VS-EX is an unofficial fan port of J-Stars Victory VS+ (PS3) to 
 |---|---|---|
 | Lift, build, boot, opening movie, menus, fights with sound | Works | One Windows machine, CI-built setup program |
 | Frame rate, default tree | About 30 frames per second in the demo and in Free Battle | One Windows machine |
+| Frame rate, busy scenes on a slower CPU (3,000 to 4,000 draws a frame) | Testers saw drops to about 20 per second. With one machine's CPU held at its base clock: 23 to 27 in 0.3.0, 26.8 without the vblank wait and 28.3 with two drawing threads, both on `main` after 0.3.0; a real slower PC and a real 60 Hz monitor not tried | One Windows machine, CPU at base clock |
 | Frame rate, its earlier v18 build (toolkit v0.18.0) | 16 to 22 frames per second | One Windows machine |
 | Frame rate, earlier v15 tree (git tag `legacy-v15`) | About 29 frames per second in fights | One Windows machine |
 | Install with the setup program and the portable zip, menus, fights, online matches | Played | Play testers' own Windows 11 PCs, AMD and NVIDIA graphics |
@@ -112,7 +113,7 @@ Nothing goes online unless you turn Online Battle on. There is no update check, 
 - **DualSense and DualSense Edge:** read directly over USB or Bluetooth. This is marked "in progress", because the button tests are pending. It has no rumble or lightbar.
 - **Other pads:** a pad that only works through DirectInput is not handled by the code. Use the keyboard.
 - **Player 2:** the keyboard or a second controller.
-- **Display:** the picture is 16:9 today. The window, a resolution scale and borderless fullscreen (F11) are in the settings window.
+- **Display:** the picture is 16:9 today. The window, a resolution scale, borderless fullscreen (F11) and graphics options (edge smoothing, shadows, model detail, object draw distance) are in the settings window.
 - **Wide monitors:** fullscreen stretches the picture to a monitor of another shape. Wide screens without stretching are planned.
 
 See [Features: Input](docs/FEATURES.md#input-modes), [DualSense](docs/FEATURES.md#dualsense) and [Features: Wide screens](docs/FEATURES.md#wide-screens). Saves, updating and uninstalling: [docs/INSTALL.md](docs/INSTALL.md#saves).
