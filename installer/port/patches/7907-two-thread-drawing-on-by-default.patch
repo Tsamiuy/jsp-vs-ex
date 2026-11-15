@@ -1,0 +1,32 @@
+Two-thread drawing (2912) is on unless PIPE=0 (was: off unless PIPE=1).
+
+On a slower processor it is the larger of the two gains found while looking into frame drops in busy scenes: title
+demo (the same fights every run), CPU at its base clock, default settings, frames presented without the vblank wait
+(2915): 28.3 flips/s with two drawing threads against 26.8 with one; the parts with 3,000-4,200 draws a frame run at
+25-29 against 20-27. At full speed it makes no measurable difference. Six 2 vs 2 fights on six stages with it on were
+clean (29.3-30.0 flips/s, no crash lines, pictures right).
+
+PIPE=0 gives the single drawing thread back. Numbered after 7906 because it changes a line that 7904 uses as context.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 5799ccd..9e52282 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -474,7 +474,7 @@ typedef struct {
+ static D3D12State s_d3d;
+ static D3D12DrawRecord s_draws_buf[2][MAX_DRAWS];
+ 
+-/* Two-thread drawing (patch 2912; PIPE=1, default off; after another title's port). render_frame_prepare stays on the
++/* Two-thread drawing (patch 2912; on by default since 7907, PIPE=0 = one drawing thread; after another title's port). render_frame_prepare stays on the
+  * FIFO thread; render_frame_submit (draw loop, post passes, Close/Execute, Present) runs on its own thread for batch N
+  * while the FIFO thread records batch N+1 into the other draw list and the other half of every upload ring (vp_parity).
+  * RfFrame is the batch the submit half reads: its own draw list, count and parity, plus snapshots of the live state it
+@@ -554,7 +554,7 @@ static int pipe_on(void)
+     if (s_pipe.on < 0) {
+         const int observed = pipe_effective_observe_begin();
+         const char* e = getenv("PIPE");
+-        int on = (e && *e == '1') ? 1 : 0;
++        int on = (e && *e == '0') ? 0 : 1;   /* 7907: on unless PIPE=0 (was: off unless PIPE=1) */
+         /* Debug switches that read or edit records, guest memory or readbacks from the submit half keep the old path. */
+         static const char* const dbg[] = { "RSX_DRAWLOG", "RSX_CAP", "RTT_SAVERT", "D3D12_IQ", "VP_TESTTRI", "RT_CLEARLOG",
+             "DRAWARGS", "VP_SUBMIT", "CELLMARK_DUMP_MINDRAWS", "GPU_OVERLAP", NULL };

@@ -67,7 +67,7 @@ static void session_reader_test(const std::string& path)
     CHECK(reader_begin(100) == Result::Ok && reader_current(bound.state));
     CHECK(reader_begin(200) == Result::Stale && reader_current(bound.state));
     CHECK(reader_install(token, normal) == Result::NotStaged && reader_current(bound.state));
-    Profile other = normal; other.choices[(size_t)Key::Pipe] = 1;
+    Profile other = normal; other.choices[(size_t)Key::Pipe] = 0;   // the conservative profile has PIPE on (index 1) since toolkit patch 7907
     CHECK(reader_install(token, other, startup) == Result::UnsupportedProfile && reader_current(bound.state));
     CHECK(reader_install(token, normal, {true, other}) == Result::RestartRequired && reader_current(bound.state));
     other = normal; other.choices[0] = 255;
@@ -211,7 +211,7 @@ int main(int argc, char** argv)
             for (auto it = std::sregex_iterator(src->begin(), src->end(), w); it != std::sregex_iterator(); ++it) written.insert((*it)[1]);
         // every key the launchers write: a table item, the key pages (PAD_KEY_/KB_KEY_/KBM_KEY_/PAD_BTN_ are written with a prefix, not matched here), or launcher only
         for (const auto& k : written) {
-            bool known = jps::find_item(k.c_str()) != nullptr || k == "BOOST_OFF_ON_EXIT" || k == "MOUSE_SENS";
+            bool known = jps::find_item(k.c_str()) != nullptr || k == "BOOST_OFF_ON_EXIT" || k == "MOUSE_SENS" || k == "PIPE_SEEN";
             for (int i = 0; i < jps::k_launcher_only_count; i++) if (k == jps::k_launcher_only[i].key) known = true;
             if (!known) std::printf("launcher writes %s: not in the table\n", k.c_str());
             CHECK(known);

@@ -120,7 +120,7 @@ int main(int argc, char** argv)
     CHECK(get_float(replacement + 0xf4) == 300);
     CHECK(!reader_current(active.state));
     CHECK(!std::strcmp(std::getenv("MODEL_DETAIL"), "2"));
-    auto bad_startup = startup; bad_startup.applied.choices[(size_t)Key::Pipe] = 1;
+    auto bad_startup = startup; bad_startup.applied.choices[(size_t)Key::Pipe] = 0;
     auto newer = token; ++newer.revision;
     const auto before_failure = reader_snapshot();
     CHECK(reader_install(newer, conservative(), bad_startup) == Result::RestartRequired);
