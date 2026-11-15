@@ -3,8 +3,7 @@
 What is planned, in rough order. ✅ done · 🔧 in progress · 📋 planned. No dates: the order is the plan, the timing is
 not promised. Options that change gameplay are opt-in; display and input improvements may default on.
 What the port adds today: [FEATURES.md](FEATURES.md). Dated state and evidence: [notes/STATUS.md](notes/STATUS.md).
-The ✅ items were first checked on the earlier port in `jstars/port` on the ps3recomp v0.15 toolkit (`--tree legacy`). The default
-build is now the port on the v0.19.0 toolkit in `installer/port` (`--tree current`, #2); what is not re-checked on it is listed in [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9).
+The ✅ items were first checked on the earlier port on the ps3recomp v0.15 toolkit (git tag `legacy-v15`). The build is now the port on the v0.19.0 toolkit in `installer/port` (#2); what is not re-checked on it is listed in [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9).
 
 ## 1. Playable on Windows from your own copy  🔧
 

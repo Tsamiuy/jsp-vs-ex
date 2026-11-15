@@ -1,7 +1,7 @@
 # J-Stars Victory VS+ — ps3recomp port notes
 
 Notes from the static-recompilation port of **J-Stars Victory VS+** (BLUS31519, US disc) with
-**ps3recomp v0.15.0** plus local changes (kept in this repository as `jstars/toolkit/ps3recomp-local.patch`; originally the branch `jstars-port`). Written so the work can
+**ps3recomp v0.15.0** plus local changes (originally the branch `jstars-port`). Many dated notes below were written on that v0.15 port; paths such as `jstars/port/...` or `jstars/toolkit/...` in them refer to the git tag `legacy-v15`, which holds that tree. The port in the tree now is `installer/port` on v0.19.0. Written so the work can
 be resumed without rediscovering anything.
 
 ## Where it stands (2026-10-30)
@@ -19,7 +19,7 @@ What changed, how it was tested and the evidence: table at the top of STATUS.md.
 |---|---|
 | [STATUS.md](STATUS.md) | "Right now" on top, the table of recent changes with their tests and evidence, then the dated log |
 | [FINDINGS.md](FINDINGS.md) | Every problem: symptom → root cause → fix → files (newest at the end) |
-| [SETUP.md](SETUP.md) | Folder layout, installed tools, lift / build / run, scripts and env vars |
+| [SETUP.md](SETUP.md) | What the build step does, how to run it by hand, the launcher and its environment variables |
 
 ## Topic notes
 

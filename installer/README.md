@@ -31,7 +31,6 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/launcher/launcher.c` | `jsp-launcher.exe`, a small program the installer's shortcuts start. It checks that the disc folder exists (message box if not), reads `paths.txt` and `play_settings.txt`, leaves the power plan alone (`CPU_BOOST=1` sets its maximum processor state to 100 % while the game runs and puts the old values back afterwards) and starts the built game. It does not replace `launcher/JStarsLauncher.cs` |
 | `installer/tools/assemble_payload.py` | Collects what setup copies: the port (`installer/port`, today ps3recomp v0.19.0; `--tree current` is the default and the only tree built, `v18`/`v19` are other names for it; `--tree legacy`/`v15` exit with a pointer to the git tag `legacy-v15`, see issue #152), the patched toolkit (`export_toolkit.py`), the toolchain, the Windows Python, `firstrun.py`, licences, and `tree.txt` naming the tree |
 | `installer/tools/firstrun.py` | The build step that runs on the player's PC after setup copied the files. Preflight checks with named codes, then resumable steps whose markers hold an input fingerprint; a new log per run in `logs\firstrun-<time>.log` (the newest five are kept) |
-| `installer/tools/jsp_spu.py` | Finds the SPU job programs inside the EBOOT and lifts them with the v0.15 tools (from `jstars/spu_jobs/`, arguments instead of fixed folders); no longer used (the retired `v15` tree; see tag `legacy-v15`) |
 | `installer/tools/lift_jobs.py` | The same for the v0.19.0 tools (the current tree): scan, wrap, lift, `spu_workloads.c` |
 | `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.19.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
 | `installer/port/jsp/`, `installer/port/patches/` | The current port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
@@ -53,7 +52,6 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/tools/assemble_portable.py` | Packs the same payload as `jsp-<version>-portable.zip` with `run.cmd` and a short readme |
 | `installer/tools/fetch_toolchain.py`, `toolchain.json` | Downloads llvm-mingw, CMake, Ninja, their licence texts and the FFmpeg source (its libavcodec/libavutil headers only go into the payload, for the opening-movie decoder) on the machine that builds the installer, checks the pinned SHA-256 of each, unpacks them into a cache. Nothing downloaded is committed |
 | `installer/tools/llvm-mingw.cmake` | CMake toolchain file for the bundled compiler |
-| `installer/patches/` | No longer applied (the retired `v15` tree; see tag `legacy-v15`). It held small patches for the payload's copy of the port and the toolkit: 0001 to 0003 so that clang builds them, 0004 the optional startup shader loader, 0005 the Windows 10 fix for DXT textures whose size is not a multiple of 4, 0006 the optional "EX" in the title logo, 0007 the window icon and the plain title the launcher asks for |
 | `installer/licenses/LGPL-2.1.txt` | The one licence text kept in the tree (some MinGW-w64 headers are LGPL-2.1+); the others are fetched with pinned hashes |
 | `installer/tools/firstrun_selftest.py`, `portable_selftest.py`, `make_fixture.py` | Host checks of `firstrun.py` and the portable path, up to the compile; `make_fixture.py` writes a small fake disc folder (no game data) |
 
@@ -108,8 +106,8 @@ The FFmpeg entry is GitHub's zip of the n9.0.1 tag: GitHub does not promise the 
 most likely means it was re-packed (check the tag, then refill). Its majors (avcodec 63, avutil 61) must match the RPCS3 DLLs
 players have; firstrun.py's check M1 warns when they do not.
 The current tree's toolkit is taken from the submodule
-`third_party/ps3recomp`: when that checkout is at another commit (the v0.15 pin), `assemble_payload.py` fetches the `v0.19.0` tag
-into it once, on the machine that builds the installer; the player's PC needs no network.
+`third_party/ps3recomp` (pinned to the v0.19.0 commit): when that checkout is at another commit, `assemble_payload.py` fetches the
+`v0.19.0` tag into it once, on the machine that builds the installer; the player's PC needs no network.
 `assemble_payload.py` refuses to finish when the payload holds a file kind that the game ships (`.elf`, `.bin`, `.sfo`,
 `.psarc`, `.edat`, `.self`, `.sprx`), and `assemble_portable.py` refuses a payload that already holds first-run output.
 

@@ -1,107 +1,44 @@
 # Setup, build and run
 
-This page covers the default v15 tree (ps3recomp v0.15.0, `jstars\port`). The opt-in v19 tree (installer switch
-`--tree v18`) uses a different recipe; see [installer/README.md](../../installer/README.md).
+How the game gets from your disc to a running port. The installer does all of it; this page names the pieces so you can follow or repeat
+a step by hand. The earlier v0.15 recipe (the maintainer's working folder, `jstars\port\build.bat`, `run_test.ps1`) is in the git tag
+`legacy-v15`, in `docs/notes/SETUP.md` there.
 
-## Folder layout (the maintainer's working folder)
+## What you need
 
-| Path | What |
+- Your own game disc folder (the one that holds `PS3_GAME`) and your own decrypted `EBOOT.elf` (how to get it: RPCS3 and its documentation).
+- The installer (`jsp-setup.exe`) or the portable zip. Both carry the compiler, CMake, Ninja and a Python; nothing is downloaded and no
+  Visual Studio is needed. Steps for players: [../INSTALL.md](../INSTALL.md); problems: [../TROUBLESHOOTING.md](../TROUBLESHOOTING.md).
+
+## What the build step does
+
+`installer/tools/firstrun.py` runs after setup has copied the files. Checks come first (named codes, for example a wrong disc folder or an
+EBOOT of another version), then resumable steps whose markers hold a fingerprint of their input:
+
+| Step | What |
 |---|---|
-| `ps3recomp-v0.15.0-win-x64\` | Prebuilt SDK bundle (lib, headers, Python tools, docs). **Not enough on its own**: it has no `templates\`, `runtime\ppu\` (per-game boot scaffold) or `libs\` source. |
-| `ps3recomp-src\` | `git clone` of sp00nznet/ps3recomp at the bundle's commit `0fe7dbf5`. The port builds the runtime **from this**. Has local edits — see RUNTIME_BUGS.md. |
-| `RPCS3\` | RPCS3 0.0.43 with the PS3 firmware installed as RPCS3 documents. Its `dev_flash` is used read-only at run time. ISO: `RPCS3\games\J-Stars Victory Vs+.iso`. |
-| `jstars\` | Everything for this title (below). |
-| `docs\notes\` | These notes. `docs\archive\jstars-notes\` holds the patches, analysis tools and measurements. |
+| `checks` | The disc folder, the EBOOT (US BLUS31519 or EU BLES02136), the toolchain, the movie decoder DLLs |
+| `lift` | `ppu_loader` and `ppu_lifter` of the ps3recomp v0.19.0 tools turn the EBOOT into C++ (`build\recompiled`); the code end differs per disc (`0x734330` US, `0x734528` EU) |
+| `spu` | `installer/tools/lift_jobs.py` finds the JOBCRT SPU jobs in the EBOOT, wraps and lifts them, and writes `spu_workloads.c` |
+| `build` | CMake and Ninja with the bundled llvm-mingw compile the port (`installer/port/jsp`) on the exported, patched toolkit; the first build takes several minutes |
+| `place` | Copies the built game and its helper files into the game folder, writes `paths.txt` for the launcher and builds `jsp-settings.exe` if it is missing |
 
-### `jstars\`
+A log of each run is `logs\firstrun-<time>.log`. Run one part by hand with `--until checks|lift|spu|build|all` and repeat one with
+`--force STEP` (usage in [../BUILDING.md](../BUILDING.md)). `build-again.cmd` in the install folder repeats the build.
 
-| Path | What |
+## Running
+
+`jsp-launcher.exe` starts the game. It reads `paths.txt` (written by the build step) and `play_settings.txt` (written by the settings
+window, [LAUNCHER.md](LAUNCHER.md)) and turns each line into an environment variable of the game:
+
+| Variable | What |
 |---|---|
-| `EBOOT.BIN`, `PARAM.SFO` | Copied out of the ISO |
-| `EBOOT.elf` | The EBOOT is taken from your own copy of the game; for how to obtain the decrypted file, see RPCS3 and its documentation. |
-| `out\` | `ppu_loader.py` output (functions/imports/image/loader JSON), `imports_named.json`, `hle_coverage.json` (import → handler status), a generated `ppu_hle_nids.cpp` |
-| `spu_jobs\` | Raw SPU job binaries + wrapped ELFs + lift reports |
-| `port\` | The game project (copy of `ps3recomp-src\templates\project`, project name `JStarsRecomp`) |
-| `port\recompiled\` | Lifter output (65 files). **Contains temporary diagnostics** in `ppu_recomp_027.cpp` (`JSTARS-DIAG`, `JSTARS-COPY`) and `ppu_recomp_032.cpp` (`JSTARS-DIAG3`, kick log, `JSTARS_KICKLOG=1`). Re-lift to get clean copies (`jstars\ppu_recomp_032.cpp.orig` is a clean backup of 032). |
-| `port\spu\` | Lifted SPU jobs + `spu_workloads.c` (registration) |
-| `port\build\JStarsRecomp.exe` | The build |
-| `hdd0\` | Host folder for guest `/dev_hdd0` (game data install lands in `hdd0\game\BLUS31519-INSTALL\`, 2.5 GB) |
-| `run\` | Test-run logs (`stdout.txt`, `stderr.txt`), debug console files, `spu_miss\` dumps |
-| `build.log`… | Build logs |
-| `run_test.ps1` | Boot-test script (below) |
+| `PS3_VFS_ROOT` | The disc folder (the one that holds `PS3_GAME`) |
+| `PS3_HDD0_ROOT` | The host folder for the game's `/dev_hdd0` (saves, game data install) |
+| `PS3_DEV_FLASH` | The `dev_flash` folder (optional) |
+| `PS3_TITLE` | The window title |
+| `PS3_VERBOSE` | `0` normally; `1` logs a lot and runs a match at less than half speed (FINDINGS section 30) |
 
-Leftovers that can be deleted: `hdd0\game\BLUS31519-INSTALL.renames-lost\`
-(2.5 GB, an interrupted test install), `hdd0\game\BLES00000\` (empty, from the
-old title-id bug), `jstars\ppu_recomp_027.cpp.orig` (NOT pristine — it was
-overwritten with an instrumented copy).
-
-## Tools installed
-
-- Python 3.15 via Windows Python Install Manager — command `python3`
-  (real path `%LOCALAPPDATA%\Python\pythoncore-3.15-64\python.exe`). `build.bat` uses the first `python.exe` found on PATH
-  (`where python`) or the full path in the `PY` environment variable, and stops with "Python not found" otherwise.
-  Packages: `pip install --user -r ps3recomp-src\requirements.txt` (capstone,
-  pycryptodome, construct, tabulate, tqdm).
-- Visual Studio 2022 Build Tools 17.14 (winget) with the C++ workload,
-  **clang-cl 19.1.5**, and VS's bundled CMake + Ninja.
-  `vcvars64.bat` does **not** put CMake/Ninja/LLVM on PATH — `build.bat` adds them.
-
-## Pipeline
-
-```bash
-# 1. load (function table, imports, TOC)
-python3 ps3recomp-src/tools/ppu_loader.py jstars/EBOOT.elf -o jstars/out
-# 2. lift (25 s). --code-end stops .rodata in the R-X segment being lifted as code
-python3 ps3recomp-src/tools/ppu_lifter.py jstars/EBOOT.elf \
-    --functions jstars/out/EBOOT.functions.json --hle-stubs jstars/out/EBOOT.imports.json \
-    --code-end 0x734330 --chunks 64 --jobs 16 --output jstars/port/recompiled
-# 3. build (first build ~10 min, ~0.4 GB RAM per lifted file)
-jstars\port\build.bat [parallel-jobs]      (default 6)
-```
-
-`0x734330` is the US disc (BLUS31519) value; the installer's table (`installer/tools/firstrun.py`) uses `0x734528` for the EU disc
-(BLES02136).
-
-Re-lifting overwrites `recompiled\` (and removes the temporary diagnostics).
-
-SPU jobs (see FINDINGS.md §2, §4, §15). All 18 JOBCRT jobs in the EBOOT, in one go:
-```bash
-python3 jstars/spu_jobs/lift_all_jobs.py      # lifts missing ones + regenerates port/spu/spu_workloads.c
-```
-By hand, for a job that is not embedded in the EBOOT:
-```bash
-python3 ps3recomp-src/tools/wrap_spu_elf.py jstars/spu_jobs/X.bin --entry 0x0 --base 0x0 --out jstars/spu_jobs/X.elf
-python3 ps3recomp-src/tools/spu_lifter.py --auto-functions jstars/spu_jobs/X.elf --base 0x0 \
-    [--code-end 0xNNNN] --symbol-prefix jstars_<name>_ -o jstars/port/spu/<name> \
-    --source-name spu_recomp.c --header-name spu_recomp.h --report jstars/spu_jobs/lift_<name>.json
-```
-then add it to `port\spu\spu_workloads.c` (fingerprint = FNV-1a-64 of exactly
-`sizeBinary` bytes; the runtime prints it on a dispatch MISS). That file is generated by `jstars\spu_jobs\lift_all_jobs.py`, so a
-hand-added entry is lost on its next run; add the job to that script too.
-
-## Running: `jstars\run_test.ps1`
-
-```powershell
-powershell -ExecutionPolicy Bypass -File jstars\run_test.ps1 90                       # 90 s run
-powershell -ExecutionPolicy Bypass -File jstars\run_test.ps1 75 -Commands stat,threads # + console queries
-```
-
-It mounts the ISO read-only as the disc, sets the env below, runs the exe for N
-seconds with stdout/stderr → `run\`, sends any `-Commands` to the debug console
-near the end (answers in `run\dbg.txt.out`), stops it (asks the window to close, forces it after 5 s) and unmounts the ISO if
-the script mounted it (an ISO that was already attached stays mounted).
-**`-NoNewWindow` matters** — without it the redirected logs came out empty.
-
-| Env var | Set to |
-|---|---|
-| `PS3_VFS_ROOT` | mounted ISO root (`E:/`) — the folder containing `PS3_GAME` |
-| `PS3_HDD0_ROOT` | `jstars/hdd0` |
-| `PS3_DEV_FLASH` | `RPCS3/dev_flash` |
-| `SPU_DUMP_MISS` | `run/spu_miss` — unlifted SPU job binaries are dumped here |
-| `PS3_DEBUG` | set only with `-Commands` — enables the debug console |
-| `PS3_TITLE` | `J-Stars Victory VS+ (recomp test)` |
-| `PS3_VERBOSE` | `0` unless already set; `1` with `-VerboseLog` (verbose logging runs a match at less than half speed, FINDINGS section 30) |
-
-The first boot runs the HDD data install (~5 min). Later boots reuse it.
-
-Norton/Avast scan each new build, so the first start after a rebuild is slow.
+The first start installs the game data into the HDD folder, which takes about five minutes. Later starts reuse it. Antivirus programs scan
+each new build, so the first start after a rebuild is slow. The other settings (resolution, window, input, graphics) are in
+[PORT_SETTINGS.md](PORT_SETTINGS.md) and [LAUNCHER.md](LAUNCHER.md).
