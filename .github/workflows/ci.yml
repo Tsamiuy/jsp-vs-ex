@@ -98,11 +98,11 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Pillow and numpy (as installer.yml pins them), Mono compiler for the launcher's LAN test
+      - name: Host test dependencies (Pillow, numpy, Mono and SDL2)
         run: |
           python3 -m pip install --disable-pip-version-check pillow==12.3.0 numpy==2.5.3
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends mono-mcs mono-runtime
+          sudo apt-get install -y --no-install-recommends mono-mcs mono-runtime libsdl2-dev
 
       - name: Fira Sans file (pinned download)
         run: |

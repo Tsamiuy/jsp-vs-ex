@@ -1,0 +1,414 @@
+Patch 7905 (experimental): default-off, script-report-armed socket API callsite discovery.
+
+Records bounded scalar metadata only. API returns do not prove packets, route or delivery;
+no settings transport, application ACK or battle-start gate. Authored SDK contexts only.
+
+diff --git a/libs/network/sysNet_probe.h b/libs/network/sysNet_probe.h
+new file mode 100644
+--- /dev/null
++++ b/libs/network/sysNet_probe.h
+@@ -0,0 +1,43 @@
++/* ENHANCEMENT: bounded discovery only; no packet delivery or readiness claim. */
++#ifndef PS3_NET_PROBE_H
++#define PS3_NET_PROBE_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++enum { PS3_NET_PROBE_RING_CAP = 256, PS3_NET_PROBE_RETURN = 1,
++       PS3_NET_PROBE_SCRIPT_REPORT = 2, PS3_NET_PROBE_PAD_SCRIPT = 1 };
++enum { PS3_NET_PROBE_SEND = 1, PS3_NET_PROBE_SENDTO,
++       PS3_NET_PROBE_RECV, PS3_NET_PROBE_RECVFROM };
++enum { PS3_NET_PROBE_OFF, PS3_NET_PROBE_WAIT, PS3_NET_PROBE_ARMING,
++       PS3_NET_PROBE_ACTIVE, PS3_NET_PROBE_CLOSED, PS3_NET_PROBE_CAPPED,
++       PS3_NET_PROBE_MARKER_FAILED };
++typedef struct {
++    uint64_t epoch, sequence, thread_id, lr_raw, begin_ms, end_ms;
++    uint32_t kind, operation, requested;
++    int32_t socket_slot, flags, api_result;
++    uint32_t script_index, mask, final_mask, source, late;
++} ps3_net_probe_record;
++typedef struct {
++    uint64_t attempted, admitted, returned, in_flight, filtered_wouldblock;
++    uint64_t accepted, copied, full_drop, contention_drop, budget_drop, late_drop;
++    uint32_t state, online_registered, incomplete, marker_failed, io_failed;
++    uint32_t queue_sampled, queued, high_water, arm_index, duration_ms, budget;
++} ps3_net_probe_stats;
++/* One explicit init before guest threads. Missing/invalid config stays off. */
++int ps3_net_probe_init(void);
++int ps3_net_probe_index(void);
++void ps3_net_probe_script_report(uint32_t port, uint32_t index, uint32_t kind,
++                                uint32_t mask, uint32_t final_mask, int32_t len);
++int ps3_net_probe_poll(ps3_net_probe_record* records, uint32_t capacity,
++                      ps3_net_probe_stats* stats);
++void ps3_net_probe_output_failed(void);
++/* Owned by cellPad, null by default: no input-to-network link dependency.
++ * Assigned only before guests by an opted-in port; never changed live. */
++extern int g_cellpad_script_report_index;
++extern void (*g_cellpad_script_report_observer)(uint32_t, uint32_t, uint32_t,
++                                              uint32_t, uint32_t, int32_t);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/libs/network/sysNet_probe.inc b/libs/network/sysNet_probe.inc
+new file mode 100644
+--- /dev/null
++++ b/libs/network/sysNet_probe.inc
+@@ -0,0 +1,268 @@
++/* ENHANCEMENT: one-window socket API discovery, included only by sysNet.c.
++ * No pointers, endpoints or payload are copied. Producers never wait or do IO.
++ * Publication/copy share one try-lock; live stats are not final accounting. */
++#include "sysNet_probe.h"
++#include "../../runtime/platform/win32_compat.h"
++#include <errno.h>
++#include <limits.h>
++
++typedef struct {
++    int crt;
++#ifdef _WIN32
++    DWORD system;
++    int socket;
++#endif
++} ProbeErrors;
++static ProbeErrors probe_errors_save(void)
++{
++    ProbeErrors e;
++#ifdef _WIN32
++    e.system = GetLastError();
++    e.socket = WSAGetLastError();
++#endif
++    e.crt = errno; // CRT accessor may itself change OS error stores
++    return e;
++}
++static void probe_errors_restore(ProbeErrors e)
++{
++    errno = e.crt; // restore CRT before the final OS setters
++#ifdef _WIN32
++    WSASetLastError(e.socket);
++    SetLastError(e.system);
++#endif
++}
++typedef struct {
++    volatile LONG state, lock, online, incomplete, marker_failed, io_failed;
++    volatile LONG64 attempted, admitted, returned, in_flight, filtered;
++    volatile LONG64 accepted, copied, full_drop, contention_drop, budget_drop, late_drop;
++    uint32_t arm_index, duration_ms, budget, head, count, high_water, budget_used;
++    uint64_t deadline, sequence;
++    ps3_net_probe_record records[PS3_NET_PROBE_RING_CAP];
++} ProbeState;
++static ProbeState s_probe;
++static int s_probe_initialized;
++static LONG probe_load(volatile LONG* p) { return InterlockedCompareExchange(p, 0, 0); }
++static uint64_t probe_load64(volatile LONG64* p)
++{ return (uint64_t)InterlockedCompareExchange64(p, 0, 0); }
++static int probe_lock(void) { return InterlockedCompareExchange(&s_probe.lock, 1, 0) == 0; }
++static void probe_unlock(void) { InterlockedExchange(&s_probe.lock, 0); }
++static void probe_incomplete(void) { InterlockedExchange(&s_probe.incomplete, 1); }
++static int probe_decimal(const char* text, uint32_t maximum, uint32_t* value)
++{
++    uint32_t n = 0;
++    if (!text || !*text) return 0;
++    for (; *text; ++text) {
++        if (*text < '0' || *text > '9' || n > (maximum - (uint32_t)(*text - '0')) / 10)
++            return 0;
++        n = n * 10 + (uint32_t)(*text - '0');
++        if (n > maximum) return 0;
++    }
++    *value = n;
++    return 1;
++}
++int ps3_net_probe_init(void)
++{
++    uint32_t index, duration = 60000, budget = 4096;
++    const char *arm, *d, *b;
++    ProbeErrors errors = probe_errors_save();
++    if (s_probe_initialized) {
++        int on = probe_load(&s_probe.state) != PS3_NET_PROBE_OFF;
++        probe_errors_restore(errors);
++        return on;
++    }
++    s_probe_initialized = 1; /* explicit startup-only init, never lazy in producers */
++    arm = getenv("PS3_NET_PROBE_ARM_SCRIPT");
++    d = getenv("PS3_NET_PROBE_DURATION_MS");
++    b = getenv("PS3_NET_PROBE_BUDGET");
++    if (!probe_decimal(arm, 255, &index) ||
++        (d && (!probe_decimal(d, 600000, &duration) || !duration)) ||
++        (b && (!probe_decimal(b, 65536, &budget) || !budget))) {
++        probe_errors_restore(errors);
++        return 0;
++    }
++    s_probe.arm_index = index;
++    s_probe.duration_ms = duration;
++    s_probe.budget = budget;
++    InterlockedExchange(&s_probe.state, PS3_NET_PROBE_WAIT);
++    probe_errors_restore(errors);
++    return 1;
++}
++int ps3_net_probe_index(void)
++{ return probe_load(&s_probe.state) == PS3_NET_PROBE_OFF ? -1 : (int)s_probe.arm_index; }
++void ps3_net_probe_output_failed(void)
++{ InterlockedExchange(&s_probe.io_failed, 1); probe_incomplete(); }
++static void probe_push(ps3_net_probe_record* record)
++{
++    record->epoch = 1; /* one capture window per process */
++    record->sequence = ++s_probe.sequence;
++    s_probe.records[(s_probe.head + s_probe.count) % PS3_NET_PROBE_RING_CAP] = *record;
++    ++s_probe.count;
++    if (s_probe.count > s_probe.high_water) s_probe.high_water = s_probe.count;
++    InterlockedIncrement64(&s_probe.accepted);
++}
++void ps3_net_probe_script_report(uint32_t port, uint32_t index, uint32_t kind,
++                                uint32_t mask, uint32_t final_mask, int32_t len)
++{
++    ProbeErrors errors;
++    ps3_net_probe_record record = {0};
++    uint64_t now;
++    if (probe_load(&s_probe.state) != PS3_NET_PROBE_WAIT || port != 0 || kind != 0 ||
++        index != s_probe.arm_index || len <= 0 || !mask || mask > 0xffffu ||
++        (final_mask & mask) != mask) return;
++    errors = probe_errors_save();
++    if (InterlockedCompareExchange(&s_probe.state, PS3_NET_PROBE_ARMING,
++                                   PS3_NET_PROBE_WAIT) != PS3_NET_PROBE_WAIT) {
++        probe_errors_restore(errors);
++        return;
++    }
++    if (!probe_lock()) {
++        InterlockedIncrement64(&s_probe.contention_drop);
++        InterlockedExchange(&s_probe.marker_failed, 1);
++        probe_incomplete();
++        InterlockedExchange(&s_probe.state, PS3_NET_PROBE_MARKER_FAILED);
++        probe_errors_restore(errors);
++        return;
++    }
++    now = GetTickCount64();
++    s_probe.deadline = now + s_probe.duration_ms;
++    record.kind = PS3_NET_PROBE_SCRIPT_REPORT;
++    record.source = PS3_NET_PROBE_PAD_SCRIPT;
++    record.script_index = index;
++    record.mask = mask;
++    record.final_mask = final_mask & 0xffffu;
++    record.begin_ms = record.end_ms = now;
++    record.socket_slot = (int32_t)port;
++    probe_push(&record);
++    InterlockedExchange(&s_probe.state, PS3_NET_PROBE_ACTIVE);
++    probe_unlock();
++    probe_errors_restore(errors);
++}
++typedef struct { int active; ps3_net_probe_record record; } ProbeTicket;
++static ProbeTicket probe_enter(ppu_context* ctx, uint32_t operation,
++                               int32_t socket_slot, uint32_t requested, int32_t flags)
++{
++    ProbeTicket ticket = {0};
++    ProbeErrors errors;
++    uint64_t now;
++    if (probe_load(&s_probe.state) != PS3_NET_PROBE_ACTIVE) return ticket;
++    errors = probe_errors_save();
++    InterlockedIncrement64(&s_probe.attempted);
++    now = GetTickCount64();
++    if (now >= s_probe.deadline) {
++        InterlockedCompareExchange(&s_probe.state, PS3_NET_PROBE_CLOSED, PS3_NET_PROBE_ACTIVE);
++        probe_errors_restore(errors);
++        return ticket;
++    }
++    ticket.active = 1;
++    ticket.record.kind = PS3_NET_PROBE_RETURN;
++    ticket.record.operation = operation;
++    ticket.record.thread_id = ctx->thread_id;
++    ticket.record.lr_raw = ctx->lr;
++    ticket.record.socket_slot = socket_slot;
++    ticket.record.requested = requested;
++    ticket.record.flags = flags;
++    ticket.record.begin_ms = now;
++    InterlockedIncrement64(&s_probe.admitted);
++    InterlockedIncrement64(&s_probe.in_flight);
++    probe_errors_restore(errors);
++    return ticket;
++}
++static void probe_leave(ProbeTicket* ticket, int32_t result)
++{
++    ProbeErrors errors;
++    ps3_net_probe_record* record;
++    if (!ticket->active) return;
++    errors = probe_errors_save();
++    record = &ticket->record;
++    record->api_result = result;
++    record->end_ms = GetTickCount64();
++    record->late = record->end_ms >= s_probe.deadline;
++    if (record->late)
++        InterlockedCompareExchange(&s_probe.state, PS3_NET_PROBE_CLOSED, PS3_NET_PROBE_ACTIVE);
++    InterlockedIncrement64(&s_probe.returned);
++    if ((record->operation == PS3_NET_PROBE_RECV || record->operation == PS3_NET_PROBE_RECVFROM) &&
++        (uint32_t)result == (0x80010200u | SYS_NET_EWOULDBLOCK)) {
++        InterlockedIncrement64(&s_probe.filtered);
++    } else if (!probe_lock()) {
++        InterlockedIncrement64(&s_probe.contention_drop);
++        if (record->late) InterlockedIncrement64(&s_probe.late_drop);
++        probe_incomplete();
++    } else {
++        if (s_probe.budget_used >= s_probe.budget) {
++            InterlockedIncrement64(&s_probe.budget_drop);
++            if (record->late) InterlockedIncrement64(&s_probe.late_drop);
++            probe_incomplete();
++            InterlockedExchange(&s_probe.state, PS3_NET_PROBE_CAPPED);
++        } else if (s_probe.count == PS3_NET_PROBE_RING_CAP) {
++            InterlockedIncrement64(&s_probe.full_drop);
++            if (record->late) InterlockedIncrement64(&s_probe.late_drop);
++            probe_incomplete();
++        } else {
++            ++s_probe.budget_used;
++            probe_push(record);
++        }
++        probe_unlock();
++    }
++    InterlockedDecrement64(&s_probe.in_flight);
++    ticket->active = 0;
++    probe_errors_restore(errors);
++}
++static void probe_stats(ps3_net_probe_stats* stats)
++{
++    if (!stats) return;
++    memset(stats, 0, sizeof(*stats));
++    stats->state = (uint32_t)probe_load(&s_probe.state);
++    stats->online_registered = (uint32_t)probe_load(&s_probe.online);
++    stats->incomplete = (uint32_t)probe_load(&s_probe.incomplete);
++    stats->marker_failed = (uint32_t)probe_load(&s_probe.marker_failed);
++    stats->io_failed = (uint32_t)probe_load(&s_probe.io_failed);
++    stats->arm_index = s_probe.arm_index;
++    stats->duration_ms = s_probe.duration_ms;
++    stats->budget = s_probe.budget;
++#define PROBE_STAT(field, counter) stats->field = probe_load64(&s_probe.counter)
++    PROBE_STAT(attempted, attempted); PROBE_STAT(admitted, admitted);
++    PROBE_STAT(returned, returned); PROBE_STAT(in_flight, in_flight);
++    PROBE_STAT(filtered_wouldblock, filtered); PROBE_STAT(accepted, accepted);
++    PROBE_STAT(copied, copied); PROBE_STAT(full_drop, full_drop);
++    PROBE_STAT(contention_drop, contention_drop); PROBE_STAT(budget_drop, budget_drop);
++    PROBE_STAT(late_drop, late_drop);
++#undef PROBE_STAT
++}
++int ps3_net_probe_poll(ps3_net_probe_record* records, uint32_t capacity,
++                      ps3_net_probe_stats* stats)
++{
++    ProbeErrors errors = probe_errors_save();
++    uint32_t count = 0;
++    int locked;
++    if (probe_load(&s_probe.state) == PS3_NET_PROBE_ACTIVE && GetTickCount64() >= s_probe.deadline)
++        InterlockedCompareExchange(&s_probe.state, PS3_NET_PROBE_CLOSED, PS3_NET_PROBE_ACTIVE);
++    locked = probe_lock();
++    if (locked && (!capacity || records)) {
++        while (count < capacity && s_probe.count) {
++            records[count++] = s_probe.records[s_probe.head];
++            s_probe.head = (s_probe.head + 1) % PS3_NET_PROBE_RING_CAP;
++            --s_probe.count;
++            InterlockedIncrement64(&s_probe.copied);
++        }
++    }
++    probe_stats(stats);
++    if (locked) {
++        if (stats) {
++            stats->queue_sampled = 1;
++            stats->queued = s_probe.count;
++            stats->high_water = s_probe.high_water;
++        }
++        probe_unlock();
++    }
++    probe_errors_restore(errors);
++    return locked ? (int)count : -1;
++}
++/* Outside an active entry window this is exactly the old call/RET_S path.
++ * A ticket is captured before the core call, never retroactively at return. */
++#define PROBE_SOCKET_RETURN(operation, call) do { \
++    if (probe_load(&s_probe.state) != PS3_NET_PROBE_ACTIVE) { RET_S(call); return; } \
++    ProbeTicket ticket = probe_enter(ctx, operation, S32(3), R32(5), S32(6)); \
++    int32_t result = (call); \
++    probe_leave(&ticket, result); \
++    RET_S(result); \
++} while (0)
+diff --git a/libs/network/sysNet.c b/libs/network/sysNet.c
+--- a/libs/network/sysNet.c
++++ b/libs/network/sysNet.c
+@@ -97,6 +97,8 @@
+ /* hostent scratch layout: struct at +0, h_aliases[] at +32, h_addr_list[] at
+  * +40, the address at +48, the name at +64. */
+ #define HOSTENT_SCRATCH 320u
++
++#include "sysNet_probe.inc"   /* experimental, default-off socket-call discovery */
+
+ static int net_trace(void);   /* PS3_NET_TRACE; defined with the send/recv paths */
+
+@@ -1038,10 +1040,10 @@
+ static void h_accept(ppu_context* ctx)      { RET_S(sys_net_bnet_accept(S32(3), PTR(4), PTR(5))); }
+ static void h_connect(ppu_context* ctx)     { RET_S(sys_net_bnet_connect(S32(3), PTR(4), R32(5))); }
+ static void h_shutdown(ppu_context* ctx)    { RET_S(sys_net_bnet_shutdown(S32(3), S32(4))); }
+-static void h_send(ppu_context* ctx)        { RET_S(sys_net_bnet_send(S32(3), PTR(4), R32(5), S32(6))); }
+-static void h_sendto(ppu_context* ctx)      { RET_S(sys_net_bnet_sendto(S32(3), PTR(4), R32(5), S32(6), PTR(7), R32(8))); }
+-static void h_recv(ppu_context* ctx)        { RET_S(sys_net_bnet_recv(S32(3), PTR(4), R32(5), S32(6))); }
+-static void h_recvfrom(ppu_context* ctx)    { RET_S(sys_net_bnet_recvfrom(S32(3), PTR(4), R32(5), S32(6), PTR(7), PTR(8))); }
++static void h_send(ppu_context* ctx)        { PROBE_SOCKET_RETURN(PS3_NET_PROBE_SEND, sys_net_bnet_send(S32(3), PTR(4), R32(5), S32(6))); }
++static void h_sendto(ppu_context* ctx)      { PROBE_SOCKET_RETURN(PS3_NET_PROBE_SENDTO, sys_net_bnet_sendto(S32(3), PTR(4), R32(5), S32(6), PTR(7), R32(8))); }
++static void h_recv(ppu_context* ctx)        { PROBE_SOCKET_RETURN(PS3_NET_PROBE_RECV, sys_net_bnet_recv(S32(3), PTR(4), R32(5), S32(6))); }
++static void h_recvfrom(ppu_context* ctx)    { PROBE_SOCKET_RETURN(PS3_NET_PROBE_RECVFROM, sys_net_bnet_recvfrom(S32(3), PTR(4), R32(5), S32(6), PTR(7), PTR(8))); }
+ static void h_setsockopt(ppu_context* ctx)  { RET_S(sys_net_bnet_setsockopt(S32(3), S32(4), S32(5), PTR(6), R32(7))); }
+ static void h_getsockopt(ppu_context* ctx)  { RET_S(sys_net_bnet_getsockopt(S32(3), S32(4), S32(5), PTR(6), PTR(7))); }
+ static void h_getsockname(ppu_context* ctx) { RET_S(sys_net_bnet_getsockname(S32(3), PTR(4), PTR(5))); }
+@@ -1061,6 +1063,7 @@
+
+ void ps3_net_host_register(unsigned int (*guest_alloc)(unsigned int size, unsigned int align))
+ {
++    InterlockedExchange(&s_probe.online, 1); /* registration entry seen, not proof of selected handlers */
+     static const struct { const char* name; void (*fn)(ppu_context*); } tab[] = {
+         { "socket", h_socket },           { "socketclose", h_close },
+         { "bind", h_bind },               { "listen", h_listen },
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -20,6 +20,7 @@
+ #include "../../runtime/platform/win32_compat.h"   /* GetTickCount64 on POSIX */
+ #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
+ #include "ps3emu/log_first.h"
++#include "../network/sysNet_probe.h"   /* declarations only; observer is null unless a port opts in */
+
+ /* PAD_CLOCK=flips: PAD_SCRIPT and PAD_STICK times count guest flips instead of
+  * wall-clock seconds. A loaded machine runs a title at a third of its usual
+@@ -1257,8 +1258,15 @@
+ /* 6501: a title port that drives player 2 itself asks for port 1 to exist. */
+ int g_cellpad_want_p2 = 0;
+
++/* Immutable after startup. Standalone input builds have no network dependency. */
++int g_cellpad_script_report_index = -1;
++void (*g_cellpad_script_report_observer)(uint32_t, uint32_t, uint32_t,
++                                        uint32_t, uint32_t, int32_t) = NULL;
++
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
++    int probe_candidate = -1;
++    u32 probe_mask = 0, probe_kind = 0;
+     { static int _once = 0;
+       if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
+     if (!s_pad_initialized)
+@@ -1453,6 +1461,9 @@
+                                                    ev[i].kind == 1 ? '+' : ev[i].kind == 2 ? '~' : ev[i].kind == 3 ? '^' : '*', ev[i].t, now, 10); }
+               }
+               if (held[i] > 0) {
++                  if (g_cellpad_script_report_observer && i == g_cellpad_script_report_index) {
++                      probe_candidate = i; probe_mask = ev[i].mask; probe_kind = (u32)ev[i].kind;
++                  }
+                   held[i]--;
+                   data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(ev[i].mask & 0xFF);
+                   data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((ev[i].mask >> 8) & 0xFF);
+@@ -1650,5 +1661,15 @@
+         for (int _i = 0; _i < CELL_PAD_MAX_CODES; _i++)                    /* button[] u16 */
+             vm_write16((unsigned long long)ea + 4 + (unsigned int)_i * 2, data->button[_i]);
+     }
++    /* SCRIPT_REPORT_PRESENT is an observation after filters/serialization,
++     * not a new input edge, UI consumption or report from a len0 drain read. */
++    if (g_cellpad_script_report_observer && probe_candidate >= 0 && data->len > 0 &&
++        probe_mask && probe_mask <= 0xffffu) {
++        u32 final_mask = (data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & 0xffu) |
++                         ((data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] & 0xffu) << 8);
++        if ((final_mask & probe_mask) == probe_mask)
++            g_cellpad_script_report_observer(port_no, (u32)probe_candidate, probe_kind,
++                                             probe_mask, final_mask, data->len);
++    }
+     return CELL_OK;
+ }
