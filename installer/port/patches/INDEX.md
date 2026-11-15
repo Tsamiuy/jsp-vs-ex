@@ -99,6 +99,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2912 | experiment | two-thread drawing, PIPE=1 (default off; experiment). After the PIPE work of another v19 port. | rsx_d3d12_backend.c | gpu_overlap_on, vp_get_vs_lookup, gput_end, render_frame_hz_impl, rsx_d3d12_backend_shutdown | PIPE, FPK_REPLAY, SHK_DBG | J-Stars |
 | 2913 | experiment | MAX_DRAWS 4096 -> 8192 (experiment). | rsx_d3d12_backend.c |  |  | J-Stars |
 | 2914 | experiment | a fragment program's inline constants are walked out of guest memory once per batch (FPK_MEMO, default on, | rsx_d3d12_backend.c | vp_upload_tex_slot_impl, vp_record_cb, gput_end, render_frame_prepare, render_frame_submit | FPK_REPLAY, FPK_MEMO | J-Stars |
+| 2915 | experiment | Frames are presented without waiting for the monitor's vblank by default (Present with sync interval 0 on the | rsx_d3d12_backend.c | create_window | D3D12_VSYNC | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
 | 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
