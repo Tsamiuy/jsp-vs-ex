@@ -48,13 +48,16 @@ static char g_here[MAX_PATH];
 static void load_env(const char *file, char *exe, size_t exe_n, char *elf, size_t elf_n)
 {
     FILE *f = fopen(file, "r");
-    char line[1024];
+    char line[1024], pipe_val[16] = "";
+    int pipe_seen = 0;
     if (!f) return;
     while (fgets(line, sizeof line, f)) {
         char *eq = strchr(line, '='), *e;
         if (!eq || line[0] == '#' || line[0] == ';') continue;
         *eq++ = 0;
         for (e = eq + strlen(eq); e > eq && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' '); ) *--e = 0;
+        if (!strcmp(line, "PIPE")) { snprintf(pipe_val, sizeof pipe_val, "%s", eq); continue; }   /* applied below, only with PIPE_SEEN=2 */
+        if (!strcmp(line, "PIPE_SEEN")) { pipe_seen = !strcmp(eq, "2"); continue; }
         if (!strcmp(line, "EXE")) strncpy(exe, eq, exe_n - 1);
         else if (!strcmp(line, "ELF")) strncpy(elf, eq, elf_n - 1);
         else if (!strncmp(eq, "@APP@", 5)) {
@@ -63,6 +66,9 @@ static void load_env(const char *file, char *exe, size_t exe_n, char *elf, size_
             SetEnvironmentVariableA(line, full);
         } else SetEnvironmentVariableA(line, eq);
     }
+    /* Two-thread drawing is on by default (toolkit patch 7907). A file from before that holds PIPE=0 for everyone who never touched the
+     * box, so PIPE counts only next to PIPE_SEEN=2 (the settings window writes both); a hand-written PIPE=0 needs the marker too. */
+    if (pipe_seen && pipe_val[0]) SetEnvironmentVariableA("PIPE", pipe_val);
     fclose(f);
 }
 

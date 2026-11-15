@@ -40,7 +40,7 @@ inline constexpr std::array<Rule, kCount> kRules{{
     { "MODEL_DETAIL", Policy::SessionLive, kDetailValues, 3, 0 },
     { "OBJECT_DISTANCE", Policy::SessionLive, kDistanceValues, 4, 1 },
     { "SHADOW_RANGE", Policy::SessionLive, kRangeValues, 2, 0 },
-    { "PIPE", Policy::StartupMustMatch, kPipeValues, 2, 0 },
+    { "PIPE", Policy::StartupMustMatch, kPipeValues, 2, 1 },   // toolkit patch 7907: two-thread drawing is on unless PIPE=0
     { "JSP_RENDER60", Policy::StartupMustMatch, kRenderValues, 4, 0 },
 }};
 
@@ -60,7 +60,7 @@ struct Profile {
     std::array<uint8_t, kCount> choices{};
     bool operator==(const Profile&) const = default;
 };
-inline Profile conservative() { return Profile{{0, 1, 0, 0, 0}}; }
+inline Profile conservative() { return Profile{{0, 1, 0, 1, 0}}; }
 inline bool valid(const Profile& p)
 {
     for (size_t i = 0; i < kCount; ++i) if (p.choices[i] >= kRules[i].count) return false;
@@ -69,7 +69,7 @@ inline bool valid(const Profile& p)
 inline Result required_profile(const Profile& p)
 {
     if (!valid(p)) return Result::InvalidValue;
-    // The first profile is intentionally fixed: normal LOD/culling/shadow range, PIPE/render60 off.
+    // The first profile is intentionally fixed: normal LOD/culling/shadow range, PIPE on (the default since toolkit patch 7907), render60 off.
     return p == conservative() ? Result::Ok : Result::UnsupportedProfile;
 }
 

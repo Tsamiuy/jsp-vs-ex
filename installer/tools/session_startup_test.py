@@ -24,7 +24,7 @@ int main()
     for (int state : {-2,-1,0,1,2}) {
         effective = state; calls = 0;
         // Deliberately disagree with actual state; configuration is not used.
-        setenv("PIPE", state == 0 ? "1" : "0", 1);
+        setenv("PIPE", state == 1 ? "0" : "1", 1);
         const auto observation = reader_startup();
         const bool known = capable && (state == 0 || state == 1);
         CHECK(observation.available == known);
@@ -34,7 +34,7 @@ int main()
             CHECK(observation.applied.choices[(size_t)Key::Render60] == 0);
             SessionLayer layer;
             CHECK(layer.install(conservative(), observation.applied) ==
-                  (state == 0 ? Result::Ok : Result::RestartRequired));
+                  (state == 1 ? Result::Ok : Result::RestartRequired));
         }
     }
     effective = 0;

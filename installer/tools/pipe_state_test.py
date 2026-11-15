@@ -215,7 +215,7 @@ static void ready(void)
 int main(void)
 {
     const char* requests[] = {NULL, "", "0", "1", "1extra", "01", "2", "true"};
-    const int expected[] = {0, 0, 0, 1, 1, 0, 0, 0};
+    const int expected[] = {1, 1, 0, 1, 1, 0, 1, 1};   /* 7907: on unless the value starts with 0 */
     for (unsigned i = 0; i < sizeof requests / sizeof requests[0]; ++i) {
         fresh(); if (requests[i]) put("PIPE", requests[i]);
         getter_is_pure(-1); ready();
@@ -252,12 +252,12 @@ int main(void)
     for (int failure = 1; failure <= 2; ++failure) {
         fresh(); fail_window = failure == 1; fail_d3d = failure == 2;
         CHECK(rsx_d3d12_backend_init(1280, 720, "fail") == -1);
-        getter_is_pure(-1); CHECK(pipe_on() == 0); getter_is_pure(-1);
+        getter_is_pure(-1); CHECK(pipe_on() == 1); getter_is_pure(-1);
     }
     fresh(); rsx_d3d12_backend_shutdown(); getter_is_pure(-1); ready();
-    CHECK(pipe_on() == 0); getter_is_pure(-1);
+    CHECK(pipe_on() == 1); getter_is_pure(-1);
     fresh(); ready(); CHECK(rsx_d3d12_backend_init(1280, 720, "repeat") == 0);
-    CHECK(pipe_on() == 0); getter_is_pure(-1);
+    CHECK(pipe_on() == 1); getter_is_pure(-1);
     for (int on = 0; on <= 1; ++on) {
         fresh(); put("PIPE", on ? "1" : "0"); CHECK(pipe_on() == on);
         getter_is_pure(-1); ready(); CHECK(pipe_on() == on); getter_is_pure(-1);

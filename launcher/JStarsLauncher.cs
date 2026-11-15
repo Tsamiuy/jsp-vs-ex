@@ -421,7 +421,7 @@ namespace JStarsLauncher
         CheckBox fxFullBox;
         CheckBox statsBox;
         CheckBox fpsBox;
-        CheckBox pipeBox;   // PIPE for the game: two-thread drawing (toolkit patch 2912), off by default
+        CheckBox pipeBox;   // PIPE for the game: two-thread drawing (toolkit patches 2912, 7907), on by default
         CheckBox unlockBox;                  // ENHANCEMENT (opt-in): one start with everything unlocked; never saved to the settings file
         volatile bool unlockThisRun;
         string backupNote = "";              // what BackupSave did, written to the log once RunGame has opened it
@@ -708,12 +708,12 @@ namespace JStarsLauncher
             p.Controls.Add(fpsBox);
             y += 32;
 
-            // PIPE for the game: the drawing work runs on a second thread (toolkit patch 2912). Off by default.
-            pipeBox = new CheckBox { Text = "Two-thread drawing", Location = P(16, y), AutoSize = true, Checked = false };
+            // PIPE for the game: the drawing work runs on a second thread (toolkit patches 2912, 7907). On by default.
+            pipeBox = new CheckBox { Text = "Two-thread drawing", Location = P(16, y), AutoSize = true, Checked = true };
             pipeBox.CheckedChanged += delegate { SaveIfReady(); };
             p.Controls.Add(pipeBox);
             p.Controls.Add(new Label {
-                Text = "Uses one more CPU core; can help in busy fights. Off = the usual single thread.",
+                Text = "Uses one more CPU core; helps in busy fights. Off = one drawing thread.",
                 Location = P(170, y + 2), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
 
@@ -1628,7 +1628,7 @@ namespace JStarsLauncher
                     int eq = t.IndexOf('=');
                     if (t.Length == 0 || t.StartsWith("#") || eq <= 0) continue;
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
-                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "PIPE" ||
+                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "PIPE" || k == "PIPE_SEEN" ||
                         k == "SHADOW_SCALE" || k == "SHADOW_RANGE" || k == "MODEL_DETAIL" || k == "OBJECT_DISTANCE" ||
                         k == "INPUT_MODE" || k == "MOUSE_SENS" || k.StartsWith("PAD_KEY_") || k.StartsWith("KB_KEY_") ||
                         k.StartsWith("KBM_KEY_") || k.StartsWith("PAD_BTN_"))
@@ -1660,7 +1660,9 @@ namespace JStarsLauncher
             fxFullBox.Checked = !(cur.TryGetValue("FX_FULL", out s) && s == "0");
             statsBox.Checked = cur.TryGetValue("TITLE_STATS", out s) ? s == "1" : !installed;
             fpsBox.Checked = cur.TryGetValue("FPS_COUNTER", out s) && s == "1";
-            pipeBox.Checked = cur.TryGetValue("PIPE", out s) && s == "1";
+            // Two-thread drawing is on by default (toolkit patch 7907). A file written before that has PIPE=0 for everyone who never touched the box:
+            // PIPE counts only when the same file carries PIPE_SEEN=2 (written by this window from now on), otherwise the box shows the default (on).
+            pipeBox.Checked = !(cur.TryGetValue("PIPE_SEEN", out s) && s == "2" && cur.TryGetValue("PIPE", out s) && s != "1");
             // Graphics tab: an unknown or missing value shows the default (Medium, Normal, Normal, Normal).
             int sh;
             if (!cur.TryGetValue("SHADOW_SCALE", out s) || !int.TryParse(s, out sh)) sh = 2;
@@ -1717,6 +1719,7 @@ namespace JStarsLauncher
             lines.Add("FX_FULL=" + (fxFullBox.Checked ? "1" : "0"));
             lines.Add("TITLE_STATS=" + (statsBox.Checked ? "1" : "0"));
             lines.Add("FPS_COUNTER=" + (fpsBox.Checked ? "1" : "0"));
+            lines.Add("PIPE_SEEN=2");   // marks PIPE below as a choice made with the on-by-default window
             lines.Add("PIPE=" + (pipeBox.Checked ? "1" : "0"));
             lines.Add("SHADOW_SCALE=" + (shadowBox.SelectedIndex + 1));
             lines.Add("SHADOW_RANGE=" + (shadowRangeBox.SelectedIndex == 1 ? "2" : "1"));
