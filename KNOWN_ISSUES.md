@@ -1,14 +1,14 @@
 # Known problems
 
-Of the default build (the v19 tree, built on ps3recomp v0.19.0), pre-release 0.3.0. The status of each item is tracked in
-[issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9) (latest status comment 2026-11-13). "Not re-checked" means not
+Of the default build (the v19 tree, built on ps3recomp v0.19.0): pre-release 0.3.0 and `main` after it. The status of each item is tracked in
+[issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9) (body refreshed 2026-11-15). "Not re-checked" means not
 run again on v19. To report a problem, see "Troubleshooting and reporting a problem" in the [README](README.md).
 
 | What happens | Affects | Workaround | State |
 |---|---|---|---|
 | Training, Pause, Restart: the Yes/No box was titled "Hide HUD: Off" | 0.1.0 and 0.2.0 | none needed | fixed in 0.3.0 ([#164](https://github.com/Tsamiuy/jsp-vs-ex/pull/164), see CHANGELOG) |
 | Training: Return to character select after using Unlimited Stamina can leave a black screen and freeze; it happens with Unlimited Stamina on or off | 0.1.0, reported by a play tester; not seen in our runs | none known | open; a related fix (Unlimited Stamina no longer writes into fighters the game has freed) is in, the freeze itself is not explained |
-| The frame rate drops to about 20 per second in heavy scenes: many fighters on screen, a building being destroyed, the Temple of Athena stage, online matches. In one log it follows the number of draws per frame, not the network | 0.1.0 reports | the "Two-thread drawing" box (`PIPE`, Display page, on by default since toolkit patch 7907) helps in busy fights; online matches with different settings of it are not tested yet | open; slowdown when buildings collapse is not measured yet |
+| The frame rate drops to about 20 per second in heavy scenes: many fighters on screen, a building being destroyed, the Temple of Athena stage, online matches. In one log it follows the number of draws per frame, not the network | 0.1.0 reports | on `main` after 0.3.0 (not in a release yet): two-thread drawing is on by default (`PIPE=0` in the settings window's Display page turns it off) frames no longer wait for the monitor's vblank, which turned 30 into 20 on 60 Hz monitors, and two per-draw cuts make the drawing thread about 20 % cheaper in busy scenes; online matches with different PIPE settings are not tested yet | open until testers confirm it on 0.3.x; a 60 Hz monitor was only imitated; slowdown when buildings collapse is not measured yet |
 | Online: a solo battle against the computer started from the online lobby froze on the Versus screen; after a connection error in Ranked, the Online Battle menu froze | 0.1.0 reports | none known; a support bundle made right after the freeze helps | open, no log yet |
 | The online lobby's Selected Stage picture is drawn with horizontal stripes | 0.1.0 report | none | open |
 | Setup refuses an EBOOT as an unknown build (check `E3`) | game update 1.02, digital editions, other builds | use the EBOOT of the 1.00 disc of the same region as the disc folder | open as reported; a disc image given as a single `.iso` file is recognised but cannot be read: setup needs an extracted disc folder |

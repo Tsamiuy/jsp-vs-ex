@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 12 available, 6 in progress, 20 planned.
+Port features: 15 available, 6 in progress, 20 planned.
 
 ## 1. What the port adds
 
@@ -20,6 +20,9 @@ Port features: 12 available, 6 in progress, 20 planned.
 | <a id="wide-screens"></a>Wide and ultrawide screens | 16:10, 21:9 and 32:9 without stretching: a wider view to the sides, the HUD kept at the edges or in a 16:9 box, movies and menus with side bars. Display only | planned | - | A wider view shows more of the arena; ranked may stay 16:9 |
 | <a id="vr"></a>VR | A PC VR headset through OpenXR: first the game on a large virtual screen, later the fights in 3D. Research only; needs a steady 60 frames per second first | planned | - |  |
 | <a id="fps-counter"></a>FPS counter | The game's own frames per second, bottom left, fading in with the title screen | available | off | FPS_COUNTER=1 or the launcher's “FPS counter (bottom left)” box |
+| <a id="graphics-options"></a>Graphics options | Edge smoothing (off, FXAA, SMAA), shadow quality (Low to Ultra), shadow distance, model detail and object draw distance, full-size effects. Shadow edges at High and Ultra keep the game's soft-edge width; fights stay at about 29 to 30 frames per second | available | FXAA, Medium, Normal | AA_MODE, SHADOW_SCALE, SHADOW_RANGE, MODEL_DETAIL, OBJECT_DISTANCE, FX_FULL; the settings window's Display and Graphics tabs; compiled and checked on Windows, see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9) |
+| <a id="two-thread-drawing"></a>Two-thread drawing | The preparing half of drawing runs on its own thread, so busy scenes (3,000 to 4,000 draws a frame) cost less on a slower processor. With the CPU held at its base clock the title demo ran at 28.3 against 26.8 frames per second (about 29.5 with the per-draw cuts of #187); no difference at full speed | available | on | PIPE=0 turns it off; the settings window's “Two-thread drawing” box; on by default since #186; online play with different settings is not tested |
+| <a id="present-no-vblank-wait"></a>Frames shown without waiting for the monitor | The port paces itself at 30 frames per second on its own clock and no longer waits for the monitor's vblank as a second clock. On a 60 Hz monitor a frame that took 33 to 50 ms no longer waits for 50 ms, so 30 does not fall to 20 | available | on | D3D12_VSYNC=1 waits for the vblank again, D3D12_VSYNC=0 allows tearing; #185; not tried on a real 60 Hz monitor (a test switch stood in for it) |
 
 ### Input and launcher
 
