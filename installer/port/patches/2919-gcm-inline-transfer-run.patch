@@ -1,0 +1,60 @@
+NV308A inline transfers (cellGcmSetInlineTransfer: data words on methods 0x0400..0x1FFC of subchannel 4 or 5) went
+word by word through the FIFO walker's general loop (IO translation, the per-word diagnostic checks, the 2D
+dispatch) and gcm_2d_method (address resolve, tiling check, write): about 8 % of the FIFO thread in the title demo's
+busy part. A run of such words inside one 1 MB IO page, with no per-word diagnostic switched on, now has its
+destination worked out once and one tiling check for the whole row; the words are written in order with vm_write32
+as before. A tiled destination still goes word by word. GCM2D_RUN=0 turns it off. In J-Stars these runs carry
+fragment program words into local memory.
+
+Title demo, CPU at base clock, two drawing threads, on top of 2918: 29.5 and 29.1 flips/s (two runs); drawing
+19.2 -> 17.5 ms a frame. One drawing thread: 26.1 -> 28.1 with both. Picture unchanged.
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 94b4b06..bc5082f 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1604,6 +1604,30 @@ static void nv3089_blit(void)
+                out_w, out_h, f, src, in_pitch, dst, dst_pitch, out_x, out_y); } }
+ }
+ 
++/* toolkit 2919: a run of NV308A inline-transfer data words (COLOR, methods 0x0400..0x1FFC) inside one IO page, with
++ * no per-word diagnostic on. The destination is worked out once and checked against the tiling once for the whole
++ * row; the words are written in order with vm_write32, as gcm_2d_method does one at a time. 0 = not taken (tiled
++ * destination, or no IO mapping): the caller goes word by word. GCM2D_RUN=0: off. */
++static int gcm_2d_inline_run(u32 method, u32 io_off, u32 count)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("GCM2D_RUN"); on = (e && *e == '0') ? 0 : 1; }
++    if (!on) return 0;
++    const u32 dea = gcm_io2ea(io_off);
++    if (!dea) return 0;
++    const u32 idx = (method - 0x0400) >> 2;
++    const u32 px = (s_gcm2d.point & 0xFFFF) + idx, py = s_gcm2d.point >> 16;
++    const u32 dst_pitch = s_gcm2d.pitch >> 16;
++    const int local = (s_gcm2d.dst_dma != 0xFEED0001u);
++    const u32 at = s_gcm2d.dst_offset + py * dst_pitch + px * 4;
++    if (gcm_rect_tiled(local, at, 4u * count, 1)) return 0;
++    const u32 ea = cellGcmResolveLocated(local, s_gcm2d.dst_offset) + py * dst_pitch + px * 4;
++    for (u32 i = 0; i < count; i++) vm_write32(ea + i * 4, vm_read32(dea + i * 4));
++    { static int lg = 0; if (PS3_LOG_FIRST(lg, 2))
++          printf("[GCM2D] 2919: inline run of %u words to 0x%08X (%s)%c", count, ea, local ? "local" : "main", 10); }
++    return 1;
++}
++
+ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+ {
+     /* GCM2D_TRACE=1: histogram of (subchannel, method) actually seen. The
+@@ -2876,6 +2900,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     continue;
+                 }
+             }
++            /* toolkit 2919: a run of inline-transfer data words in one IO page (gcm_2d_inline_run). */
++            if (!wdiag && count && type == 0 && (subch == 4 || subch == 5) && method >= 0x0400u &&
++                method + (count - 1u) * 4u <= 0x1FFCu &&
++                ((s_fifo_getoff + 4) >> 20) == ((s_fifo_getoff + count * 4) >> 20) &&
++                gcm_2d_inline_run(method, s_fifo_getoff + 4, count)) {
++                s_fifo_getoff += 4 + count * 4;
++                continue;
++            }
+             for (u32 i = 0; i < count; i++) {
+                 u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
+                 if (!dea) break;

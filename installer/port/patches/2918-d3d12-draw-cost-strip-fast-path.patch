@@ -1,0 +1,109 @@
+Two per-draw costs on the drawing (FIFO) thread, found with a line-level profile of the title demo's busy part
+(3,000-4,000 draws a frame) on a CPU held at its base clock:
+
+1. upload_vpull: strips and fans with 16-bit indices took the general index loop, which tests the index width, the
+   restart index and the strip prefix again for every index, and then the general strip walk. Now the prefix (at
+   most two entries) goes through the general code and the batch's own indices through a tight loop that counts
+   restarts; with no restart in the batch the strip walk is a plain loop. Same indices, range, triangles and strip
+   state as before. VPULL_FAST16=0 turns both off together with the older 16-bit fast path.
+2. vp_record_cb read back from the constant upload heap, which is write-combined memory and slow to read: c[0] right
+   after the 7.5 KB copy, and the viewport epilogue changed in place. c[0] now comes from the rsx_state the constants
+   were copied from, and the epilogue is built in a local array and copied once.
+
+Title demo, CPU at base clock, two drawing threads: 28.3 flips/s before, 28.7 and 29.0 after (two runs); drawing
+20.5 -> 19.2 ms a frame. Picture unchanged.
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 8bfa707..25b7549 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5430,7 +5430,9 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+ 
+     /* Viewport epilogue (see the render_frame notes this logic came from):
+      * x/y identity, z lane remaps GL clip z when the guest programs one. */
+-    float* vpx = (float*)(dst + RSX_MAX_VERTEX_CONSTANTS * 16);
++    /* 2918: built here and copied to the upload heap once at the end (it is read and changed below). */
++    float* const vpx_dst = (float*)(dst + RSX_MAX_VERTEX_CONSTANTS * 16);
++    float vpx[8];
+     const float* vs_ = st->viewport_scale;
+     const float* vo_ = st->viewport_offset;
+     vpx[0] = vpx[1] = vpx[3] = 1.0f;
+@@ -5522,7 +5524,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+     int uses_c03 = (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n)
+                        ? s_d3d.vp_vs[vs_idx].uses_c03 : s_d3d.vp_uses_c03;
+     float* c = (float*)dst;
+-    float c00 = c[0];
++    float c00 = st->vertex_constants[0][0];   /* 2918: dst is write-combined upload memory, slow to read back */
+     int garbage = !(c00 > 0.0f && c00 < 8.0f);
+     if (env_on("VP_NOFIXPROJ", &s_env_vp_nofixproj)) garbage = 0;
+     if ((garbage && uses_c03) || env_on("VP_FIXPROJ", &s_env_vp_fixproj)) {
+@@ -5534,6 +5536,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+         c[10]=1.0f/99.0f; c[14]=-1.0f/99.0f;
+         vpx[2] = 1.0f; vpx[6] = 0.0f;
+     }
++    memcpy(vpx_dst, vpx, sizeof vpx);   /* 2918 */
+ }
+ 
+ /* The SET_SHADER_CONTROL bits a guest FP's translation depends on. */
+@@ -11219,6 +11222,7 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+     const int restart_en = strip && strip_restart_on(st);
+     u32* raw = s_vpull.raw;
+     u32 vmin = 0xFFFFFFFFu, vmax = 0;
++    u32 nrst = 1;   /* 2918: restarts in raw[]; 1 = not counted (the general loop) */
+     /* The common case (16-bit indices, no restart, no strip prefix) as a
+      * branch-free loop: same raw[] and range as the general loop below, which
+      * re-tests width, restart and prefix for every index. VPULL_FAST16=0: off. */
+@@ -11232,6 +11236,31 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+             vmin = ix < vmin ? ix : vmin;
+             vmax = ix > vmax ? ix : vmax;
+         }
++        nrst = 0;
++    } else if (f16 && sixteen) {
++        /* toolkit 2918: strips and fans with 16-bit indices. The prefix (at most two entries, positions in pre[])
++         * as in the general loop, then the batch's own indices in a tight loop that counts restarts. A 16-bit index
++         * never equals VPULL_NO, and a restart index above 0xFFFF never matches, as in the general loop. */
++        const u32 rix = restart_en ? st->restart_index : 0xFFFFFFFFu;
++        u32 k = 0; nrst = 0;
++        for (; k < npre; k++) {
++            const u32 kk = pre[k];
++            const u32 ix = ((u32)ip[kk * 2] << 8) | ip[kk * 2 + 1];
++            if (ix == rix) { raw[k] = VPULL_NO; nrst++; continue; }
++            raw[k] = ix;
++            if (ix < vmin) vmin = ix;
++            if (ix > vmax) vmax = ix;
++        }
++        const u8* p16 = ip + (u64)first * 2u;
++        for (u32 j = 0; k < total; k++, j++) {
++            const u32 ix = ((u32)p16[2u * j] << 8) | p16[2u * j + 1u];
++            const u32 r = ix == rix;
++            raw[k] = r ? VPULL_NO : ix;
++            nrst += r;
++            const u32 lo = r ? vmin : ix, hi = r ? vmax : ix;
++            vmin = lo < vmin ? lo : vmin;
++            vmax = hi > vmax ? hi : vmax;
++        }
+     } else
+     for (u32 k = 0; k < total; k++) {
+         const u32 kk = k < npre ? pre[k] : first + (k - npre);
+@@ -11251,6 +11280,22 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+         u32* tl = s_vpull.tri;
+         u32 seg0 = 0;
+         out = 0; t = scont ? s_sc_indexed.tris : 0; seg0_abs = scont ? s_sc_indexed.hub : first;
++        if (nrst == 0) {   /* 2918: no restart in the batch: one segment from raw[0], the general walk's result */
++            if (npre == 0) seg0_abs = first;
++            if (total >= 3) {
++                if (fan) {
++                    const u32 h = raw[0];
++                    for (u32 k = 2; k < total; k++) { tl[out] = h; tl[out + 1] = raw[k - 1]; tl[out + 2] = raw[k]; out += 3; }
++                    t += total - 2;
++                } else {
++                    for (u32 k = 2; k < total; k++, t++) {
++                        const u32 sw = t & 1u, a = raw[k - 1], b = raw[k];
++                        tl[out] = raw[k - 2]; tl[out + 1] = sw ? b : a; tl[out + 2] = sw ? a : b; out += 3;
++                    }
++                }
++            }
++            pos = total;
++        } else
+         for (u32 k = 0; k < total; k++) {
+             if (raw[k] == VPULL_NO) { pos = 0; t = 0; continue; }
+             if (pos == 0) {
