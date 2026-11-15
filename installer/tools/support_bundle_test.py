@@ -84,6 +84,10 @@ def main():
         check("GPU: Test Adapter 9000" in f, "facts: GPU name from a log line")
         g = sb.gpu_name({"a.log": b"[spu] gpu sync: 3 waits\n", "game/run/play_stdout.txt": b"[D3D12] adapter: Test GPU (VRAM 8 MB)\r\n"})
         check(g == "Test GPU (VRAM 8 MB) (from game/run/play_stdout.txt)", "GPU: the [D3D12] adapter line wins over a looser match")
+        pm = sb.present_mode({"a.log": b"x\n", "game/run/play_stdout.txt": b"[D3D12] present: no wait for the monitor (default)\r\n[D3D12] present: waits for the monitor's vblank (D3D12_VSYNC=1)\n"})
+        check(pm == "waits for the monitor's vblank (D3D12_VSYNC=1) (from game/run/play_stdout.txt)", "present mode: the last [D3D12] present line")
+        check(sb.present_mode({"a.log": b"[D3D12] adapter: x\n"}).startswith("not in the logs"), "present mode: absent in older logs")
+        check("\npresent mode: " in f, "facts: present mode line")
         check("bundled Python: " in f and "CPUs: " in f and "free space" in f and "Windows: " in f, "facts: system lines")
         check("\nCPU: " in f and "AVX2: " in f and "\nGPU driver: " in f, "facts: CPU model, AVX2 and GPU driver lines")
         fake = {r"HARDWARE\DESCRIPTION\System\CentralProcessor\0": {"ProcessorNameString": "  Test CPU   8-Core  "},

@@ -383,6 +383,17 @@ def gpu_name(blobs):
     return "not found in the logs"
 
 
+def present_mode(blobs):
+    """How the game presents frames, from the toolkit's start-up line ("[D3D12] present: ..." since toolkit patch 2915) in the logs;
+    the last one when several runs are kept. Older builds do not print it."""
+    pat = re.compile(rb"\[D3D12\] present: ([^\n\r]{1,160})")
+    for name in sorted(blobs):
+        found = pat.findall(blobs[name])
+        if found:
+            return f"{found[-1].decode('utf-8', 'replace').strip()} (from {name})"
+    return "not in the logs (a build before toolkit patch 2915, or the game has not been started)"
+
+
 def facts(app, blobs, refused, not_text, cuts, names):
     app = pathlib.Path(app)
     L = ["J-Stars Fan Revival support bundle", f"made: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}"]
@@ -411,6 +422,7 @@ def facts(app, blobs, refused, not_text, cuts, names):
     drivers = gpu_drivers()
     L.append("GPU driver: " + ("; ".join(drivers) if drivers else "not found (not Windows, or no display driver key)"))
     L += display_lines(displays(), game_display(exe_name))
+    L.append(f"present mode: {present_mode(blobs)}")
     L.append("")
     L.append("files in this zip:")
     L += [f"  {n}" for n in names]
