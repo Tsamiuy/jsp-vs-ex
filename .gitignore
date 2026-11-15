@@ -181,6 +181,8 @@ __pycache__/
 !/installer/port/jsp/*.inc
 !/installer/port/jsp/*.h
 !/installer/port/jsp/lift_insn_patches.json
+!/installer/port/jsp/lift_lod_hooks.json
+!/installer/port/jsp/lod_hooks.py
 !/installer/port/jsp/CMakeLists.txt
 !/installer/port/patches/
 /installer/port/patches/*

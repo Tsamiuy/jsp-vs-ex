@@ -2,7 +2,7 @@
 #     python3 tools/ci/run_host_tests.py [--toolkit DIR] [--fake-tool EXE --launcher EXE]
 # Row:      WHERE | PATH [ARGS]      WHERE = all, posix or windows. .py runs as `python3 -I`, .sh with bash, .c is compiled with cc.
 # Exclude:  exclude | GLOB | REASON  (a file that matches *_test.*, test_*.py or *selftest* and is not a test of its own)
-# Placeholders in ARGS: {scratch} an empty folder of this test, {toolkit} the patched ps3recomp folder (--toolkit),
+# Placeholders in ARGS (also inside paths): {scratch} an empty folder of this test, {toolkit} the patched ps3recomp folder (--toolkit),
 # {font} the Fira Sans file, {fake_tool} and {launcher} the exes the Windows job builds. A row whose placeholder was not given fails (never skips).
 # tools/ci/run_host_tests.py --check-coverage fails when a test file in git is neither listed nor excluded here.
 all     | installer/tools/rpcs3_wizard_test.py
@@ -18,6 +18,7 @@ all     | installer/tools/unlock_option_test.py
 all     | tools/test_features.py
 all     | tools/test_release.py
 all     | tools/test_contributors.py
+all     | tools/ci/test_host_tests.py
 # release.yml runs the tag step on ubuntu-latest, and this test fakes `gh` with an extension-less script that Windows' CreateProcess cannot start (not a product problem)
 posix   | tools/ci/test_release_tag.py
 posix   | installer/tools/online_settings_test.sh
@@ -27,6 +28,9 @@ posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py
 posix   | installer/tools/session_startup_test.py
 posix   | installer/tools/pipe_state_test.py --runtime {toolkit} --already-patched
+posix   | installer/tools/lod_hooks_test.py --lifter {toolkit}/tools/ppu_lifter.py --native
+posix   | installer/tools/lod_image_guard_test.py --loader {toolkit}/runtime/ppu/ppu_loader.cpp
+posix   | installer/tools/lod_lifetime_test.py
 posix   | installer/tools/overlay_font_test.sh {font}
 posix   | installer/tools/port_overlay_test.c {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}

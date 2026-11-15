@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "program": {
+    "region": "US",
+    "sha256": "a8a1543b914b70aa87a83e50c6d90c216d9ed1b60c49c629ddad5590874d7716",
+    "segment_sha256": "eb43c5d6ebabba67c037bbf49159ef7e1e4f19eba083c1269e603a7f3520488e"
+  },
+  "hooks": [
+    {"addr": "0x003955B4", "end": "0x00395630", "enter": "jsp_lod_initialize_enter", "leave": "jsp_lod_hook_leave"},
+    {"addr": "0x0039595C", "end": "0x00395968", "enter": "jsp_lod_retire_enter", "leave": "jsp_lod_hook_leave"},
+    {"addr": "0x003959C8", "end": "0x00395A80", "enter": "jsp_lod_select_enter", "leave": "jsp_lod_hook_leave"}
+  ]
+}

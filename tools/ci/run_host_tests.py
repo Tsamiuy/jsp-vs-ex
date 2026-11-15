@@ -66,6 +66,15 @@ def command(cmd, subs, scratch):
             if not v:
                 return None, f"needs --{m.group(1).replace('_', '-')}"
             a = str(v)
+        else:
+            # Expand declared placeholders inside paths without splitting argv
+            # or interpreting unrelated braces in literal test arguments.
+            pattern = r"\{(scratch|toolkit|font|fake_tool|launcher)\}"
+            values = dict(subs, scratch=scratch)
+            for key in re.findall(pattern, a):
+                if not values.get(key):
+                    return None, f"needs --{key.replace('_', '-')}"
+            a = re.sub(pattern, lambda match: str(values[match.group(1)]), a)
         args.append(a)
     if path.suffix == ".py":
         # -I ignores PYTHONUTF8 and PYTHONIOENCODING, so UTF-8 output (the tests print Japanese and accented paths) is asked for here:

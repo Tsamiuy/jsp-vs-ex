@@ -225,6 +225,11 @@ def main(argv=None):
     shutil.copy2(pub / "NOTICE.md", out / "licenses/jstars-port-NOTICE.md")
     # the glue (installer/port/jsp) and the pinned toolkit with installer/port/patches applied
     shutil.copytree(ROOT / "installer/port/jsp", out / "port")
+    # The lift manifest and verifier travel with the glue; a partial payload
+    # must not fall back to a manually asserted LOD entry-hook capability.
+    for required in ("lift_lod_hooks.json", "lod_hooks.py"):
+        if not (out / "port" / required).is_file():
+            sys.exit(f"incomplete port payload: missing {required}")
     sys.path.insert(0, str(ROOT / "installer/tools"))
     import export_toolkit
     try:

@@ -35,6 +35,7 @@ play_settings.txt in the install folder; otherwise they are in the JSP Fan Reviv
 import argparse
 import configparser
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -531,6 +532,7 @@ class Ctx:
         tools = self.cached("tools", lambda: tree_hash(self.tools))
         if step == "lift":
             return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, "tree": "v18",
+                    "lift_recipe": sha(__file__), "lod_hooks": lod_hook_plan(self),
                     **({"insn_patches": self.cached("insn_patches", lambda: sha(insn_patches(self)))} if insn_patches(self) else {})}
         if step == "spu":
             return {"eboot": eb, "toolkit_tools": tools, "lift_jobs": self.cached("lift_jobs", lambda: tree_hash(self.root / "tools" / "lift_jobs.py"))}
@@ -562,7 +564,14 @@ class Ctx:
             return "unreadable marker"
         new = self.inputs(step)
         diff = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
-        return ("input changed: " + ", ".join(diff)) if diff else ""
+        if diff:
+            return "input changed: " + ", ".join(diff)
+        if step == "lift":
+            try:
+                verify_lod_hooks(self)
+            except (OSError, ValueError, KeyError, struct.error) as e:
+                return "LOD output verification failed: " + str(e)
+        return ""
 
     def mark(self, step):
         self.marker(step).parent.mkdir(parents=True, exist_ok=True)
@@ -610,12 +619,36 @@ def insn_patches(c):
     return f if c.region == "US" and f.is_file() else None
 
 
+def lod_hook_tool(c):
+    def load():
+        path = c.root / "port" / "lod_hooks.py"
+        spec = importlib.util.spec_from_file_location("jsp_lod_hooks", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    return c.cached("lod_hook_tool", load)
+
+
+def lod_hook_args(c):
+    return (c.root / "port" / "lift_lod_hooks.json", c.eboot, c.region, c.tools / "ppu_lifter.py")
+
+
+def lod_hook_plan(c):
+    return lod_hook_tool(c).plan(*lod_hook_args(c))
+
+
+def verify_lod_hooks(c):
+    return lod_hook_tool(c).verify(c.build / "recompiled", *lod_hook_args(c))
+
+
 def step_lift(c):
     """@ docs/notes/SETUP.md of this repository: ppu_loader.py, then ppu_lifter.py with --code-end (about 25 s on the
     maintainer's PC). -X utf8: the tools open files without an encoding (Windows would write the generated C in the code page)."""
     an, out = c.build / "analysis", c.build / "recompiled"
     an.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
+    hook_tool = lod_hook_tool(c)
+    (out / hook_tool.RECEIPT).unlink(missing_ok=True)
     e = str(c.eboot)
     ok, t1 = run("lift: ppu_loader", [*c.py, c.tools / "ppu_loader.py", e, "-o", str(an) + os.sep], an / "ppu_loader.log")
     if not ok:
@@ -629,11 +662,18 @@ def step_lift(c):
     jobs_args = ["--toc", TOC, "-j"]   # --toc goes before the job count; the pair is spliced in front of it
     if insn_patches(c):
         jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # JSP_PORT_MENU=1: the Options row count (see jsp_port_menu.cpp)
+    if lod_hook_plan(c)["enabled"]:
+        jobs_args = ["--fn-hooks", str(lod_hook_args(c)[0]), *jobs_args]
     ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", funcs,
                                       "--hle-stubs", an / "EBOOT.imports.json", "--code-end", CODE_END[c.region],
                                       "--chunks", "64", *jobs_args, str(c.a.jobs), "--output", out], out / "lift.log")
     t1 += t3
     if not ok:
+        return False
+    try:
+        hook_tool.stamp(out, *lod_hook_args(c))
+    except (OSError, ValueError, KeyError, struct.error) as ex:
+        say("[lift] LOD hook verification failed: " + str(ex))
         return False
     n = len(list(out.glob("ppu_recomp_*.cpp")))
     say(f"[lift] {n} lifted files, {tree_size(out) / 1e6:.0f} MB of C++ in {out}, {t1 + t2:.0f} s")
@@ -699,6 +739,7 @@ def build_plan(c, jobs):
            "-DCMAKE_TOOLCHAIN_FILE=" + fw(c.root / "cmake" / "llvm-mingw.cmake"), "-DLLVM_MINGW_ROOT=" + fw(tc / "llvm-mingw"),
            "-DCMAKE_MAKE_PROGRAM=" + fw(paths["T3 ninja"]), "-DPS3RECOMP_DIR=" + fw(c.root / "ps3recomp"),
            "-DRECOMP_DIR=" + fw(c.build / "recompiled"), "-DSPU_DIR=" + fw(c.build / "spu"),
+           "-DJSP_EBOOT=" + fw(c.eboot), "-DJSP_GAME_REGION=" + c.region,
            "-DCMAKE_C_FLAGS_RELEASE=-O2 -DNDEBUG", "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG", "-DPython3_EXECUTABLE=" + fw(py)]
     inc = ffmpeg_include(c.root)
     if inc:   # the opening movie: FFmpeg loaded at run time (DLLs from RPCS3, copied by the place step)

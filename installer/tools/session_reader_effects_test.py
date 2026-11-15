@@ -27,10 +27,12 @@ def function(text, signature):
 
 PREFIX = r'''
 #include "jsp_session_reader.h"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <unordered_map>
 extern "C" int jsp_setting_gen(void);

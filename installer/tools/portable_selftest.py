@@ -123,6 +123,14 @@ def main(scratch, payload=None, disc=None, eboot=None):
     # --- place + move/rename: paths.txt relative, markers still current, CMake cache of the old place dropped
     old = scratch / "old" / "JSP Fan Revival"
     old.mkdir(parents=True)
+    # Place markers fingerprint lift inputs even though this fixture never lifts.
+    (old / "port").mkdir()
+    for filename in ("lod_hooks.py", "lift_lod_hooks.json"):
+        shutil.copy2(HERE.parent / "port" / "jsp" / filename, old / "port" / filename)
+    tools = old / "ps3recomp" / "tools"
+    tools.mkdir(parents=True)
+    (tools / "ppu_lifter.py").write_text("# Authored fingerprint stand-in; not a lifter.\n"
+                                       "raise SystemExit('fingerprint-only fixture must not execute')\n")
     ns = firstrun.argparse.Namespace(root=str(old), disc=str(fx / "disc"), eboot=str(fx / "EBOOT.elf"), devflash=str(fx / "dev_flash"),
                                      hdd0=str(old / "hdd0"), force=[], toolchain=str(scratch / "none"))
     (old / "build" / "port").mkdir(parents=True)
