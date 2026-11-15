@@ -101,7 +101,12 @@ def main():
         check("<- game window" in dl[1] and "default Hz" in dl[1] and "Virtual Display" in dl[1] and "1280x720" in dl[2], "displays: the game window's display is marked; Hz 1 means default")
         check("not running" in sb.display_lines(mons, (None, ""))[-1], "displays: the game is not running")
         check(sb.display_lines([], (None, "")) == ["Displays: not found (not Windows, or the query failed)"], "displays: none found")
-        check(sb.displays() == [] and sb.game_display("jsp.exe") == (None, ""), "displays: off Windows both queries return nothing")
+        if sys.platform == "win32":   # the real queries run here (CI's runner has a virtual display, maybe none): a list, and no game running
+            real = sb.displays()
+            check(isinstance(real, list) and all(isinstance(m, dict) for m in real) and sb.game_display("jsp-no-such-game.exe") == (None, ""), "displays: the real Windows queries run and find no game")
+            print("   (this machine: %d display(s) %s)" % (len(real), [(m.get("width"), m.get("height"), m.get("hz")) for m in real]))
+        else:
+            check(sb.displays() == [] and sb.game_display("jsp.exe") == (None, ""), "displays: off Windows both queries return nothing")
         check("\nDisplays: not found" in f or "\nDisplay 1" in f, "facts: a displays line is always present")
 
         # the cap: two big logs, the oldest lines of the largest go first, with a note
