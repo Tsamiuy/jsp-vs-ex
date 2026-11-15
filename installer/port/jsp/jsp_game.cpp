@@ -49,6 +49,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "jsp_session_reader.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>        /* GetTickCount64 */
@@ -96,6 +97,12 @@ namespace {
 
 /* A live setting as a float / text: an in-game change, else the environment, else def / nullptr-like "". */
 float setting_float(const char* key, float def) { char b[48]; return jsp_setting_get(key, b, sizeof b) ? (float)std::atof(b) : def; }
+// Session-sensitive readers consume one coherent input tuple. This supplies
+// configuration, not proof that every guest object/backend has applied it.
+float session_setting_float(const jpss::ReaderValue& value, float def)
+{
+    return value.present ? (float)std::atof(value.text) : def;
+}
 
 /* Experiments (the maintainer 11-09: half-finished work stays out of the Features build): Group Camera and see-through
  * scenery, Turn-based, 6 fighters (SIX_*), the Balance log and knockdown research (KD_*, KO_TEST_MAX), action swaps,
@@ -2402,39 +2409,71 @@ void six_watch_tick(bool picking)
  * the game reads them. docs/archive/jstars-notes/GRAPHICS_MAP.md. */
 struct LodOrig { float d0, d1, cull; uint32_t w0, w1, wc, flag; };
 std::unordered_map<uint32_t, LodOrig> g_lod_orig;
+// Fields changed by the game are new originals; unchanged fields can still be
+// this hook's scaled output. Reconcile each field before a generation sweep.
+void lod_original_changes(LodOrig& lo, uint32_t r0, uint32_t r1, uint32_t rc, uint32_t flag, float prior_od)
+{
+    if (r0 != lo.w0) std::memcpy(&lo.d0, &r0, 4);
+    if (r1 != lo.w1) std::memcpy(&lo.d1, &r1, 4);
+    if (rc != lo.wc) std::memcpy(&lo.cull, &rc, 4);
+    if (flag != (prior_od == 0.0f ? 0u : lo.flag)) lo.flag = flag;
+}
 void lod_select_hook(uint32_t o)
 {
+    /* VEGETATION is an experiment. Keep its existing suppression bookkeeping
+     * separate: a hidden object's zero cull distance is this hook's output. */
+    static const float veg = [] { const char* e = exp_env("VEGETATION");
+                                   float v = e ? (float)std::atof(e) : 1.0f;
+                                   return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }();
     /* Live: the in-game Graphics page changes MODEL_DETAIL and OBJECT_DISTANCE. Objects already seen are rescaled from their own
      * stored originals and written back at once; the rest follow at their next call. */
     static float md = 1.0f, od = 1.0f;
     static int lgen = -1;
-    if (lgen != jsp_setting_gen()) {
-        lgen = jsp_setting_gen();
-        float v = setting_float("MODEL_DETAIL", 1.0f); md = v < 0.25f ? 0.25f : v > 100.0f ? 100.0f : v;
-        v = setting_float("OBJECT_DISTANCE", 1.0f); od = v < 0.0f ? 1.0f : v > 100.0f ? 100.0f : v;
+    bool refreshed = false;
+    const int generation = jsp_setting_gen();
+    if (lgen != generation) {
+        const float prior_od = od;
+        const auto inputs = jpss::reader_snapshot();
+        float v = session_setting_float(inputs.live[(size_t)jpss::Key::ModelDetail], 1.0f); md = v < 0.25f ? 0.25f : v > 100.0f ? 100.0f : v;
+        v = session_setting_float(inputs.live[(size_t)jpss::Key::ObjectDistance], 1.0f); od = v < 0.0f ? 1.0f : v > 100.0f ? 100.0f : v;
+        // Retaining the pre-snapshot generation causes another refresh on the
+        // next hook when an update overlaps this one.
+        lgen = generation;
+        refreshed = true;
         for (auto& kv : g_lod_orig) {
             LodOrig& lo = kv.second;
+            if (kv.first < 0x10000u || kv.first >= 0xF0000000u || vm_read32(kv.first) != 0x008843D0u) continue;
+            if (veg >= 1.0f)
+                lod_original_changes(lo, vm_read32(kv.first + 0x50), vm_read32(kv.first + 0x54),
+                                     vm_read32(kv.first + 0x5C), vm_read32(kv.first + 0x58), prior_od);
             const float n0 = lo.d0 * md, n1 = lo.d1 * md, nc = od > 0.0f ? lo.cull * od : lo.cull;
             std::memcpy(&lo.w0, &n0, 4); std::memcpy(&lo.w1, &n1, 4); std::memcpy(&lo.wc, &nc, 4);
-            if (kv.first < 0x10000u || kv.first >= 0xF0000000u || vm_read32(kv.first) != 0x008843D0u) continue;   /* the object is gone */
             vm_write32(kv.first + 0x50, lo.w0); vm_write32(kv.first + 0x54, lo.w1); vm_write32(kv.first + 0x5C, lo.wc);
             vm_write32(kv.first + 0x58, od == 0.0f ? 0 : lo.flag);   /* never stop drawing / the object's own cull switch */
         }
     }
-    /* VEGETATION=<f> ("Vegetation" in the launcher: 1 Normal, 0.66 Medium, 0.33 Low, 0 Off): plants are the map
-     * objects with their own cull distance (+0x58 set by the stage's LODModelInfo; the maintainer saw them follow
-     * OBJECT_DISTANCE). A share of them, picked by address so the same ones stay hidden, is culled at distance 0. */
-    static const float veg = [] { const char* e = exp_env("VEGETATION");   /* experiment: also hid buildings and props (11-10) */
-                                   float v = e ? (float)std::atof(e) : 1.0f;
-                                   return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }();
-    if (md == 1.0f && od == 1.0f && veg >= 1.0f) return;
+    if (md == 1.0f && od == 1.0f && veg >= 1.0f) {
+        // Overrides are restored. Retaining their ledger would let a later
+        // local preference edit overwrite a new stage's objects at reused EAs.
+        if (refreshed) g_lod_orig.clear();
+        return;
+    }
     if (o < 0x10000u || o >= 0xF0000000u || vm_read32(o) != 0x008843D0u) return;
-    const uint32_t r0 = vm_read32(o + 0x50), r1 = vm_read32(o + 0x54), rc = vm_read32(o + 0x5C);
+    const uint32_t r0 = vm_read32(o + 0x50), r1 = vm_read32(o + 0x54), rc = vm_read32(o + 0x5C), flag = vm_read32(o + 0x58);
     auto it = g_lod_orig.find(o);
-    if (it == g_lod_orig.end() || r0 != it->second.w0 || r1 != it->second.w1 || rc != it->second.wc) {
+    if (it == g_lod_orig.end() || r0 != it->second.w0 || r1 != it->second.w1 || rc != it->second.wc
+        || (veg >= 1.0f && flag != (od == 0.0f ? 0u : it->second.flag))) {
         LodOrig lo; std::memcpy(&lo.d0, &r0, 4); std::memcpy(&lo.d1, &r1, 4); std::memcpy(&lo.cull, &rc, 4);
-        lo.flag = it != g_lod_orig.end() ? it->second.flag : vm_read32(o + 0x58);
-        if (it != g_lod_orig.end() && r0 == it->second.w0) lo = it->second;   /* only part rewritten: keep */
+        lo.flag = flag;
+        if (it != g_lod_orig.end()) {
+            if (veg >= 1.0f) {
+                lo = it->second;
+                lod_original_changes(lo, r0, r1, rc, flag, od);
+            } else {
+                lo.flag = it->second.flag;
+                if (r0 == it->second.w0) lo = it->second; // retain legacy vegetation suppression bookkeeping
+            }
+        }
         const float n0 = lo.d0 * md, n1 = lo.d1 * md, nc = od > 0.0f ? lo.cull * od : lo.cull;
         std::memcpy(&lo.w0, &n0, 4); std::memcpy(&lo.w1, &n1, 4); std::memcpy(&lo.wc, &nc, 4);
         g_lod_orig[o] = lo;
@@ -3507,15 +3546,25 @@ void shadow_range_tick()
 {
     static float f = 1.0f;
     static int sgen = -1;
-    if (sgen != jsp_setting_gen()) {   /* live: the in-game Graphics page changes it */
-        sgen = jsp_setting_gen();
-        const float v = setting_float("SHADOW_RANGE", 1.0f);
+    const int generation = jsp_setting_gen();
+    if (sgen != generation) {   /* live: local page or temporary session layer */
+        const auto inputs = jpss::reader_snapshot();
+        const float v = session_setting_float(inputs.live[(size_t)jpss::Key::ShadowRange], 1.0f);
         f = v < 1.0f ? 1.0f : v > 2.0f ? 2.0f : v;
+        sgen = generation;
     }
     static float base = 0.0f, written = -1.0f;
+    static uint32_t range_server = 0;
     if (f <= 1.0f && written < 0.0f) return;
     const uint32_t srv = vm_read32(vm_read32(0x008D3888u + 0x464Cu));
     if (srv < 0x10000u || srv >= 0xF0000000u) return;
+    // A different server owns a different original range, even when its
+    // current value happens to equal what was written to the previous one.
+    if (srv != range_server) {
+        range_server = srv;
+        base = 0.0f;
+        written = -1.0f;
+    }
     if (f <= 1.0f) {   /* back to Normal: put the game's own value back once */
         const uint32_t raw0 = vm_read32(srv + 0xF4); float cur0; std::memcpy(&cur0, &raw0, 4);
         if (cur0 == written && base > 0.0f) { uint32_t w; std::memcpy(&w, &base, 4); vm_write32(srv + 0xF4, w); }

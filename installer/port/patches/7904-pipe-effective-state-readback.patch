@@ -1,0 +1,151 @@
+Patch 7904: read the effective PIPE decision without initializing it.
+
+Publish the actual pipe_on outcome after backend readiness, preserving its
+existing environment/debug/thread-failure policy. The getter reads only an
+atomic witness. Both shutdown routes and unsupported initialization/producer
+ordering invalidate before a late completion can publish. Legacy PIPE lifetime
+is not reset on backend reinit; deliberately keep readback unavailable afterward.
+This is local state evidence, not a settings ACK or worker-health check.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -493,6 +493,52 @@
+     RfFrame f;
+     u64 n_sub, n_wait; double wait_ms;   /* [PIPE] stats */
+ } s_pipe = { -1 };
++/* PIPE effective-state witness (7904). This never changes producer policy.
++ * The legacy worker/events/on survive shutdown, so only the first backend
++ * lifetime can be witnessed. Unsupported early/concurrent observation and any
++ * shutdown/reinit permanently report unavailable instead of trusting old state.
++ * All witness access is atomic; the getter never reads owner-only s_pipe data. */
++enum {
++    PIPE_WITNESS_NEW, PIPE_WITNESS_INIT, PIPE_WITNESS_READY,
++    PIPE_WITNESS_OBSERVING, PIPE_WITNESS_OFF, PIPE_WITNESS_ON,
++    PIPE_WITNESS_UNAVAILABLE
++};
++static volatile LONG s_pipe_witness = PIPE_WITNESS_NEW;
++static void pipe_effective_close(void)
++{
++    InterlockedExchange(&s_pipe_witness, PIPE_WITNESS_UNAVAILABLE);
++}
++static void pipe_effective_begin(void)
++{
++    if (InterlockedCompareExchange(&s_pipe_witness, PIPE_WITNESS_INIT, PIPE_WITNESS_NEW) != PIPE_WITNESS_NEW)
++        pipe_effective_close();
++}
++static void pipe_effective_ready(void)
++{
++    InterlockedCompareExchange(&s_pipe_witness, PIPE_WITNESS_READY, PIPE_WITNESS_INIT);
++}
++/* Only called inside the one-time initializer. A known outcome here means
++ * another initializer beat this caller after its stale on<0 condition. */
++static int pipe_effective_observe_begin(void)
++{
++    const LONG before = InterlockedCompareExchange(&s_pipe_witness, PIPE_WITNESS_OBSERVING, PIPE_WITNESS_READY);
++    if (before == PIPE_WITNESS_READY) return 1;
++    if (before != PIPE_WITNESS_UNAVAILABLE)
++        pipe_effective_close();
++    return 0;
++}
++static void pipe_effective_observe_end(int observed, int on)
++{
++    if (observed)
++        InterlockedCompareExchange(&s_pipe_witness, on ? PIPE_WITNESS_ON : PIPE_WITNESS_OFF, PIPE_WITNESS_OBSERVING);
++}
++int rsx_d3d12_pipe_effective_state(void)
++{
++    const LONG state = InterlockedCompareExchange(&s_pipe_witness, PIPE_WITNESS_NEW, PIPE_WITNESS_NEW);
++    return state == PIPE_WITNESS_OFF ? 0 : state == PIPE_WITNESS_ON ? 1 : -1;
++}
++/* End PIPE effective-state witness. */
++
+ static DWORD WINAPI pipe_thread(LPVOID arg)
+ {
+     (void)arg;
+@@ -506,6 +552,7 @@
+ static int pipe_on(void)
+ {
+     if (s_pipe.on < 0) {
++        const int observed = pipe_effective_observe_begin();
+         const char* e = getenv("PIPE");
+         int on = (e && *e == '1') ? 1 : 0;
+         /* Debug switches that read or edit records, guest memory or readbacks from the submit half keep the old path. */
+@@ -521,6 +568,7 @@
+             else fprintf(stderr, "[PIPE] on: draw loop, Execute and Present on their own thread (tid %lu)%c", (unsigned long)GetThreadId(s_pipe.th), 10);
+         }
+         s_pipe.on = on;
++        pipe_effective_observe_end(observed, s_pipe.on);
+     }
+     return s_pipe.on;
+ }
+@@ -9669,6 +9717,7 @@
+
+ static void d3d12_shutdown(void* ud)
+ {
++    pipe_effective_close();
+     (void)ud;
+     printf("[D3D12] Backend shutdown\n");
+ }
+@@ -12358,6 +12407,7 @@
+
+ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+ {
++    pipe_effective_begin();
+     memset(&s_d3d, 0, sizeof(s_d3d));
+     s_d3d.draws = s_draws_buf[0];
+     s_d3d.width = width;
+@@ -12405,12 +12455,14 @@
+     }
+     s_d3d.hwnd = create_window(width, height, title);
+     if (!s_d3d.hwnd) {
++        pipe_effective_close();
+         printf("[D3D12] ERROR: Window creation failed\n");
+         return -1;
+     }
+
+     /* Initialize D3D12 */
+     if (init_d3d12(s_d3d.bb_w, s_d3d.bb_h) != 0) {   /* the swap chain: guest size x RES_SCALE */
++        pipe_effective_close();
+         printf("[D3D12] ERROR: D3D12 initialization failed\n");
+         return -1;
+     }
+@@ -12436,6 +12488,7 @@
+     rsx_set_backend(&s_d3d12_backend);
+
+     s_d3d.initialized = 1;
++    pipe_effective_ready();
+     s_d3d.last_fps_time = GetTickCount64();
+
+     printf("[D3D12] Backend ready: %ux%u\n", width, height);
+@@ -12444,6 +12497,7 @@
+
+ void rsx_d3d12_backend_shutdown(void)
+ {
++    pipe_effective_close();
+     if (!s_d3d.initialized) return;
+
+     pipe_wait();     /* PIPE=1: the batch in flight first */
+@@ -12621,6 +12675,7 @@
+     return -1;
+ }
+ void rsx_d3d12_backend_shutdown(void) {}
++int rsx_d3d12_pipe_effective_state(void) { return -1; }
+ int rsx_d3d12_backend_pump_messages(void) { return 0; }
+ void rsx_d3d12_backend_present(void) {}
+
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -43,5 +43,11 @@
+ /* Shut down the D3D12 backend and release all resources. */
+ void rsx_d3d12_backend_shutdown(void);
+
++/* Actual PIPE policy outcome: -1 unavailable, 0 off, 1 on. Pure atomic read;
++ * never initializes PIPE. Valid only after first backend readiness and actual
++ * producer completion. Shutdown, reinit or unsupported producer overlap leaves
++ * it unavailable; it is not a worker-health or application-completion receipt. */
++int rsx_d3d12_pipe_effective_state(void);
++
+ /* Process Win32 messages. Returns 0 normally, -1 if window closed. */
+ int rsx_d3d12_backend_pump_messages(void);

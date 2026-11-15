@@ -205,11 +205,20 @@ add_executable(${PROJECT_NAME}
     jsp_unlock.cpp     # ENHANCEMENT: unlock-everything cheat, JSP_UNLOCK_ALL=1 (the launcher's Cheats tab)
     jsp_port_menu.cpp  # ENHANCEMENT: in-game Port Settings page, JSP_PORT_MENU=1 (needs toolkit patches 2516-2518 and 6501; US build only)
     jsp_settings.cpp   # ENHANCEMENT: settings file, live values for the in-game settings pages (jsp_settings.h)
+    jsp_session_startup.cpp # ENHANCEMENT: actual startup state; no session/ACK activation
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
 )
+
+# This explicit canonical player target has no render60 implementation. It is a
+# build capability, not an environment default. Replace this witness before
+# adding that implementation; unknown configurations must not claim "off".
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jsp_render60.cpp")
+    message(FATAL_ERROR "Update session startup capability before adding render60")
+endif()
+target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_SESSION_RENDER60_ABSENT=1)
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
