@@ -888,7 +888,7 @@ def build_settings_window(root):
             (root / SETTINGS_HASH).write_text(hashlib.sha256(src.read_bytes()).hexdigest() + "\n")
             done = True
         except OSError as e:
-            say(f"[place] settings window: the new build could not replace jsp-settings.exe ({e}); close the window and run this step again")
+            say(f"[place] settings window: the new build could not replace jsp-settings.exe ({e.strerror or type(e).__name__}); close the window and run this step again")
         finally:
             tmp.unlink(missing_ok=True)
     say(f"[place] settings window: {'jsp-settings.exe ' + ('rebuilt' if had else 'built') if done else ('kept the old jsp-settings.exe' if had else 'not built') + ' (csc exit ' + str(r.returncode) + ')'}")
