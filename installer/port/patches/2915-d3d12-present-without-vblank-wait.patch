@@ -1,0 +1,70 @@
+Frames are presented without waiting for the monitor's vblank by default (Present with sync interval 0 on the
+flip-model swap chain; the window and the borderless fullscreen window are composed, so nothing tears).
+
+J-Stars paces itself at 30 FPS by the port's own 60 Hz clock. Present(1) put a second, unrelated clock behind it. On
+a 60 Hz monitor a frame that missed its refresh waited for the next one, so every frame that took between 33 and
+50 ms was shown after 50 ms (20 FPS), and frames that were on time could lose up to 16.7 ms to the wait. On a 144 Hz
+or faster monitor the wait is a few ms, which is why it did not show on the development PC.
+
+Measured with the title demo (the same fights every run), CPU at its base clock, default settings: a 165 Hz monitor
+26.6 flips/s (21-27 in the busy parts), a stand-in for a 59.94 Hz monitor 23.0 (the busy parts at exactly 20),
+no wait 26.8.
+
+D3D12_VSYNC=1 waits for the vblank as before. D3D12_VSYNC=0 is unchanged: no wait and tearing allowed, for measuring
+a title past the display's rate. The present mode is printed once at start.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 658251b2..f6fceb96 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1020,14 +1020,24 @@ static HWND create_window(u32 width, u32 height, const char* title)
+  * D3D12 initialization
+  * -----------------------------------------------------------------------*/
+ 
+-/* D3D12_VSYNC=0: present without waiting for the vblank, for measuring a title
+- * past the display's rate. Read once. */
+-static int d3d12_vsync_off(void)
++/* 2915: how a frame is presented. 0 (default): without waiting for the monitor's vblank. The title paces itself by
++ * its own 60 Hz clock; the wait put a second, unrelated clock behind it, and on a 60 Hz monitor every frame that
++ * missed its refresh waited a whole one more (anything between 33 and 50 ms became 50 ms, 20 FPS), where a 144 Hz
++ * monitor only costs a few ms. The swap chain is the flip model in a window or a borderless window, so this does not
++ * tear. 1 (D3D12_VSYNC=1): wait for the vblank, the earlier default. 2 (D3D12_VSYNC=0): no wait and tearing allowed,
++ * for measuring a title past the display's rate. Read once. */
++static int d3d12_present_mode(void)
+ {
+-    static int off = -1;
+-    if (off < 0) { const char* e = getenv("D3D12_VSYNC"); off = e && *e == '0'; }
+-    return off;
++    static int mode = -1;
++    if (mode < 0) {
++        const char* e = getenv("D3D12_VSYNC");
++        mode = (!e || !*e) ? 0 : (*e == '0' ? 2 : 1);
++        printf("[D3D12] present: %s\n", mode == 1 ? "waits for the monitor's vblank (D3D12_VSYNC=1)"
++                                       : mode == 2 ? "no wait, tearing allowed (D3D12_VSYNC=0)" : "no wait for the monitor (default)");
++    }
++    return mode;
+ }
++static int d3d12_vsync_off(void) { return d3d12_present_mode() == 2; }   /* the swap chain asks for tearing only then */
+ 
+ static int init_d3d12(u32 width, u32 height)
+ {
+@@ -9354,14 +9364,15 @@ skip_dump_consider: ;
+         }
+       } }
+ 
+-    /* Present, on the vblank unless D3D12_VSYNC=0: that one is for measuring a
+-     * title past the display's rate. Skipped for an offscreen-only batch. */
++    /* Present (2915: without waiting for the vblank unless D3D12_VSYNC=1). Skipped for an
++     * offscreen-only batch. */
+     if (f->present) {
+-        if (!d3d12_vsync_off())
++        const int pm = d3d12_present_mode();   /* 2915: 0 no wait (default), 1 on the vblank, 2 no wait with tearing */
++        if (pm == 1)
+             s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0);
+         else
+             s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 0,
+-                                              s_d3d.tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
++                                              (pm == 2 && s_d3d.tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
+     }
+     rdoc_frame_end();
+ 
