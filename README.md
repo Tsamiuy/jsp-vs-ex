@@ -36,7 +36,7 @@ J-Stars Victory VS-EX is an unofficial fan port of J-Stars Victory VS+ (PS3) to 
 | Lift, build, boot, opening movie, menus, fights with sound | Works | One Windows machine, CI-built setup program |
 | Frame rate, default tree | About 30 frames per second in the demo and in Free Battle | One Windows machine |
 | Frame rate, its earlier v18 build (toolkit v0.18.0) | 16 to 22 frames per second | One Windows machine |
-| Frame rate, earlier v15 tree (`--tree legacy`) | About 29 frames per second in fights | One Windows machine |
+| Frame rate, earlier v15 tree (git tag `legacy-v15`) | About 29 frames per second in fights | One Windows machine |
 | Install with the setup program and the portable zip, menus, fights, online matches | Played | Play testers' own Windows 11 PCs, AMD and NVIDIA graphics |
 | EU disc, first-start window, long runs | Not re-checked on the default tree | Not measured |
 | Older CPU without AVX2 | Not tried; it will most likely not run | Not measured |

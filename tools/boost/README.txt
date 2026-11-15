@@ -4,8 +4,8 @@ WARNING (read first)
   This helper changes the "Maximum processor state" of the ACTIVE Windows power plan, for both the
   plugged-in (AC) and the battery (DC) value, with powercfg. It does not save the old value and it does
   not restore it. boost_on.bat sets 100 % and boost_off.bat sets 99 %, whatever the value was before.
-  After boost_off.bat the plan stays at 99 %. The same happens when jstars\play.ps1 or jstars\run_test.ps1
-  call these files (run_test.ps1 skips them when JSTARS_NO_BOOST=1 is set).
+  After boost_off.bat the plan stays at 99 %. The same happens when a script calls
+  these files (the installed launcher does not: CPU_BOOST=1 there sets and restores the power plan itself).
   Before the first use, write down your current value (see "First test", step 3). To go back, set that
   value by hand in Power Options. The helper is optional and not needed to build or run the port.
   Not tested on Windows by the author of this change; it is a text change only.

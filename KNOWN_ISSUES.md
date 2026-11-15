@@ -18,5 +18,5 @@ run again on v19. To report a problem, see "Troubleshooting and reporting a prob
 | Not tried yet: key rebinds and controller remaps by hand, playing to a K.O., characters other than the route's five, Windows 10 with the menu fix, long runs, the lost-device case | v19 | none | not tested |
 | Needs a CPU with AVX2 | default build | a hand build with `-DJSP_AVX2=OFF` | by design |
 | Online and Cross-Save upload need PSN and do nothing; Cross-Save is now "Exit Game". Online Battle over a re-psn server is experimental and off unless turned on | default build | see [docs/ONLINE.md](docs/ONLINE.md) | by design |
-| A hand build from this repository (pinned ps3recomp v0.15.0 submodule plus `jstars/toolkit/ps3recomp-local.patch`, see [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine | hand builds | use the installer, which applies the same patch | not tested |
+| A hand build from this repository (the pinned ps3recomp v0.19.0 submodule plus `installer/port/patches`, see [docs/BUILDING.md](docs/BUILDING.md)) has not been tried on a clean machine | hand builds | use the installer, which applies the same patches | not tested |
 | The scripts change your power plan and mount the disc image | `.bat`/`.ps1` scripts | read [docs/SCRIPTS.md](docs/SCRIPTS.md) first | by design |
