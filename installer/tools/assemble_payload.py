@@ -227,7 +227,7 @@ def main(argv=None):
     shutil.copytree(ROOT / "installer/port/jsp", out / "port")
     # The lift manifest and verifier travel with the glue; a partial payload
     # must not fall back to a manually asserted LOD entry-hook capability.
-    for required in ("lift_lod_hooks.json", "lod_hooks.py"):
+    for required in ("lift_lod_hooks.json", "lift_game_hooks.json", "lod_hooks.py"):
         if not (out / "port" / required).is_file():
             sys.exit(f"incomplete port payload: missing {required}")
     sys.path.insert(0, str(ROOT / "installer/tools"))

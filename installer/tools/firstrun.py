@@ -532,7 +532,7 @@ class Ctx:
         tools = self.cached("tools", lambda: tree_hash(self.tools))
         if step == "lift":
             return {"eboot": eb, "region": self.region, "code_end": CODE_END[self.region], "toolkit_tools": tools, "tree": "v18",
-                    "lift_recipe": sha(__file__), "lod_hooks": lod_hook_plan(self),
+                    "lift_recipe": sha(__file__), "lod_hooks": lod_hook_plan(self), "game_hooks": self.cached("game_hooks", lambda: sha(game_hooks_file(self)) if game_hooks_file(self).is_file() else "absent"),
                     **({"insn_patches": self.cached("insn_patches", lambda: sha(insn_patches(self)))} if insn_patches(self) else {})}
         if step == "spu":
             return {"eboot": eb, "toolkit_tools": tools, "lift_jobs": self.cached("lift_jobs", lambda: tree_hash(self.root / "tools" / "lift_jobs.py"))}
@@ -637,6 +637,22 @@ def lod_hook_plan(c):
     return lod_hook_tool(c).plan(*lod_hook_args(c))
 
 
+def game_hooks_file(c):
+    return c.root / "port" / "lift_game_hooks.json"
+
+
+def merged_fn_hooks(c, an):
+    """One --fn-hooks file for the lifter: the LOD manifest's hooks plus port/lift_game_hooks.json's (Impossible AI). Only used
+    when the LOD plan accepts the program, so both sets follow the same program check."""
+    spec = json.loads(lod_hook_args(c)[0].read_text())
+    extra = json.loads(game_hooks_file(c).read_text()) if game_hooks_file(c).is_file() else {"hooks": []}
+    seen = {int(e["addr"], 0) for e in spec["hooks"]}
+    hooks = list(spec["hooks"]) + [e for e in extra.get("hooks", []) if int(e["addr"], 0) not in seen]
+    out = an / "fn_hooks_all.json"
+    out.write_text(json.dumps({"schema": 1, "hooks": hooks}, indent=1) + "\n")
+    return out
+
+
 def verify_lod_hooks(c):
     return lod_hook_tool(c).verify(c.build / "recompiled", *lod_hook_args(c))
 
@@ -663,7 +679,7 @@ def step_lift(c):
     if insn_patches(c):
         jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # JSP_PORT_MENU=1: the Options row count (see jsp_port_menu.cpp)
     if lod_hook_plan(c)["enabled"]:
-        jobs_args = ["--fn-hooks", str(lod_hook_args(c)[0]), *jobs_args]
+        jobs_args = ["--fn-hooks", str(merged_fn_hooks(c, an)), *jobs_args]   # the LOD hooks and the game hooks (Impossible AI)
     ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", funcs,
                                       "--hle-stubs", an / "EBOOT.imports.json", "--code-end", CODE_END[c.region],
                                       "--chunks", "64", *jobs_args, str(c.a.jobs), "--output", out], out / "lift.log")

@@ -125,7 +125,7 @@ def main(scratch, payload=None, disc=None, eboot=None):
     old.mkdir(parents=True)
     # Place markers fingerprint lift inputs even though this fixture never lifts.
     (old / "port").mkdir()
-    for filename in ("lod_hooks.py", "lift_lod_hooks.json"):
+    for filename in ("lod_hooks.py", "lift_lod_hooks.json", "lift_game_hooks.json"):
         shutil.copy2(HERE.parent / "port" / "jsp" / filename, old / "port" / filename)
     tools = old / "ps3recomp" / "tools"
     tools.mkdir(parents=True)
