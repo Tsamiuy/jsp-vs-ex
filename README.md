@@ -35,7 +35,7 @@ J-Stars Victory VS-EX is an unofficial fan port of J-Stars Victory VS+ (PS3) to 
 |---|---|---|
 | Lift, build, boot, opening movie, menus, fights with sound | Works | One Windows machine, CI-built setup program |
 | Frame rate, default tree | About 30 frames per second in the demo and in Free Battle | One Windows machine |
-| Frame rate, busy scenes on a slower CPU (3,000 to 4,000 draws a frame) | Testers saw drops to about 20 per second. With one machine's CPU held at its base clock: 23 to 27 in 0.3.0, 26.8 without the vblank wait, 28.3 with two drawing threads and about 29.5 with two per-draw cuts, all on `main` after 0.3.0; a real slower PC and a real 60 Hz monitor not tried | One Windows machine, CPU at base clock |
+| Frame rate, busy scenes on a slower CPU (3,000 to 4,000 draws a frame) | Testers saw drops to about 20 per second. With one machine's CPU held at its base clock: 23 to 27 in 0.3.0, 26.8 without the vblank wait, 28.3 with two drawing threads and about 29.5 with two per-draw cuts, all three in 0.4.0; a real slower PC and a real 60 Hz monitor not tried | One Windows machine, CPU at base clock |
 | Frame rate, its earlier v18 build (toolkit v0.18.0) | 16 to 22 frames per second | One Windows machine |
 | Frame rate, earlier v15 tree (git tag `legacy-v15`) | About 29 frames per second in fights | One Windows machine |
 | Install with the setup program and the portable zip, menus, fights, online matches | Played | Play testers' own Windows 11 PCs, AMD and NVIDIA graphics |
@@ -65,7 +65,7 @@ Linux and Steam Deck (Proton) are not supported yet. Every detail is in [docs/IN
 **Steps**
 
 1. Download `jsp-setup.exe` from the <!-- version -->[0.4.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.4.0)<!-- /version -->. A portable zip (<!-- version -->`jsp-0.4.0-portable.zip`<!-- /version -->) is there too. You now have the file.
-2. Run `jsp-setup.exe`. The setup wizard opens. Windows may warn that the file is not code-signed. To check the download first, compare its SHA-256 with the release page: `SHA256SUMS.txt` for 0.3.0 and earlier, `SHA256SUMS` from the next release ([how](docs/INSTALL.md#check-your-download)).
+2. Run `jsp-setup.exe`. The setup wizard opens. Windows may warn that the file is not code-signed. To check the download first, compare its SHA-256 with the release page: `SHA256SUMS.txt` for 0.3.0 and earlier, `SHA256SUMS` from 0.4.0 ([how](docs/INSTALL.md#check-your-download)).
 3. Point the wizard at your disc folder and at `EBOOT.elf`. It checks both and names the problem if one is wrong.
 4. Let setup finish. It builds the game on your PC, which takes a while. You see the finish page.
 5. Open **JSP Fan Revival** from the Start menu. The launcher opens.

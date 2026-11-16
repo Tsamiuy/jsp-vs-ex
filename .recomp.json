@@ -19,7 +19,7 @@
     {"label": "Status notes", "url": "https://github.com/Tsamiuy/jsp-vs-ex/blob/main/docs/notes/STATUS.md"},
     {"label": "Setup", "url": "https://github.com/Tsamiuy/jsp-vs-ex/blob/main/docs/notes/SETUP.md"}
   ],
-  "help": ["Testing on other Windows machines", "The glow layer around effects", "Output resolution above 1280x720"],
+  "help": ["Testing on other Windows machines", "Frame rate reports from slower CPUs and 60 Hz monitors", "Online play between two PCs"],
   "tags": ["spu", "d3d12"],
-  "notes": "Work in progress: 0.1.0 and 0.2.0 are pre-releases, and the first full release will be 1.0.0. Needs your own copy of the game; no game data is stored in this repository. As of the notes (2026-10-27) the game lifts and builds on Windows (Direct3D 12, 1280x720) and runs through the opening movie, the title screen and the menus; fights run at about 29 frames per second on the maps that were tested, with sound. Online and Cross-Save upload need PSN and do nothing. Developed with AI agent assistance under the maintainers' direction."
+  "notes": "Work in progress: 0.1.0 to 0.4.0 are pre-releases, and the first full release will be 1.0.0. Needs your own copy of the game; no game data is stored in this repository. The game is built on the player's PC (Direct3D 12) and runs through the opening movie, the title screen, the menus and fights with sound; fights run at about 30 frames per second on the maintainer's PC, with drops in busy scenes on slower CPUs (see KNOWN_ISSUES.md). Online and Cross-Save upload need PSN and do nothing. Developed with AI agent assistance under the maintainers' direction."
 }

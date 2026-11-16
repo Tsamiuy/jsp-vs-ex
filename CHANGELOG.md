@@ -2,9 +2,13 @@
 
 All notable changes are listed here, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `X.Y.Z` (the number in `installer/VERSION`).
-0.1.0 and 0.2.0 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
+0.1.0 to 0.4.0 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
 
 ## [Unreleased]
+
+### Changed
+
+- Docs brought up to date after 0.4.0: ROADMAP (releases, Training options, KO count, the Impossible mode, Port Settings pages, online and Proton wording), the feature list (new Impossible mode row; KO count, Training options and in-game settings now in progress), README and INSTALL (`SHA256SUMS` from 0.4.0, speed numbers now in 0.4.0), KNOWN_ISSUES (0.4.0, a row for the new Free Battle options), `.recomp.json` notes and help list.
 
 ## [0.4.0] - 2026-11-16
 
