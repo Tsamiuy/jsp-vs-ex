@@ -244,8 +244,8 @@ index 3d1281d..3346da6 100644
 + * reaches the game only when the keyboard sits on port 0 (pj_mouse_feed). Returns 1 when *port_state was replaced. */
 +static int pad_kb_mouse(const PadKb* kb, PadHostState* port_state, int kb_port, int hidden)
 +{
-+    if (!kb->polled[0] && !kb->polled[1]) return 0;
-+    PadHostState ks = kb_port >= 0 ? *port_state : (kb->polled[0] ? kb->st[0] : kb->st[1]);
++    if (!kb->ok[0] && !kb->ok[1]) return 0;   /* a keyboard that was not read (PAD_NO_KEYBOARD) never drives the mouse hooks */
++    PadHostState ks = kb_port >= 0 ? *port_state : (kb->ok[0] ? kb->st[0] : kb->st[1]);
 +    pad_mouse_look(&ks);
 +    pad_mouse_menus(&ks);
 +    if (!pj_mouse_feed(kb_port, hidden)) return 0;
