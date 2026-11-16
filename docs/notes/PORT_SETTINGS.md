@@ -84,16 +84,22 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 
 The Controls page has a row "Player order" (Cross: start). It closes the page and starts the join: the screen shows "Press a button: player N",
 and each pad (or the keyboard) takes the next free player, player 1 to 4, with its first button press. The press that joins is not seen by the
-game, and a pad that has not pressed is not given to the game while join runs. Join ends when every connected pad has pressed, when four players
-are taken, or when player 1 presses Start (that Start is swallowed too); a keyboard that never pressed takes the next free place then. The
-same join can be started without the page, and without `JSP_PORT_MENU`, by holding **Select + L3 + R3** on a pad for 2 seconds (the chord
-needs both sticks pressed in, which the game's own controls do not use as far as the notes say; the game's use of Select was not found in the
-notes, so a collision there is not excluded). Until one of the two is used nothing changes: slot order, `INPUT_MODE`, `PAD_PAD_P2` as before.
-After a join a pad that is unplugged frees its player and a pad that is plugged in later takes the lowest free player; player 1 is never left
-empty while another player exists (the lowest one moves up), because the menus read port 0. Rumble follows the pad. The order logic is
-`libs/input/pad_join.h` in the toolkit, host tested by `installer/tools/pad_join_test.c`; the text is drawn by `jsp_port_menu.cpp` from the
-toolkit's `g_pad_join_notify`. Known limits: a DualSense that stands in for slot 0 counts as the device of slot 0 (an XInput pad appearing
-on slot 0 replaces it); the game takes two human players in Free Battle, so players 3 and 4 are read but not used yet; not tried with real pads.
+game. While join runs the game keeps the layout it had before (the old slot order, or the previous player order), so a fight goes on and
+only the pads that are joining are held back; the new order takes over in one step when join ends. Join ends when every connected pad has
+pressed, when four players are taken, or when player 1 presses Start (that Start is swallowed too). A pad that is still holding a button when
+join starts, or is plugged in holding one, stays neutral until it was released. The same join can be started without the page, and without
+`JSP_PORT_MENU`, by holding **Select + L3 + R3** on a pad for 2 seconds (the chord needs both sticks pressed in, which the game's own
+controls do not use as far as the notes say; the game's use of Select was not found in the notes, so a collision there is not excluded).
+`PAD_JOIN=0` (a line in `play_settings.txt`, like the other switches) turns the chord and the row off. Until one of the two is used nothing
+changes: slot order, `INPUT_MODE`, `PAD_PAD_P2` as before. After a join a pad that is unplugged frees its player and a pad that is plugged in
+later takes the lowest free player; player 1 is never left empty while another player exists (the lowest one moves up), because the menus read
+port 0. The keyboard is a player only where `INPUT_MODE` gives it one: Keyboard or Keyboard and Mouse, Controller with `PAD_PAD_P2` on (the
+default), or no pad on slot 0; once it has a player it keeps it, and it holds the end of join open only in the two keyboard modes or when no
+pad is connected. The mouse belongs to the keyboard wherever it sits. Rumble goes to the pad the game sees on the port and stops when that pad
+leaves the port. The order logic is `libs/input/pad_join.h` in the toolkit, host tested by `installer/tools/pad_join_test.c`; the text is drawn
+by `jsp_port_menu.cpp` from the toolkit's `g_pad_join_notify`. Known limits: a DualSense that stands in for slot 0 counts as the device of slot
+0 (an XInput pad appearing on slot 0 replaces it); the game takes two human players in Free Battle, so players 3 and 4 are read but not used
+yet; not tried with real pads.
 
 ## Open
 

@@ -189,6 +189,92 @@ int main(void)
     in[0].buttons = PJ_CHORD_BITS; in[0].connected = 0;       /* a disconnected device never fires */
     CHECK(!pj_chord(&j, in, 10000) && !pj_chord(&j, in, 20000));
 
+
+    /* ---- round 2: the view the game keeps during join, P8 held devices, chord reset ---- */
+    /* first join (no table before): the game keeps its default layout (pj_view_default), no device is viewed through the table */
+    pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1);
+    CHECK(!pj_view_default(&j));                        /* no reorder yet: the caller does not use the table at all */
+    start_join();
+    CHECK(pj_view_default(&j) && pj_view_dev(&j, 0) == -1);
+    release_all(); press(1, CROSS); release_all(); press(0, CROSS);
+    CHECK(!j.joining && !pj_view_default(&j) && pj_view_dev(&j, 0) == 1 && pj_view_dev(&j, 1) == 0);   /* one step at the end */
+
+    /* redo: the previous table stays what the game sees until join ends; a leaver drops out of it; player 1 moves up there too */
+    CHECK(dev(0) == 1 && dev(1) == 0);
+    pj_begin(&j); upd();
+    CHECK(j.joining && !pj_view_default(&j) && pj_view_dev(&j, 0) == 1 && pj_view_dev(&j, 1) == 0 && dev(0) == -1);
+    release_all(); press(0, CROSS); release_all();      /* new table: slot 0 first */
+    CHECK(pj_view_dev(&j, 0) == 1 && pj_view_dev(&j, 1) == 0 && dev(0) == 0);   /* still the old view */
+    in[1].connected = 0; upd();
+    CHECK(pj_view_dev(&j, 0) == 0 && pj_view_dev(&j, 1) == -1);               /* device 1 left: device 0 moved up in the view */
+    connect(1, 1); upd(); release_all(); press(1, CROSS);
+    CHECK(!j.joining && pj_view_dev(&j, 0) == 0 && pj_view_dev(&j, 1) == 1);
+
+    /* P8: a device held since before join is not auto-assigned showing its buttons */
+    pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1);
+    in[0].buttons = CROSS; upd();
+    start_join(); upd();
+    press(1, PJ_BTN_START);                             /* joins as player 1 with Start (not an end) */
+    CHECK(dev(0) == 1 && j.joining);
+    release_all();
+    CHECK(dev(0) == 1 && j.armed[0]);
+    in[0].buttons = CROSS; upd(); in[0].buttons = 0; upd();
+    pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1);
+    start_join(); release_all();
+    in[0].buttons = CROSS; upd(); release_all();        /* player 1 = device 0 */
+    in[1].buttons = CIRCLE;                             /* device 1 never pressed; it is holding a button when the next join begins */
+    pj_begin(&j); upd();
+    in[1].buttons = CIRCLE; upd();                      /* held, not armed: cannot join */
+    CHECK(dev(0) == -1 && dev(1) == -1);
+    in[0].buttons = 0; upd(); in[0].buttons = CROSS; upd();   /* device 0 released and pressed: player 1 */
+    CHECK(dev(0) == 0 && j.joining);
+    in[0].buttons = 0; upd(); in[0].buttons = PJ_BTN_START; upd();   /* player 1 Start ends join; device 1 is still held */
+    CHECK(!j.joining && dev(1) == 1 && pj_hidden(&j, 1));          /* given a place but neutral */
+    in[1].buttons = 0; upd();
+    CHECK(!pj_hidden(&j, 1));
+    /* plugged in with a button down after join: place, but neutral until released (disconnect + reconnect while held) */
+    in[1].connected = 0; upd();
+    CHECK(dev(1) == -1);
+    in[1].connected = 1; in[1].buttons = CROSS; upd();
+    CHECK(dev(1) == 1 && pj_hidden(&j, 1));
+    in[1].buttons = 0; upd();
+    CHECK(!pj_hidden(&j, 1));
+
+    /* P4: the chord device's Select / L3 / R3 are not hidden during or after join, and the chord does not refire while still held */
+    pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1);
+    in[0].buttons = PJ_CHORD_BITS;
+    CHECK(!pj_chord(&j, in, 1000) && pj_chord_held(&j, 0));
+    CHECK(pj_chord(&j, in, 1000 + PJ_CHORD_MS));
+    pj_begin(&j); pj_update(&j, in);
+    CHECK(j.joining && !pj_chord_held(&j, 0) && j.chord_since[0] == 0);
+    in[0].buttons = 0; pj_update(&j, in);
+    in[0].buttons = PJ_BTN_SELECT; pj_update(&j, in);    /* Select during join is just a joining press, swallowed as one */
+    CHECK(dev(0) == 0 && pj_hidden(&j, 0));
+    in[0].buttons = PJ_CHORD_BITS; pj_update(&j, in);
+    in[1].buttons = 0; pj_update(&j, in); in[1].buttons = CROSS; pj_update(&j, in);   /* join ends by device 1 */
+    CHECK(!j.joining && !pj_chord_held(&j, 0));
+    CHECK(!pj_chord(&j, in, 50000) && !pj_chord(&j, in, 90000) && !pj_chord_held(&j, 0));   /* held through the end: release first */
+    in[0].buttons = 0;
+    CHECK(!pj_chord(&j, in, 100000));
+    in[0].buttons = PJ_CHORD_BITS;
+    CHECK(!pj_chord(&j, in, 101000) && pj_chord(&j, in, 101000 + PJ_CHORD_MS));
+
+    /* adversarial cases: Start by a device that is not player 1 is a plain press; five devices pressing at once in keyboard mode */
+    pj_init(&j); reset_devs(); for (int d = 0; d < 3; d++) connect(d, 1);
+    start_join(); release_all();
+    press(2, PJ_BTN_START);
+    CHECK(dev(0) == 2 && j.joining);
+    release_all(); press(1, PJ_BTN_START);
+    CHECK(dev(1) == 1 && j.joining);                    /* not player 1: no end */
+    pj_init(&j); reset_devs(); for (int d = 0; d < PJ_DEVS; d++) connect(d, 1);
+    start_join(); release_all();
+    for (int d = 0; d < PJ_DEVS; d++) in[d].buttons = CROSS;
+    upd();
+    CHECK(!j.joining && dev(0) == 0 && dev(1) == 1 && dev(2) == 2 && dev(3) == 3 && j.player_of[4] == -1);
+    release_all();
+    in[2].connected = 0; upd();
+    CHECK(dev(2) == PJ_DEV_KEYBOARD);                   /* the fifth takes the freed place */
+
     printf(fails ? "pad_join_test: %d FAILED\n" : "pad_join_test: all passed\n", fails);
     return fails != 0;
 }
