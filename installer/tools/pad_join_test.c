@@ -275,6 +275,33 @@ int main(void)
     in[2].connected = 0; upd();
     CHECK(dev(2) == PJ_DEV_KEYBOARD);                   /* the fifth takes the freed place */
 
+    /* ---- round 3: the chord bits never reach the game, from the first poll of the hold to the release ---- */
+    {
+        /* the order cellPad.c's stage works in: chord (when not joining), update, then what the game may see */
+        uint64_t t = 1000; int leaked = 0;
+        for (int round = 0; round < 2; round++) {         /* round 0: first join; round 1: a redo from player 1's device */
+            if (round == 0) { pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1); }
+            const int holder = round == 0 ? 0 : j.dev_of[0];
+            in[holder].buttons = PJ_CHORD_BITS;
+            int fired = 0;
+            for (int i = 0; i < 160; i++) {                /* 2.5 s at 16 ms */
+                t += 16;
+                PadJoinDev p[PJ_DEVS]; memcpy(p, in, sizeof p); p[PJ_DEV_KEYBOARD].connected = 0;
+                if (!j.joining && pj_chord(&j, p, t)) { pj_begin(&j); fired = 1; }
+                if (j.active || j.request) pj_update(&j, in);
+                if (pj_chord_hide(&j, holder, in[holder].buttons) & PJ_CHORD_BITS) leaked++;
+                if (pj_chord_hide(&j, holder, in[holder].buttons & ~PJ_BTN_L3) & PJ_CHORD_BITS) leaked++;   /* one bit let go: the rest stays hidden */
+                if (round == 1 && fired) CHECK(pj_view_dev(&j, 0) == holder);   /* the kept view: the holder still sits there */
+            }
+            CHECK(fired && j.joining);
+            in[holder].buttons = 0; t += 16; pj_update(&j, in);
+            CHECK(pj_chord_hide(&j, holder, PJ_BTN_SELECT) == PJ_BTN_SELECT);   /* released: nothing hidden any more */
+            release_all();
+            if (round == 0) { press(1, CROSS); release_all(); press(0, CROSS); release_all(); CHECK(!j.joining); }
+        }
+        CHECK(leaked == 0);
+    }
+
     printf(fails ? "pad_join_test: %d FAILED\n" : "pad_join_test: all passed\n", fails);
     return fails != 0;
 }

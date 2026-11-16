@@ -19,12 +19,19 @@ reorder. Rumble goes to the device the game sees on the port; a motor is stopped
 g_pad_join_notify(joining, next_player) tells the port when to draw its on-screen text; it is called outside the pad lock, one
 call at a time, with generations in order.
 
+Select, L3 and R3 are hidden from the game from the first poll of the chord until that pad has released all three (also while join
+runs). The keyboard is polled per kind of port (port 0: mouse hooks; others: keys only), never reused for the other kind.
+
+Default-on change, also without a reorder: rumble now goes to the device the game sees on the port. In Keyboard or Keyboard and Mouse
+mode with PAD_PAD_P2 (the pad is player 2) the pad rumbles for port 1; before, port 0's rumble went to XInput slot 0 (the same pad)
+and port 1's to empty slot 1.
+
 The chord and the keyboard rules read the wall clock only to time a held chord; the game never sees it.
 
 Pure logic: installer/tools/pad_join_test.c (host test, no pad needed). Not tested with real pads.
 
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 3d1281d..b074bf4 100644
+index 3d1281d..fec9e02 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -108,6 +108,52 @@ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
@@ -196,7 +203,7 @@ index 3d1281d..b074bf4 100644
      }
  }
  
-@@ -1150,6 +1197,124 @@ static unsigned long long pad_now_ms(void)
+@@ -1150,6 +1197,134 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -205,11 +212,14 @@ index 3d1281d..b074bf4 100644
 + * Every poll composes the four ports in a local buffer and publishes each port once, at the end (s_data_fresh goes up after
 + * that), so a reader that lost the pad lock never sees a half-built report. Without a reorder the layout is the old one
 + * (slot order, 6500 INPUT_MODE, PAD_PAD_P2). */
-+typedef struct { PadHostState st; int ok, polled; } PadKb;
-+static int pad_kb_get(PadKb* kb, int port)
++/* The keyboard's state per kind of port: [0] = port 0 (the mouse hooks apply), [1] = any other port (keys only). A state is never
++ * reused for the other kind, so the mouse follows the keyboard's own port. */
++typedef struct { PadHostState st[2]; int ok[2], polled[2]; } PadKb;
++static const PadHostState* pad_kb_get(PadKb* kb, int port)
 +{
-+    if (!kb->polled) { kb->polled = 1; pad_host_release(&kb->st); kb->ok = pad_poll_keyboard_to(&kb->st, port); }
-+    return kb->ok;
++    const int f = port ? 1 : 0;
++    if (!kb->polled[f]) { kb->polled[f] = 1; pad_host_release(&kb->st[f]); kb->ok[f] = pad_poll_keyboard_to(&kb->st[f], f); }
++    return kb->ok[f] ? &kb->st[f] : NULL;
 +}
 +static void pad_neutral(PadHostState* hs)   /* connected, nothing pressed, sticks centred */
 +{
@@ -227,9 +237,11 @@ index 3d1281d..b074bf4 100644
 +     * port 1 (player 2). Controller chosen: the keyboard is player 2. PAD_PAD_P2=0 turns both off. */
 +    if (p2 && P[0].connected && !P[1].connected && (m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM)) { P[1] = P[0]; dev[1] = dev[0]; }
 +    if (!P[0].connected || m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM) {
-+        if (pad_kb_get(kb, 0)) { P[0] = kb->st; dev[0] = PJ_DEV_KEYBOARD; }
++        const PadHostState* k = pad_kb_get(kb, 0);
++        if (k) { P[0] = *k; dev[0] = PJ_DEV_KEYBOARD; }
 +    } else if (p2 && m == PAD_MODE_CONTROLLER && !P[1].connected) {
-+        if (pad_kb_get(kb, 1)) { P[1] = kb->st; dev[1] = PJ_DEV_KEYBOARD; }
++        const PadHostState* k = pad_kb_get(kb, 1);
++        if (k) { P[1] = *k; dev[1] = PJ_DEV_KEYBOARD; }
 +    }
 +}
 +
@@ -269,9 +281,12 @@ index 3d1281d..b074bf4 100644
 +            const int m = pad_input_mode();
 +            const int elig = m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM || (m == PAD_MODE_CONTROLLER && pad_p2()) ||
 +                             !raw[0].connected || s_pj.player_of[PJ_DEV_KEYBOARD] >= 0;
-+            if (elig && pad_kb_get(&kb, 0)) {
-+                in[PJ_DEV_KEYBOARD].connected = kb.st.connected ? 1 : 0;
-+                in[PJ_DEV_KEYBOARD].buttons = kb.st.buttons;
++            /* polled as the kind of port it holds now (or would take: port 0 only in kbm mode), for the join and the view */
++            const int kp = s_pj.player_of[PJ_DEV_KEYBOARD];
++            const PadHostState* k = elig ? pad_kb_get(&kb, kp >= 0 ? kp : (m == PAD_MODE_KBM ? 0 : 1)) : NULL;
++            if (k) {
++                in[PJ_DEV_KEYBOARD].connected = k->connected ? 1 : 0;
++                in[PJ_DEV_KEYBOARD].buttons = k->buttons;
 +                in[PJ_DEV_KEYBOARD].must = (m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM || !pads) ? 1 : 0;
 +            }
 +        }
@@ -290,16 +305,18 @@ index 3d1281d..b074bf4 100644
 +            const int d = odev[p];
 +            if (d < 0 || !out[p].connected) continue;
 +            if (s_pj.active && pj_hidden(&s_pj, d)) pad_neutral(&out[p]);     /* a joining press is not the game's */
-+            else if (!s_pj.joining && d < 4 && pj_chord_held(&s_pj, d)) out[p].buttons &= (u16)~PJ_CHORD_BITS;
++            else if (d < 4) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
 +        }
 +    } else {
 +        for (int p = 0; p < 4; p++) {
 +            const int d = pj_view_dev(&s_pj, p);
 +            odev[p] = d;
 +            if (d < 0) { pad_host_release(&out[p]); continue; }
-+            out[p] = d == PJ_DEV_KEYBOARD ? kb.st : raw[d];
++            const PadHostState* k = d == PJ_DEV_KEYBOARD ? pad_kb_get(&kb, p) : NULL;   /* the kind of port it sits on */
++            if (d == PJ_DEV_KEYBOARD) { if (k) out[p] = *k; else pad_host_release(&out[p]); }
++            else out[p] = raw[d];
 +            if (pj_hidden(&s_pj, d)) pad_neutral(&out[p]);
-+            else if (!s_pj.joining && d < 4 && pj_chord_held(&s_pj, d)) out[p].buttons &= (u16)~PJ_CHORD_BITS;
++            else if (d < 4) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
 +        }
 +    }
 +    /* publish: one copy per port, and only then the status and motor bookkeeping */
@@ -321,7 +338,7 @@ index 3d1281d..b074bf4 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -1160,20 +1325,12 @@ static void pad_poll_backend(void)
+@@ -1160,20 +1335,12 @@ static void pad_poll_backend(void)
      /* A real pad streams reports at roughly this rate whether or not anything
       * changed, and libpad buffers them; a fresh sweep is a fresh report for
       * every port. cellPadGetData hands each one out exactly once. */
@@ -347,7 +364,7 @@ index 3d1281d..b074bf4 100644
  #else
  #if PAD_BACKEND_SDL2
      pad_poll_sdl2();
-@@ -1181,7 +1338,21 @@ static void pad_poll_backend(void)
+@@ -1181,7 +1348,21 @@ static void pad_poll_backend(void)
      if (!s_host_state[0].connected) pad_poll_keyboard();
  #endif
      pad_track_assign();
@@ -369,7 +386,7 @@ index 3d1281d..b074bf4 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -1951,12 +2122,15 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1951,12 +2132,15 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  
  #if PAD_BACKEND_XINPUT
      /* XInput keeps the motors at what they were last set to: no renewal. */
@@ -390,10 +407,10 @@ index 3d1281d..b074bf4 100644
  #if PAD_BACKEND_SDL2
 diff --git a/libs/input/pad_join.h b/libs/input/pad_join.h
 new file mode 100644
-index 0000000..092df40
+index 0000000..3445971
 --- /dev/null
 +++ b/libs/input/pad_join.h
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,219 @@
 +/* pad_join.h -- who is player N: the device-to-player table of cellPad (toolkit patch 7908; ENHANCEMENT).
 + *
 + * Pure logic, no I/O, no clock of its own: cellPad.c feeds it one snapshot of every device per poll, and the host test
@@ -494,8 +511,15 @@ index 0000000..092df40
 +static inline int pj_view_default(const PadJoin* j) { return j->joining && !j->prev_valid; }
 +/* 1 = the game sees this device neutral: its joining press is still held. */
 +static inline int pj_hidden(const PadJoin* j, int dev) { return j->swallow[dev]; }
-+/* 1 = the device holds the whole chord right now (cellPad.c hides those bits from the game; not while join runs) */
++/* 1 = the device holds the whole chord right now */
 +static inline int pj_chord_held(const PadJoin* j, int dev) { return j->chord_since[dev] != 0; }
++/* What the game may see of a device's buttons: Select, L3 and R3 are hidden from the first poll of the chord until the device has
++ * released all three, also while join runs and after it ended (a chord that fired is held through the reset of join start). */
++static inline uint16_t pj_chord_hide(const PadJoin* j, int dev, uint16_t buttons)
++{
++    if (pj_chord_held(j, dev) || (j->chord_block[dev] && (buttons & PJ_CHORD_BITS))) return (uint16_t)(buttons & ~PJ_CHORD_BITS);
++    return buttons;
++}
 +
 +/* Chord detection on a snapshot taken in default mode or after join. Returns 1 once per hold, when it reached PJ_CHORD_MS.
 + * now_ms must be > 0. Wall-clock input on purpose: it times a human hold, game logic never sees it. */
@@ -504,7 +528,7 @@ index 0000000..092df40
 +    int fire = 0;
 +    for (int d = 0; d < PJ_DEVS; d++) {
 +        const int held = in[d].connected && (in[d].buttons & PJ_CHORD_BITS) == PJ_CHORD_BITS;
-+        if (!held) { j->chord_since[d] = 0; j->chord_fired[d] = 0; j->chord_block[d] = 0; continue; }
++        if (!held) { j->chord_since[d] = 0; j->chord_fired[d] = 0; if (!(in[d].buttons & PJ_CHORD_BITS)) j->chord_block[d] = 0; continue; }
 +        if (j->chord_block[d]) { j->chord_since[d] = 0; continue; }   /* held since a join began or ended: release first */
 +        if (!j->chord_since[d]) j->chord_since[d] = now_ms;
 +        if (!j->chord_fired[d] && now_ms - j->chord_since[d] >= PJ_CHORD_MS) { j->chord_fired[d] = 1; fire = 1; }
@@ -558,6 +582,8 @@ index 0000000..092df40
 +    if (!j->active) return;
 +    for (int d = 0; d < PJ_DEVS; d++)
 +        if (in[d].connected && !in[d].buttons) { j->armed[d] = 1; j->swallow[d] = 0; }
++    for (int d = 0; d < PJ_DEVS; d++)
++        if (!(in[d].buttons & PJ_CHORD_BITS)) j->chord_block[d] = 0;   /* released: the chord is free again, nothing is hidden */
 +
 +    if (j->joining) {
 +        int ended = 0;

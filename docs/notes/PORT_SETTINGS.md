@@ -96,7 +96,7 @@ later takes the lowest free player; player 1 is never left empty while another p
 port 0. The keyboard is a player only where `INPUT_MODE` gives it one: Keyboard or Keyboard and Mouse, Controller with `PAD_PAD_P2` on (the
 default), or no pad on slot 0; once it has a player it keeps it, and it holds the end of join open only in the two keyboard modes or when no
 pad is connected. The mouse belongs to the keyboard wherever it sits. Rumble goes to the pad the game sees on the port and stops when that pad
-leaves the port. The order logic is `libs/input/pad_join.h` in the toolkit, host tested by `installer/tools/pad_join_test.c`; the text is drawn
+leaves the port. This one is on by default, also without a reorder: in Keyboard or Keyboard and Mouse mode with `PAD_PAD_P2` the pad is player 2 and now rumbles for port 1 (before, port 0's rumble went to XInput slot 0, the same pad, and port 1's to an empty slot). Select, L3 and R3 are hidden from the game from the first poll of the chord until the pad has released them. The order logic is `libs/input/pad_join.h` in the toolkit, host tested by `installer/tools/pad_join_test.c`; the text is drawn
 by `jsp_port_menu.cpp` from the toolkit's `g_pad_join_notify`. Known limits: a DualSense that stands in for slot 0 counts as the device of slot
 0 (an XInput pad appearing on slot 0 replaces it); the game takes two human players in Free Battle, so players 3 and 4 are read but not used
 yet; not tried with real pads.
@@ -111,3 +111,4 @@ yet; not tried with real pads.
 - The sixth row's parts after the game's own per-update loop with the instruction patch (the earlier tree needed the patch to keep them shown).
 - Pressure-capable pads: the game's menu reading pressure words behind the page.
 - Player order (7908): try it with two real pads and the keyboard, both start paths, the on-screen text, unplug and re-plug, and the Select + L3 + R3 hold in a fight and in the menus.
+- Rumble on the default path (7908): with Keyboard mode and a pad as player 2, check the pad rumbles in a fight and the keyboard player gets none.

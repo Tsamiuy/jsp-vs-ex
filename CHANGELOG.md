@@ -8,7 +8,7 @@ All notable changes are listed here, newest first. The format follows
 
 ### Added
 
-- Choose the player order (ENHANCEMENT, toolkit patch 7908): each pad or the keyboard takes the next free player by its first button press, started from the Port Settings Controls page (`JSP_PORT_MENU=1`) or by holding Select + L3 + R3 for 2 s; the order is unchanged until used (`PAD_JOIN=0` turns it off). Logic host tested; not yet tried with real pads.
+- Choose the player order (ENHANCEMENT, toolkit patch 7908): each pad or the keyboard takes the next free player by its first button press, started from the Port Settings Controls page (`JSP_PORT_MENU=1`) or by holding Select + L3 + R3 for 2 s; the order is unchanged until used (`PAD_JOIN=0` turns it off). Also on by default, even without a reorder: rumble goes to the pad the game sees on the port (Keyboard mode with a pad as player 2: the pad rumbles for player 2). Logic host tested; not yet tried with real pads.
 
 ### Changed
 
