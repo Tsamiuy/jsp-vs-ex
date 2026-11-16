@@ -63,7 +63,7 @@ Open Windows Settings, then Apps, or use the uninstaller in the install folder. 
 
 `jsp-setup.exe` and the game it builds are not code-signed. Windows SmartScreen or an antivirus program may warn about them, because the program compiles code and writes files in your user folders.
 
-Each release lists SHA-256 sums on its release page, and a `.sha256` file for the zip. The sums file is `SHA256SUMS.txt` for 0.3.0 and earlier, and `SHA256SUMS` from the next release. To check a download, run this in PowerShell and compare the value with the release page:
+Each release lists SHA-256 sums on its release page, and a `.sha256` file for the zip. The sums file is `SHA256SUMS.txt` for 0.3.0 and earlier, and `SHA256SUMS` from 0.4.0. To check a download, run this in PowerShell and compare the value with the release page:
 
 ```
 Get-FileHash .\jsp-setup.exe -Algorithm SHA256

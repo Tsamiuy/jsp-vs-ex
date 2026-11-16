@@ -17,7 +17,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 | ✅ | **Long sessions:** the fight freeze (capped log counters overflowed after minutes in a fight) is fixed; a 30-minute scripted run and a 20-minute normal session had no freeze ([details](FEATURES.md#long-sessions)) |
 | 🔧 | A fight that stayed a flat brown screen on one launch was seen once and not reproduced |
 | ✅ | The glow layer around effects was compared with RPCS3 screenshots and matches, so no fix was needed (by eye, not a pixel comparison) ([details](FEATURES.md#effects-glow)) |
-| ✅ | Tagged pre-releases: 0.1.0 and 0.2.0 ([releases](https://github.com/Tsamiuy/jsp-vs-ex/releases)) |
+| ✅ | Tagged pre-releases: 0.1.0 to 0.4.0 ([releases](https://github.com/Tsamiuy/jsp-vs-ex/releases)) |
 
 ## 2. Display and controls  🔧
 
@@ -30,17 +30,18 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 - 🔧 "EX" in place of the "+" in the title logo, matching the port's name (optional, `JSP_EX_LOGO=0` keeps the "+"; merged; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy of the logo is not yet confirmed) ([details](FEATURES.md#ex-logo))
 - 📋 Split-screen layout, brightness and glare, DLSS (parked in the notes) ([details](FEATURES.md#split-screen-layout), [more](FEATURES.md#brightness-glare), [more](FEATURES.md#dlss))
 - 🔧 Add to Steam from the installer (merged; not yet tried with a real Steam) ([details](FEATURES.md#steam-shortcut))
-- 📋 Every launcher setting editable in the game, on the Port Settings page ([details](FEATURES.md#ingame-settings))
+- 🔧 The launcher's settings editable in the game, on the Port Settings page: Display, Graphics and Controls are in (opt-in); the rest are not moved yet ([details](FEATURES.md#ingame-settings))
 - 📋 Wide and ultrawide screens (16:10, 21:9, 32:9) without stretching ([details](FEATURES.md#wide-screens))
 - 📋 VR through OpenXR: first a virtual screen, later 3D fights (research) ([details](FEATURES.md#vr))
 
 ## 3. Modes and match options (opt-in)  🔧
 
 - ✅ **Training Mode** in Free Battle: a standing dummy, no KO with health refill, unlimited time ([details](FEATURES.md#training-mode))
-- 📋 Training options: infinite Stamina, infinite support, unlimited Victory Burst ([details](FEATURES.md#training-options))
+- 🔧 Training options: Unlimited Stamina, Free Camera and Hide HUD are in; infinite support and unlimited Victory Burst are planned ([details](FEATURES.md#training-options))
 - 📋 Two local players in Training ([details](FEATURES.md#training-2p))
 - 📋 Arcade for two players on one PC ([details](FEATURES.md#arcade-2p))
-- 📋 KO count up to 5 as a match option in every mode except Training ([details](FEATURES.md#ko-count))
+- 🔧 KO count, 1 to 5, as a match option: Free Battle has it (L1 / R1 on the Stage Select); the other modes are planned ([details](FEATURES.md#ko-count))
+- ✅ **Impossible mode** in Free Battle: a computer opponent that guards and Just Guards whenever it can, as a 2 against 1 fight (opt-in, chosen in a window when Free Battle's Character Select opens) ([details](FEATURES.md#impossible-ai))
 - 📋 1v1 and 3v3 matches beside the usual 2v2 (the game is built around 2v2 with a support character; 3v3 only if the
   engine allows it); all three online too, see section 4 ([details](FEATURES.md#match-sizes))
 - 📋 Your own music files in place of the game's tracks (your files, never shipped) ([details](FEATURES.md#own-music))
@@ -59,7 +60,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 
 - 🔧 **The game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server** (a fork of psnr) (experimental, opt-in; how
   to try it: `installer/README.md`, "Online Battle"): in a test of two copies on one PC, both reached a Friendly Match
-  room and played into the fight. Not yet tried on Windows or between two PCs
+  room and played into the fight. Play testers report online matches on their Windows PCs since 0.1.0 (no logs yet); the EU build, two real PCs with different settings or versions, and the Impossible mode online are not tried
 - 📋 **Online matches with rollback netcode:** 1v1 first, then 2v2, and 3v3 if the engine allows it (see section 3);
   direct connection first ([details](FEATURES.md#online-rollback))
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
@@ -79,8 +80,8 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 ## Platforms
 
 - Windows 11, x64, with Direct3D 12: the target today (Windows 10 partly: the menu fix is not yet confirmed there)
-- Linux through Proton or Wine: not supported yet. The default build has not been run under Proton since the
-  thread-local fix (installer patch 0003); the `--tree current` port reached fights under Proton in tests of its earlier v0.18.0 build
+- Linux through Proton or Wine: not supported yet. The author's runs of the default build under Proton reached the menus, fights and
+  an online room on one PC ([issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)); it is not tested on other setups
 
 ## Not planned
 
