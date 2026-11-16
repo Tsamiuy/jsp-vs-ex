@@ -73,6 +73,7 @@ extern "C" void (*g_cellpad_rstick_filter)(uint32_t port_no, uint16_t* rx, uint1
 extern "C" int g_cellpad_want_p2;   /* cellPad.c */
 extern "C" { int g_jstars_fb_rows = 2; }   /* rows in the Free Battle list, read by func_001E6E98 (hand edit in ppu_recomp_010.cpp) */
 extern "C" void (*g_tex_patch_hook)(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt);   /* rsx_d3d12_backend.c */
+extern "C" int (*g_rsx_tint_rects)(short (*rects)[4], float (*rgb)[3], int max);   /* rsx_d3d12_backend.c, toolkit 2920 */
 extern "C" int (*g_pad_arrows_dpad)(void);   /* cellPad.c */
 extern "C" int (*g_pad_mouse_look)(void);    /* cellPad.c, INPUT_MODE=kbm */
 extern "C" int (*g_pad_mouse_menus)(void);   /* cellPad.c, INPUT_MODE=kbm */
@@ -953,6 +954,34 @@ bool training_pad_getter(uint32_t target)
 bool g_training_test = false;
 
 bool training_active() { return g_training_test || g_training_mode; }
+
+/* Impossible AI (the maintainer's design, 2026-11-15/16; Free Battle only). On Character Select, Right at 5 stars on a
+ * CPU's COM Level row turns it on for that slot (the level stays 5 stars; the stars turn orange-red, toolkit 2920), Left
+ * turns it off again, Right once more lets the game wrap to 1 star. In the fight the slot's fighter gets AI level 19 (the
+ * top of the game's own tables), a guard on every frame without a defence, a Just Guard on every just-guardable hit, and
+ * holds its guard instead of attacking into a counter. Test switch IMP_MENU_BITS=<bits> (default 771: 1 level 19,
+ * 2 guard, 256 Just Guard, 512 holding back). The guard, Just Guard and holding back come from the entry hooks in
+ * port/lift_game_hooks.json; without them (another EBOOT) only the level applies. */
+volatile bool g_imp_slot[4] = { false, false, false, false };
+/* KOs to win (2026-11-15, Free Battle only): set on Stage Select with L1 (down to 1) and R1 (up to 5), shown under the Time
+ * Limit box; 3 is the game's own. g_ko_fb: the last Stage Select was Free Battle's, so the fight uses it. */
+volatile int g_ko_win = 3;
+volatile bool g_ko_fb = false;
+/* The Impossible fight (2026-11-15/16): chosen in a window when Free Battle's Character Select opens ("Free Battle" or
+ * "Impossible"). 0 normal, 1 Impossible 2 vs 1 (the players on red, the Impossible CPU alone on blue). */
+volatile int g_imp_mode = 0;
+volatile bool g_imp_no_partner = false;
+volatile uint32_t g_ko_counter[2] = { 0, 0 };   /* the fight's two KO counter objects, red first (lower address), from the heap search */
+volatile int g_ko_limit_now = 0;                 /* the limit written this fight (0 = the game's own) */
+volatile unsigned long long g_vs_screen_ms = 0;  /* the VS loading screen after Stage Select (classes 0x00882220, 0x008822C8, 0x00882378): last call */
+int imp_bits_for(uint32_t unit_index, uint32_t team)
+{
+    static const int menu_bits = [] { const char* e = std::getenv("IMP_MENU_BITS"); return e ? std::atoi(e) : 771; }();   /* test only */
+    if (g_imp_mode > 0) return team == 1 ? menu_bits : 0;   /* the Impossible fight: the CPU on blue */
+    if (unit_index > 3) return 0;
+    const int slot = unit_index == 1 ? 2 : unit_index == 2 ? 1 : (int)unit_index;   /* battle unit order: slots 0, 2, 1, 3 */
+    return g_imp_slot[slot] ? menu_bits : 0;
+}
 
 
 /* Training mode (the maintainer's plan, step 1): no
@@ -2511,12 +2540,106 @@ void lod_select_hook(uint32_t o)
     }
 }
 
+/* Impossible AI and KOs to win: what they need from the indirect calls (called first in training_icall). */
+void impossible_icall(uint32_t target, uint64_t* gpr)
+{
+    const uint32_t o = (uint32_t)gpr[3];
+    const bool heap = o >= 0x10000000u && o < 0x20000000u && !(o & 3);
+    /* Impossible bit 1: the AI unit (func_0001F758's r3: +0x14 bit 1 = a CPU, +0x18 battle unit index, +0x1C team,
+     * +0x20 AI level) of an Impossible CPU gets level 19 */
+    if (target == 0x0001F758u && heap && (vm_read32(o + 0x14) & 2u) &&
+        (imp_bits_for(vm_read32(o + 0x18), vm_read32(o + 0x1C)) & 1) && vm_read32(o + 0x20) != 19u) {
+        static int said = 0;
+        if (said++ < 8) { std::printf("[imp] AI unit %08X (unit %u, team %u): level %u -> 19\n", o, vm_read32(o + 0x18), vm_read32(o + 0x1C), vm_read32(o + 0x20)); std::fflush(stdout); }
+        vm_write32(o + 0x20, 19u);
+    }
+    /* IMP_LOG=1 (test only): every 10 s each fighter's health and the damage it took (health objects in slot order) */
+    { static const bool imp_log = std::getenv("IMP_LOG") != nullptr;
+      if (imp_log && (target == 0x00085CECu || target == 0x00085B84u)) {
+          static uint32_t ho[8]; static long long dmg[8]; static int kos[8]; static int nh = 0; static unsigned long long t0 = 0, last = 0;
+          const int32_t max = heap ? (int32_t)vm_read32(o + 0x98) : 0;
+          if (max > 0 && max <= 1000000) {
+              int i = 0; while (i < nh && ho[i] != o) i++;
+              if (i == nh && nh < 8) { ho[nh] = o; dmg[nh] = 0; kos[nh] = 0; nh++; }
+              if (i < 8 && target == 0x00085B84u) {
+                  const int32_t d = (int32_t)gpr[4], cur = (int32_t)vm_read32(o + 0x90);
+                  if (d > 0 && d <= 1000000) { dmg[i] += d < cur ? d : (cur > 0 ? cur : 0); if (cur > 0 && d >= cur) kos[i]++; }
+              }
+              const unsigned long long now = GetTickCount64();
+              if (!t0) t0 = last = now;
+              if (now - last >= 10000) { last = now;
+                  int order[8]; for (int k = 0; k < nh; k++) order[k] = k;
+                  for (int a = 0; a < nh; a++) for (int c = a + 1; c < nh; c++) if (ho[order[c]] < ho[order[a]]) { const int t = order[a]; order[a] = order[c]; order[c] = t; }
+                  std::printf("[imp] t=%llus", (now - t0) / 1000);
+                  for (int k = 0; k < nh; k++) { const int j = order[k];
+                      std::printf(" | f%d hp %d/%d took %lld ko %d", k, (int32_t)vm_read32(ho[j] + 0x90) / 100, (int32_t)vm_read32(ho[j] + 0x98) / 100, dmg[j] / 100, kos[j]); }
+                  std::printf("\n"); std::fflush(stdout);
+              }
+          }
+      } }
+    /* KOs to win. The two KO counter objects (vtable 0x00876558: +0x24 the KOs that side has scored, +0x28 how many it
+     * needs) are found in the heap while a fight is on (the HUD reads health through 0x00085CEC every frame); red's is
+     * the lower address. The Impossible fight is fixed: red needs 1 KO, blue 2 (the AI must knock the players out twice).
+     * KO_LOG=1 (test only): the counters and every KO. */
+    static const bool ko_log = std::getenv("KO_LOG") != nullptr;
+    const bool ko_imp = g_imp_mode != 0 && g_ko_fb;
+    const int ko_limit = ko_imp ? 0 : (g_ko_fb && g_ko_win != 3 ? g_ko_win : 0);
+    if (heap && target == 0x00139E04u && vm_read32(o) == 0x0087A2E0u && g_ko_limit_now >= 4) {
+        /* 4 or 5 KOs: the KO bar (one per side, +0x38 the side) only has 1-3 KO layouts, so it shows the 3-KO layout
+         * (+0x48 0, +0x40 3) filling on the last 3 KOs, full when the match ends (a two-bar look is still to come) */
+        const uint32_t side = vm_read32(o + 0x38) & 1u, ctr = g_ko_counter[side];
+        const int count = (ctr >= 0x10000000u && ctr < 0x20000000u && vm_read32(ctr) == 0x00876558u) ? (int32_t)vm_read32(ctr + 0x24) : 0;
+        const int shown = count - (g_ko_limit_now - 3);
+        vm_write32(o + 0x48, 0); vm_write32(o + 0x40, 3); vm_write32(o + 0x3C, (uint32_t)(shown < 0 ? 0 : shown > 3 ? 3 : shown));
+    }
+    if ((ko_limit > 0 || ko_imp || ko_log) && target == 0x00085CECu) {
+        static unsigned long long last_scan = 0, last_hud = 0; static int found = 0;
+        static int32_t last_cnt[2] = { -1, -1 };
+        const unsigned long long now = GetTickCount64();
+        if (now - last_hud > 5000) { found = 0; last_cnt[0] = last_cnt[1] = -1; }   /* a new fight */
+        last_hud = now;
+        g_ko_limit_now = ko_limit;
+        if ((ko_log || ko_imp) && found >= 2) for (int s = 0; s < 2; s++) {
+            const uint32_t a = g_ko_counter[s];
+            if (vm_read32(a) != 0x00876558u) continue;
+            const int32_t cnt = (int32_t)vm_read32(a + 0x24);
+            if (cnt != last_cnt[s]) { last_cnt[s] = cnt; std::printf("[ko] %s: %d of %d\n", s == 0 ? "red" : "blue", cnt, (int32_t)vm_read32(a + 0x28)); std::fflush(stdout); }
+        }
+        if (found < 2 && now - last_scan > 2000) {   /* fight objects sit at 0x19E00000 and up */
+            last_scan = now; found = 0;
+            for (uint32_t page = 0x19000000u; page < 0x20000000u; ) {
+                MEMORY_BASIC_INFORMATION mi;
+                if (!VirtualQuery(vm_base + page, &mi, sizeof mi)) break;
+                const uint64_t end64 = (uint64_t)((uint8_t*)mi.BaseAddress - vm_base) + mi.RegionSize;
+                const uint32_t region_end = end64 > 0x20000000ull ? 0x20000000u : (uint32_t)end64;
+                const bool readable = mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+                const uint32_t from = page;
+                page = region_end > page ? region_end : page + 0x1000u;
+                if (!readable) continue;
+                for (uint32_t a = (from + 3u) & ~3u; a + 0x30u < region_end; a += 4) {
+                    if (vm_read32(a) != 0x00876558u) continue;
+                    const int32_t cnt = (int32_t)vm_read32(a + 0x24), lim = (int32_t)vm_read32(a + 0x28);
+                    if (cnt < 0 || cnt > 20 || lim < 1 || lim > 20) continue;
+                    const int want = ko_imp ? (found == 0 ? 1 : 2) : ko_limit;
+                    if (found < 2) g_ko_counter[found] = a;
+                    found++;
+                    if (ko_log) { std::printf("[ko] counter %08X count %d limit %d -> %d%s\n", a, cnt, lim, want > 0 ? want : lim, ko_imp ? " (Impossible fight: fixed)" : ""); std::fflush(stdout); }
+                    if (want > 0 && lim != want) vm_write32(a + 0x28, (uint32_t)want);
+                }
+            }
+        }
+    }
+    /* the VS loading screen is up while its classes get calls (for the star tint there) */
+    if (heap) { const uint32_t vt = vm_read32(o); if (vt == 0x00882220u || vt == 0x008822C8u || vt == 0x00882378u) g_vs_screen_ms = GetTickCount64(); }
+}
+
 int training_icall(uint32_t target, uint64_t* gpr)
 {
     if (target == 0x003959C8u) {
         if (!JSP_LOD_ENTRY_HOOKS_VERIFIED || !jsp_lod_hooks_active()) lod_select_hook((uint32_t)gpr[3]);
         return 0; // the verified entry wrapper applies it exactly once
     }
+    impossible_icall(target, gpr);
     if (g_probe_on == 1) probe_icall(target, (uint32_t)gpr[3], (uint32_t)gpr[4]);
     /* SIX_ICALL=1 (test only): calls into the setup-table functions (0x00183528..0x00186E00) while the match loads,
      * each target with its first arguments, the first 6 times each, to find what asks which slot is a Support. */
@@ -2976,6 +3099,246 @@ bool on_stagesel()
 uint32_t stage_focus() { return vm_read32(g_seen_stage.obj + 0x58); }
 uint32_t stage_time() { return vm_read32(g_seen_stage_time.obj + 0x40); }
 
+/* ---------------------------------------------------------------------------
+ * Impossible AI, the Impossible fight and KOs to win: Character Select and Stage Select (see g_imp_slot, g_imp_mode,
+ * g_ko_win). The game wraps 5 stars -> 1 on Right and repeats a held direction, so the first Right at 5 stars is
+ * swallowed until it is let go.
+ * -----------------------------------------------------------------------*/
+bool main_menu_open();
+void impossible_charsel(uint16_t* b, uint16_t* lx)
+{
+    static bool was_on = false;
+    const bool fb = !training_active() && vm_read32(0x00956550u) == 3 && g_imp_mode == 0;   /* the main menu's cursor row: Free Battle */
+    if (!fb || !on_charsel()) {
+        if (main_menu_open() && was_on) { was_on = false; for (int k = 0; k < 4; k++) g_imp_slot[k] = false; }
+        return;
+    }
+    { static const int force = [] { const char* e = std::getenv("IMP_SLOTS"); return e ? (int)std::strtol(e, nullptr, 16) : 0; }();   /* IMP_SLOTS=<hex slot mask> (test only) */
+      if (!was_on) for (int k = 1; k < 4; k++) if ((force >> k) & 1) { g_imp_slot[k] = true; was_on = true; } }   /* once per visit */
+    const uint16_t LEFT = 0x0080, RIGHT = 0x0020;
+    static uint16_t prev_dir = 0;
+    static bool hold = false;
+    const uint32_t cursor = charsel_cursor();
+    const uint16_t dir = (uint16_t)(((*b & LEFT) || *lx < 64) ? LEFT : ((*b & RIGHT) || *lx > 192) ? RIGHT : 0);
+    const bool edge = dir && dir != prev_dir;
+    prev_dir = dir;
+    if (!dir) hold = false;
+    for (int k = 1; k < 4; k++)   /* a slot that is no longer a 5-star CPU loses it */
+        if (g_imp_slot[k] && (vm_read32(setup_field(k, 0x00)) != 2 || vm_read32(setup_field(k, 0x18)) != 4)) {
+            g_imp_slot[k] = false; std::printf("[imp] slot %d: Impossible off (no longer a 5-star CPU)\n", k); std::fflush(stdout);
+        }
+    const bool com_row = panel_open() == 2 && panel_row() == 1 && cursor >= 1 && cursor < 4 && vm_read32(setup_field((int)cursor, 0x00)) == 2;
+    if (com_row && !hold && panel_level() == 4) {
+        if (!g_imp_slot[cursor] && dir == RIGHT) {            /* 5 stars -> Impossible on a fresh press; a held Right stops at 5 stars */
+            hold = true;
+            if (edge) { g_imp_slot[cursor] = true; was_on = true; std::printf("[imp] slot %u: Impossible on\n", cursor); std::fflush(stdout); }
+        } else if (g_imp_slot[cursor] && dir == LEFT && edge) {   /* Impossible -> 5 stars */
+            g_imp_slot[cursor] = false; hold = true;
+            std::printf("[imp] slot %u: Impossible off (5 stars)\n", cursor); std::fflush(stdout);
+        } else if (g_imp_slot[cursor] && dir == RIGHT && edge) {  /* Impossible -> 1 star: the game wraps */
+            g_imp_slot[cursor] = false;
+            std::printf("[imp] slot %u: Impossible off (1 star)\n", cursor); std::fflush(stdout);
+        }
+    }
+    if (hold) { *b &= (uint16_t)~(LEFT | RIGHT); *lx = 128; }
+}
+
+/* The orange-red stars of an Impossible CPU (toolkit 2920 tints only the yellow pixels of these rectangles, so the tint
+ * follows the screens' slides and fades): the five lit stars of its slot on Character Select, the slot window's five
+ * when it is open on that slot, and its row on the VS loading screen (1280x720 places). */
+int impossible_tint_rects(short (*r)[4], float (*rgb)[3], int max)
+{
+    if (training_active()) return 0;
+    if (!on_charsel()) {   /* the VS screen's classes keep getting calls while it fades to white and the tips come in; the scene step is 4 only while it shows */
+        if (GetTickCount64() - g_vs_screen_ms > 400 || vm_read32(0x0094DEC4u) != 4) return 0;
+        static const short k_vs_star[4][2] = { { 368, 459 }, { 368, 560 }, { 983, 459 }, { 983, 559 } };
+        int n = 0;
+        for (int k = 1; k < 4 && n < max; k++) {
+            if (!g_imp_slot[k]) continue;
+            /* the rows slide in from the right by about one star while they fade in: the rectangle reaches 60 px further right */
+            /* a side with one fighter shows its row in the middle (blue alone: its stars at y 523) */
+            const bool alone = k == 2 && vm_read32(setup_field(3, 0x08)) == 2u;
+            r[n][0] = (short)(k_vs_star[k][0] - 20); r[n][1] = (short)((alone ? 521 : k_vs_star[k][1]) - 2); r[n][2] = 20 + 176 + 60; r[n][3] = 37;
+            rgb[n][0] = 1.0f; rgb[n][1] = 0.36f; rgb[n][2] = 0.30f; n++;
+        }
+        return n;
+    }
+    static const short k_slot_star1[4][2] = { { 0, 0 }, { 429, 237 }, { 212, 413 }, { 429, 500 } };
+    int n = 0;
+    for (int k = 1; k < 4 && n < max; k++) {
+        if (!g_imp_slot[k]) continue;
+        r[n][0] = (short)(k_slot_star1[k][0] - 2); r[n][1] = (short)(k_slot_star1[k][1] - 1); r[n][2] = 5 * 30 + 2; r[n][3] = 24;
+        rgb[n][0] = 1.0f; rgb[n][1] = 0.36f; rgb[n][2] = 0.30f; n++;
+    }
+    const uint32_t cursor = charsel_cursor();
+    if (n < max && panel_open() == 2 && cursor >= 1 && cursor < 4 && g_imp_slot[cursor] && panel_level() == 4) {
+        r[n][0] = 790; r[n][1] = 279; r[n][2] = 5 * 40 + 2; r[n][3] = 39;
+        rgb[n][0] = 1.0f; rgb[n][1] = 0.36f; rgb[n][2] = 0.30f; n++;
+    }
+    return n;
+}
+
+/* The Impossible fight's window and Character Select rules. When Free Battle's Character Select opens, a window asks
+ * "Free Battle" or "Impossible". In the Impossible fight, on every poll of Character Select: Player 4 and both Support
+ * slots are padlocked (written to the setup records and the screen's two copies, as Training's locks are), the
+ * opponent's slot (2) is a CPU shown at 5 stars and played at Impossible, the partner (slot 1) can be a CPU of up to
+ * 5 stars or padlocked with Select for a 1 vs 1. With 2 Players the game gives Player 2 the blue leader slot (record
+ * +0x14: 0 Player 1, 1 Player 2, 2 CPU), the Impossible CPU's: Player 2 becomes the partner on red instead.
+ * Test switches: IMP_MODE=1 the fight without the window, IMP_NO_PARTNER=1 a 1 vs 1, SETUP_LOG=1 the slot records. */
+void imp_mode_tick(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
+{
+    if (port != 0) return;
+    static int state = 0;              /* 0 idle, 1 the window, 3 release */
+    static bool was_cs = false;
+    static uint16_t prev = 0, prev_dir = 0;
+    const uint16_t CROSS = 0x4000, CIRCLE = 0x2000, LEFT = 0x0080, RIGHT = 0x0020, SELECT = 0x0001;
+    const uint16_t cur = *b, pressed = (uint16_t)(cur & ~prev);
+    prev = cur;
+    { static const bool sl = std::getenv("SETUP_LOG") != nullptr; static unsigned long long t = 0, tf = 0;
+      const unsigned long long now = GetTickCount64();
+      const uint32_t w0 = vm_read32(0x008D3888u - 0x7A90u);
+      const uint32_t world = (w0 >= 0x00010000u && w0 < 0x30000000u) ? vm_read32(w0) : 0u;
+      if (sl && !on_charsel() && !on_stagesel() && world >= 0x10000000u && world < 0x20000000u && now - tf >= 5000) { tf = now;
+          std::printf("[setup] fight units:");   /* battle unit +0x20: 1 a player, 3 a CPU */
+          for (uint32_t k = 0; k < 4; k++) { const uint32_t rec = world + 0x60u + 0x94u * k; std::printf(" unit %u ctrl %u team %u |", k, vm_read32(rec + 0x20), vm_read32(rec + 0x0C)); }
+          std::printf("\n"); std::fflush(stdout); }
+      if (sl && (on_charsel() || on_stagesel()) && now - t >= 2000) { t = now;
+          for (int k = 0; k < 4; k++) { const uint32_t r = setup_field(k, 0);
+              std::printf("[setup] slot %d: +00 %u +04 %u +08 %u char %u team %u +14 %u stars %u\n", k, vm_read32(r), vm_read32(r + 4), vm_read32(r + 8),
+                          vm_read32(r + 0x0C), vm_read32(r + 0x10), vm_read32(r + 0x14), vm_read32(r + 0x18)); }
+          std::fflush(stdout); } }
+    if (main_menu_open()) { if (g_imp_mode) { std::printf("[impmode] main menu: mode off\n"); std::fflush(stdout); } g_imp_mode = 0; g_imp_no_partner = false; state = 0; was_cs = false; return; }
+    const bool fb = !training_active() && vm_read32(0x00956550u) == 3 && !g_auto.on;
+    const bool cs = on_charsel();
+    if (fb && cs && !was_cs && state == 0 && g_imp_mode == 0 &&
+        cellOskDialog_choice_open(L"Choose a fight", L"Free Battle", L"Impossible")) { state = 1; prev_dir = 0; }
+    was_cs = cs;
+    if (state == 1) {
+        if (!cellOskDialog_overlay_active()) {
+            const int r = cellOskDialog_confirm_poll();   /* 0 the right button, 1 the left, else backed out */
+            g_imp_mode = r == 0 ? 1 : 0; state = 3;
+            std::printf("[impmode] %s\n", g_imp_mode ? "Impossible 2 vs 1" : "Free Battle"); std::fflush(stdout);
+        } else {
+            const uint16_t dir = (uint16_t)(((cur & LEFT) || *lx < 64) ? LEFT : ((cur & RIGHT) || *lx > 192) ? RIGHT : 0);
+            if (dir && dir != prev_dir) cellOskDialog_overlay_key(dir == LEFT ? 0x25u : 0x27u);
+            prev_dir = dir;
+            if (pressed & CROSS) cellOskDialog_overlay_key(0x0Du);
+            if (pressed & CIRCLE) cellOskDialog_overlay_key(0x1Bu);
+        }
+        *b = 0; *lx = 128; *ly = 128;
+        return;
+    }
+    if (state == 3) { if (cur == 0) state = 0; else { *b = 0; return; } }
+    { static const int forced = [] { const char* e = std::getenv("IMP_MODE"); return e ? std::atoi(e) : 0; }();   /* test only */
+      static const bool np = std::getenv("IMP_NO_PARTNER") != nullptr;
+      if (forced && cs && !g_imp_mode && vm_read32(0x00956550u) == 3 && !training_active()) { g_imp_mode = 1; g_imp_no_partner = np; std::printf("[impmode] Impossible 2 vs 1 (test switch)%s\n", np ? ", no partner" : ""); std::fflush(stdout); } }
+    if (!g_imp_mode || !cs) return;
+    if ((pressed & SELECT) && charsel_cursor() == 1 && vm_read32(setup_field(1, 0x14)) != 1u) {   /* not Player 2's slot */
+        g_imp_no_partner = !g_imp_no_partner;
+        std::printf("[impmode] partner %s\n", g_imp_no_partner ? "off (1 vs 1)" : "on"); std::fflush(stdout);
+    }
+    *b = (uint16_t)(*b & ~SELECT);
+    const uint32_t screen = g_seen_charsel.obj;
+    const uint32_t bases[3] = { 0x009540E4u, screen + 0x38, screen + 0x168 };
+    const bool two_p = vm_read32(setup_field(2, 0x14)) == 1u || vm_read32(setup_field(1, 0x14)) == 1u;
+    { static bool said = false; if (two_p && !said) { said = true; std::printf("[impmode] 2 Players: Player 2 is the partner (slot 1), slot 2 stays the CPU's\n"); std::fflush(stdout); } }
+    for (uint32_t base : bases) {
+        auto lock = [&](int k) { const uint32_t r = base + 0x2Cu * (uint32_t)k;
+            vm_write32(r + 0x04, 1); vm_write32(r + 0x08, 2); vm_write32(r + 0x0C, 0); vm_write32(r + 0x18, 1); vm_write32(r + 0x20, 0); };
+        lock(3);
+        for (int k = 4; k < 6; k++) vm_write32(base + 0x2Cu * (uint32_t)k + 0x08, 2);
+        if (two_p) {
+            vm_write32(base + 0x2Cu + 0x14, 1);                                         /* Player 2 on slot 1 */
+            if (vm_read32(base + 0x2Cu + 0x04) == 1) { vm_write32(base + 0x2Cu + 0x04, 0); vm_write32(base + 0x2Cu + 0x08, 1); }
+        } else if (g_imp_no_partner) lock(1);
+        else if (vm_read32(base + 0x2Cu + 0x04) == 1) vm_write32(base + 0x2Cu + 0x04, 0);   /* unlocked again */
+        const uint32_t s2 = base + 0x2Cu * 2u;
+        vm_write32(s2 + 0x14, 2);                 /* a CPU's slot, never a player's */
+        vm_write32(s2 + 0x00, 2);                 /* CPU */
+        vm_write32(s2 + 0x18, 4);                 /* shown as 5 stars; plays as Impossible */
+    }
+    g_imp_slot[2] = true; g_imp_slot[1] = false;
+}
+
+/* KOs to win on Free Battle's Stage Select: L1 / R1 change it (the presses are kept from the game), 1 to 5. Fixed in
+ * the Impossible fight (red 1, blue 2). Called before the auto-pilot, which drives the pad on Stage Select. */
+void ko_stagesel(uint16_t* b)
+{
+    static bool was = false;
+    const bool fb = on_stagesel() && !training_active() && vm_read32(0x00956550u) == 3;
+    if (on_stagesel() && !was) { g_ko_fb = fb;
+        if (fb && g_imp_mode) { std::printf("[ko] Stage Select (Impossible fight): fixed, red 1 KO to win, blue 2\n"); std::fflush(stdout); }
+        else if (fb) { std::printf("[ko] Stage Select (Free Battle): %d KOs to win\n", (int)g_ko_win); std::fflush(stdout); } }
+    was = on_stagesel();
+    if (!fb) return;
+    static uint16_t prev = 0;
+    const uint16_t L1 = 0x0400, R1 = 0x0800;
+    const uint16_t pressed = (uint16_t)(*b & ~prev);
+    prev = *b;
+    if (g_imp_mode) { *b = (uint16_t)(*b & ~(L1 | R1)); return; }
+    if ((pressed & L1) && g_ko_win > 1) { g_ko_win = g_ko_win - 1; std::printf("[ko] %d KOs to win\n", (int)g_ko_win); std::fflush(stdout); }
+    if ((pressed & R1) && g_ko_win < 5) { g_ko_win = g_ko_win + 1; std::printf("[ko] %d KOs to win\n", (int)g_ko_win); std::fflush(stdout); }
+    *b = (uint16_t)(*b & ~(L1 | R1));
+}
+/* The KOs-to-win line under the Time Limit box (between it and the portraits), drawn at twice its size, sliding and fading
+ * with the screen (stage_slide_tick, as the padlock does). */
+const uint32_t* ko_stamp(short* x, short* y, short* w, short* h, short* show_w, short* show_h)
+{
+    if (training_active() || !on_stagesel() || vm_read32(0x00956550u) != 3) return nullptr;
+    stage_slide_tick();
+    const int off = g_slide_drawn;
+    const int SW = 300, SH = 22, X0 = 725, Y0 = 412;   /* shown size and place in 1280x720 (centred under the Time Limit box) */
+    if (off < 0 || X0 + off >= 1280 || g_lock_white >= 1.0f) return nullptr;
+    const int W = SW * 2, H = SH * 2;
+    static uint32_t out[600 * 44];
+    static int drawn = -1;
+    const bool fixed = g_imp_mode != 0;
+    if (drawn != (fixed ? 100 : g_ko_win)) {
+        drawn = fixed ? 100 : g_ko_win;
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (bm && bits) {
+            HGDIOBJ old = SelectObject(dc, bm);
+            uint32_t* p = (uint32_t*)bits;
+            for (int i = 0; i < W * H; i++) p[i] = 0x00262A2Au;   /* the boxes' dark grey */
+            for (int i = 0; i < W; i++) { p[i] = 0x00606060u; p[(H - 1) * W + i] = 0x00606060u; }
+            SetBkMode(dc, TRANSPARENT);
+            HFONT f = CreateFontW(40, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HGDIOBJ oldf = SelectObject(dc, f);
+            RECT rc = { 0, 0, W, H };
+            wchar_t txt[48];
+            if (fixed) swprintf(txt, 48, L"KOs to win   Red 1   Blue 2");   /* the Impossible fight: fixed, no L1 / R1 */
+            else {
+                SetTextColor(dc, RGB(150, 150, 150));
+                DrawTextW(dc, L"  L1", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(dc, L"R1  ", -1, &rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                swprintf(txt, 48, L"KOs to win   \x25C0  %d  \x25B6", (int)g_ko_win);
+            }
+            SetTextColor(dc, RGB(255, 255, 255));
+            DrawTextW(dc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(dc, oldf); DeleteObject(f);
+            GdiFlush();
+            for (int i = 0; i < W * H; i++) { const uint32_t c = p[i]; out[i] = 0xFF000000u | ((c & 0xFF) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFF); }
+            SelectObject(dc, old); DeleteObject(bm);
+        }
+        DeleteDC(dc);
+    }
+    *x = (short)(X0 + off); *y = Y0; *w = (short)W; *h = (short)H; *show_w = (short)SW; *show_h = (short)SH;
+    if (g_lock_white <= 0.0f) return out;
+    static uint32_t faded[600 * 44];
+    const uint32_t k = (uint32_t)(g_lock_white * 256.0f);
+    for (int i = 0; i < W * H; i++) {
+        uint32_t c = 0xFF000000u;
+        for (int sft = 0; sft < 24; sft += 8) c |= ((((out[i] >> sft) & 255) * (256 - k) + 255 * k) >> 8) << sft;
+        faded[i] = c;
+    }
+    return faded;
+}
+
 void stage_lock(uint16_t* b, uint16_t* lx)
 {
     if (!on_stagesel()) return;
@@ -3071,6 +3434,7 @@ void fps_counter_apply()
 
 const uint32_t* stage_lock_stamp(short* x, short* y, short* w, short* h, short* show_w, short* show_h)
 {
+    if (const uint32_t* ko = ko_stamp(x, y, w, h, show_w, show_h)) return ko;
     if (const uint32_t* menu = tb_stamp(x, y, w, h, show_w, show_h)) return menu;
     if (!training_active() || !on_stagesel()) return nullptr;
     /* the game draws its own lock badge now (stage_lock); TRAINING_LOCK_PICTURE=1: the port's padlock as before */
@@ -3293,6 +3657,8 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
         break;
     case 2:   /* 1 Player, until character select is up */
         if (on_charsel()) { g_auto.step = 3; g_auto.t = now; g_auto.press_until = 0; auto_log("character select"); break; }
+        { static const bool two = std::getenv("AUTO_2P") != nullptr; static int down_done = 0;   /* AUTO_2P=1 (test only): 2 Players */
+          if (two && down_done < 1) { if (now - g_auto.t >= 1500) { auto_press(DOWN, now, 120, 600); down_done++; auto_log("2 Players"); } break; } }
         auto_press(CROSS, now, 120, 1500);
         break;
     case 3:   /* the picks are written below on every poll; Start until stage select is up */
@@ -3821,6 +4187,7 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
                   if (*q == ',') q++; else break;
               }
           } }
+        ko_stagesel(b);   /* before the auto-pilot, which drives the pad on Stage Select */
         auto_fight(b, lx, ly);
         if (g_free_battle_box) free_battle_box(port, b, lx, ly);
         tb_list_rows(*b);
@@ -3865,6 +4232,8 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
                 if (force_sup >= 0) { vm_write32(setup_field(4, 0x08), 0); vm_write32(setup_field(4, 0x0C), (uint32_t)force_sup); }
             }
         }
+        imp_mode_tick(port, b, lx, ly);
+        impossible_charsel(b, lx);
         if (training_active()) {
             pause_tick(b); settings_tick(); tb_tick(b, lx, ly);
             if (!g_tb_running) freecam_tick(b, lx, ly);
@@ -3880,6 +4249,86 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 }
 
 }  // namespace
+
+/* Impossible AI: entry/leave hooks from port/lift_game_hooks.json (lifter --fn-hooks, with the LOD hooks).
+ * Hit receivers (vtable 0x00875108): +0x18 the battle unit index; some fighters have a second receiver with the same
+ * +0x18, marked by +0x08 -> +0x08 = 1, which must not stand for the fighter. +0x1F8 defence type (0 none, 1 guard,
+ * 2 caught: no damage and no reaction, 3 untouchable), +0x1FC mode (3 = from every side, as a held guard), +0x200 the
+ * kinds of attack it covers (3 = body attacks and projectiles), +0x214/+0x218 the Just Guard timing and window, +0x22C
+ * the hit records waiting this frame. Battle unit records: world + 0x60 + 0x94 * index (+0x0C team, +0x20 3 = a CPU). */
+static bool imp_heap(uint32_t a) { return a >= 0x10000000u && a < 0x20000000u && !(a & 3); }
+static bool imp_recv_primary(uint32_t r)
+{
+    const uint32_t p = vm_read32(r + 0x08);
+    return !imp_heap(p) || vm_read32(p + 0x08) == 0;
+}
+static int imp_bits_for_recv(uint32_t r, uint32_t* idx_out = nullptr)
+{
+    if (!imp_heap(r) || vm_read32(r) != 0x00875108u) return 0;
+    const uint32_t idx = vm_read32(r + 0x18);
+    if (idx_out) *idx_out = idx;
+    const uint32_t w0 = vm_read32(0x008D3888u - 0x7A90u), world = (w0 >= 0x00010000u && w0 < 0x30000000u) ? vm_read32(w0) : 0u;
+    if (idx >= 6 || !imp_heap(world)) return 0;
+    const uint32_t rec = world + 0x60u + 0x94u * idx;
+    return vm_read32(rec + 0x20) == 3u ? imp_bits_for(idx, vm_read32(rec + 0x0C)) : 0;
+}
+static volatile uint32_t g_recv_by_idx[8];                /* each fighter's hit receiver by battle unit index */
+static volatile unsigned long long g_counter_until[8];   /* that fighter showed a counter stance or Just Guard window until then */
+
+/* func_00082464 sets a hit receiver's defence for the frame. After the game has set it, an Impossible CPU without a
+ * defence this frame gets a guard (bit 2); the game's own defence (a real guard, a counter stance) stays. It also notes
+ * every fighter's receiver and whether it is in a counter stance or has its Just Guard window open (for bit 512). */
+static thread_local uint32_t t_imp_recv = 0;
+extern "C" void jsp_imp_def_enter(ppu_context* ctx) { t_imp_recv = (uint32_t)ctx->gpr[3]; }
+extern "C" void jsp_imp_def_leave(ppu_context* ctx)
+{
+    (void)ctx;
+    const uint32_t r = t_imp_recv;
+    if (!imp_heap(r) || vm_read32(r) != 0x00875108u) return;
+    const uint32_t idx = vm_read32(r + 0x18);
+    if (idx < 8 && imp_recv_primary(r)) {
+        g_recv_by_idx[idx] = r;
+        const int32_t ty = (int32_t)vm_read32(r + 0x1F8), win = (int32_t)vm_read32(r + 0x218);
+        if (ty == 2 || win >= 0) g_counter_until[idx] = GetTickCount64() + 300;   /* remembered for 300 ms */
+    }
+    const int imp = imp_bits_for_recv(r);
+    if (!(imp & 2) || vm_read32(r + 0x1F8) != 0) return;
+    static int said = 0;
+    if (said < 3) { said++; std::printf("[imp] guard for unit %u\n", idx); std::fflush(stdout); }
+    vm_write32(r + 0x1F8, 1u); vm_write32(r + 0x1FC, 3u); vm_write32(r + 0x200, 3u);
+}
+
+/* func_00022AC0 builds an AI fighter's virtual pad word (pad +0x20; the AI unit is pad - 0xD70, unit +0x5C points back
+ * at the pad). Bit 512: while its target is in a counter stance (defence type 2) or has its Just Guard window open, the
+ * Impossible CPU only holds its guard (R1, 0x100) instead of attacking into the counter. */
+static thread_local uint32_t t_imp_pad = 0;
+extern "C" void jsp_imp_word_enter(ppu_context* ctx) { t_imp_pad = (uint32_t)ctx->gpr[3]; }
+extern "C" void jsp_imp_word_leave(ppu_context* ctx)
+{
+    (void)ctx;
+    const uint32_t pad = t_imp_pad, u = pad - 0xD70u;
+    if (!imp_heap(pad) || !imp_heap(u) || vm_read32(u + 0x5C) != pad || !(vm_read32(u + 0x14) & 2u)) return;
+    if (!(imp_bits_for(vm_read32(u + 0x18), vm_read32(u + 0x1C)) & 512)) return;
+    const uint32_t e = vm_read32(u + 0x48), tu = imp_heap(e) ? vm_read32(e + 0x0C) : 0u, tidx = imp_heap(tu) ? vm_read32(tu + 0x18) : 99u;   /* the hate entry names the target unit */
+    const uint32_t r = tidx < 8 ? g_recv_by_idx[tidx] : 0u;
+    if (imp_heap(r) && vm_read32(r) == 0x00875108u && (vm_read32(r + 0x1F8) == 2u || (int32_t)vm_read32(r + 0x218) >= 0 || GetTickCount64() < g_counter_until[tidx])) {
+        vm_write32(pad + 0x20, 0x100u);
+        static int said = 0; if (said++ < 3) { std::printf("[imp] unit %u holds back against a counter\n", vm_read32(u + 0x18)); std::fflush(stdout); }
+    }
+}
+
+/* func_000833DC (before the frame's damage) turns every just-guardable hit into a Just Guard (action 21) when the
+ * receiver's window (+0x218) is open. Bit 256: when hit records wait for an Impossible CPU, the window is opened on
+ * entry, so the game runs its own Just Guard (no damage, the fighter's counter if it has one). */
+extern "C" void jsp_jg_check_enter(ppu_context* ctx)
+{
+    const uint32_t r = (uint32_t)ctx->gpr[3];
+    if ((imp_bits_for_recv(r) & 256) && (int32_t)vm_read32(r + 0x22C) > 0 && (int32_t)vm_read32(r + 0x214) >= 0) {
+        vm_write32(r + 0x218, 0);
+        static int said = 0; if (said++ < 3) { std::printf("[imp] Just Guard for unit %u\n", vm_read32(r + 0x18)); std::fflush(stdout); }
+    }
+}
+extern "C" void jsp_jg_check_leave(ppu_context* ctx) { (void)ctx; }
 
 extern "C" void jsp_lod_initialize_enter(ppu_context* ctx)
 {
@@ -3918,6 +4367,7 @@ extern "C" void jsp_register_game_overrides(void)
     g_ppu_icall_hook = training_icall;
     g_rsx_copy_rects = training_copy_rects;
     g_rsx_stamp = stage_lock_stamp;
+    g_rsx_tint_rects = impossible_tint_rects;   /* toolkit 2920: the Impossible CPU's stars */
     if (kExp) g_rsx_cutout = gc_cutout;   /* see-through scenery: Group Camera */
     fps_counter_apply();   /* FPS_COUNTER=1: the counter; live, the in-game Graphics page switches it */
     g_cellpad_filter = game_pad_filter;

@@ -128,7 +128,7 @@ def units():
     firstrun.check_space = lambda r: [("OK", "S1", "stub")]
     # This unit section mocks the entire lift/build steps. Actual emitted-hook
     # refusal and receipt verification are exercised by lod_hooks_test.py.
-    for filename in ("lod_hooks.py", "lift_lod_hooks.json"):
+    for filename in ("lod_hooks.py", "lift_lod_hooks.json", "lift_game_hooks.json"):
         __import__("shutil").copy2(pathlib.Path(firstrun.__file__).resolve().parents[1] / "port/jsp" / filename,
                                   root / "port" / filename)
     firstrun.verify_lod_hooks = lambda c: False
