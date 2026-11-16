@@ -80,6 +80,21 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
   file was left. Without `JSP_PORT_MENU` the Options list showed its five rows and no file was written. The first run of a fresh
   build (no shader cache yet) reached the menu too late for the scripted route; the second run passed.
 
+## Player order (ENHANCEMENT, toolkit patch 7908)
+
+The Controls page has a row "Player order" (Cross: start). It closes the page and starts the join: the screen shows "Press a button: player N",
+and each pad (or the keyboard) takes the next free player, player 1 to 4, with its first button press. The press that joins is not seen by the
+game, and a pad that has not pressed is not given to the game while join runs. Join ends when every connected pad has pressed, when four players
+are taken, or when player 1 presses Start (that Start is swallowed too); a keyboard that never pressed takes the next free place then. The
+same join can be started without the page, and without `JSP_PORT_MENU`, by holding **Select + L3 + R3** on a pad for 2 seconds (the chord
+needs both sticks pressed in, which the game's own controls do not use as far as the notes say; the game's use of Select was not found in the
+notes, so a collision there is not excluded). Until one of the two is used nothing changes: slot order, `INPUT_MODE`, `PAD_PAD_P2` as before.
+After a join a pad that is unplugged frees its player and a pad that is plugged in later takes the lowest free player; player 1 is never left
+empty while another player exists (the lowest one moves up), because the menus read port 0. Rumble follows the pad. The order logic is
+`libs/input/pad_join.h` in the toolkit, host tested by `installer/tools/pad_join_test.c`; the text is drawn by `jsp_port_menu.cpp` from the
+toolkit's `g_pad_join_notify`. Known limits: a DualSense that stands in for slot 0 counts as the device of slot 0 (an XInput pad appearing
+on slot 0 replaces it); the game takes two human players in Free Battle, so players 3 and 4 are read but not used yet; not tried with real pads.
+
 ## Open
 
 - The settings pages are not built or run yet (host test and syntax checks only): open each page, change one live and one next-start setting, rebind a key, close, and start again to see the saved values arrive.
@@ -89,3 +104,4 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 - The overlay is drawn before 2508's and 2509's pictures, so those land on top (a page open with the FPS counter or the time-limit stamp).
 - The sixth row's parts after the game's own per-update loop with the instruction patch (the earlier tree needed the patch to keep them shown).
 - Pressure-capable pads: the game's menu reading pressure words behind the page.
+- Player order (7908): try it with two real pads and the keyboard, both start paths, the on-screen text, unplug and re-plug, and the Select + L3 + R3 hold in a fight and in the menus.

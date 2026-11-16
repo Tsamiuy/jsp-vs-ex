@@ -1,0 +1,363 @@
+Patch 7908 (ENHANCEMENT): players choose the player order: a device-to-player table in cellPad, started by a chord or the port, off until used.
+
+Players choose the player order instead of the host slot: cellPad keeps a device-to-player table (libs/input/pad_join.h).
+
+Not in force until a reorder is started, so the old rules (XInput slot order, INPUT_MODE, PAD_PAD_P2) stay exactly as they were.
+Started by pad_join_request() (the port's Port Settings row) or by the chord Select + L3 + R3 held 2 s on any pad. Then every
+device (XInput slot, the DualSense stand-in = slot 0, the keyboard) takes the lowest free player at its first button press, up
+to four; a device that has not pressed is not given to the game; the joining press is swallowed until its device was released.
+Join ends when every device that must join has, when four are taken, or on a new Start from player 1. After that a device that
+disconnects frees its player, a later one takes the lowest free player, and player 1 is never left empty while another player
+exists (the lowest other player moves up). The keyboard holds the end of join open only where INPUT_MODE makes it a player.
+Rumble follows the player's device. g_pad_join_notify(joining, next_player) tells the port when to draw its on-screen text.
+
+The chord and the keyboard rules read the wall clock only to time a held chord; the game never sees it.
+
+Pure logic: installer/tools/pad_join_test.c (host test, no pad needed). Not tested with real pads.
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 3d1281d..8a7dc94 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -108,6 +108,22 @@ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
+ /* Per-port "a report has arrived since your last read" flag; see cellPadGetData. */
+ static int s_data_fresh[PAD_MAX_HOST_PORTS];
+ 
++/* 7908 (ENHANCEMENT): the device-to-player table (pad_join.h). Not in force until a reorder is started (the port's menu row,
++ * pad_join_request, or the chord Select + L3 + R3 held 2 s); then every device's first press takes the next free player. */
++#include "pad_join.h"
++_Static_assert(PJ_BTN_SELECT == CELL_PAD_CTRL_SELECT && PJ_BTN_L3 == CELL_PAD_CTRL_L3 && PJ_BTN_R3 == CELL_PAD_CTRL_R3 && PJ_BTN_START == CELL_PAD_CTRL_START, "pad_join.h bits");
++static PadJoin s_pj = { 0 };
++static int     s_pj_inited = 0;
++static int     s_pj_raw_conn[PJ_DEVS];   /* which host device each connected flag comes from (rumble and status look here) */
++/* Called (outside the pad lock) when join starts, ends, or the player the next press takes changes: joining 0/1, next_player 1..4 (0 = none). */
++void (*g_pad_join_notify)(int joining, int next_player) = 0;
++static int s_pj_notified_j = 0, s_pj_notified_n = 0;
++void pad_join_request(void)
++{
++    if (!s_pj_inited) { pj_init(&s_pj); s_pj_inited = 1; }
++    pj_begin(&s_pj);
++}
++
+ #if PAD_BACKEND_SDL2
+ /* PS3 port i's controller, by SDL instance id (-1 = none); the port keeps the
+  * GUID of the last one it had so that pad gets the same port back. */
+@@ -1150,6 +1166,82 @@ static unsigned long long pad_now_ms(void)
+ #endif
+ }
+ 
++#if PAD_BACKEND_XINPUT
++/* The old layout (slot order; 6500 INPUT_MODE). */
++static void pad_layout_default(void)
++{
++    /* 6500: Keyboard / Keyboard & Mouse chosen: the keyboard is player 1, so a controller found on port 0 moves to
++     * port 1 (player 2). Controller chosen: the keyboard is player 2. PAD_PAD_P2=0 turns both off. */
++    { static int p2 = -1; if (p2 < 0) { const char* e = getenv("PAD_PAD_P2"); p2 = !(e && e[0] == '0'); }
++      if (p2 && s_host_state[0].connected && !s_host_state[1].connected &&
++          (pad_input_mode() == PAD_MODE_KEYBOARD || pad_input_mode() == PAD_MODE_KBM))
++          s_host_state[1] = s_host_state[0];
++      if (!s_host_state[0].connected || pad_input_mode() == PAD_MODE_KEYBOARD || pad_input_mode() == PAD_MODE_KBM)
++          pad_poll_keyboard();
++      else if (p2 && pad_input_mode() == PAD_MODE_CONTROLLER && !s_host_state[1].connected)
++          pad_poll_keyboard_port(1); }
++}
++
++static void pad_neutral(PadHostState* hs)   /* connected, nothing pressed, sticks centred */
++{
++    pad_host_release(hs);
++    hs->connected = 1;
++}
++
++/* 7908: after pad_poll_xinput filled s_host_state[0..3] by XInput slot (the DualSense stand-in on slot 0). Without a reorder
++ * the old layout runs unchanged and only the chord is watched; with one, the devices are laid out by pad_join.h. Pad lock held. */
++static void pad_join_stage(void)
++{
++    if (!s_pj_inited) { pj_init(&s_pj); s_pj_inited = 1; }
++    PadHostState raw[PJ_DEVS];
++    PadJoinDev in[PJ_DEVS];
++    memset(raw, 0, sizeof raw);
++    for (int d = 0; d < 4; d++) {
++        raw[d] = s_host_state[d];
++        in[d].connected = raw[d].connected ? 1 : 0;
++        in[d].must = 1;
++        in[d].buttons = raw[d].buttons;
++    }
++    memset(&in[PJ_DEV_KEYBOARD], 0, sizeof in[PJ_DEV_KEYBOARD]);
++    const int table = s_pj.active || __atomic_load_n(&s_pj.request, __ATOMIC_ACQUIRE);
++    if (!table) {
++        pad_layout_default();
++        if (pj_chord(&s_pj, in, pad_now_ms() | 1)) pj_begin(&s_pj);   /* pads only */
++        for (int d = 0; d < 4; d++)
++            if (pj_chord_held(&s_pj, d) && s_host_state[d].connected) s_host_state[d].buttons &= (u16)~PJ_CHORD_BITS;
++        for (int d = 0; d < PJ_DEVS; d++) s_pj_raw_conn[d] = in[d].connected;
++        return;
++    }
++    /* the keyboard is a device like the others: polled into slot 0 (mouse and focus rules of port 0), then moved */
++    pad_host_release(&s_host_state[0]);
++    pad_poll_keyboard_port(0);
++    raw[PJ_DEV_KEYBOARD] = s_host_state[0];
++    in[PJ_DEV_KEYBOARD].connected = raw[PJ_DEV_KEYBOARD].connected ? 1 : 0;
++    in[PJ_DEV_KEYBOARD].buttons = raw[PJ_DEV_KEYBOARD].buttons;
++    {   /* the keyboard holds up the end of join only where INPUT_MODE says it is a player: keyboard / kbm, or no pad at all */
++        int pads = 0;
++        for (int d = 0; d < 4; d++) pads += in[d].connected;
++        const int m = pad_input_mode();
++        in[PJ_DEV_KEYBOARD].must = (m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM || (m == PAD_MODE_DEFAULT && !pads)) ? 1 : 0;
++    }
++    if (!s_pj.joining) {
++        PadJoinDev pads_only[PJ_DEVS];
++        memcpy(pads_only, in, sizeof pads_only);
++        pads_only[PJ_DEV_KEYBOARD].connected = 0;
++        if (pj_chord(&s_pj, pads_only, pad_now_ms() | 1)) pj_begin(&s_pj);
++    }
++    pj_update(&s_pj, in);
++    for (int d = 0; d < PJ_DEVS; d++) s_pj_raw_conn[d] = in[d].connected;
++    for (int p = 0; p < 4; p++) {
++        const int d = pj_dev_for_player(&s_pj, p);
++        if (d < 0) { pad_host_release(&s_host_state[p]); continue; }
++        s_host_state[p] = raw[d];
++        if (pj_hidden(&s_pj, d)) pad_neutral(&s_host_state[p]);
++        else if (d < 4 && pj_chord_held(&s_pj, d)) s_host_state[p].buttons &= (u16)~PJ_CHORD_BITS;
++    }
++}
++#endif
++
+ static void pad_poll_backend(void)
+ {
+     static unsigned long long s_last_ms = 0;
+@@ -1164,16 +1256,7 @@ static void pad_poll_backend(void)
+ 
+ #if PAD_BACKEND_XINPUT
+     pad_poll_xinput();
+-    /* 6500: Keyboard / Keyboard & Mouse chosen: the keyboard is player 1, so a controller found on port 0 moves to
+-     * port 1 (player 2). Controller chosen: the keyboard is player 2. PAD_PAD_P2=0 turns both off. */
+-    { static int p2 = -1; if (p2 < 0) { const char* e = getenv("PAD_PAD_P2"); p2 = !(e && e[0] == '0'); }
+-      if (p2 && s_host_state[0].connected && !s_host_state[1].connected &&
+-          (pad_input_mode() == PAD_MODE_KEYBOARD || pad_input_mode() == PAD_MODE_KBM))
+-          s_host_state[1] = s_host_state[0];
+-      if (!s_host_state[0].connected || pad_input_mode() == PAD_MODE_KEYBOARD || pad_input_mode() == PAD_MODE_KBM)
+-          pad_poll_keyboard();
+-      else if (p2 && pad_input_mode() == PAD_MODE_CONTROLLER && !s_host_state[1].connected)
+-          pad_poll_keyboard_port(1); }
++    pad_join_stage();
+ #else
+ #if PAD_BACKEND_SDL2
+     pad_poll_sdl2();
+@@ -1181,7 +1264,16 @@ static void pad_poll_backend(void)
+     if (!s_host_state[0].connected) pad_poll_keyboard();
+ #endif
+     pad_track_assign();
++    const int pj_j = s_pj.joining, pj_n = pj_next_player(&s_pj);
+     pad_unlock();
++    /* 7908: tell the port (outside the pad lock: it draws) when join starts, ends, or the next player changes */
++    if (pj_j != s_pj_notified_j || pj_n != s_pj_notified_n) {
++        s_pj_notified_j = pj_j; s_pj_notified_n = pj_n;
++        if (pj_j) printf("[cellPad] join: press a button for player %d\n", pj_n);
++        else printf("[cellPad] join ended\n");
++        fflush(stdout);
++        if (g_pad_join_notify) g_pad_join_notify(pj_j, pj_n);
++    }
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -1951,12 +2043,14 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+ 
+ #if PAD_BACKEND_XINPUT
+     /* XInput keeps the motors at what they were last set to: no renewal. */
+-    if (s_host_state[port_no].connected) {
++    /* 7908: after a reorder the player's port is not its XInput slot; keyboard has no motor */
++    { const int dev = s_pj.active ? pj_dev_for_player(&s_pj, (int)port_no) : (int)port_no;
++      if (dev >= 0 && dev < 4 && s_host_state[port_no].connected) {
+         XINPUT_VIBRATION vib;
+         vib.wLeftMotorSpeed  = (WORD)lo;
+         vib.wRightMotorSpeed = (WORD)hi;
+-        if (p_xi_set_state) p_xi_set_state((DWORD)port_no, &vib);
+-    }
++        if (p_xi_set_state) p_xi_set_state((DWORD)dev, &vib);
++      } }
+ #endif
+ 
+ #if PAD_BACKEND_SDL2
+diff --git a/libs/input/pad_join.h b/libs/input/pad_join.h
+new file mode 100644
+index 0000000..4dfa97c
+--- /dev/null
++++ b/libs/input/pad_join.h
+@@ -0,0 +1,177 @@
++/* pad_join.h -- who is player N: the device-to-player table of cellPad (toolkit patch 7908; ENHANCEMENT).
++ *
++ * Pure logic, no I/O, no clock of its own: cellPad.c feeds it one snapshot of every device per poll, and the host test
++ * (installer/tools/pad_join_test.c in the port tree) drives it the same way.
++ *
++ * Devices: 0..3 the host pad slots (XInput slot; the DualSense stand-in is device 0), 4 the keyboard.
++ * Players: 0..3 (player 1..4), the PS3 pad ports the game reads.
++ *
++ * Until a reorder is made (pj_begin or the chord) the table is NOT in force (pj.active == 0) and cellPad.c keeps the old
++ * rules (slot order, INPUT_MODE, PAD_PAD_P2). After a reorder:
++ *  - join mode: a device's first button press takes the lowest free player, and is swallowed (the device stays neutral
++ *    for the game until all its buttons were released once). A device that has not pressed is not given to the game.
++ *    A device that is already pressing when join begins (the press that started it) must be released first.
++ *    Join ends when every device flagged `must` has joined, when all four players are taken, or on a new Start press
++ *    from the device of player 1 (swallowed like a join press); devices left over then take the lowest free players.
++ *  - after join: a device that disconnects frees its player; one that connects later takes the lowest free player.
++ *  - player 1 stays occupied whenever any device has a player: if its device leaves, the lowest-numbered other player moves
++ *    to player 1 (the game's menus read port 0).
++ *  - chord: Select + L3 + R3 held PJ_CHORD_MS on one device starts join (pj_chord).
++ */
++#ifndef PAD_JOIN_H
++#define PAD_JOIN_H
++#include <stdint.h>
++#include <string.h>
++
++#define PJ_PLAYERS 4
++#define PJ_DEVS    5
++#define PJ_DEV_KEYBOARD 4
++#define PJ_CHORD_MS 2000
++/* CELL_PAD_CTRL_* bits as cellPad.h has them, repeated so this header stands alone (a static assert in cellPad.c checks them) */
++#define PJ_BTN_SELECT 0x0001
++#define PJ_BTN_L3     0x0002
++#define PJ_BTN_R3     0x0004
++#define PJ_BTN_START  0x0008
++#define PJ_CHORD_BITS (PJ_BTN_SELECT | PJ_BTN_L3 | PJ_BTN_R3)
++
++typedef struct {
++    uint8_t  connected;
++    uint8_t  must;      /* join cannot end by "everyone pressed" while this device is connected and has not joined */
++    uint16_t buttons;   /* CELL_PAD_CTRL_* digital mask, low word (all buttons incl. d-pad and L2/R2 as digital) */
++} PadJoinDev;
++
++typedef struct {
++    int     active, joining;
++    int8_t  player_of[PJ_DEVS];     /* -1 = none */
++    int8_t  dev_of[PJ_PLAYERS];     /* -1 = none */
++    uint8_t was_conn[PJ_DEVS], armed[PJ_DEVS], swallow[PJ_DEVS];
++    uint16_t prev[PJ_DEVS];
++    uint64_t chord_since[PJ_DEVS];  /* 0 = not held */
++    uint8_t chord_fired[PJ_DEVS];
++    int     request;                /* a begin asked for from outside (the port's menu row), taken at the next update */
++} PadJoin;
++
++static inline void pj_init(PadJoin* j)
++{
++    memset(j, 0, sizeof *j);
++    memset(j->player_of, -1, sizeof j->player_of);
++    memset(j->dev_of, -1, sizeof j->dev_of);
++}
++
++static inline int pj_free_player(const PadJoin* j)
++{
++    for (int p = 0; p < PJ_PLAYERS; p++) if (j->dev_of[p] < 0) return p;
++    return -1;
++}
++static inline void pj_assign(PadJoin* j, int dev, int p) { j->player_of[dev] = (int8_t)p; j->dev_of[p] = (int8_t)dev; }
++static inline void pj_free_dev(PadJoin* j, int dev)
++{
++    if (j->player_of[dev] >= 0) j->dev_of[j->player_of[dev]] = -1;
++    j->player_of[dev] = -1;
++}
++
++/* Asks for a reorder; takes effect in the next pj_update. */
++static inline void pj_begin(PadJoin* j) { __atomic_store_n(&j->request, 1, __ATOMIC_RELEASE); }
++
++/* The player the next press takes, 1-based; 0 when join is not running or all four are taken. */
++static inline int pj_next_player(const PadJoin* j)
++{
++    if (!j->joining) return 0;
++    const int p = pj_free_player(j);
++    return p < 0 ? 0 : p + 1;
++}
++
++/* The device behind player (port) p, or -1. Without a reorder (active == 0) the caller does not ask. */
++static inline int pj_dev_for_player(const PadJoin* j, int p) { return p >= 0 && p < PJ_PLAYERS ? j->dev_of[p] : -1; }
++/* 1 = the game sees this device neutral: its joining press is still held. */
++static inline int pj_hidden(const PadJoin* j, int dev) { return j->swallow[dev]; }
++/* 1 = the device holds the whole chord right now (cellPad.c hides those bits from the game) */
++static inline int pj_chord_held(const PadJoin* j, int dev) { return j->chord_since[dev] != 0; }
++
++/* Chord detection on a snapshot taken in default mode or after join. Returns 1 once per hold, when it reached PJ_CHORD_MS.
++ * now_ms must be > 0. Wall-clock input on purpose: it times a human hold, game logic never sees it. */
++static inline int pj_chord(PadJoin* j, const PadJoinDev* in, uint64_t now_ms)
++{
++    int fire = 0;
++    for (int d = 0; d < PJ_DEVS; d++) {
++        const int held = in[d].connected && (in[d].buttons & PJ_CHORD_BITS) == PJ_CHORD_BITS;
++        if (!held) { j->chord_since[d] = 0; j->chord_fired[d] = 0; continue; }
++        if (!j->chord_since[d]) j->chord_since[d] = now_ms;
++        if (!j->chord_fired[d] && now_ms - j->chord_since[d] >= PJ_CHORD_MS) { j->chord_fired[d] = 1; fire = 1; }
++    }
++    return fire;
++}
++
++static inline void pj_end_join(PadJoin* j, const PadJoinDev* in)
++{
++    j->joining = 0;
++    for (int d = 0; d < PJ_DEVS; d++) {   /* the ones that never pressed: lowest free player, in device order */
++        if (!in[d].connected || j->player_of[d] >= 0) continue;
++        const int p = pj_free_player(j);
++        if (p < 0) break;
++        pj_assign(j, d, p);
++    }
++}
++
++/* One poll. in[PJ_DEVS]: every device's state now. Call pj_chord first in the same poll when the chord is wanted. */
++static inline void pj_update(PadJoin* j, const PadJoinDev* in)
++{
++    for (int d = 0; d < PJ_DEVS; d++) {
++        if (!in[d].connected) {
++            if (j->was_conn[d]) { pj_free_dev(j, d); j->armed[d] = 0; j->swallow[d] = 0; j->was_conn[d] = 0; }
++        } else if (!j->was_conn[d]) {
++            j->was_conn[d] = 1; j->armed[d] = 0;
++        }
++    }
++    if (__atomic_exchange_n(&j->request, 0, __ATOMIC_ACQ_REL)) {
++        j->active = 1; j->joining = 1;
++        memset(j->player_of, -1, sizeof j->player_of);
++        memset(j->dev_of, -1, sizeof j->dev_of);
++        memset(j->armed, 0, sizeof j->armed);
++        memset(j->swallow, 0, sizeof j->swallow);
++        memset(j->prev, 0xFF, sizeof j->prev);   /* nothing counts as a new press until the first release */
++    }
++    if (!j->active) return;
++    for (int d = 0; d < PJ_DEVS; d++)
++        if (in[d].connected && !in[d].buttons) { j->armed[d] = 1; j->swallow[d] = 0; }
++
++    if (j->joining) {
++        int ended = 0;
++        for (int d = 0; d < PJ_DEVS && !ended; d++) {   /* Start from player 1 ends join (not the press that joined it) */
++            if (in[d].connected && j->player_of[d] == 0 && !j->swallow[d] &&
++                (in[d].buttons & PJ_BTN_START) && !(j->prev[d] & PJ_BTN_START)) {
++                j->swallow[d] = 1;
++                pj_end_join(j, in);
++                ended = 1;
++            }
++        }
++        if (!ended) {
++            for (int d = 0; d < PJ_DEVS; d++) {
++                if (!in[d].connected || !j->armed[d] || j->player_of[d] >= 0 || !in[d].buttons) continue;
++                const int p = pj_free_player(j);
++                if (p < 0) break;
++                pj_assign(j, d, p);
++                j->swallow[d] = 1;
++            }
++            int joined = 0, waiting = 0;
++            for (int d = 0; d < PJ_DEVS; d++) {
++                if (j->player_of[d] >= 0) joined++;
++                else if (in[d].connected && in[d].must) waiting++;
++            }
++            if (joined && (!waiting || pj_free_player(j) < 0)) pj_end_join(j, in);
++        }
++    } else {
++        for (int d = 0; d < PJ_DEVS; d++) {   /* connected later: lowest free player */
++            if (!in[d].connected || j->player_of[d] >= 0) continue;
++            const int p = pj_free_player(j);
++            if (p < 0) break;
++            pj_assign(j, d, p);
++        }
++    }
++    if (j->dev_of[0] < 0) {   /* player 1 left: the lowest other player takes over */
++        for (int p = 1; p < PJ_PLAYERS; p++)
++            if (j->dev_of[p] >= 0) { const int d = j->dev_of[p]; pj_free_dev(j, d); pj_assign(j, d, 0); break; }
++    }
++    for (int d = 0; d < PJ_DEVS; d++) j->prev[d] = in[d].buttons;
++}
++#endif

@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 16 available, 9 in progress, 17 planned.
+Port features: 16 available, 10 in progress, 17 planned.
 
 ## 1. What the port adds
 
@@ -34,6 +34,7 @@ Port features: 16 available, 9 in progress, 17 planned.
 | <a id="dualsense"></a>DualSense | A DualSense or DualSense Edge over USB or Bluetooth is read directly | in progress | on | Hands-on tests of the buttons are pending |
 | <a id="second-player"></a>Second player | A keyboard or a second controller can be player 2; split-screen fights are drawn by the game as before | available | on |  |
 | <a id="hud-size"></a>Fight HUD size | Scales the fight HUD; split screen stays at full size | available | 1.00 | UI_SCALE=0.50..1.00 |
+| <a id="pad-join"></a>Choose the player order | ENHANCEMENT: players pick who is player 1 to 4 by pressing a button on each pad (or a key), instead of the Windows controller slot deciding. Started from the Port Settings Controls page (Player order) or by holding Select + L3 + R3 for 2 seconds on a pad; the screen shows Press a button: player N, Start from player 1 ends it. A pad that is unplugged frees its player and the next one takes the lowest free place. Without it the order stays as before (slot order, INPUT_MODE). The game itself only takes two human players in Free Battle: the pads for players 3 and 4 are read but not yet used | in progress | host test | Toolkit patch 7908; the row needs JSP_PORT_MENU=1, the chord does not. The order logic is host tested (installer/tools/pad_join_test.c); not yet tried with real pads or on screen, see [PORT_SETTINGS.md](notes/PORT_SETTINGS.md) |
 
 ### Menus and modes
 

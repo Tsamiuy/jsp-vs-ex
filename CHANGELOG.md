@@ -6,6 +6,10 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Choose the player order (ENHANCEMENT, toolkit patch 7908): each pad or the keyboard takes the next free player by its first button press, started from the Port Settings Controls page (`JSP_PORT_MENU=1`) or by holding Select + L3 + R3 for 2 s; the order is unchanged until used. Logic host tested; not yet tried with real pads.
+
 ### Changed
 
 - Docs brought up to date after 0.4.0: ROADMAP (releases, Training options, KO count, the Impossible mode, Port Settings pages, online and Proton wording), the feature list (new Impossible mode row; KO count, Training options and in-game settings now in progress), README and INSTALL (`SHA256SUMS` from 0.4.0, speed numbers now in 0.4.0), KNOWN_ISSUES (0.4.0, a row for the new Free Battle options), `.recomp.json` notes and help list.

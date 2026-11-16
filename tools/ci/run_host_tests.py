@@ -83,13 +83,14 @@ def command(cmd, subs, scratch):
     if path.suffix == ".sh":
         return ["bash", str(path), *args], ""
     if path.suffix == ".c":
-        # a C test: compile with the system compiler, include dir from the toolkit (libs/video), run
+        # a C test: compile with the system compiler, include dirs from the toolkit (libs/video, libs/input), run
         cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
         if not cc:
             return None, "no C compiler"
         exe = pathlib.Path(scratch) / "t.exe"
         inc = pathlib.Path(args[0]) / "libs" / "video"
-        return [("compile", [cc, "-O1", "-Wall", f"-I{inc}", str(path), "-o", str(exe), "-lm"]), [str(exe)]], ""
+        inc_in = pathlib.Path(args[0]) / "libs" / "input"
+        return [("compile", [cc, "-O1", "-Wall", f"-I{inc}", f"-I{inc_in}", str(path), "-o", str(exe), "-lm"]), [str(exe)]], ""
     return None, "unknown test type"
 
 
