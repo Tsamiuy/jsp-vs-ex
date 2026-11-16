@@ -302,6 +302,31 @@ int main(void)
         CHECK(leaked == 0);
     }
 
+    /* ---- round 4 ---- */
+    /* R1: only the device that holds the whole chord at join start / end must release first; another pad holding L3 is not hidden */
+    pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1);
+    start_join(); release_all();
+    press(0, CROSS); release_all();                     /* device 0 = player 1 */
+    in[0].buttons = PJ_BTN_L3; upd();
+    CHECK(pj_chord_hide(&j, 0, PJ_BTN_L3) == PJ_BTN_L3);   /* not blocked: L3 alone is the game's */
+    in[1].buttons = CROSS; upd();                       /* device 1 joins and ends join while player 1 holds L3 */
+    CHECK(!j.joining && dev(1) == 1 && pj_chord_hide(&j, 0, PJ_BTN_L3) == PJ_BTN_L3 && !j.chord_block[0]);
+    /* ... but a device that holds the whole chord at the end of join stays hidden until it released it */
+    pj_init(&j); reset_devs(); connect(0, 1); connect(1, 1);
+    start_join(); release_all(); press(0, CROSS); release_all();
+    in[0].buttons = PJ_CHORD_BITS; upd();
+    in[1].buttons = CROSS; upd();
+    CHECK(!j.joining && pj_chord_hide(&j, 0, PJ_CHORD_BITS) == 0 && j.chord_block[0] && !j.chord_block[1]);
+    in[0].buttons = 0; upd();
+    CHECK(!j.chord_block[0] && pj_chord_hide(&j, 0, PJ_BTN_L3) == PJ_BTN_L3);
+    /* R2: the mouse hooks run for the keyboard wherever it sits; their result feeds only port 0 and not a held joining press */
+    { int odev[4] = { 2, PJ_DEV_KEYBOARD, -1, -1 };
+      CHECK(pj_port_of_dev(odev, PJ_DEV_KEYBOARD) == 1 && !pj_mouse_feed(1, 0));    /* keyboard is player 2: cleanup only */
+      int none[4] = { 0, 1, -1, -1 };
+      CHECK(pj_port_of_dev(none, PJ_DEV_KEYBOARD) == -1 && !pj_mouse_feed(-1, 0));  /* out of the table: cleanup only */
+      int kb1[4] = { PJ_DEV_KEYBOARD, 0, -1, -1 };
+      CHECK(pj_port_of_dev(kb1, PJ_DEV_KEYBOARD) == 0 && pj_mouse_feed(0, 0) && !pj_mouse_feed(0, 1)); }
+
     printf(fails ? "pad_join_test: %d FAILED\n" : "pad_join_test: all passed\n", fails);
     return fails != 0;
 }

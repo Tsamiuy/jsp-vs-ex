@@ -26,12 +26,16 @@ Default-on change, also without a reorder: rumble now goes to the device the gam
 mode with PAD_PAD_P2 (the pad is player 2) the pad rumbles for port 1; before, port 0's rumble went to XInput slot 0 (the same pad)
 and port 1's to empty slot 1.
 
+The mouse hooks (cursor clip and hide, wheel) run once per poll whenever the keyboard is polled, wherever it sits, so their cleanup
+always runs; their result feeds the keyboard only when it is on port 0. Only a pad holding the whole chord when join starts or ends
+must release it first.
+
 The chord and the keyboard rules read the wall clock only to time a held chord; the game never sees it.
 
 Pure logic: installer/tools/pad_join_test.c (host test, no pad needed). Not tested with real pads.
 
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 3d1281d..fec9e02 100644
+index 3d1281d..3346da6 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -108,6 +108,52 @@ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
@@ -87,7 +91,7 @@ index 3d1281d..fec9e02 100644
  #if PAD_BACKEND_SDL2
  /* PS3 port i's controller, by SDL instance id (-1 = none); the port keeps the
   * GUID of the last one it had so that pad gets the same port back. */
-@@ -457,16 +503,15 @@ static void pad_mouse_menus(PadHostState* hs)
+@@ -457,24 +503,22 @@ static void pad_mouse_menus(PadHostState* hs)
      else if (target == cur && click_wait) { click_wait = 0; press = 4; swallow_lb = 1; }
  }
  
@@ -95,9 +99,9 @@ index 3d1281d..fec9e02 100644
 -static void pad_poll_keyboard(void) { pad_poll_keyboard_port(0); }
 -/* The keyboard as the pad on `port` (0 normally; 1 = player 2 next to a controller). Mouse only on 0. */
 -static void pad_poll_keyboard_port(int port)
-+/* The keyboard as a pad state in *hs (7908: a local buffer, published by pad_join_stage). port 0 = the mouse hooks apply (the
-+ * keyboard is player 1 or the only pad), anything else = keys only (player 2 next to a controller). Returns 0 when PAD_NO_KEYBOARD
-+ * is set (*hs untouched), else 1. */
++/* The keys as a pad state in *hs (7908: a local buffer, published by pad_join_stage). port 0 = mouse buttons may be bound (the
++ * keyboard is player 1 or the only pad), anything else = keys only (player 2 next to a controller). The mouse hooks are NOT run here:
++ * pad_join_stage runs them once per poll (pad_kb_mouse). Returns 0 when PAD_NO_KEYBOARD is set (*hs untouched), else 1. */
 +static int pad_poll_keyboard_to(PadHostState* hs, int port)
  {
      static int off = -1;
@@ -109,16 +113,24 @@ index 3d1281d..fec9e02 100644
      if (!pad_host_window_focused()) {
          /* Release everything on focus loss, or a key held while alt-tabbing would stay down forever. */
          hs->buttons = 0;
-@@ -474,7 +519,7 @@ static void pad_poll_keyboard_port(int port)
+         hs->analog_lx = hs->analog_ly = 128;
          hs->analog_rx = hs->analog_ry = 128;
          hs->connected = 1;
-         if (port == 0) { pad_mouse_look(hs); pad_mouse_menus(hs); }
+-        if (port == 0) { pad_mouse_look(hs); pad_mouse_menus(hs); }
 -        return;
 +        return 1;
      }
  
      static struct { const char* name; int vk; u16 btn; } map[] = {
-@@ -528,6 +573,7 @@ static void pad_poll_keyboard_port(int port)
+@@ -520,7 +564,6 @@ static void pad_poll_keyboard_port(int port)
+     hs->analog_lx = (u8)((stick & CELL_PAD_CTRL_LEFT) ? 0 : (stick & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
+     hs->analog_ly = (u8)((stick & CELL_PAD_CTRL_UP) ? 0 : (stick & CELL_PAD_CTRL_DOWN) ? 255 : 128);
+     hs->analog_rx = hs->analog_ry = 128;
+-    if (port == 0) { pad_mouse_look(hs); pad_mouse_menus(hs); }
+     hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
+     hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
+ 
+@@ -528,6 +571,7 @@ static void pad_poll_keyboard_port(int port)
        if (!said && btns) { said = 1;
            printf("[cellPad] keyboard active on port %d\n", port);
            fflush(stdout); } }
@@ -126,7 +138,7 @@ index 3d1281d..fec9e02 100644
  }
  #else
  static void pad_poll_keyboard(void)
-@@ -768,7 +814,8 @@ static int pad_dualsense_state(XINPUT_STATE* st)
+@@ -768,7 +812,8 @@ static int pad_dualsense_state(XINPUT_STATE* st)
      return 1;
  }
  
@@ -136,7 +148,7 @@ index 3d1281d..fec9e02 100644
  {
      const unsigned long long now = pad_now_ms();
      for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
-@@ -783,13 +830,13 @@ static void pad_poll_xinput(void)
+@@ -783,13 +828,13 @@ static void pad_poll_xinput(void)
                                       + (unsigned long long)i * (PAD_EMPTY_RECHECK_MS / PAD_MAX_HOST_PORTS);
              /* 6503: no XInput controller on port 0: a DualSense stands in */
              if (!(i == 0 && pad_dualsense_state(&state))) {
@@ -153,7 +165,7 @@ index 3d1281d..fec9e02 100644
          XINPUT_GAMEPAD* gp = &state.Gamepad;
  
          /* Map XInput buttons to PS3 CELL_PAD_CTRL_*. 6500: PAD_BTN_<PS3 NAME>=<XInput name> picks another source for
-@@ -834,32 +881,32 @@ static void pad_poll_xinput(void)
+@@ -834,32 +879,32 @@ static void pad_poll_xinput(void)
              if (on) btns |= xmap[k].btn;
          }
  
@@ -203,7 +215,7 @@ index 3d1281d..fec9e02 100644
      }
  }
  
-@@ -1150,6 +1197,134 @@ static unsigned long long pad_now_ms(void)
+@@ -1150,6 +1195,152 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -227,6 +239,19 @@ index 3d1281d..fec9e02 100644
 +    hs->connected = 1;
 +}
 +static int pad_p2(void) { static int p2 = -1; if (p2 < 0) { const char* e = getenv("PAD_PAD_P2"); p2 = !(e && e[0] == '0'); } return p2; }
++
++/* The mouse hooks, once per poll, on the keyboard's own state (cleanup of the cursor clip and the wheel always runs); what they add
++ * reaches the game only when the keyboard sits on port 0 (pj_mouse_feed). Returns 1 when *port_state was replaced. */
++static int pad_kb_mouse(const PadKb* kb, PadHostState* port_state, int kb_port, int hidden)
++{
++    if (!kb->polled[0] && !kb->polled[1]) return 0;
++    PadHostState ks = kb_port >= 0 ? *port_state : (kb->polled[0] ? kb->st[0] : kb->st[1]);
++    pad_mouse_look(&ks);
++    pad_mouse_menus(&ks);
++    if (!pj_mouse_feed(kb_port, hidden)) return 0;
++    *port_state = ks;
++    return 1;
++}
 +
 +/* The old layout: P[i] = what port i shows, dev[i] = the device behind it (-1 none; PJ_DEV_KEYBOARD). */
 +static void pad_layout_default(PadHostState* P, int* dev, const PadHostState* raw, PadKb* kb)
@@ -319,6 +344,11 @@ index 3d1281d..fec9e02 100644
 +            else if (d < 4) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
 +        }
 +    }
++    {   /* the mouse: before a reorder only where the old code ran it (keyboard on port 0); with the table whenever the keyboard is polled */
++        const int kp = pj_port_of_dev(odev, PJ_DEV_KEYBOARD);
++        if (s_pj.active || kp == 0)
++            pad_kb_mouse(&kb, kp >= 0 ? &out[kp] : NULL, kp, kp >= 0 && s_pj.active && pj_hidden(&s_pj, PJ_DEV_KEYBOARD));
++    }
 +    /* publish: one copy per port, and only then the status and motor bookkeeping */
 +    for (int p = 0; p < 4; p++) s_host_state[p] = out[p];
 +    for (int p = 0; p < 4; p++) {
@@ -338,7 +368,7 @@ index 3d1281d..fec9e02 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -1160,20 +1335,12 @@ static void pad_poll_backend(void)
+@@ -1160,20 +1351,12 @@ static void pad_poll_backend(void)
      /* A real pad streams reports at roughly this rate whether or not anything
       * changed, and libpad buffers them; a fresh sweep is a fresh report for
       * every port. cellPadGetData hands each one out exactly once. */
@@ -364,7 +394,7 @@ index 3d1281d..fec9e02 100644
  #else
  #if PAD_BACKEND_SDL2
      pad_poll_sdl2();
-@@ -1181,7 +1348,21 @@ static void pad_poll_backend(void)
+@@ -1181,7 +1364,21 @@ static void pad_poll_backend(void)
      if (!s_host_state[0].connected) pad_poll_keyboard();
  #endif
      pad_track_assign();
@@ -386,7 +416,7 @@ index 3d1281d..fec9e02 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -1951,12 +2132,15 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1951,12 +2148,15 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  
  #if PAD_BACKEND_XINPUT
      /* XInput keeps the motors at what they were last set to: no renewal. */
@@ -407,10 +437,10 @@ index 3d1281d..fec9e02 100644
  #if PAD_BACKEND_SDL2
 diff --git a/libs/input/pad_join.h b/libs/input/pad_join.h
 new file mode 100644
-index 0000000..3445971
+index 0000000..f5ef60e
 --- /dev/null
 +++ b/libs/input/pad_join.h
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,231 @@
 +/* pad_join.h -- who is player N: the device-to-player table of cellPad (toolkit patch 7908; ENHANCEMENT).
 + *
 + * Pure logic, no I/O, no clock of its own: cellPad.c feeds it one snapshot of every device per poll, and the host test
@@ -536,17 +566,29 @@ index 0000000..3445971
 +    return fire;
 +}
 +
-+static inline void pj_reset_chord(PadJoin* j)
++/* At join start and end: only a device that holds the whole chord right now (it fired it) must release before it counts again. */
++static inline void pj_reset_chord(PadJoin* j, const PadJoinDev* in)
 +{
 +    memset(j->chord_since, 0, sizeof j->chord_since);
 +    memset(j->chord_fired, 0, sizeof j->chord_fired);
-+    memset(j->chord_block, 1, sizeof j->chord_block);
++    for (int d = 0; d < PJ_DEVS; d++)
++        j->chord_block[d] = in[d].connected && (in[d].buttons & PJ_CHORD_BITS) == PJ_CHORD_BITS;
 +}
++
++/* The port (0..3) the device sits on in a view odev[4] (device per port, -1 none), or -1. */
++static inline int pj_port_of_dev(const int* odev, int dev)
++{
++    for (int p = 0; p < PJ_PLAYERS; p++) if (odev[p] == dev) return p;
++    return -1;
++}
++/* The mouse hooks (cursor clip and hide, wheel) run once per poll whenever the keyboard is polled, wherever it sits, so their cleanup
++ * always runs; what they compute feeds only a keyboard that sits on port 0 and is not holding a joining press. */
++static inline int pj_mouse_feed(int kb_port, int hidden) { return kb_port == 0 && !hidden; }
 +
 +static inline void pj_end_join(PadJoin* j, const PadJoinDev* in)
 +{
 +    j->joining = 0;
-+    pj_reset_chord(j);
++    pj_reset_chord(j, in);
 +    for (int d = 0; d < PJ_DEVS; d++) {   /* the ones that never pressed: lowest free player, in device order */
 +        if (!in[d].connected || j->player_of[d] >= 0) continue;
 +        const int p = pj_free_player(j);
@@ -572,7 +614,7 @@ index 0000000..3445971
 +        j->prev_valid = j->active;
 +        memcpy(j->prev_dev_of, j->dev_of, sizeof j->prev_dev_of);
 +        j->active = 1; j->joining = 1;
-+        pj_reset_chord(j);
++        pj_reset_chord(j, in);
 +        memset(j->player_of, -1, sizeof j->player_of);
 +        memset(j->dev_of, -1, sizeof j->dev_of);
 +        memset(j->armed, 0, sizeof j->armed);
