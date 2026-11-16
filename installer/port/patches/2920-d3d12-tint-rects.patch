@@ -1,0 +1,199 @@
+A title port can tint rectangles of the finished frame: g_rsx_tint_rects gives up to 8 rectangles {x, y, w, h} in guest
+pixels (1280x720 places) and a colour each. The frame inside each rectangle is copied to a scratch texture and drawn back
+with a small shader that multiplies only saturated yellow pixels by the colour (min(r, g) - b above 0.2), so the tint
+follows the game's own slides and fades and leaves skin, cream and white alone. Runs after the copy rectangles and
+before the stamps. NULL by default (nothing happens).
+
+J-Stars: the difficulty stars of an Impossible CPU turn from yellow to orange-red on Character Select, in the slot
+window and on the VS loading screen (installer/port/jsp/jsp_game.cpp, impossible_tint_rects).
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 25b7549..97cd77d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7740,6 +7740,178 @@ static void oskp_draw(u32 fi)
+ }
+ 
+ 
++/* toolkit 2920: rectangles of the finished frame a title port wants recoloured, {x, y, w, h} in guest pixels (up to
++ * 8), each with a colour (rgb, 0..1). Only star-yellow pixels change (red and green high, blue low: how much is
++ * min(r, g) - b); they move towards the colour by that much, so white, black, grey and the frames around stay as they
++ * are, also when the rectangle is drawn over a fade. The pieces are copied to a scratch texture and drawn back with that
++ * shader, after the copy rectangles. J-Stars: the stars of an "Impossible" CPU go from yellow to orange-red. */
++int (*g_rsx_tint_rects)(short (*rects)[4], float (*rgb)[3], int max) = NULL;
++static ID3D12PipelineState* s_tint_pso = NULL;
++static ID3D12RootSignature* s_tint_rs = NULL;
++static ID3D12DescriptorHeap* s_tint_heap = NULL;
++static ID3D12Resource* s_tint_tmp = NULL;
++static u32 s_tint_w = 0, s_tint_h = 0;
++
++static int tint_init(void)
++{
++    if (s_tint_pso) return 1;
++    static int failed = 0;
++    if (failed) return 0;
++    failed = 1;
++    static const char vs[] =
++        "float4 main(uint id : SV_VertexID) : SV_Position {\n"
++        "    float2 p = float2((id << 1) & 2, id & 2);\n"
++        "    return float4(p * float2(2, -2) + float2(-1, 1), 0, 1);\n"
++        "}\n";
++    static const char ps[] =
++        "Texture2D<float4> src : register(t0);\n"
++        "cbuffer C : register(b0) { int2 off; float2 pad; float4 want; };\n"
++        "float4 main(float4 pos : SV_Position) : SV_Target {\n"
++        "    float4 c = src.Load(int3(int2(pos.xy) + off, 0));\n"
++        "    float y = saturate((min(c.r, c.g) - c.b - 0.2) * 4.0);   /* saturated yellow only: skin and cream stay */\n"
++        "    float3 o = lerp(c.rgb, c.rgb * want.rgb, y);\n"
++        "    return float4(o, c.a);\n"
++        "}\n";
++    ID3DBlob *vb = NULL, *pb = NULL, *err = NULL;
++    if (FAILED(D3DCompile(vs, sizeof vs - 1, "tint_vs", NULL, NULL, "main", "vs_5_0", 0, 0, &vb, &err)) ||
++        FAILED(D3DCompile(ps, sizeof ps - 1, "tint_ps", NULL, NULL, "main", "ps_5_0", 0, 0, &pb, &err))) {
++        printf("[D3D12] tint shader: %s%c", err ? (const char*)err->lpVtbl->GetBufferPointer(err) : "?", 10);
++        return 0;
++    }
++    D3D12_DESCRIPTOR_RANGE rg = {0};
++    rg.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
++    rg.NumDescriptors = 1;
++    D3D12_ROOT_PARAMETER rp[2]; memset(rp, 0, sizeof rp);
++    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++    rp[0].DescriptorTable.NumDescriptorRanges = 1;
++    rp[0].DescriptorTable.pDescriptorRanges = &rg;
++    rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++    rp[1].Constants.ShaderRegister = 0;
++    rp[1].Constants.Num32BitValues = 8;
++    rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    D3D12_ROOT_SIGNATURE_DESC rd = {0};
++    rd.NumParameters = 2; rd.pParameters = rp;
++    ID3DBlob* sig = NULL;
++    if (FAILED(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
++        FAILED(s_d3d.device->lpVtbl->CreateRootSignature(s_d3d.device, 0, sig->lpVtbl->GetBufferPointer(sig),
++               sig->lpVtbl->GetBufferSize(sig), &IID_ID3D12RootSignature, (void**)&s_tint_rs)))
++        return 0;
++    D3D12_DESCRIPTOR_HEAP_DESC hd = {0};
++    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 1; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
++    if (FAILED(s_d3d.device->lpVtbl->CreateDescriptorHeap(s_d3d.device, &hd, &IID_ID3D12DescriptorHeap, (void**)&s_tint_heap)))
++        return 0;
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
++    pd.pRootSignature = s_tint_rs;
++    pd.VS.pShaderBytecode = vb->lpVtbl->GetBufferPointer(vb);
++    pd.VS.BytecodeLength  = vb->lpVtbl->GetBufferSize(vb);
++    pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb);
++    pd.PS.BytecodeLength  = pb->lpVtbl->GetBufferSize(pb);
++    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++    pd.RasterizerState.DepthClipEnable = TRUE;
++    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++    pd.SampleMask = UINT_MAX;
++    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    pd.NumRenderTargets = 1;
++    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
++    pd.SampleDesc.Count = 1;
++    if (FAILED(s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
++            s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&s_tint_pso)))
++        return 0;
++    failed = 0;
++    return 1;
++}
++
++static void tintrects_draw(u32 fi)
++{
++    if (!g_rsx_tint_rects) return;
++    short r[8][4]; float c[8][3];
++    const int n = g_rsx_tint_rects(r, c, 8);
++    if (n <= 0 || !tint_init()) return;
++    const u32 W = s_d3d.bb_w, H = s_d3d.bb_h;
++    const float sx = (float)W / (float)s_d3d.width, sy = (float)H / (float)s_d3d.height;
++    ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
++    if (!s_tint_tmp || s_tint_w < W || s_tint_h < H / 4) {   /* scratch: the pieces side by side */
++        if (s_tint_tmp) { grave_add((IUnknown*)s_tint_tmp, s_d3d.frame_count); s_tint_tmp = NULL; }
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++        D3D12_RESOURCE_DESC td = {0};
++        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++        td.Width = W; td.Height = H / 4; td.DepthOrArraySize = 1; td.MipLevels = 1;
++        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
++                D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&s_tint_tmp)))
++            return;
++        s_tint_w = W; s_tint_h = H / 4;
++        D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
++        sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
++        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
++        sv.Texture2D.MipLevels = 1;
++        D3D12_CPU_DESCRIPTOR_HANDLE h;
++        s_tint_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_tint_heap, &h);
++        s_d3d.device->lpVtbl->CreateShaderResourceView(s_d3d.device, s_tint_tmp, &sv, h);
++    } else {
++        D3D12_RESOURCE_BARRIER t0 = {0};
++        t0.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        t0.Transition.pResource = s_tint_tmp;
++        t0.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++        t0.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++        t0.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++        cl->lpVtbl->ResourceBarrier(cl, 1, &t0);
++    }
++    D3D12_RESOURCE_BARRIER b[2]; memset(b, 0, sizeof b);
++    b[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b[0].Transition.pResource = s_d3d.render_targets[fi];
++    b[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    cl->lpVtbl->ResourceBarrier(cl, 1, b);
++    D3D12_TEXTURE_COPY_LOCATION bb = {0}, tmp = {0};
++    bb.pResource = s_d3d.render_targets[fi]; bb.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    tmp.pResource = s_tint_tmp; tmp.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    D3D12_RECT sc[8]; int tx[8]; u32 used = 0; int m = 0;
++    for (int i = 0; i < n; i++) {
++        sc[m].left = (LONG)(r[i][0] * sx); sc[m].top = (LONG)(r[i][1] * sy);
++        sc[m].right = sc[m].left + (LONG)(r[i][2] * sx + 0.5f); sc[m].bottom = sc[m].top + (LONG)(r[i][3] * sy + 0.5f);
++        if (sc[m].left < 0 || sc[m].top < 0 || sc[m].right > (LONG)W || sc[m].bottom > (LONG)H || sc[m].right <= sc[m].left ||
++            sc[m].bottom <= sc[m].top || used + (u32)(sc[m].right - sc[m].left) > s_tint_w || (u32)(sc[m].bottom - sc[m].top) > s_tint_h)
++            continue;
++        D3D12_BOX box = { (UINT)sc[m].left, (UINT)sc[m].top, 0, (UINT)sc[m].right, (UINT)sc[m].bottom, 1 };
++        cl->lpVtbl->CopyTextureRegion(cl, &tmp, used, 0, 0, &bb, &box);
++        tx[m] = (int)used; used += (u32)(sc[m].right - sc[m].left);
++        c[m][0] = c[i][0]; c[m][1] = c[i][1]; c[m][2] = c[i][2];
++        m++;
++    }
++    b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    b[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    b[1] = b[0];
++    b[1].Transition.pResource = s_tint_tmp;
++    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    b[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++    cl->lpVtbl->ResourceBarrier(cl, 2, b);
++    D3D12_CPU_DESCRIPTOR_HANDLE rtv;
++    s_d3d.rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rtv_heap, &rtv);
++    rtv.ptr += (SIZE_T)fi * s_d3d.rtv_descriptor_size;
++    cl->lpVtbl->OMSetRenderTargets(cl, 1, &rtv, FALSE, NULL);
++    D3D12_VIEWPORT vp = { 0.0f, 0.0f, (float)W, (float)H, 0.0f, 1.0f };
++    cl->lpVtbl->RSSetViewports(cl, 1, &vp);
++    cl->lpVtbl->SetPipelineState(cl, s_tint_pso);
++    cl->lpVtbl->SetGraphicsRootSignature(cl, s_tint_rs);
++    cl->lpVtbl->SetDescriptorHeaps(cl, 1, &s_tint_heap);
++    D3D12_GPU_DESCRIPTOR_HANDLE gh;
++    s_tint_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_tint_heap, &gh);
++    cl->lpVtbl->SetGraphicsRootDescriptorTable(cl, 0, gh);
++    cl->lpVtbl->IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    for (int i = 0; i < m; i++) {
++        struct { int off[2]; float pad[2]; float want[4]; } k = { { tx[i] - (int)sc[i].left, -(int)sc[i].top }, { 0, 0 },
++                                                                 { c[i][0], c[i][1], c[i][2], 1.0f } };
++        cl->lpVtbl->SetGraphicsRoot32BitConstants(cl, 1, 8, &k, 0);
++        cl->lpVtbl->RSSetScissorRects(cl, 1, &sc[i]);
++        cl->lpVtbl->DrawInstanced(cl, 3, 1, 0, 0);
++    }
++}
++
+ /* A small opaque picture a title port can put on the frame. The callback gives RGBA pixels (w x h), and
+  * where and how large to show them in 1280x720 coordinates, or NULL when there is nothing to show. */
+ const u32* (*g_rsx_stamp)(short* x, short* y, short* w, short* h, short* show_w, short* show_h) = NULL;
+@@ -9463,6 +9635,7 @@ skip_dump_consider: ;
+          * reduced-viewport pass to capture mid-frame. */
+         screen_copy_capture(fi);
+         copyrects_draw(fi);      /* title port's frame patches (J-Stars: 0-star dummy) */
++        tintrects_draw(fi);      /* toolkit 2920: title port's tinted rectangles (J-Stars: an Impossible CPU's stars) */
+         stamp_draw(fi);          /* title port's small pictures (J-Stars: Training's time limit lock, FPS counter) */
+         oskp_draw(fi);           /* on-screen-keyboard text panel, if one is up */
+         /* Transition render target to PRESENT state */
