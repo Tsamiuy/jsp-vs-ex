@@ -6,10 +6,13 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
-### Changed
+### Added
 
 - Free Battle: "KOs to win" on the Stage Select (L1 / R1, 1 to 5; 3 is the game's own) and an Impossible mode. On Character Select, Right at 5 stars in a CPU slot turns Impossible on (orange-red stars; AI level 19, guards every frame it has no defence of its own, Just Guards every just-guardable hit, holds its guard against counters). A window at the start of Free Battle's Character Select offers Free Battle or Impossible (2 vs 1: blue leader slot is the Impossible CPU, Player 2 takes the red partner slot, KOs fixed at red 1 and blue 2). Needs three more lifted entry hooks (`installer/port/jsp/lift_game_hooks.json`, lifted with the LOD hooks only when their program check accepts the EBOOT, so the first run re-lifts). 4 and 5 KOs keep the game's 3-KO bars for now. Not tested: a real second controller, Impossible on the partner slots in a fight, online play with the Impossible mode.
 - Toolkit patch 2920: a title port can tint rectangles of the finished frame (`g_rsx_tint_rects`: up to 8 rectangles and a colour each; only saturated yellow pixels move towards the colour, so white, grey and skin stay). Nothing happens until the port sets it; the Impossible AI change that uses it is a separate pull request.
+
+### Changed
+
 - Docs brought up to date with what changed since 0.3.0: README status table (frame rate on slower CPUs), KNOWN_ISSUES (frame-rate row, issue #9 date), TROUBLESHOOTING (what the support bundle's `facts.txt` shows), and three new Features rows (graphics options, two-thread drawing, frames shown without the vblank wait) with ROADMAP lines.
 - Two per-draw cuts on the drawing thread (toolkit patches 2918 and 2919): strips and fans with 16-bit indices take a tight loop instead of the general index loop, the vertex-constant copy no longer reads back from write-combined upload memory, and a run of NV308A inline-transfer words inside one IO page is written with one address resolve and one tiling check (`VPULL_FAST16=0` and `GCM2D_RUN=0` turn them off). With the CPU held at its base clock the title demo went from about 28.0 to 29.5 flips per second and the drawing cost per frame from about 21.8 to 17.1 ms; the pictures are unchanged.
 - Two-thread drawing is on by default (toolkit patch 7907, `PIPE`): the preparing half of drawing runs on its own thread unless `PIPE=0`. The settings window's "Two-thread drawing" box starts ticked and now writes `PIPE_SEEN=2` next to `PIPE`; a `PIPE=0` in a settings file without that marker (every file written while it was off by default) no longer counts, so existing installs get the new default. The experimental online session rules (`jsp_session_settings.h`) now ask for PIPE on in the conservative profile. Online matches between players with different PIPE settings, and between old and new versions, are not tested.
