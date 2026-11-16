@@ -11,7 +11,7 @@ All notable changes are listed here, newest first. The format follows
 ### Added
 
 - Free Battle: "KOs to win" on the Stage Select (L1 / R1, 1 to 5; 3 is the game's own) and an Impossible mode. On Character Select, Right at 5 stars in a CPU slot turns Impossible on (orange-red stars; AI level 19, guards every frame it has no defence of its own, Just Guards every just-guardable hit, holds its guard against counters). A window at the start of Free Battle's Character Select offers Free Battle or Impossible (2 vs 1: blue leader slot is the Impossible CPU, Player 2 takes the red partner slot, KOs fixed at red 1 and blue 2). Needs three more lifted entry hooks (`installer/port/jsp/lift_game_hooks.json`, lifted with the LOD hooks only when their program check accepts the EBOOT, so the first run re-lifts). 4 and 5 KOs keep the game's 3-KO bars for now. Not tested: a real second controller, Impossible on the partner slots in a fight, online play with the Impossible mode.
-- Toolkit patch 2920: a title port can tint rectangles of the finished frame (`g_rsx_tint_rects`: up to 8 rectangles and a colour each; only saturated yellow pixels move towards the colour, so white, grey and skin stay). Nothing happens until the port sets it; the Impossible AI change that uses it is a separate pull request.
+- Toolkit patch 2920: a title port can tint rectangles of the finished frame (`g_rsx_tint_rects`: up to 8 rectangles and a colour each; only saturated yellow pixels move towards the colour, so white, grey and skin stay). Nothing happens until the port sets it; the Impossible mode uses it for the orange-red stars.
 
 ### Changed
 
