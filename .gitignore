@@ -167,6 +167,7 @@ __pycache__/
 !/installer/tools/settings_test.cpp
 !/installer/tools/settings_test.sh
 !/installer/tools/port_overlay_test.c
+!/installer/tools/pad_join_test.c
 !/installer/tools/overlay_font_test.cpp
 !/installer/tools/overlay_font_test.sh
 !/installer/patches/

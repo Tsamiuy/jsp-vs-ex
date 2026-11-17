@@ -64,6 +64,9 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void
 #include "jsp_overlay_api.h"
 extern "C" uint32_t cellGcm_flip_request_count(void);
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
+// Toolkit patch 7908 (ENHANCEMENT, player order): ask for the join; the toolkit calls the notifier (outside its pad lock) when join starts, ends or the next player changes.
+extern "C" void pad_join_request(void);
+extern "C" void (*g_pad_join_notify)(int joining, int next_player);
 // Toolkit patch 6501: hooks in cellPadGetData, NULL by default (jsp_game.cpp sets them first; this file chains behind them).
 extern "C" void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly);
 extern "C" void (*g_cellpad_rstick_filter)(uint32_t port_no, uint16_t* rx, uint16_t* ry);
@@ -86,7 +89,7 @@ enum : uint16_t { BTN_START = 0x0008, BTN_UP = 0x0010, BTN_RIGHT = 0x0020, BTN_D
 enum Page { CLOSED = 0, MAIN = 1, ONLINE = 2, DISPLAY = 3, GRAPHICS = 4, CONTROLS = 5, KEYS = 6, PADBTNS = 7, LAUNCHER = 8 };
 constexpr int kSettingsVisible = 8;   // rows shown at once on a settings page
 // The settings pages' rows (jsp_settings.h has the data): a choice item, a key, a controller button, a link to a sub-page, "Reset".
-struct SRow { enum Kind { ITEM, KEY, PADBTN, OPEN, RESET } kind; int idx; Page target; };
+struct SRow { enum Kind { ITEM, KEY, PADBTN, OPEN, RESET, JOIN } kind; int idx; Page target; };   // JOIN: "Player order" (starts the pad join, toolkit patch 7908)
 // the Online page's rows: 0 Method, 1 Server, 2 Online name, 3 Community preset, 4 Save, 5 Discard changes.
 enum : int { ROW_METHOD = 0, ROW_SERVER = 1, ROW_NAME = 2, ROW_PRESET = 3, ROW_SAVE = 4, ROW_DISCARD = 5, kEditRows = 6 };
 
@@ -112,6 +115,7 @@ struct SettingsIO {
     virtual void live(const char* key, const char* value) = 0;          // a live setting changed ("" = unset): the readers pick it up
     virtual int poll_vk(bool mouse) = 0;                                // a key held right now (Windows virtual-key code), 0 = none
     virtual std::string path() = 0;
+    virtual void pad_join() {}                                          // start the player-order join (toolkit patch 7908); the page closes after it
 };
 
 // The Options panel's cursor struct (func_001C07F0: [0] total, [4] cursor, [8] visible, [0xC] top, [0x10] last).
@@ -277,6 +281,7 @@ struct Menu {
         else if (page == CONTROLS) {
             items(jps::G_CONTROLS);
             if (model.mode() == 2) srows.push_back({ SRow::OPEN, 0, PADBTNS }); else srows.push_back({ SRow::OPEN, 0, KEYS });
+            srows.push_back({ SRow::JOIN, 0, CLOSED });   // ENHANCEMENT: choose the player order by pressing a button on each pad
         }
         else if (page == KEYS) { for (int a = 0; a < jps::k_action_count; a++) srows.push_back({ SRow::KEY, a, CLOSED }); srows.push_back({ SRow::RESET, 0, CLOSED }); }
         else if (page == PADBTNS) { for (int b = 0; b < jps::k_padbtn_count; b++) srows.push_back({ SRow::PADBTN, b, CLOSED }); srows.push_back({ SRow::RESET, 0, CLOSED }); }
@@ -294,6 +299,7 @@ struct Menu {
         case SRow::KEY: return jps::k_actions[r.idx].label;
         case SRow::PADBTN: return jps::k_padbtns[r.idx].label;
         case SRow::OPEN: return r.target == KEYS ? "Keys" : "Controller buttons";
+        case SRow::JOIN: return "Player order";
         default: return "Reset this page to the defaults";
         }
     }
@@ -304,6 +310,7 @@ struct Menu {
         case SRow::KEY: return capturing && r.idx == srows[(size_t)ssel].idx ? (model.mode() == 1 ? "key or mouse button..." : "press a key...") : jps::key_name(model.key_vk(r.idx));
         case SRow::PADBTN: return jps::k_xbutton_names[model.pad_btn(r.idx)];
         case SRow::OPEN: return "Cross: open";
+        case SRow::JOIN: return "Cross: start";
         default: return "";
         }
     }
@@ -355,6 +362,12 @@ struct Menu {
             capturing = true; cap_armed = false; smsg.clear(); smsg_err = false; dirty = true;
         } else if ((edge & BTN_CROSS) && r.kind == SRow::OPEN) {
             open_settings(r.target, 0);
+        } else if ((edge & BTN_CROSS) && r.kind == SRow::JOIN) {
+            // ENHANCEMENT: every device's first press takes the next player; the page closes, the join text shows on the game screen
+            io->pad_join();
+            events.push_back("settings: player order join started");
+            close();
+            return;
         } else if ((edge & BTN_CROSS) && r.kind == SRow::RESET) {
             if (page == DISPLAY) model.reset_group(jps::G_DISPLAY);
             else if (page == GRAPHICS) model.reset_group(jps::G_GRAPHICS);
@@ -481,6 +494,7 @@ GameBackend g_backend;
 
 // The settings pages' OS side: jsp_settings.cpp (file, live values) and the keyboard (key capture).
 struct GameSettingsIO : jpm::SettingsIO {
+    void pad_join() override { pad_join_request(); }
     bool load(std::string& text, std::string& note) override { return jps::io_load(text, note); }
     bool save(const std::string& text, std::string& err) override { return jps::io_save(text, err); }
     const char* active(const char* key) override { return std::getenv(key); }
@@ -655,6 +669,7 @@ void draw_settings(uint32_t white, uint32_t gold)
     } else {
         const char* h1 = cur.kind == SRow::KEY ? "Up/Down: select  Cross: change the key  Circle: back"
                        : cur.kind == SRow::OPEN || cur.kind == SRow::RESET ? "Up/Down: select  Cross: open or reset  Circle: back"
+                       : cur.kind == SRow::JOIN ? "Up/Down: select  Cross: start  Circle: back.  Or hold Select + L3 + R3 for 2 s on a pad."
                        : "Up/Down: select  Left/Right or Cross: change  Circle: back";
         jsp_overlay_text_style(260, 578, h1, 0.5f, white, 0);
         jsp_overlay_text_style(260, 598, "Every change is saved at once. * = saved; applies on the next start.", 0.5f, white, 0);
@@ -688,6 +703,10 @@ int g_ver_state = -1;                   // panel state at the last panel update
 
 void draw_page();
 
+// ENHANCEMENT (toolkit patch 7908): the player-order join. g_joining / g_join_next come from the toolkit's notifier (g_mu held).
+bool g_joining = false;
+int g_join_next = 0;   // the player (1-4) the next press takes
+
 // Flow object S (@0x009535F0 -> +0x30 state) and the menu-mode global (0x0095653C +0x10 mode): the idle Main Menu is state 4 with mode 0.
 constexpr uint32_t k_flow_ptr = 0x009535F0, k_mode_g = 0x0095653C;
 int flow_state() { const uint32_t s = vm_read32(k_flow_ptr); return s ? (int)vm_read32(s + 0x30) : -1; }
@@ -717,10 +736,30 @@ void ver_draw()
     g_drawn = true;
 }
 
+// "Press a button: player N", bottom centre of the 1280x720 layout space, in the menu's own text. The overlay layer is shared with the
+// page and the version line: this is drawn from draw_page() and replaces them while it runs (the page cannot be open: its row closes it).
+void join_draw()
+{
+    if (!jsp_overlay_begin(1280, 720)) return;
+    char line[64];
+    std::snprintf(line, sizeof line, "Press a button: player %d", g_join_next);
+    const uint32_t white = JSP_RGBA(255, 255, 255, 255);
+    const float w = jsp_overlay_text_width(line, 1.1f);
+    const float x = w > 0 ? (1280.0f - w) / 2 : 400.0f;
+    jsp_overlay_fill_rect((int)x - 30, 600, (int)(w > 0 ? w : 480) + 60, 80, JSP_RGBA(0, 0, 0, 170));
+    jsp_overlay_text_style(x, 618, line, 1.1f, white, 0);
+    const char* hint = "Player 1: Start when done";
+    const float w2 = jsp_overlay_text_width(hint, 0.55f);
+    jsp_overlay_text_style(w2 > 0 ? (1280.0f - w2) / 2 : 450.0f, 650, hint, 0.55f, white, 0);
+    jsp_overlay_end();
+    g_drawn = true;
+}
+
 void draw_page()
 {
     using namespace jpm;
     if (g_menu.page == CLOSED) {
+        if (g_joining && g_join_next > 0) { join_draw(); return; }
         if (g_help) {
             // ENHANCEMENT: the game's help line for the Options list has no text for a sixth row (the text comes from a message
             // table keyed per row, not found), so the port draws one in the game's help bar (left x 210, y 540 in 1280x720).
@@ -808,6 +847,16 @@ void pad_filter(uint32_t port, uint16_t* buttons, uint16_t* lx, uint16_t* ly)
     const bool help_changed = help != g_help;
     g_help = help;
     if (g_menu.take_dirty() || help_changed) draw_page();
+}
+
+// Toolkit patch 7908 calls this when join starts, ends or the next player changes (not under its pad lock).
+void jsp_pad_join_notify(int joining, int next_player)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_joining = joining != 0;
+    g_join_next = joining ? next_player : 0;
+    std::fprintf(stderr, "[padjoin] %s, next player %d (flip %u)\n", joining ? "join running" : "join ended", next_player, (unsigned)cellGcm_flip_request_count());
+    draw_page();
 }
 
 // The right stick is filtered before the buttons on the same read, so it follows the state of the previous read: a one-read
@@ -933,6 +982,7 @@ bool install(uint32_t addr, fn_t wrapper, fn_t* orig)
 extern "C" void jsp_register_port_menu_overrides(void)
 {
     load_version_line();
+    g_pad_join_notify = jsp_pad_join_notify;   // the join text does not depend on the Port Settings page or the US build
     if (!port_menu_env() && !g_ver.any()) return;
     if (vm_read32(k_row_count_insn) != 0x3B200005u) {   // the hooks' addresses are those of the US 1.00 code only
         std::fprintf(stderr, "[portmenu] JSP_PORT_MENU or a version line is set, but this is not the US 1.00 build (0x%08X holds 0x%08X): the page and the line stay off\n", k_row_count_insn, vm_read32(k_row_count_insn));

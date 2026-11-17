@@ -381,6 +381,8 @@ int main(int argc, char** argv)
     // ================= the pages (fake io) =================
     {
         struct IO : SettingsIO {
+            int joins = 0;
+            void pad_join() override { joins++; }
             std::string file; bool load_ok = true, save_ok = true; int saves = 0;
             std::map<std::string, std::string> env, live_set; std::vector<int> keys;   // keys: queue of poll_vk answers
             bool mouse_asked = false;
@@ -420,7 +422,8 @@ int main(int argc, char** argv)
         CHECK(io.live_set["UI_SCALE"] == "1.00" && io.live_set["AA_MODE"] == "fxaa" && io.file.find("AA_MODE=fxaa") != std::string::npos && m.smsg.find("Defaults saved") == 0);
         // wrap and scroll: Up from the first row lands on the last, the window follows
         press(BTN_CIRCLE); press(BTN_DOWN); press(BTN_CROSS);                            // Controls
-        CHECK(m.page == CONTROLS && m.srows.size() == 3 && m.srows[2].kind == SRow::OPEN && m.srows[2].target == KEYS);
+        CHECK(m.page == CONTROLS && m.srows.size() == 4 && m.srows[2].kind == SRow::OPEN && m.srows[2].target == KEYS && m.srows[3].kind == SRow::JOIN);
+        CHECK(m.row_label(m.srows[3]) == "Player order" && m.row_value(m.srows[3]) == "Cross: start");
         press(BTN_CROSS); CHECK(m.ssel == 0);                                           // INPUT_MODE: keyboard -> kbm
         CHECK(m.model.mode() == 1 && io.file.find("INPUT_MODE=kbm") != std::string::npos);
         press(BTN_DOWN); press(BTN_RIGHT); press(BTN_DOWN);                              // sensitivity 1.25x, then the Keys link
@@ -468,6 +471,15 @@ int main(int argc, char** argv)
         CHECK(bad.page == MAIN && bad.smsg == "unreadable" && bad.smsg_err);
         bad.feed(BTN_DOWN, 1, true); bad.feed(0, 1, true); bad.feed(BTN_DOWN, 1, true); bad.feed(0, 1, true); bad.feed(BTN_DOWN, 1, true); bad.feed(0, 1, true);   // Online
         bad.feed(BTN_DOWN, 1, true); bad.feed(0, 1, true); CHECK(bad.sel == 4);
+        // ENHANCEMENT (toolkit 7908): Cross on "Player order" starts the join once and closes the page; the held Cross is not the game's
+        { Menu pj; pj.io = &io; io.load_ok = true; io.joins = 0;
+          pj.feed(BTN_CROSS, 1, true); pj.feed(0, 1, true); pj.feed(BTN_DOWN, 1, true); pj.feed(0, 1, true); pj.feed(BTN_DOWN, 1, true); pj.feed(0, 1, true);
+          pj.feed(BTN_CROSS, 1, true); pj.feed(0, 1, true);                               // Controls
+          CHECK(pj.page == CONTROLS);
+          pj.ssel = 3; CHECK(pj.srows[3].kind == SRow::JOIN);
+          CHECK(pj.feed(BTN_CROSS, 1, true) && pj.page == CLOSED && io.joins == 1 && pj.wait_release);
+          CHECK(pj.feed(BTN_CROSS, 1, true) && io.joins == 1);                            // still held: swallowed, no second start
+          CHECK(!pj.feed(0, 1, false) && !pj.active()); }
         // without an io the old two-row main page is unchanged
         Menu old; CHECK(old.main_rows().size() == 2 && old.main_rows()[0] == ONLINE && old.main_rows()[1] == CLOSED);
     }

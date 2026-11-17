@@ -37,6 +37,7 @@ posix   | installer/tools/net_probe_test.py --sdk {toolkit}
 posix   | installer/tools/matching2_context_test.py --sdk {toolkit} --output {scratch}/native
 posix   | installer/tools/overlay_font_test.sh {font}
 posix   | installer/tools/port_overlay_test.c {toolkit}
+posix   | installer/tools/pad_join_test.c {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
 exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py

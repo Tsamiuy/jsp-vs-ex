@@ -1,0 +1,762 @@
+Patch 7909 (ENHANCEMENT): PlayStation pads (DualSense, DualSense Edge, DualShock 4 v1 and v2) over USB or Bluetooth, up to four, each its own device, alongside XInput pads.
+
+Extends 6503 (one DualSense, port 0 only, when XInput had nothing there) and 7908 (the join table). Windows has no XInput driver for these pads, so
+with INPUT_MODE=controller a tester's PS4 or PS5 pad was not seen at all unless it was a single DualSense on port 0.
+
+Pads: vendor 054C, product 0CE6 / 0DF2 (DualSense, Edge) and 05C4 / 09CC (DualShock 4 v1, v2). A manager thread looks at the HID devices every second
+while fewer than four pads are read (never on the game thread; the path is checked for the vendor id before a device is opened, and a pad must be
+a Generic Desktop Joystick / Game Pad collection) and starts one reader thread per pad, which keeps the newest input report of that pad (the read buffer
+is as long as the device's InputReportByteLength). A pad that is unplugged makes its read fail, the reader ends and frees its slot, and a later pad takes
+the lowest free slot. A Bluetooth pad is told apart by InputReportByteLength > 64 and switched from its short report to the full one by reading one
+feature report (DualSense 0x05 as in 6503, DualShock 4 0x02).
+
+Report layouts (pad_hid.h; pure code, tested by installer/tools/pad_join_test.c): from the PS4 developer wiki pages "DualShock 4" (USB and Bluetooth
+reports) and "DualSense", the byte offsets are written out in the header; no code of another project was copied. DualShock 4: USB report 0x01 (64
+bytes) with LX LY RX RY at bytes 1..4, hat and face buttons at 5, shoulders / Share / Options / stick clicks at 6, L2 R2 analog at 8 and 9; Bluetooth
+report 0x11 (the same data two bytes later); short Bluetooth report 0x01 (10 bytes) before the switch. DualSense as 6503 read it. The pad is turned into
+the same state an XInput pad gives (Cross = A, Circle = B, Square = X, Triangle = Y, Share or Create = BACK, Options = START), so the PAD_BTN_* rebinds,
+the deadzone and the trigger threshold apply to it unchanged (pad_xinput_to_host is the old XInput mapping, now a function).
+
+Which port: the join table (7908) has devices 5..8 for the HID pads (PJ_DEV_HID0 + n; the keyboard stays 4), so a reorder (the port's menu row or the
+chord Select + L3 + R3, the Share or Create button is Select) treats every PlayStation pad like any other: first press, lowest free player, up to four.
+Without a reorder, the old order stays and HID pads come after it: XInput pads keep their slot as their port, then the HID pads take the lowest ports
+no XInput pad holds, in the order the readers have them (the order Windows listed them at plug-in; a pad that leaves frees its reader slot). Chosen
+because it changes nothing that works today: a lone Xbox pad is its slot, a lone DualSense is port 0 (it was the stand-in for slot 0, now it is the
+first HID pad and the lowest free port is 0), and a DualSense next to an Xbox pad on slot 1 is still port 0. The cases that change were
+unusable before: a DualSense next to an Xbox pad on slot 0 (it was ignored) is now port 1, and a DualShock 4 is a pad at all. For a fixed order the
+reorder is the tool; this patch adds no setting for the default order.
+
+The 6503 stand-in for slot 0 is gone (the DualSense is a device of its own now). A pad on port 0 in the old layout is an XInput pad or, failing that,
+the first HID pad, so the keyboard rules of 7908 (a keyboard fills port 0 only when no pad is there) are as before.
+
+PAD_NO_PLAYSTATION=1 turns all HID pads off; PAD_NO_DUALSENSE=1 stays as a second name for the same switch (it now also covers the DualShock 4).
+No rumble, no lightbar, no touchpad or motion: ASSUMPTION: rumble over raw HID needs the pad's output report with its own checksum over Bluetooth,
+which is not trivial or safe to get right without a pad to test; the game gets a pad without rumble (as 6503 had it). Rumble keeps going to XInput
+devices only (7908's device test, devices below 4).
+
+Not tested with real pads (none here): the parsing is tested on reports built from the documented layout (host test, address and undefined-behaviour
+sanitizers), the Windows code only compiled (MinGW -fsyntax-only -Wall -Wextra). The Bluetooth DualShock 4 read size and its switch feature report
+(0x02, 37 bytes) are from the same documentation and unproven.
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 2e4e68c..1d31c70 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -691,128 +691,257 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+ #define PAD_EMPTY_RECHECK_MS 1000
+ static unsigned long long s_pad_empty_until[PAD_MAX_HOST_PORTS];
+ 
+-/* DualSense (PS5) over USB or Bluetooth, read as a raw HID device: Windows
+- * has no XInput driver for it. A reader thread keeps the newest input report;
+- * pad_dualsense_state() turns it into an XINPUT_STATE so port 0 goes through
+- * the same mapping (and PAD_BTN_* rebinds, with Cross = A position, Circle = B,
+- * Square = X, Triangle = Y, Create = BACK, Options = START). Used only when
+- * XInput has no controller on port 0. PAD_NO_DUALSENSE=1 turns it off. (Patch 6503, from the v0.15 port.) */
+-static SRWLOCK s_ds_lock = SRWLOCK_INIT;
+-static unsigned char s_ds_report[80];
+-static volatile LONG s_ds_ok = 0;          /* 1 while a DualSense is open and reporting */
+-static volatile LONG s_ds_len = 0;         /* length of the newest report */
+-
+-static HANDLE ds_open(int* bt)
++/* ---- 7909 (ENHANCEMENT): PlayStation pads as raw HID devices ------------------------------------------------------------------
++ * DualSense, DualSense Edge, DualShock 4 v1 / v2, over USB or Bluetooth (ids and report layouts: pad_hid.h). Windows has no XInput
++ * driver for them. Each pad is its own device: a manager thread looks for pads every second while a slot is free (never on the game
++ * thread) and starts one reader thread per pad, which keeps the newest input report of that pad; a pad that is unplugged ends its
++ * reader (the read fails), which frees the slot for the next arrival. cellPad reads at most PH_MAX_PADS = 4 of them.
++ * Where they sit among the ports: pad_layout_default (the old order) and the join table of pad_join.h.
++ * PAD_NO_PLAYSTATION=1 turns them all off; PAD_NO_DUALSENSE=1 (6503's name) is the same switch. No rumble, no lightbar. */
++#include "pad_hid.h"
++_Static_assert(PH_X_DPAD_UP == XINPUT_GAMEPAD_DPAD_UP && PH_X_DPAD_DOWN == XINPUT_GAMEPAD_DPAD_DOWN &&
++               PH_X_DPAD_LEFT == XINPUT_GAMEPAD_DPAD_LEFT && PH_X_DPAD_RIGHT == XINPUT_GAMEPAD_DPAD_RIGHT &&
++               PH_X_START == XINPUT_GAMEPAD_START && PH_X_BACK == XINPUT_GAMEPAD_BACK &&
++               PH_X_LTHUMB == XINPUT_GAMEPAD_LEFT_THUMB && PH_X_RTHUMB == XINPUT_GAMEPAD_RIGHT_THUMB &&
++               PH_X_LSHOULDER == XINPUT_GAMEPAD_LEFT_SHOULDER && PH_X_RSHOULDER == XINPUT_GAMEPAD_RIGHT_SHOULDER &&
++               PH_X_A == XINPUT_GAMEPAD_A && PH_X_B == XINPUT_GAMEPAD_B && PH_X_X == XINPUT_GAMEPAD_X && PH_X_Y == XINPUT_GAMEPAD_Y,
++               "pad_hid.h must use the XInput button values");
++_Static_assert(PJ_HID_PADS == PH_MAX_PADS, "pad_join.h and pad_hid.h count the same pads");
++
++#define HID_REPORT_KEEP 96          /* bytes of a report kept (the parser reads far less) */
++typedef struct {
++    SRWLOCK lock;                   /* the report, its length and the path */
++    unsigned char report[HID_REPORT_KEEP];
++    unsigned len;
++    char path[512];                 /* the device it reads, while busy (the manager does not open one twice) */
++    int kind, bt;
++    HANDLE h;
++    volatile LONG busy;             /* 1 from the manager's claim until the reader has finished */
++    volatile LONG ok;               /* 1 while its reader holds a report */
++} PadHid;
++static PadHid s_hid[PH_MAX_PADS];
++
++static DWORD WINAPI hid_reader(LPVOID arg)
++{
++    PadHid* s = (PadHid*)arg;
++    const int n_slot = (int)(s - s_hid);
++    /* Bluetooth starts in a short report; reading the pad's calibration feature report once switches it to the full one. */
++    if (s->bt) {
++        unsigned char f[64]; memset(f, 0, sizeof f);
++        f[0] = (unsigned char)ph_bt_switch_id(s->kind);
++        HidD_GetFeature(s->h, f, (ULONG)ph_bt_switch_len(s->kind));
++    }
++    printf("[cellPad] PlayStation pad %d connected (%s, %s)\n", n_slot, s->kind == PH_DS4 ? "DualShock 4" : "DualSense",
++           s->bt ? "Bluetooth" : "USB");
++    fflush(stdout);
++    PHIDP_PREPARSED_DATA pp; HIDP_CAPS caps; DWORD want = 96;
++    if (HidD_GetPreparsedData(s->h, &pp)) {
++        if (HidP_GetCaps(pp, &caps) == HIDP_STATUS_SUCCESS && caps.InputReportByteLength > want) want = caps.InputReportByteLength;
++        HidD_FreePreparsedData(pp);
++    }
++    unsigned char* buf = (unsigned char*)malloc(want);   /* ReadFile wants at least InputReportByteLength */
++    for (;;) {
++        DWORD n = 0;
++        if (!buf || !ReadFile(s->h, buf, want, &n, NULL) || n < 10) break;
++        AcquireSRWLockExclusive(&s->lock);
++        memcpy(s->report, buf, n < HID_REPORT_KEEP ? n : HID_REPORT_KEEP);
++        s->len = n < HID_REPORT_KEEP ? n : HID_REPORT_KEEP;
++        ReleaseSRWLockExclusive(&s->lock);
++        InterlockedExchange(&s->ok, 1);
++    }
++    InterlockedExchange(&s->ok, 0);
++    free(buf);
++    CloseHandle(s->h);
++    printf("[cellPad] PlayStation pad %d disconnected\n", n_slot); fflush(stdout);
++    AcquireSRWLockExclusive(&s->lock);
++    s->path[0] = 0;
++    ReleaseSRWLockExclusive(&s->lock);
++    InterlockedExchange(&s->busy, 0);
++    return 0;
++}
++
++static int hid_path_open(const char* path)   /* 1 = a slot already reads this device */
++{
++    for (int i = 0; i < PH_MAX_PADS; i++) {
++        if (!s_hid[i].busy) continue;
++        AcquireSRWLockShared(&s_hid[i].lock);
++        const int same = _stricmp(s_hid[i].path, path) == 0;
++        ReleaseSRWLockShared(&s_hid[i].lock);
++        if (same) return 1;
++    }
++    return 0;
++}
++static int hid_free_slot(void)
++{
++    for (int i = 0; i < PH_MAX_PADS; i++) if (!s_hid[i].busy) return i;
++    return -1;
++}
++
++/* One pass over the HID devices: opens the pads that are not read yet and starts a reader for each (while a slot is free). */
++static void hid_scan(void)
+ {
+     GUID g; HidD_GetHidGuid(&g);
+     HDEVINFO set = SetupDiGetClassDevsA(&g, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+-    if (set == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+-    HANDLE found = INVALID_HANDLE_VALUE;
++    if (set == INVALID_HANDLE_VALUE) return;
+     SP_DEVICE_INTERFACE_DATA ifd; ifd.cbSize = sizeof ifd;
+-    for (DWORD k = 0; found == INVALID_HANDLE_VALUE && SetupDiEnumDeviceInterfaces(set, NULL, &g, k, &ifd); k++) {
++    for (DWORD k = 0; hid_free_slot() >= 0 && SetupDiEnumDeviceInterfaces(set, NULL, &g, k, &ifd); k++) {
+         DWORD need = 0;
+         SetupDiGetDeviceInterfaceDetailA(set, &ifd, NULL, 0, &need, NULL);
+         SP_DEVICE_INTERFACE_DETAIL_DATA_A* d = (SP_DEVICE_INTERFACE_DETAIL_DATA_A*)malloc(need);
+         if (!d) continue;
+         d->cbSize = sizeof *d;
+-        if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, d, need, NULL, NULL)) {
++        if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, d, need, NULL, NULL) && strlen(d->DevicePath) < sizeof s_hid[0].path &&
++            ph_path_may_be_sony(d->DevicePath) && !hid_path_open(d->DevicePath)) {
+             HANDLE h = CreateFileA(d->DevicePath, GENERIC_READ | GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+             if (h != INVALID_HANDLE_VALUE) {
+                 HIDD_ATTRIBUTES a; a.Size = sizeof a;
+                 PHIDP_PREPARSED_DATA pp; HIDP_CAPS caps;
+-                if (HidD_GetAttributes(h, &a) && a.VendorID == 0x054C &&
+-                    (a.ProductID == 0x0CE6 || a.ProductID == 0x0DF2) &&       /* DualSense, DualSense Edge */
++                int kind = PH_NONE, bt = 0;
++                if (HidD_GetAttributes(h, &a) && (kind = ph_kind(a.VendorID, a.ProductID)) != PH_NONE &&
+                     HidD_GetPreparsedData(h, &pp)) {
+-                    HidP_GetCaps(pp, &caps); HidD_FreePreparsedData(pp);
+-                    *bt = caps.InputReportByteLength > 64;                       /* USB 64, Bluetooth 78 */
+-                    found = h;
+-                } else CloseHandle(h);
++                    const int ok = HidP_GetCaps(pp, &caps) == HIDP_STATUS_SUCCESS && ph_is_gamepad(caps.UsagePage, caps.Usage);
++                    HidD_FreePreparsedData(pp);
++                    if (!ok) kind = PH_NONE;
++                    else bt = ph_is_bluetooth(caps.InputReportByteLength);
++                } else kind = PH_NONE;
++                const int slot = hid_free_slot();
++                if (kind == PH_NONE || slot < 0) CloseHandle(h);
++                else {
++                    PadHid* s = &s_hid[slot];
++                    AcquireSRWLockExclusive(&s->lock);
++                    strcpy(s->path, d->DevicePath);
++                    s->len = 0;
++                    ReleaseSRWLockExclusive(&s->lock);
++                    s->h = h; s->kind = kind; s->bt = bt;
++                    InterlockedExchange(&s->busy, 1);
++                    HANDLE t = CreateThread(NULL, 64 * 1024, hid_reader, s, 0, NULL);
++                    if (t) CloseHandle(t);
++                    else { CloseHandle(h); InterlockedExchange(&s->busy, 0); }
++                }
+             }
+         }
+         free(d);
+     }
+     SetupDiDestroyDeviceInfoList(set);
+-    return found;
+ }
+ 
+-static DWORD WINAPI ds_reader(LPVOID unused)
++static DWORD WINAPI hid_manager(LPVOID unused)
+ {
+     (void)unused;
+     for (;;) {
+-        int bt = 0;
+-        HANDLE h = ds_open(&bt);
+-        if (h == INVALID_HANDLE_VALUE) { Sleep(2000); continue; }
+-        /* Bluetooth starts in a short DS4-style report; reading feature report
+-         * 0x05 (calibration) switches it to the full 0x31 report. */
+-        if (bt) { unsigned char f[64] = {0x05}; HidD_GetFeature(h, f, 41); }
+-        printf("[cellPad] DualSense connected (%s)\n", bt ? "Bluetooth" : "USB"); fflush(stdout);
+-        unsigned char buf[96];
+-        for (;;) {
+-            DWORD n = 0;
+-            if (!ReadFile(h, buf, sizeof buf, &n, NULL) || n < 10) break;
+-            AcquireSRWLockExclusive(&s_ds_lock);
+-            memcpy(s_ds_report, buf, n < sizeof s_ds_report ? n : sizeof s_ds_report);
+-            s_ds_len = (LONG)n;
+-            ReleaseSRWLockExclusive(&s_ds_lock);
+-            InterlockedExchange(&s_ds_ok, 1);
+-        }
+-        InterlockedExchange(&s_ds_ok, 0);
+-        CloseHandle(h);
+-        printf("[cellPad] DualSense disconnected\n"); fflush(stdout);
++        if (hid_free_slot() >= 0) hid_scan();
+         Sleep(1000);
+     }
++    return 0;
+ }
+ 
+-static int pad_dualsense_state(XINPUT_STATE* st)
++static int pad_hid_enabled(void)
+ {
+-    static int started = 0;
+-    if (!started) {
+-        started = 1;
+-        if (getenv("PAD_NO_DUALSENSE")) return 0;
+-        CreateThread(NULL, 64 * 1024, ds_reader, NULL, 0, NULL);
++    static int on = -1;
++    if (on < 0) {
++        on = !(getenv("PAD_NO_PLAYSTATION") || getenv("PAD_NO_DUALSENSE"));
++        if (on) { HANDLE t = CreateThread(NULL, 64 * 1024, hid_manager, NULL, 0, NULL); if (t) CloseHandle(t); }
+     }
+-    if (!s_ds_ok) return 0;
+-    unsigned char r[80];
+-    AcquireSRWLockShared(&s_ds_lock);
+-    memcpy(r, s_ds_report, sizeof r);
+-    ReleaseSRWLockShared(&s_ds_lock);
+-    /* d = sticks/triggers/buttons as laid out in the full report:
+-     * 0 LX 1 LY 2 RX 3 RY 4 L2 5 R2 6 counter 7 hat|Sq/X/O/Tri 8 L1 R1 L2 R2 Create Options L3 R3 9 PS. */
+-    unsigned char d[10];
+-    if (r[0] == 0x31) memcpy(d, r + 2, 10);               /* Bluetooth, full report */
+-    else if (r[0] == 0x01 && s_ds_len >= 64) memcpy(d, r + 1, 10);   /* USB */
+-    else if (r[0] == 0x01) {   /* Bluetooth short report (switch not taken): DS4 order */
+-        d[0] = r[1]; d[1] = r[2]; d[2] = r[3]; d[3] = r[4];
+-        d[7] = r[5]; d[8] = r[6]; d[9] = r[7]; d[4] = r[8]; d[5] = r[9]; d[6] = 0;
+-    } else return 0;
++    return on;
++}
++
++/* The XInput-style state of HID pad `i`, or 0 when no pad is read there. */
++static int pad_hid_state(int i, XINPUT_STATE* st)
++{
++    if (!pad_hid_enabled() || !s_hid[i].ok) return 0;
++    unsigned char r[HID_REPORT_KEEP]; unsigned len;
++    AcquireSRWLockShared(&s_hid[i].lock);
++    memcpy(r, s_hid[i].report, sizeof r); len = s_hid[i].len;
++    ReleaseSRWLockShared(&s_hid[i].lock);
++    PadHidPad p;
++    if (!ph_parse(s_hid[i].kind, r, len, &p)) return 0;
+     memset(st, 0, sizeof *st);
+-    XINPUT_GAMEPAD* gp = &st->Gamepad;
+-    static const WORD hat[8] = {
+-        XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_RIGHT,
+-        XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_RIGHT,
+-        XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_DOWN | XINPUT_GAMEPAD_DPAD_LEFT,
+-        XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_UP | XINPUT_GAMEPAD_DPAD_LEFT };
+-    if ((d[7] & 15) < 8) gp->wButtons |= hat[d[7] & 15];
+-    if (d[7] & 0x10) gp->wButtons |= XINPUT_GAMEPAD_X;          /* Square */
+-    if (d[7] & 0x20) gp->wButtons |= XINPUT_GAMEPAD_A;          /* Cross */
+-    if (d[7] & 0x40) gp->wButtons |= XINPUT_GAMEPAD_B;          /* Circle */
+-    if (d[7] & 0x80) gp->wButtons |= XINPUT_GAMEPAD_Y;          /* Triangle */
+-    if (d[8] & 0x01) gp->wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+-    if (d[8] & 0x02) gp->wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+-    if (d[8] & 0x10) gp->wButtons |= XINPUT_GAMEPAD_BACK;       /* Create */
+-    if (d[8] & 0x20) gp->wButtons |= XINPUT_GAMEPAD_START;      /* Options */
+-    if (d[8] & 0x40) gp->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+-    if (d[8] & 0x80) gp->wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+-    gp->bLeftTrigger = d[4]; gp->bRightTrigger = d[5];
+-    gp->sThumbLX = (SHORT)(((int)d[0] - 128) * 256);
+-    gp->sThumbLY = (SHORT)((128 - (int)d[1]) * 256 - (d[1] == 0));   /* HID: 0 = up */
+-    gp->sThumbRX = (SHORT)(((int)d[2] - 128) * 256);
+-    gp->sThumbRY = (SHORT)((128 - (int)d[3]) * 256 - (d[3] == 0));
++    st->Gamepad.wButtons = p.buttons;
++    st->Gamepad.bLeftTrigger = p.l2; st->Gamepad.bRightTrigger = p.r2;
++    st->Gamepad.sThumbLX = p.lx; st->Gamepad.sThumbLY = p.ly;
++    st->Gamepad.sThumbRX = p.rx; st->Gamepad.sThumbRY = p.ry;
+     return 1;
+ }
+ 
+-/* Fills raw[0..3] (a local buffer, see pad_join_stage) from the XInput slots; the DualSense stand-in (6503) is slot 0. */
++/* One XInput-style state -> a pad's host state: the mapping 6500 made (PAD_BTN_* rebinds, deadzone, triggers). 7909: a function, so the
++ * HID pads go through the same mapping as an XInput pad. */
++static void pad_xinput_to_host(PadHostState* o, const XINPUT_STATE* st)
++{
++    o->connected = 1;
++    const XINPUT_GAMEPAD* gp = &st->Gamepad;
++
++    /* Map XInput buttons to PS3 CELL_PAD_CTRL_*. 6500: PAD_BTN_<PS3 NAME>=<XInput name> picks another source for
++     * one PS3 button (the launcher's controller page), e.g. PAD_BTN_CROSS=B. XInput names: A B X Y LB RB LT RT
++     * LS RS START BACK DUP DDOWN DLEFT DRIGHT. Read once. */
++    static const struct { const char* name; u16 mask; } xsrc[] = {
++        { "A", XINPUT_GAMEPAD_A }, { "B", XINPUT_GAMEPAD_B }, { "X", XINPUT_GAMEPAD_X },
++        { "Y", XINPUT_GAMEPAD_Y }, { "LB", XINPUT_GAMEPAD_LEFT_SHOULDER },
++        { "RB", XINPUT_GAMEPAD_RIGHT_SHOULDER }, { "LT", 0 }, { "RT", 0 },
++        { "LS", XINPUT_GAMEPAD_LEFT_THUMB }, { "RS", XINPUT_GAMEPAD_RIGHT_THUMB },
++        { "START", XINPUT_GAMEPAD_START }, { "BACK", XINPUT_GAMEPAD_BACK },
++        { "DUP", XINPUT_GAMEPAD_DPAD_UP }, { "DDOWN", XINPUT_GAMEPAD_DPAD_DOWN },
++        { "DLEFT", XINPUT_GAMEPAD_DPAD_LEFT }, { "DRIGHT", XINPUT_GAMEPAD_DPAD_RIGHT },
++    };
++    static struct { const char* name; int src; u16 btn; } xmap[] = {
++        { "CROSS", 0, CELL_PAD_CTRL_CROSS },     { "CIRCLE", 1, CELL_PAD_CTRL_CIRCLE },
++        { "SQUARE", 2, CELL_PAD_CTRL_SQUARE },   { "TRIANGLE", 3, CELL_PAD_CTRL_TRIANGLE },
++        { "L1", 4, CELL_PAD_CTRL_L1 },           { "R1", 5, CELL_PAD_CTRL_R1 },
++        { "L2", 6, CELL_PAD_CTRL_L2 },           { "R2", 7, CELL_PAD_CTRL_R2 },
++        { "L3", 8, CELL_PAD_CTRL_L3 },           { "R3", 9, CELL_PAD_CTRL_R3 },
++        { "START", 10, CELL_PAD_CTRL_START },    { "SELECT", 11, CELL_PAD_CTRL_SELECT },
++        { "DPAD_UP", 12, CELL_PAD_CTRL_UP },     { "DPAD_DOWN", 13, CELL_PAD_CTRL_DOWN },
++        { "DPAD_LEFT", 14, CELL_PAD_CTRL_LEFT }, { "DPAD_RIGHT", 15, CELL_PAD_CTRL_RIGHT },
++    };
++    static int xmap_read = 0;
++    if (!xmap_read) {
++        xmap_read = 1;
++        for (unsigned k = 0; k < sizeof xmap / sizeof xmap[0]; k++) {
++            char var[40]; snprintf(var, sizeof var, "PAD_BTN_%s", xmap[k].name);
++            const char* ev = getenv(var);
++            if (!ev) continue;
++            for (unsigned q = 0; q < sizeof xsrc / sizeof xsrc[0]; q++)
++                if (!strcmp(ev, xsrc[q].name)) { xmap[k].src = (int)q; break; }
++        }
++    }
++    u16 btns = 0;
++    for (unsigned k = 0; k < sizeof xmap / sizeof xmap[0]; k++) {
++        const int q = xmap[k].src;
++        const int on = q == 6 ? gp->bLeftTrigger > PAD_TRIGGER_THRESHOLD
++                     : q == 7 ? gp->bRightTrigger > PAD_TRIGGER_THRESHOLD
++                     : (gp->wButtons & xsrc[q].mask) != 0;
++        if (on) btns |= xmap[k].btn;
++    }
++
++    o->buttons = btns;
++
++    /* Analog sticks. PS3 Y axis is inverted vs XInput (up = 0). Reflect about
++     * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
++     * whose bits (0x7F) alias SELECT+START and can make the guest self-exit.
++     * (via sagemono, PR #42) */
++    o->analog_lx = pad_xinput_stick_to_u8(gp->sThumbLX, PAD_STICK_DEADZONE);
++    o->analog_ly = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbLY, PAD_STICK_DEADZONE));
++    o->analog_rx = pad_xinput_stick_to_u8(gp->sThumbRX, PAD_STICK_DEADZONE);
++    o->analog_ry = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbRY, PAD_STICK_DEADZONE));
++
++    /* Triggers */
++    o->trigger_l2 = gp->bLeftTrigger;
++    o->trigger_r2 = gp->bRightTrigger;
++
++    /* Pressure-sensitive buttons: XInput has digital only, so 0 or 255 */
++    o->press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
++    o->press_down     = (btns & CELL_PAD_CTRL_DOWN)     ? 255 : 0;
++    o->press_left     = (btns & CELL_PAD_CTRL_LEFT)     ? 255 : 0;
++    o->press_right    = (btns & CELL_PAD_CTRL_RIGHT)    ? 255 : 0;
++    o->press_triangle = (btns & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
++    o->press_circle   = (btns & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
++    o->press_cross    = (btns & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
++    o->press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
++    o->press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
++    o->press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
++}
++
++/* Fills raw[0..3] (a local buffer, see pad_join_stage) from the XInput slots. */
+ static void pad_poll_xinput(PadHostState* raw)
+ {
+     const unsigned long long now = pad_now_ms();
+@@ -826,85 +955,22 @@ static void pad_poll_xinput(PadHostState* raw)
+             if (!skip)
+                 s_pad_empty_until[i] = now + PAD_EMPTY_RECHECK_MS
+                                      + (unsigned long long)i * (PAD_EMPTY_RECHECK_MS / PAD_MAX_HOST_PORTS);
+-            /* 6503: no XInput controller on port 0: a DualSense stands in */
+-            if (!(i == 0 && pad_dualsense_state(&state))) {
+-                if (skip) raw[i].connected = 0;
+-                else pad_host_release(&raw[i]);
+-                continue;
+-            }
+-        } else s_pad_empty_until[i] = 0;
+-
+-        raw[i].connected = 1;
+-        XINPUT_GAMEPAD* gp = &state.Gamepad;
+-
+-        /* Map XInput buttons to PS3 CELL_PAD_CTRL_*. 6500: PAD_BTN_<PS3 NAME>=<XInput name> picks another source for
+-         * one PS3 button (the launcher's controller page), e.g. PAD_BTN_CROSS=B. XInput names: A B X Y LB RB LT RT
+-         * LS RS START BACK DUP DDOWN DLEFT DRIGHT. Read once. */
+-        static const struct { const char* name; u16 mask; } xsrc[] = {
+-            { "A", XINPUT_GAMEPAD_A }, { "B", XINPUT_GAMEPAD_B }, { "X", XINPUT_GAMEPAD_X },
+-            { "Y", XINPUT_GAMEPAD_Y }, { "LB", XINPUT_GAMEPAD_LEFT_SHOULDER },
+-            { "RB", XINPUT_GAMEPAD_RIGHT_SHOULDER }, { "LT", 0 }, { "RT", 0 },
+-            { "LS", XINPUT_GAMEPAD_LEFT_THUMB }, { "RS", XINPUT_GAMEPAD_RIGHT_THUMB },
+-            { "START", XINPUT_GAMEPAD_START }, { "BACK", XINPUT_GAMEPAD_BACK },
+-            { "DUP", XINPUT_GAMEPAD_DPAD_UP }, { "DDOWN", XINPUT_GAMEPAD_DPAD_DOWN },
+-            { "DLEFT", XINPUT_GAMEPAD_DPAD_LEFT }, { "DRIGHT", XINPUT_GAMEPAD_DPAD_RIGHT },
+-        };
+-        static struct { const char* name; int src; u16 btn; } xmap[] = {
+-            { "CROSS", 0, CELL_PAD_CTRL_CROSS },     { "CIRCLE", 1, CELL_PAD_CTRL_CIRCLE },
+-            { "SQUARE", 2, CELL_PAD_CTRL_SQUARE },   { "TRIANGLE", 3, CELL_PAD_CTRL_TRIANGLE },
+-            { "L1", 4, CELL_PAD_CTRL_L1 },           { "R1", 5, CELL_PAD_CTRL_R1 },
+-            { "L2", 6, CELL_PAD_CTRL_L2 },           { "R2", 7, CELL_PAD_CTRL_R2 },
+-            { "L3", 8, CELL_PAD_CTRL_L3 },           { "R3", 9, CELL_PAD_CTRL_R3 },
+-            { "START", 10, CELL_PAD_CTRL_START },    { "SELECT", 11, CELL_PAD_CTRL_SELECT },
+-            { "DPAD_UP", 12, CELL_PAD_CTRL_UP },     { "DPAD_DOWN", 13, CELL_PAD_CTRL_DOWN },
+-            { "DPAD_LEFT", 14, CELL_PAD_CTRL_LEFT }, { "DPAD_RIGHT", 15, CELL_PAD_CTRL_RIGHT },
+-        };
+-        static int xmap_read = 0;
+-        if (!xmap_read) {
+-            xmap_read = 1;
+-            for (unsigned k = 0; k < sizeof xmap / sizeof xmap[0]; k++) {
+-                char var[40]; snprintf(var, sizeof var, "PAD_BTN_%s", xmap[k].name);
+-                const char* ev = getenv(var);
+-                if (!ev) continue;
+-                for (unsigned q = 0; q < sizeof xsrc / sizeof xsrc[0]; q++)
+-                    if (!strcmp(ev, xsrc[q].name)) { xmap[k].src = (int)q; break; }
+-            }
+-        }
+-        u16 btns = 0;
+-        for (unsigned k = 0; k < sizeof xmap / sizeof xmap[0]; k++) {
+-            const int q = xmap[k].src;
+-            const int on = q == 6 ? gp->bLeftTrigger > PAD_TRIGGER_THRESHOLD
+-                         : q == 7 ? gp->bRightTrigger > PAD_TRIGGER_THRESHOLD
+-                         : (gp->wButtons & xsrc[q].mask) != 0;
+-            if (on) btns |= xmap[k].btn;
++            if (skip) raw[i].connected = 0;
++            else pad_host_release(&raw[i]);
++            continue;
+         }
++        s_pad_empty_until[i] = 0;
++        pad_xinput_to_host(&raw[i], &state);
++    }
++}
+ 
+-        raw[i].buttons = btns;
+-
+-        /* Analog sticks. PS3 Y axis is inverted vs XInput (up = 0). Reflect about
+-         * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
+-         * whose bits (0x7F) alias SELECT+START and can make the guest self-exit.
+-         * (via sagemono, PR #42) */
+-        raw[i].analog_lx = pad_xinput_stick_to_u8(gp->sThumbLX, PAD_STICK_DEADZONE);
+-        raw[i].analog_ly = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbLY, PAD_STICK_DEADZONE));
+-        raw[i].analog_rx = pad_xinput_stick_to_u8(gp->sThumbRX, PAD_STICK_DEADZONE);
+-        raw[i].analog_ry = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbRY, PAD_STICK_DEADZONE));
+-
+-        /* Triggers */
+-        raw[i].trigger_l2 = gp->bLeftTrigger;
+-        raw[i].trigger_r2 = gp->bRightTrigger;
+-
+-        /* Pressure-sensitive buttons: XInput has digital only, so 0 or 255 */
+-        raw[i].press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
+-        raw[i].press_down     = (btns & CELL_PAD_CTRL_DOWN)     ? 255 : 0;
+-        raw[i].press_left     = (btns & CELL_PAD_CTRL_LEFT)     ? 255 : 0;
+-        raw[i].press_right    = (btns & CELL_PAD_CTRL_RIGHT)    ? 255 : 0;
+-        raw[i].press_triangle = (btns & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
+-        raw[i].press_circle   = (btns & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
+-        raw[i].press_cross    = (btns & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
+-        raw[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
+-        raw[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
+-        raw[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
++/* 7909: the HID pads (PlayStation), one entry per reader slot; they are devices of their own (pad_join.h PJ_DEV_HID0 + i). */
++static void pad_poll_hid(PadHostState* hid)
++{
++    for (int i = 0; i < PH_MAX_PADS; i++) {
++        XINPUT_STATE state;
++        if (pad_hid_state(i, &state)) pad_xinput_to_host(&hid[i], &state);
++        else pad_host_release(&hid[i]);
+     }
+ }
+ 
+@@ -1229,11 +1295,18 @@ static int pad_kb_mouse(const PadKb* kb, PadHostState* port_state, int kb_port,
+     return 1;
+ }
+ 
+-/* The old layout: P[i] = what port i shows, dev[i] = the device behind it (-1 none; PJ_DEV_KEYBOARD). */
+-static void pad_layout_default(PadHostState* P, int* dev, const PadHostState* raw, PadKb* kb)
++/* The old layout: P[i] = what port i shows, dev[i] = the device behind it (-1 none; PJ_DEV_KEYBOARD, PJ_DEV_HID0 + n).
++ * 7909: the XInput pads keep their slots as ports; the HID pads (PlayStation) then take the lowest ports that no XInput pad holds, in
++ * the order their readers have them. So a lone DualSense is port 0 as before, a lone XInput pad is its slot as before, and a DualSense
++ * next to an XInput pad on slot 0 is port 1 (it used to be ignored). */
++static void pad_layout_default(PadHostState* P, int* dev, const PadHostState* raw, const PadHostState* hid, PadKb* kb)
+ {
+     const int m = pad_input_mode(), p2 = pad_p2();
+-    for (int i = 0; i < 4; i++) { P[i] = raw[i]; dev[i] = raw[i].connected ? i : -1; }
++    uint8_t xc[4], hc[PH_MAX_PADS];
++    for (int i = 0; i < 4; i++) xc[i] = raw[i].connected ? 1 : 0;
++    for (int h = 0; h < PH_MAX_PADS; h++) hc[h] = hid[h].connected ? 1 : 0;
++    ph_port_devs(xc, hc, PJ_DEV_HID0, dev);
++    for (int i = 0; i < 4; i++) P[i] = dev[i] >= PJ_DEV_HID0 ? hid[dev[i] - PJ_DEV_HID0] : raw[i];
+     /* 6500: Keyboard / Keyboard & Mouse chosen: the keyboard is player 1, so a controller found on port 0 moves to
+      * port 1 (player 2). Controller chosen: the keyboard is player 2. PAD_PAD_P2=0 turns both off. */
+     if (p2 && P[0].connected && !P[1].connected && (m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM)) { P[1] = P[0]; dev[1] = dev[0]; }
+@@ -1256,8 +1329,8 @@ static void pad_motor_stop(int d)   /* XInput keeps a motor at what it was last
+ static unsigned s_dev_motor[4];
+ static int      s_dev_motor_port[4];
+ 
+-/* 7908: after pad_poll_xinput filled raw[0..3] by XInput slot (the DualSense stand-in is slot 0). Pad lock held. */
+-static void pad_join_stage(const PadHostState* raw)
++/* 7908: after pad_poll_xinput filled raw[0..3] by XInput slot and pad_poll_hid filled hid[0..3] by reader slot (7909). Pad lock held. */
++static void pad_join_stage(const PadHostState* raw, const PadHostState* hid)
+ {
+     if (!s_pj_inited) { pj_init(&s_pj); s_pj_inited = 1; }
+     static int was_joining = 0;
+@@ -1273,6 +1346,16 @@ static void pad_join_stage(const PadHostState* raw)
+         in[d].buttons = raw[d].buttons;
+         pads += in[d].connected;
+     }
++    int hid_any = 0;
++    for (int h = 0; h < PH_MAX_PADS; h++) {
++        PadJoinDev* q = &in[PJ_DEV_HID0 + h];
++        q->connected = hid[h].connected ? 1 : 0;
++        q->must = 1;
++        q->buttons = hid[h].buttons;
++        pads += q->connected;
++        hid_any |= q->connected;
++    }
++    const int pad0 = raw[0].connected || hid_any;   /* a pad on port 0 in the old layout: an XInput pad, or else the first HID pad */
+     const int en = pad_join_enabled();
+     const int table = en && (s_pj.active || __atomic_load_n(&s_pj.request, __ATOMIC_ACQUIRE));
+     if (en) {
+@@ -1281,7 +1364,7 @@ static void pad_join_stage(const PadHostState* raw)
+              * or no pad on slot 0 (the old fallback); once it has a player it keeps it */
+             const int m = pad_input_mode();
+             const int elig = m == PAD_MODE_KEYBOARD || m == PAD_MODE_KBM || (m == PAD_MODE_CONTROLLER && pad_p2()) ||
+-                             !raw[0].connected || s_pj.player_of[PJ_DEV_KEYBOARD] >= 0;
++                             !pad0 || s_pj.player_of[PJ_DEV_KEYBOARD] >= 0;
+             /* polled as the kind of port it holds now (or would take: port 0 only in kbm mode), for the join and the view */
+             const int kp = s_pj.player_of[PJ_DEV_KEYBOARD];
+             const PadHostState* k = elig ? pad_kb_get(&kb, kp >= 0 ? kp : (m == PAD_MODE_KBM ? 0 : 1)) : NULL;
+@@ -1301,12 +1384,12 @@ static void pad_join_stage(const PadHostState* raw)
+     }
+     /* what the game sees: the table, or the old layout (no reorder yet, or while the first join runs) */
+     if (!s_pj.active || pj_view_default(&s_pj)) {
+-        pad_layout_default(out, odev, raw, &kb);
++        pad_layout_default(out, odev, raw, hid, &kb);
+         for (int p = 0; p < 4; p++) {
+             const int d = odev[p];
+             if (d < 0 || !out[p].connected) continue;
+             if (s_pj.active && pj_hidden(&s_pj, d)) pad_neutral(&out[p]);     /* a joining press is not the game's */
+-            else if (d < 4) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
++            else if (d != PJ_DEV_KEYBOARD) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
+         }
+     } else {
+         for (int p = 0; p < 4; p++) {
+@@ -1315,9 +1398,9 @@ static void pad_join_stage(const PadHostState* raw)
+             if (d < 0) { pad_host_release(&out[p]); continue; }
+             const PadHostState* k = d == PJ_DEV_KEYBOARD ? pad_kb_get(&kb, p) : NULL;   /* the kind of port it sits on */
+             if (d == PJ_DEV_KEYBOARD) { if (k) out[p] = *k; else pad_host_release(&out[p]); }
+-            else out[p] = raw[d];
++            else out[p] = d >= PJ_DEV_HID0 ? hid[d - PJ_DEV_HID0] : raw[d];
+             if (pj_hidden(&s_pj, d)) pad_neutral(&out[p]);
+-            else if (d < 4) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
++            else if (d != PJ_DEV_KEYBOARD) out[p].buttons = pj_chord_hide(&s_pj, d, out[p].buttons);
+         }
+     }
+     {   /* the mouse: before a reorder only where the old code ran it (keyboard on port 0); with the table whenever the keyboard is polled */
+@@ -1355,8 +1438,11 @@ static void pad_poll_backend(void)
+     { PadHostState raw[PAD_MAX_HOST_PORTS];
+       memset(raw, 0, sizeof raw);
+       for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) pad_host_release(&raw[_i]);
++      PadHostState hid[PH_MAX_PADS];
++      memset(hid, 0, sizeof hid);
+       pad_poll_xinput(raw);
+-      pad_join_stage(raw); }
++      pad_poll_hid(hid);
++      pad_join_stage(raw, hid); }
+ #else
+ #if PAD_BACKEND_SDL2
+     pad_poll_sdl2();
+diff --git a/libs/input/pad_hid.h b/libs/input/pad_hid.h
+new file mode 100644
+index 0000000..a690d4a
+--- /dev/null
++++ b/libs/input/pad_hid.h
+@@ -0,0 +1,143 @@
++/* pad_hid.h -- PlayStation pads read as raw HID devices: which ones, and what their input reports mean
++ * (toolkit patch 7909; ENHANCEMENT; extends the DualSense reader of patch 6503).
++ *
++ * Pure logic, no I/O (cellPad.c does the Windows HID calls, the host test installer/tools/pad_join_test.c feeds reports).
++ *
++ * Byte offsets are described from published documentation, not from any code:
++ *  - DualShock 4 (PS4 controller), USB input report 0x01 (64 bytes) and Bluetooth input report 0x11 (78 bytes): the PS4 developer
++ *    wiki, page "DualShock 4" (psdevwiki.com/ps4/DS4-USB and DS4-BT). USB: byte 0 report id, then LX LY RX RY (0 = left / up,
++ *    128 = centre), byte 5 = hat in the low nibble (0 = up, clockwise, 8 = released) and Square 0x10, Cross 0x20, Circle 0x40,
++ *    Triangle 0x80, byte 6 = L1 0x01, R1 0x02, L2 0x04, R2 0x08, Share 0x10, Options 0x20, L3 0x40, R3 0x80, byte 7 = PS and
++ *    touchpad click and a counter, byte 8 = L2 analog, byte 9 = R2 analog. Bluetooth 0x11: bytes 1..2 are flags, the same data
++ *    starts at byte 3 (two bytes later than USB). A Bluetooth DualShock 4 sends only the short report 0x01 (10 bytes, the data at
++ *    byte 1 as on USB, ending after R2) until feature report 0x02 is read once; then it sends 0x11.
++ *  - DualSense (PS5 controller): the same wiki ("DualSense"), and the layout 6503 already read: USB report 0x01 (64 bytes) with
++ *    LX LY RX RY L2 R2 counter at bytes 1..7, byte 8 = hat and face buttons (as DualShock 4 byte 5), byte 9 = L1 R1 L2 R2 Create
++ *    Options L3 R3 (as DualShock 4 byte 6); Bluetooth full report 0x31 with the same data from byte 2; the short Bluetooth report
++ *    0x01 (until feature report 0x05 is read once) is the DualShock 4 short layout.
++ *
++ * The output uses the XInput button values (A = Cross, B = Circle, X = Square, Y = Triangle, BACK = Share / Create, START =
++ * Options) so cellPad.c runs it through the same mapping as an XInput pad, including the PAD_BTN_* rebinds.
++ */
++#ifndef PAD_HID_H
++#define PAD_HID_H
++#include <stdint.h>
++#include <string.h>
++
++#define PH_VENDOR_SONY 0x054C
++#define PH_MAX_PADS    4        /* HID pads read at once (players are at most four) */
++
++enum { PH_NONE = 0, PH_DUALSENSE = 1, PH_DS4 = 2 };
++
++/* XInput wButtons values (XINPUT_GAMEPAD_*, xinput.h); cellPad.c asserts they match. */
++#define PH_X_DPAD_UP    0x0001
++#define PH_X_DPAD_DOWN  0x0002
++#define PH_X_DPAD_LEFT  0x0004
++#define PH_X_DPAD_RIGHT 0x0008
++#define PH_X_START      0x0010
++#define PH_X_BACK       0x0020
++#define PH_X_LTHUMB     0x0040
++#define PH_X_RTHUMB     0x0080
++#define PH_X_LSHOULDER  0x0100
++#define PH_X_RSHOULDER  0x0200
++#define PH_X_A          0x1000
++#define PH_X_B          0x2000
++#define PH_X_X          0x4000
++#define PH_X_Y          0x8000
++
++/* Which pad a USB / Bluetooth HID device is: DualSense 0CE6, DualSense Edge 0DF2, DualShock 4 v1 05C4, DualShock 4 v2 09CC. */
++static inline int ph_kind(unsigned vid, unsigned pid)
++{
++    if (vid != PH_VENDOR_SONY) return PH_NONE;
++    if (pid == 0x0CE6 || pid == 0x0DF2) return PH_DUALSENSE;
++    if (pid == 0x05C4 || pid == 0x09CC) return PH_DS4;
++    return PH_NONE;
++}
++
++/* A first, cheap look at a device path before it is opened: Windows puts the vendor id into the path (USB "vid_054c", Bluetooth
++ * "vid&0002054c"), so the paths of other makers are skipped without opening them. The real check is ph_kind on the opened device. */
++static inline int ph_path_may_be_sony(const char* path)
++{
++    for (const char* p = path; *p; p++)
++        if (p[0] == '0' && p[1] == '5' && p[2] == '4' && (p[3] == 'c' || p[3] == 'C')) return 1;
++    return 0;
++}
++
++/* The top-level collection of a pad: Generic Desktop page, usage Joystick (4) or Game Pad (5). */
++static inline int ph_is_gamepad(unsigned usage_page, unsigned usage) { return usage_page == 0x01 && (usage == 0x04 || usage == 0x05); }
++
++/* The feature report that switches a Bluetooth pad from the short to the full input report, and its length (id included). */
++static inline int ph_bt_switch_id(int kind)  { return kind == PH_DS4 ? 0x02 : 0x05; }
++static inline int ph_bt_switch_len(int kind) { return kind == PH_DS4 ? 37 : 41; }
++
++/* Windows reports InputReportByteLength: 64 over USB, more over Bluetooth (78 for the DualSense; the DualShock 4 lists a longer
++ * descriptor). Anything above 64 is Bluetooth. */
++static inline int ph_is_bluetooth(unsigned input_report_len) { return input_report_len > 64; }
++
++typedef struct {
++    uint16_t buttons;               /* PH_X_* */
++    uint8_t  l2, r2;                /* 0..255 */
++    int16_t  lx, ly, rx, ry;        /* XInput style: up = positive */
++} PadHidPad;
++
++static inline int16_t ph_axis(uint8_t v)   /* HID 0..255, 128 centre -> -32768..32512 */
++{
++    return (int16_t)(((int)v - 128) * 256);
++}
++static inline int16_t ph_axis_up(uint8_t v)   /* HID: 0 = up -> positive */
++{
++    return (int16_t)((128 - (int)v) * 256 - (v == 0));   /* 128 * 256 = 32768 does not fit: 32767 */
++}
++
++/* Parses one input report as read from the device (report id first). Returns 1 and fills *o, or 0 when the report is not a pad
++ * state (other id, too short). */
++static inline int ph_parse(int kind, const uint8_t* r, unsigned len, PadHidPad* o)
++{
++    if (len < 1 || (kind != PH_DUALSENSE && kind != PH_DS4)) return 0;
++    uint8_t stick[4], face, b1, l2, r2;
++    if (kind == PH_DUALSENSE && r[0] == 0x31 && len >= 11) {            /* Bluetooth full report */
++        memcpy(stick, r + 2, 4); l2 = r[6]; r2 = r[7]; face = r[9]; b1 = r[10];
++    } else if (kind == PH_DUALSENSE && r[0] == 0x01 && len >= 64) {     /* USB */
++        memcpy(stick, r + 1, 4); l2 = r[5]; r2 = r[6]; face = r[8]; b1 = r[9];
++    } else if (kind == PH_DS4 && r[0] == 0x01 && len >= 64) {           /* USB */
++        memcpy(stick, r + 1, 4); face = r[5]; b1 = r[6]; l2 = r[8]; r2 = r[9];
++    } else if (kind == PH_DS4 && r[0] == 0x11 && len >= 12) {           /* Bluetooth full report: USB layout, two bytes later */
++        memcpy(stick, r + 3, 4); face = r[7]; b1 = r[8]; l2 = r[10]; r2 = r[11];
++    } else if (r[0] == 0x01 && len >= 10 && len < 64) {                 /* Bluetooth short report, either pad */
++        memcpy(stick, r + 1, 4); face = r[5]; b1 = r[6]; l2 = r[8]; r2 = r[9];
++    } else return 0;
++    static const uint16_t hat[8] = {
++        PH_X_DPAD_UP, PH_X_DPAD_UP | PH_X_DPAD_RIGHT, PH_X_DPAD_RIGHT, PH_X_DPAD_DOWN | PH_X_DPAD_RIGHT,
++        PH_X_DPAD_DOWN, PH_X_DPAD_DOWN | PH_X_DPAD_LEFT, PH_X_DPAD_LEFT, PH_X_DPAD_UP | PH_X_DPAD_LEFT };
++    uint16_t b = 0;
++    if ((face & 15) < 8) b |= hat[face & 15];
++    if (face & 0x10) b |= PH_X_X;           /* Square */
++    if (face & 0x20) b |= PH_X_A;           /* Cross */
++    if (face & 0x40) b |= PH_X_B;           /* Circle */
++    if (face & 0x80) b |= PH_X_Y;           /* Triangle */
++    if (b1 & 0x01) b |= PH_X_LSHOULDER;
++    if (b1 & 0x02) b |= PH_X_RSHOULDER;
++    if (b1 & 0x10) b |= PH_X_BACK;          /* Share / Create */
++    if (b1 & 0x20) b |= PH_X_START;         /* Options */
++    if (b1 & 0x40) b |= PH_X_LTHUMB;
++    if (b1 & 0x80) b |= PH_X_RTHUMB;
++    o->buttons = b; o->l2 = l2; o->r2 = r2;
++    o->lx = ph_axis(stick[0]); o->ly = ph_axis_up(stick[1]);
++    o->rx = ph_axis(stick[2]); o->ry = ph_axis_up(stick[3]);
++    return 1;
++}
++
++/* The old layout's ports (nothing reordered): the XInput pads keep their slot as the port; the HID pads then take the lowest ports no
++ * XInput pad holds, in reader order. dev[port] = the XInput slot (0..3), hid_base + HID index, or -1 (port empty). So a lone XInput
++ * pad stays on its slot, a lone HID pad is port 0, and an HID pad next to an XInput pad on slot 0 is port 1. */
++static inline void ph_port_devs(const uint8_t* xconn, const uint8_t* hconn, int hid_base, int* dev)
++{
++    for (int i = 0; i < 4; i++) dev[i] = xconn[i] ? i : -1;
++    for (int i = 0, h = 0; i < 4; i++) {
++        if (xconn[i]) continue;
++        while (h < PH_MAX_PADS && !hconn[h]) h++;
++        if (h >= PH_MAX_PADS) break;
++        dev[i] = hid_base + h; h++;
++    }
++}
++#endif
+diff --git a/libs/input/pad_join.h b/libs/input/pad_join.h
+index f5ef60e..809a084 100644
+--- a/libs/input/pad_join.h
++++ b/libs/input/pad_join.h
+@@ -3,7 +3,7 @@
+  * Pure logic, no I/O, no clock of its own: cellPad.c feeds it one snapshot of every device per poll, and the host test
+  * (installer/tools/pad_join_test.c in the port tree) drives it the same way.
+  *
+- * Devices: 0..3 the host pad slots (XInput slot; the DualSense stand-in is device 0), 4 the keyboard.
++ * Devices: 0..3 the XInput slots, 4 the keyboard, 5..8 the HID pads (PlayStation pads, one device each; patch 7909).
+  * Players: 0..3 (player 1..4), the PS3 pad ports the game reads.
+  *
+  * Until a reorder is made (pj_begin or the chord) the table is NOT in force (pj.active == 0) and cellPad.c keeps the old
+@@ -26,8 +26,10 @@
+ #include <string.h>
+ 
+ #define PJ_PLAYERS 4
+-#define PJ_DEVS    5
+ #define PJ_DEV_KEYBOARD 4
++#define PJ_DEV_HID0     5   /* 7909: the HID (PlayStation) pads, PJ_HID_PADS of them: devices 5..8 */
++#define PJ_HID_PADS     4
++#define PJ_DEVS    (PJ_DEV_HID0 + PJ_HID_PADS)
+ #define PJ_CHORD_MS 2000
+ /* CELL_PAD_CTRL_* bits as cellPad.h has them, repeated so this header stands alone (a static assert in cellPad.c checks them) */
+ #define PJ_BTN_SELECT 0x0001

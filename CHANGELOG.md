@@ -6,6 +6,11 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- PlayStation pads (ENHANCEMENT, toolkit patch 7909): up to four DualSense, DualSense Edge or DualShock 4 (v1, v2) pads over USB or Bluetooth are read directly, each its own player next to Xbox-style pads and in the player-order join; no rumble or lightbar yet; only checked against the documented report layout, not on real pads (`PAD_NO_PLAYSTATION=1` turns them off, `PAD_NO_DUALSENSE=1` still works).
+- Choose the player order (ENHANCEMENT, toolkit patch 7908): each pad or the keyboard takes the next free player by its first button press, started from the Port Settings Controls page (`JSP_PORT_MENU=1`) or by holding Select + L3 + R3 for 2 s; the order is unchanged until used (`PAD_JOIN=0` turns it off). Also on by default, even without a reorder: rumble goes to the pad the game sees on the port (Keyboard mode with a pad as player 2: the pad rumbles for player 2). Logic host tested; not yet tried with real pads.
+
 ### Changed
 
 - Docs brought up to date after 0.4.0: ROADMAP (releases, Training options, KO count, the Impossible mode, Port Settings pages, online and Proton wording), the feature list (new Impossible mode row; KO count, Training options and in-game settings now in progress), README and INSTALL (`SHA256SUMS` from 0.4.0, speed numbers now in 0.4.0), KNOWN_ISSUES (0.4.0, a row for the new Free Battle options), `.recomp.json` notes and help list.
