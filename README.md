@@ -161,7 +161,7 @@ Close the open problems of the v19 tree ([issue #9](https://github.com/Tsamiuy/j
 
 ## Contributing
 
-Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord server](https://discord.gg/W8fMT78Q7k) (unofficial fan work; this project has its own forum there).
+Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord server](https://discord.gg/W8fMT78Q7k) (unofficial fan work; this project has its own forum there). [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/W8fMT78Q7k)
 
 ---
 
