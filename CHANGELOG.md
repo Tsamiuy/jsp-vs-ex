@@ -8,6 +8,7 @@ All notable changes are listed here, newest first. The format follows
 
 ### Added
 
+- PlayStation pads (ENHANCEMENT, toolkit patch 7909): up to four DualSense, DualSense Edge or DualShock 4 (v1, v2) pads over USB or Bluetooth are read directly, each its own player next to Xbox-style pads and in the player-order join; no rumble or lightbar yet; only checked against the documented report layout, not on real pads (`PAD_NO_PLAYSTATION=1` turns them off, `PAD_NO_DUALSENSE=1` still works).
 - Choose the player order (ENHANCEMENT, toolkit patch 7908): each pad or the keyboard takes the next free player by its first button press, started from the Port Settings Controls page (`JSP_PORT_MENU=1`) or by holding Select + L3 + R3 for 2 s; the order is unchanged until used (`PAD_JOIN=0` turns it off). Also on by default, even without a reorder: rumble goes to the pad the game sees on the port (Keyboard mode with a pad as player 2: the pad rumbles for player 2). Logic host tested; not yet tried with real pads.
 
 ### Changed

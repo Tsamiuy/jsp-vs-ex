@@ -110,13 +110,13 @@ Nothing goes online unless you turn Online Battle on. There is no update check, 
 ## Settings and controllers
 
 - **Controllers:** keyboard, keyboard and mouse, or a controller that Windows reads through XInput (Xbox-style pads). Buttons can be remapped in the settings window.
-- **DualSense and DualSense Edge:** read directly over USB or Bluetooth. This is marked "in progress", because the button tests are pending. It has no rumble or lightbar.
+- **PlayStation pads:** DualSense, DualSense Edge and DualShock 4 (v1 and v2), up to four, are read directly over USB or Bluetooth, each as its own player next to Xbox-style pads. This is marked "in progress", because it was only checked against the documented report layout, not on real pads yet. They have no rumble or lightbar.
 - **Other pads:** a pad that only works through DirectInput is not handled by the code. Use the keyboard.
 - **Player 2:** the keyboard or a second controller.
 - **Display:** the picture is 16:9 today. The window, a resolution scale, borderless fullscreen (F11) and graphics options (edge smoothing, shadows, model detail, object draw distance) are in the settings window.
 - **Wide monitors:** fullscreen stretches the picture to a monitor of another shape. Wide screens without stretching are planned.
 
-See [Features: Input](docs/FEATURES.md#input-modes), [DualSense](docs/FEATURES.md#dualsense) and [Features: Wide screens](docs/FEATURES.md#wide-screens). Saves, updating and uninstalling: [docs/INSTALL.md](docs/INSTALL.md#saves).
+See [Features: Input](docs/FEATURES.md#input-modes), [PlayStation pads](docs/FEATURES.md#dualsense) and [Features: Wide screens](docs/FEATURES.md#wide-screens). Saves, updating and uninstalling: [docs/INSTALL.md](docs/INSTALL.md#saves).
 
 ---
 

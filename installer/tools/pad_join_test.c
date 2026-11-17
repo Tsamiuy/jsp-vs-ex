@@ -1,7 +1,9 @@
-/* Host test of libs/input/pad_join.h (toolkit patch 7908): the device-to-player table of cellPad. No game, no pad, no GPU.
- *   gcc -O1 -Wall -I<patched tree>/libs/input installer/tools/pad_join_test.c -o pad_join_test
- * Devices: 0..3 host pad slots, 4 keyboard. Players 0..3. */
+/* Host test of libs/input/pad_join.h (toolkit patch 7908: the device-to-player table of cellPad) and libs/input/pad_hid.h (patch 7909:
+ * PlayStation pads as HID devices: report parsing and the port order). No game, no pad, no GPU.
+ *   gcc -O1 -Wall -fsanitize=address,undefined -I<patched tree>/libs/input installer/tools/pad_join_test.c -o pad_join_test
+ * Devices: 0..3 XInput slots, 4 keyboard, 5..8 HID pads. Players 0..3. */
 #include "pad_join.h"
+#include "pad_hid.h"
 #include <stdio.h>
 
 static int fails;
@@ -326,6 +328,110 @@ int main(void)
       CHECK(pj_port_of_dev(none, PJ_DEV_KEYBOARD) == -1 && !pj_mouse_feed(-1, 0));  /* out of the table: cleanup only */
       int kb1[4] = { PJ_DEV_KEYBOARD, 0, -1, -1 };
       CHECK(pj_port_of_dev(kb1, PJ_DEV_KEYBOARD) == 0 && pj_mouse_feed(0, 0) && !pj_mouse_feed(0, 1)); }
+
+    /* ---- 7909: PlayStation pads. Report layouts as in pad_hid.h's header; the reports below are built byte by byte from it. ---- */
+    CHECK(ph_kind(0x054C, 0x0CE6) == PH_DUALSENSE && ph_kind(0x054C, 0x0DF2) == PH_DUALSENSE);
+    CHECK(ph_kind(0x054C, 0x05C4) == PH_DS4 && ph_kind(0x054C, 0x09CC) == PH_DS4);
+    CHECK(ph_kind(0x054C, 0x0268) == PH_NONE && ph_kind(0x045E, 0x0CE6) == PH_NONE && ph_kind(0x045E, 0x02FF) == PH_NONE);
+    CHECK(ph_path_may_be_sony("\\\\?\\hid#vid_054c&pid_09cc#7&1b2c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"));
+    CHECK(ph_path_may_be_sony("\\\\?\\HID#{00001124-0000-1000-8000-00805F9B34FB}_VID&0002054C_PID&05C4#8&2a&0&0000"));
+    CHECK(!ph_path_may_be_sony("\\\\?\\hid#vid_045e&pid_02ff#7&1b2c&0&0000#{4d1e55b2}") && !ph_path_may_be_sony(""));
+    CHECK(ph_is_gamepad(1, 5) && ph_is_gamepad(1, 4) && !ph_is_gamepad(1, 6) && !ph_is_gamepad(12, 5));
+    CHECK(ph_bt_switch_id(PH_DS4) == 0x02 && ph_bt_switch_id(PH_DUALSENSE) == 0x05);
+    CHECK(!ph_is_bluetooth(64) && ph_is_bluetooth(78) && ph_is_bluetooth(547));
+    { PadHidPad o; uint8_t r[80];
+      /* DualShock 4, USB 0x01 (64 bytes): LX LY RX RY | face | shoulders | ps | L2 R2 */
+      memset(r, 0, sizeof r); r[0] = 0x01; r[1] = 128; r[2] = 128; r[3] = 128; r[4] = 128; r[5] = 8;   /* hat 8 = released */
+      CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == 0 && o.lx == 0 && o.ly == 0 && o.rx == 0 && o.ry == 0 && !o.l2 && !o.r2);
+      r[5] = 8 | 0x20; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_A);                       /* Cross = A */
+      r[5] = 8 | 0x40; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_B);                       /* Circle = B */
+      r[5] = 8 | 0x10; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_X);                       /* Square = X */
+      r[5] = 8 | 0x80; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_Y);                       /* Triangle = Y */
+      r[5] = 0; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_DPAD_UP);                        /* hat 0 = up */
+      r[5] = 1; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == (PH_X_DPAD_UP | PH_X_DPAD_RIGHT));
+      r[5] = 4; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_DPAD_DOWN);
+      r[5] = 6; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_DPAD_LEFT);
+      r[5] = 7; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == (PH_X_DPAD_UP | PH_X_DPAD_LEFT));
+      r[5] = 8; r[6] = 0x01; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_LSHOULDER);
+      r[6] = 0x02; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_RSHOULDER);
+      r[6] = 0x10; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_BACK);                       /* Share = Select */
+      r[6] = 0x20; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_START);                      /* Options = Start */
+      r[6] = 0x40; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_LTHUMB);
+      r[6] = 0x80; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == PH_X_RTHUMB);
+      r[6] = 0x0C; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.buttons == 0);                               /* digital L2 / R2: only the analog counts */
+      r[6] = 0; r[8] = 200; r[9] = 77; CHECK(ph_parse(PH_DS4, r, 64, &o) && o.l2 == 200 && o.r2 == 77);
+      r[1] = 0; r[2] = 0; r[3] = 255; r[4] = 255;                                                      /* left up-left, right down-right */
+      CHECK(ph_parse(PH_DS4, r, 64, &o) && o.lx == -32768 && o.ly == 32767 && o.rx == 32512 && o.ry == -32512);
+      /* DualShock 4, Bluetooth 0x11 (78 bytes): the same data two bytes later */
+      memset(r, 0, sizeof r); r[0] = 0x11; r[1] = 0xC0; r[3] = 128; r[4] = 128; r[5] = 128; r[6] = 128; r[7] = 8 | 0x20 | 0x40; r[8] = 0x20 | 0x01;
+      r[10] = 9; r[11] = 250;
+      CHECK(ph_parse(PH_DS4, r, 78, &o) && o.buttons == (PH_X_A | PH_X_B | PH_X_START | PH_X_LSHOULDER) && o.l2 == 9 && o.r2 == 250 && o.lx == 0);
+      CHECK(ph_parse(PH_DS4, r, 547, &o) && o.r2 == 250);          /* the long Windows read size */
+      CHECK(!ph_parse(PH_DS4, r, 8, &o));                           /* too short */
+      CHECK(!ph_parse(PH_DUALSENSE, r, 78, &o));                    /* 0x11 is not a DualSense report */
+      /* short Bluetooth report 0x01 (10 bytes, before the switch): either pad */
+      memset(r, 0, sizeof r); r[0] = 0x01; r[1] = 128; r[2] = 128; r[3] = 128; r[4] = 128; r[5] = 8 | 0x20; r[6] = 0x20; r[8] = 5; r[9] = 6;
+      CHECK(ph_parse(PH_DS4, r, 10, &o) && o.buttons == (PH_X_A | PH_X_START) && o.l2 == 5 && o.r2 == 6);
+      CHECK(ph_parse(PH_DUALSENSE, r, 10, &o) && o.buttons == (PH_X_A | PH_X_START));
+      CHECK(!ph_parse(PH_DS4, r, 9, &o));
+      /* DualSense, USB 0x01 (64 bytes): LX LY RX RY L2 R2 counter | face | shoulders */
+      memset(r, 0, sizeof r); r[0] = 0x01; r[1] = 255; r[2] = 0; r[3] = 128; r[4] = 128; r[5] = 33; r[6] = 44; r[8] = 8 | 0x20; r[9] = 0x10 | 0x80;
+      CHECK(ph_parse(PH_DUALSENSE, r, 64, &o) && o.buttons == (PH_X_A | PH_X_BACK | PH_X_RTHUMB) && o.l2 == 33 && o.r2 == 44);
+      CHECK(o.lx == 32512 && o.ly == 32767 && o.rx == 0 && o.ry == 0);   /* LX = 255 right; LY = 0 is up (positive) */
+      r[2] = 255; r[3] = 0; CHECK(ph_parse(PH_DUALSENSE, r, 64, &o) && o.ly == -32512 && o.rx == -32768);   /* LY = 255 down; RX = 0 left */
+      /* DualSense, Bluetooth 0x31: data from byte 2 */
+      memset(r, 0, sizeof r); r[0] = 0x31; r[1] = 0x01; r[2] = 128; r[3] = 128; r[4] = 128; r[5] = 128; r[6] = 11; r[7] = 12; r[9] = 8 | 0x40 | 0x80; r[10] = 0x20 | 0x02;
+      CHECK(ph_parse(PH_DUALSENSE, r, 78, &o) && o.buttons == (PH_X_B | PH_X_Y | PH_X_START | PH_X_RSHOULDER) && o.l2 == 11 && o.r2 == 12);
+      r[0] = 0x05; CHECK(!ph_parse(PH_DUALSENSE, r, 78, &o));       /* other report ids are not a pad state */
+      CHECK(!ph_parse(PH_NONE, r, 78, &o) && !ph_parse(PH_DS4, r, 0, &o));
+    }
+
+    /* port order without a reorder: XInput slots stay, HID pads take the lowest free ports */
+    { uint8_t x[4], h[PH_MAX_PADS]; int dv[4];
+      memset(x, 0, sizeof x); memset(h, 0, sizeof h);
+      ph_port_devs(x, h, PJ_DEV_HID0, dv); CHECK(dv[0] == -1 && dv[1] == -1 && dv[2] == -1 && dv[3] == -1);
+      x[1] = 1; ph_port_devs(x, h, PJ_DEV_HID0, dv); CHECK(dv[0] == -1 && dv[1] == 1 && dv[2] == -1);   /* a lone Xbox pad: its slot, as today */
+      memset(x, 0, sizeof x); h[0] = 1; ph_port_devs(x, h, PJ_DEV_HID0, dv);
+      CHECK(dv[0] == PJ_DEV_HID0 && dv[1] == -1);                                                       /* a lone DualSense: port 0, as today */
+      x[0] = 1; ph_port_devs(x, h, PJ_DEV_HID0, dv); CHECK(dv[0] == 0 && dv[1] == PJ_DEV_HID0 && dv[2] == -1);   /* beside Xbox 0: port 1 */
+      memset(x, 0, sizeof x); x[1] = 1; ph_port_devs(x, h, PJ_DEV_HID0, dv);
+      CHECK(dv[0] == PJ_DEV_HID0 && dv[1] == 1);                                                        /* Xbox on slot 1: HID fills port 0 as the old stand-in did */
+      x[0] = 1; x[2] = 1; h[1] = 0; h[2] = 1; h[3] = 1; ph_port_devs(x, h, PJ_DEV_HID0, dv);           /* Xbox 0, 1, 2 + HID 0, 2, 3 */
+      CHECK(dv[0] == 0 && dv[1] == 1 && dv[2] == 2 && dv[3] == PJ_DEV_HID0);                           /* the fourth port takes the first HID pad */
+      memset(x, 0, sizeof x); h[0] = h[1] = h[2] = h[3] = 1; ph_port_devs(x, h, PJ_DEV_HID0, dv);        /* four HID pads */
+      CHECK(dv[0] == PJ_DEV_HID0 && dv[1] == PJ_DEV_HID0 + 1 && dv[2] == PJ_DEV_HID0 + 2 && dv[3] == PJ_DEV_HID0 + 3);
+      h[0] = 0; ph_port_devs(x, h, PJ_DEV_HID0, dv);                                                    /* pad 0 unplugged: the others move up */
+      CHECK(dv[0] == PJ_DEV_HID0 + 1 && dv[1] == PJ_DEV_HID0 + 2 && dv[2] == PJ_DEV_HID0 + 3 && dv[3] == -1);
+    }
+
+    /* the join table with HID pads as devices: XInput + HID mixed, press order wins, a lost pad frees its player */
+    { pj_init(&j); reset_devs(); connect(1, 1); connect(PJ_DEV_HID0, 1); connect(PJ_DEV_HID0 + 2, 1);
+      start_join();
+      press(PJ_DEV_HID0 + 2, CROSS);                                    /* the second DualShock first */
+      CHECK(dev(0) == PJ_DEV_HID0 + 2 && pj_hidden(&j, PJ_DEV_HID0 + 2) && j.joining);
+      release_all(); press(1, CROSS); release_all();                    /* the Xbox pad second */
+      CHECK(dev(1) == 1 && j.joining);
+      press(PJ_DEV_HID0, CIRCLE); release_all();                        /* the first DualShock third: everyone joined */
+      CHECK(!j.joining && dev(2) == PJ_DEV_HID0 && dev(0) == PJ_DEV_HID0 + 2 && dev(3) == -1);
+      in[PJ_DEV_HID0 + 2].connected = 0; upd();                         /* player 1's pad is unplugged: the Xbox pad moves up */
+      CHECK(dev(0) == 1 && dev(1) == -1 && dev(2) == PJ_DEV_HID0);
+      connect(PJ_DEV_HID0 + 3, 1); upd();                               /* a new HID pad takes the lowest free player */
+      CHECK(dev(1) == PJ_DEV_HID0 + 3);
+      /* four pads fill the four players and end join by themselves */
+      pj_init(&j); reset_devs(); connect(0, 1); connect(PJ_DEV_HID0, 1); connect(PJ_DEV_HID0 + 1, 1); connect(PJ_DEV_HID0 + 3, 1);
+      start_join(); release_all();
+      press(PJ_DEV_HID0 + 3, CROSS); release_all(); press(0, CROSS); release_all();
+      press(PJ_DEV_HID0 + 1, CROSS); release_all(); press(PJ_DEV_HID0, CROSS);
+      CHECK(!j.joining && dev(0) == PJ_DEV_HID0 + 3 && dev(1) == 0 && dev(2) == PJ_DEV_HID0 + 1 && dev(3) == PJ_DEV_HID0);
+      /* the chord works on an HID pad, and its Select (Share), L3, R3 are hidden from the game from the first poll of the hold */
+      pj_init(&j); reset_devs(); connect(PJ_DEV_HID0 + 1, 1); upd();
+      PadJoinDev c[PJ_DEVS]; memcpy(c, in, sizeof c);
+      c[PJ_DEV_HID0 + 1].buttons = PJ_CHORD_BITS;
+      CHECK(!pj_chord(&j, c, 1000) && pj_chord_hide(&j, PJ_DEV_HID0 + 1, PJ_CHORD_BITS | CROSS) == CROSS);
+      CHECK(pj_chord(&j, c, 1000 + PJ_CHORD_MS));
+      /* the HID devices fit the tables: the last one is in range */
+      CHECK(PJ_DEVS == 9 && PJ_DEV_HID0 + PJ_HID_PADS == PJ_DEVS && PJ_HID_PADS == PH_MAX_PADS);
+    }
 
     printf(fails ? "pad_join_test: %d FAILED\n" : "pad_join_test: all passed\n", fails);
     return fails != 0;

@@ -97,9 +97,25 @@ port 0. The keyboard is a player only where `INPUT_MODE` gives it one: Keyboard 
 default), or no pad on slot 0; once it has a player it keeps it, and it holds the end of join open only in the two keyboard modes or when no
 pad is connected. The mouse hooks (cursor clip and hide, wheel) run once per poll wherever the keyboard sits, and only a keyboard on port 0 gets the mouse look and menu clicks. Rumble goes to the pad the game sees on the port and stops when that pad
 leaves the port. This one is on by default, also without a reorder: in Keyboard or Keyboard and Mouse mode with `PAD_PAD_P2` the pad is player 2 and now rumbles for port 1 (before, port 0's rumble went to XInput slot 0, the same pad, and port 1's to an empty slot). Select, L3 and R3 are hidden from the game from the first poll of the chord until the pad has released them; a chord completed while a join is already running is not a chord and reaches the game as ordinary buttons. The order logic is `libs/input/pad_join.h` in the toolkit, host tested by `installer/tools/pad_join_test.c`; the text is drawn
-by `jsp_port_menu.cpp` from the toolkit's `g_pad_join_notify`. Known limits: a DualSense that stands in for slot 0 counts as the device of slot
-0 (an XInput pad appearing on slot 0 replaces it); the game takes two human players in Free Battle, so players 3 and 4 are read but not used
+by `jsp_port_menu.cpp` from the toolkit's `g_pad_join_notify`. Known limits: the game takes two human players in Free Battle, so players 3 and 4 are read but not used
 yet; not tried with real pads.
+
+
+## PlayStation pads (ENHANCEMENT, toolkit patch 7909)
+
+DualSense, DualSense Edge, DualShock 4 v1 (054C:05C4) and v2 (054C:09CC), USB or Bluetooth, up to four at once, read as raw HID devices
+(Windows has no XInput driver for them). Each pad is a device of its own in the player-order table (devices 5 to 8; XInput slots are 0 to 3,
+the keyboard 4), so the reorder above treats them like any other pad. Without a reorder the old order stays: XInput pads keep their slot as
+their port, then the PlayStation pads take the lowest ports no XInput pad holds, in the order Windows listed them at plug-in. So one Xbox pad,
+or one DualSense alone, behave as before (a lone DualSense is port 0); a DualSense next to an Xbox pad on slot 0 is port 1 (it used to be
+ignored); a DualShock 4 works at all. Buttons: Cross is A, Circle B, Square X, Triangle Y, Share or Create is Select, Options is Start; the
+`PAD_BTN_*` rebinds, the deadzone and the trigger threshold apply as for an XInput pad. The pads are looked for once a second by a background
+thread and each has its own reader, so plugging in or out never stalls the game; a pad that leaves frees its player (see above).
+`PAD_NO_PLAYSTATION=1` turns them off (`PAD_NO_DUALSENSE=1`, the first name, is the same switch and now also covers the DualShock 4).
+No rumble, lightbar, touchpad or motion: rumble over raw HID needs the pad's output report (with a checksum over Bluetooth), not safe to get
+right without a pad. Report layouts are in the header of `libs/input/pad_hid.h`, host tested by `installer/tools/pad_join_test.c` on reports
+built from the documented layout. Not tried with real pads: the Bluetooth DualShock 4 read size and its switch feature report are the
+least certain parts.
 
 ## Open
 
@@ -110,6 +126,7 @@ yet; not tried with real pads.
 - The overlay is drawn before 2508's and 2509's pictures, so those land on top (a page open with the FPS counter or the time-limit stamp).
 - The sixth row's parts after the game's own per-update loop with the instruction patch (the earlier tree needed the patch to keep them shown).
 - Pressure-capable pads: the game's menu reading pressure words behind the page.
+- PlayStation pads (7909): try a DualShock 4 (USB and Bluetooth) and a DualSense (USB and Bluetooth) with real hardware, one alone, two together, and beside an Xbox pad; check Cross, Circle, sticks, triggers and the hot-plug.
 - Player order (7908): try it with two real pads and the keyboard, both start paths, the on-screen text, unplug and re-plug, and the Select + L3 + R3 hold in a fight and in the menus.
 - Rumble on the default path (7908): with Keyboard mode and a pad as player 2, check the pad rumbles in a fight and the keyboard player gets none.
 - Player order (7908), known limit: after a reorder the keyboard can be sampled twice in one poll (once to join, once for the port it lands on, when the two kinds of port differ); not checked for side effects. Also check in Keyboard and Mouse mode that the cursor is freed when the keyboard is player 2 or out of the order.

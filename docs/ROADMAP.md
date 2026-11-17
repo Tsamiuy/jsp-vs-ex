@@ -25,7 +25,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 - ✅ Graphics options: edge smoothing, shadow quality and distance, model detail, object draw distance ([details](FEATURES.md#graphics-options))
 - ✅ Smoother busy scenes on slower PCs: two-thread drawing on by default and frames shown without waiting for the monitor's vblank ([details](FEATURES.md#two-thread-drawing), [more](FEATURES.md#present-no-vblank-wait))
 - ✅ Keyboard, keyboard and mouse, or controller, each with its own bindings; a keyboard or a second controller as player 2 ([details](FEATURES.md#input-modes), [more](FEATURES.md#second-player))
-- 🔧 DualSense and DualSense Edge read directly (USB or Bluetooth); hands-on tests of the buttons are pending ([details](FEATURES.md#dualsense))
+- 🔧 PlayStation pads (DualSense, DualSense Edge, DualShock 4; up to four, USB or Bluetooth) read directly; hands-on tests with real pads are pending ([details](FEATURES.md#dualsense))
 - ✅ Launcher with resolution, window size, input choice, rebinds and the fight HUD size ([details](FEATURES.md#launcher), [more](FEATURES.md#hud-size))
 - 🔧 "EX" in place of the "+" in the title logo, matching the port's name (optional, `JSP_EX_LOGO=0` keeps the "+"; merged; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy of the logo is not yet confirmed) ([details](FEATURES.md#ex-logo))
 - 📋 Split-screen layout, brightness and glare, DLSS (parked in the notes) ([details](FEATURES.md#split-screen-layout), [more](FEATURES.md#brightness-glare), [more](FEATURES.md#dlss))
