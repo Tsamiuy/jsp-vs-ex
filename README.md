@@ -161,7 +161,7 @@ Close the open problems of the v19 tree ([issue #9](https://github.com/Tsamiuy/j
 
 ## Contributing
 
-Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord](https://discord.gg/h3j2wFwqvn).
+Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord server](https://discord.gg/W8fMT78Q7k) (unofficial fan work; this project has its own forum there).
 
 ---
 
