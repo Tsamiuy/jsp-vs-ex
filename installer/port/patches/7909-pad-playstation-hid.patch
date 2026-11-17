@@ -591,7 +591,7 @@ new file mode 100644
 index 0000000..a690d4a
 --- /dev/null
 +++ b/libs/input/pad_hid.h
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,143 @@
 +/* pad_hid.h -- PlayStation pads read as raw HID devices: which ones, and what their input reports mean
 + * (toolkit patch 7909; ENHANCEMENT; extends the DualSense reader of patch 6503).
 + *
@@ -609,7 +609,6 @@ index 0000000..a690d4a
 + *    LX LY RX RY L2 R2 counter at bytes 1..7, byte 8 = hat and face buttons (as DualShock 4 byte 5), byte 9 = L1 R1 L2 R2 Create
 + *    Options L3 R3 (as DualShock 4 byte 6); Bluetooth full report 0x31 with the same data from byte 2; the short Bluetooth report
 + *    0x01 (until feature report 0x05 is read once) is the DualShock 4 short layout.
-+ * RPCS3 is not a source for this file; nothing here is copied from GPL code.
 + *
 + * The output uses the XInput button values (A = Cross, B = Circle, X = Square, Y = Triangle, BACK = Share / Create, START =
 + * Options) so cellPad.c runs it through the same mapping as an XInput pad, including the PAD_BTN_* rebinds.
