@@ -13,6 +13,7 @@ All notable changes are listed here, newest first. The format follows
 
 ### Changed
 
+- Releases: the Discord message now opens a new thread in the project's Discord forum and carries the release notes (new features, fixes and changes), cut to 1,800 characters, with a "Full notes and download" link; an empty notes field keeps the short message, and mentions stay disabled (`.github/workflows/release-notify.yml`).
 - Docs brought up to date after 0.4.0: ROADMAP (releases, Training options, KO count, the Impossible mode, Port Settings pages, online and Proton wording), the feature list (new Impossible mode row; KO count, Training options and in-game settings now in progress), README and INSTALL (`SHA256SUMS` from 0.4.0, speed numbers now in 0.4.0), KNOWN_ISSUES (0.4.0, a row for the new Free Battle options), `.recomp.json` notes and help list.
 
 ## [0.4.0] - 2026-11-16
