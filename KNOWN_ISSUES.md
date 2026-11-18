@@ -1,6 +1,6 @@
 # Known problems
 
-Of the default build (the v19 tree, built on ps3recomp v0.19.0): pre-release 0.4.0 and `main` after it. The status of each item is tracked in
+Of the default build (the v19 tree, built on ps3recomp v0.19.0): pre-release 0.5.0 and `main` after it. The status of each item is tracked in
 [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9) (body refreshed 2026-11-16). "Not re-checked" means not
 run again on v19. To report a problem, see "Troubleshooting and reporting a problem" in the [README](README.md).
 
@@ -12,6 +12,9 @@ run again on v19. To report a problem, see "Troubleshooting and reporting a prob
 | Online: a solo battle against the computer started from the online lobby froze on the Versus screen; after a connection error in Ranked, the Online Battle menu froze | 0.1.0 reports | none known; a support bundle made right after the freeze helps | open, no log yet |
 | The online lobby's Selected Stage picture is drawn with horizontal stripes | 0.1.0 report | none | open |
 | Free Battle's KOs to win and Impossible mode: not tried online, with a real second controller, or in a 2 against 2 with Impossible on the partner slots; with 4 and 5 KOs the KO bars keep the game's 3-KO look | 0.4.0 | play them offline in Free Battle | not tested |
+| Rollback netcode (experimental, off unless `JSP_ROLLBACK=1`): tested only as two copies on one PC, not on two PCs; one player per PC; menus and character select not linked; every match uses the same fixed seed; a first-launch pipeline build can stall a match for seconds | 0.5.0 | warm the pipeline cache with an offline fight first; see [docs/ROLLBACK.md](docs/ROLLBACK.md) | not tested on two PCs |
+| PlayStation pads (DualSense, DualSense Edge, DualShock 4) read directly: checked only against the documented report layout, not on real pads; no rumble or lightbar | 0.5.0 | `PAD_NO_PLAYSTATION=1` turns them off | not tested |
+| Choosing the player order (Select + L3 + R3, or Port Settings) and rumble going to the pad the game sees on the port: not tried with real pads | 0.5.0 | `PAD_JOIN=0` turns the player-order join off | not tested |
 | Setup refuses an EBOOT as an unknown build (check `E3`) | game update 1.02, digital editions, other builds | use the EBOOT of the 1.00 disc of the same region as the disc folder | open as reported; a disc image given as a single `.iso` file is recognised but cannot be read: setup needs an extracted disc folder |
 | Lighting on some floors washed out; a white bar under the left portrait | earlier v18 build | none | not compared on v19; the bar is not explained |
 | A loading page; a black window of about two minutes at the first start; log files stay at 0 bytes during play and fill at exit | v19 reports | wait for the window | not re-checked after the boot fix |
