@@ -119,6 +119,22 @@ uint32_t UdpMux::rnd() { rng_ ^= rng_ << 13; rng_ ^= rng_ >> 7; rng_ ^= rng_ << 
 
 void UdpMux::raw_send(const Endpoint& to, const std::vector<uint8_t>& bytes)
 {
+    if (tx_hook && tx_hook(to, bytes)) return;   // re-psn: this peer is reached through the server's relay
+    raw_send_plain(to, bytes);
+}
+void UdpMux::set_hooks(std::function<int(Endpoint&, uint8_t*, int&)> rx, std::function<bool(const Endpoint&, const std::vector<uint8_t>&)> tx)
+{
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    rx_hook = std::move(rx); tx_hook = std::move(tx);
+}
+void UdpMux::send_control(const Endpoint& to, const uint8_t* data, size_t len)
+{
+    std::lock_guard<std::recursive_mutex> lk(mu_);
+    if (sock_ == -1) return;
+    raw_send_plain(to, std::vector<uint8_t>(data, data + len));
+}
+void UdpMux::raw_send_plain(const Endpoint& to, const std::vector<uint8_t>& bytes)
+{
     sockaddr_in a{};
     a.sin_family = AF_INET; a.sin_addr.s_addr = to.ip_be; a.sin_port = htons(to.port);
     const int r = (int)::sendto((SOCK_T)sock_, (const char*)bytes.data(), (int)bytes.size(), 0, (sockaddr*)&a, sizeof a);
@@ -159,10 +175,10 @@ void UdpMux::pump()
             else i++;
         }
     }
-    uint8_t buf[kMaxDatagram + 1];
+    uint8_t buf[kMaxDatagram + 1 + 64];   // 64 spare bytes: a relayed datagram carries the relay header (re-psn), unwrapped below
     for (;;) {
         sockaddr_in a{}; socklen_t_ l = sizeof a;
-        const int n = (int)::recvfrom((SOCK_T)sock_, (char*)buf, sizeof buf, 0, (sockaddr*)&a, &l);
+        int n = (int)::recvfrom((SOCK_T)sock_, (char*)buf, sizeof buf, 0, (sockaddr*)&a, &l);
         if (n < 0) {
 #ifdef _WIN32
             if (WSAGetLastError() == WSAECONNRESET) continue;   // an earlier send bounced (ICMP); the next datagram can still be read
@@ -170,9 +186,11 @@ void UdpMux::pump()
             break;
         }
         if (n < 1) continue;
+        Endpoint from{}; from.ip_be = a.sin_addr.s_addr; from.port = ntohs(a.sin_port);
+        if (rx_hook) { const int r = rx_hook(from, buf, n); if (r == 1) continue; }
+        if (n < 1) continue;
         if ((size_t)n > kMaxDatagram) { oversize++; continue; }
         received++;
-        Endpoint from{}; from.ip_be = a.sin_addr.s_addr; from.port = ntohs(a.sin_port);
         if (buf[0] != kTagGekko && buf[0] != kTagMessage && buf[0] != kTagSettings && buf[0] != kTagHeartbeat) { unknown_tag++; continue; }   // never queue an unknown tag
         auto& q = q_[buf[0]];
         if (q.size() >= kMaxQueued) { q.pop_front(); overflow++; }
@@ -361,6 +379,7 @@ int DirectRendezvous::poll()
             hub_.new_peers.clear();
             for (const Endpoint& p : cand) {
                 MessageChannel* c = hub_.find(p);
+                if (has_only_ && !(p == only_)) { rejected_hello++; hub_.close(p); continue; }   // re-psn: only the room's other player
                 const bool ok = c && c->recv(m) && m.size() == 5 && std::memcmp(m.data(), "HELO", 4) == 0 && m[4] >= 1 && m[4] + local_count_ <= 4 && local_count_ >= 1;
                 if (ok && !ch_) { ch_ = c; hello_count_ = m[4]; }
                 else { rejected_hello++; hub_.close(p); }

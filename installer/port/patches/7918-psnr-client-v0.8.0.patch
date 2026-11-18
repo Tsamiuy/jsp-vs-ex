@@ -1,0 +1,1133 @@
+Patch 7918 (experimental, rollback netcode): the vendored psnr client is replaced by the re-psn v0.8.0 client, for the rollback rendezvous over re-psn.
+
+The rollback rendezvous needs the real-time convention (psnr_relay_unwrap_from, psnr_rtt_ms / psnr_report_rtt, psnr_heartbeat, GET_CAPS, room parse helpers).
+Source: https://github.com/undecuple/re-psn client/psnr.c and client/psnr.h at tag v0.8.0 (annotated tag object 61834bbe7cd2..., commit 57d41c27bd1b),
+MIT (LICENSE of that repository; the same author as the toolkit's earlier source sp00nznet/psnr). The two files are byte-identical to that tag (compared with the
+raw files of the tag); README.md names the new source.
+API check against the callers in the runtime (np_psnr.c, cellNetCtl.c, sceNp.c, sceNpMatching2.c, sceNpScore.c): every function the callers use keeps its signature
+(psnr_connect, psnr_poll, psnr_call, psnr_send, psnr_close, psnr_server_addr, psnr_probe_packet, psnr_punch_packet, psnr_probe_reply, psnr_is_control, psnr_relay_wrap,
+psnr_relay_unwrap, psnr_stream_connect / accept, psnr_connect_error, psnr_msg_free; compared by declaration text) and the message / error enum values are unchanged; the
+new header only ADDS functions, message types (PEER_AUTH, GET_CAPS, SET_ROOM_ACCESS, JOIN_BY_CODE, GET_ROOM_ACCESS, CAPS) and psnr_found. No caller needed a change.
+Behaviour not verified by a run against a real server (see docs/ROLLBACK.md); the host test installer/tools/net_repsn_test.sh runs it against a fake server.
+
+diff --git a/libs/network/psnr/README.md b/libs/network/psnr/README.md
+index cb66135..3beaad8 100644
+--- a/libs/network/psnr/README.md
++++ b/libs/network/psnr/README.md
+@@ -1,7 +1,7 @@
+-# psnr client (vendored)
++# psnr client (vendored; replaced by patch 7918)
+ 
+ `psnr.c` and `psnr.h` are copied unchanged from
+-[sp00nznet/psnr](https://github.com/sp00nznet/psnr) `client/` (MIT, same author).
++[undecuple/re-psn](https://github.com/undecuple/re-psn) `client/` at tag v0.8.0 (tag object 61834bbe7cd2, commit 57d41c27bd1b; MIT, see that repository's LICENSE). They replace the older copy from sp00nznet/psnr (patch 7918).
+ That repository also holds the server they talk to and the protocol reference
+ (`docs/api.md`). Change them there first, then copy them here.
+ 
+diff --git a/libs/network/psnr/psnr.c b/libs/network/psnr/psnr.c
+index b77cfbc..ce2cad6 100644
+--- a/libs/network/psnr/psnr.c
++++ b/libs/network/psnr/psnr.c
+@@ -25,6 +25,7 @@
+ #  define BAD_SOCK INVALID_SOCKET
+ #  define sock_close closesocket
+ #  define WOULD_BLOCK() (WSAGetLastError() == WSAEWOULDBLOCK)
++#  define CONNECT_PENDING() (WSAGetLastError() == WSAEWOULDBLOCK)   /* non-blocking connect in progress */
+ #  define poll WSAPoll
+    typedef WSAPOLLFD pollfd_t;
+ #else
+@@ -36,15 +37,19 @@
+ #  include <unistd.h>
+ #  include <errno.h>
+ #  include <poll.h>
++#  include <ifaddrs.h>
++#  include <net/if.h>
+    typedef int sock_t;
+ #  define BAD_SOCK (-1)
+ #  define sock_close close
+ #  define WOULD_BLOCK() (errno == EAGAIN || errno == EWOULDBLOCK)
++#  define CONNECT_PENDING() (errno == EINPROGRESS)
+    typedef struct pollfd pollfd_t;
+ #endif
+ 
+-#include "../host_socket_send.h"
+ #define HEARTBEAT_SECS 20
++#define RTT_SAMPLES    8       /* completed calls the reported round trip is the smallest of */
++#define RTT_MAX_MS     60000   /* the server ignores more; so do we */
+ 
+ static uint64_t now_ms(void)
+ {
+@@ -71,17 +76,46 @@ struct psnr_client {
+     int      relay;                       /* HELLO_ACK: the server relays */
+     uint8_t  server_ip[4], local_ip[4];   /* the TCP connection's two ends */
+     uint16_t server_port;
++    uint16_t rtt[RTT_SAMPLES];            /* round trips of recent psnr_call replies, in ms */
++    int      rtt_n, rtt_next;
++    int      report_rtt;                  /* send the smallest in HEARTBEAT; off until psnr_report_rtt(c, 1) */
++    int      dead_reason;                 /* enum psnr_dead_reason, set with dead */
++    int      dead_os_err;                 /* the OS error at that point, 0 if none */
+ };
+ 
++static int os_error(void)
++{
++#ifdef _WIN32
++    return WSAGetLastError();
++#else
++    return errno;
++#endif
++}
++
++/* The first failure sticks: a client is dead once, with the reason of the first thing that broke. */
++static void mark_dead(psnr_client* c, int reason, int os_err)
++{
++    if (c->dead) return;
++    c->dead = 1;
++    c->dead_reason = reason;
++    c->dead_os_err = os_err;
++}
++
+ static int send_all(psnr_client* c, const uint8_t* p, size_t n)
+ {
++    uint64_t t0 = 0;   /* when the socket first refused data in this call */
+     while (n) {
+-        int k = send(c->s, (const char*)p, (int)n, PS3_NET_HOST_SEND_FLAGS);
++        int k = send(c->s, (const char*)p, (int)n, 0);
+         if (k < 0) {
+             pollfd_t pf;
+-            if (!WOULD_BLOCK()) { c->dead = 1; return -1; }
++            uint64_t waited, rest;
++            if (!WOULD_BLOCK()) { mark_dead(c, PSNR_DEAD_IO_ERROR, os_error()); return -1; }
++            if (!t0) t0 = now_ms();
++            waited = now_ms() - t0;
++            if (waited >= PSNR_SEND_TIMEOUT_MS) { mark_dead(c, PSNR_DEAD_SEND_TIMEOUT, 0); return -1; }
++            rest = PSNR_SEND_TIMEOUT_MS - waited;
+             pf.fd = c->s; pf.events = POLLOUT; pf.revents = 0;
+-            poll(&pf, 1, 1000);
++            poll(&pf, 1, (int)(rest < 1000 ? rest : 1000));
+             continue;
+         }
+         p += k;
+@@ -108,12 +142,18 @@ static int pump(psnr_client* c)
+ {
+     for (;;) {
+         if (c->rx_cap - c->rx_len < 4096) {
+-            c->rx_cap = c->rx_cap ? c->rx_cap * 2 : 8192;
+-            c->rx = (uint8_t*)realloc(c->rx, c->rx_cap);
++            size_t cap = c->rx_cap ? c->rx_cap * 2 : 8192;
++            uint8_t* grown = (uint8_t*)realloc(c->rx, cap);
++            if (!grown) { mark_dead(c, PSNR_DEAD_NOMEM, os_error()); break; }
++            c->rx = grown;
++            c->rx_cap = cap;
+         }
+         int k = recv(c->s, (char*)c->rx + c->rx_len, (int)(c->rx_cap - c->rx_len), 0);
+-        if (k == 0 || (k < 0 && !WOULD_BLOCK())) { c->dead = 1; break; }
+-        if (k < 0) break;
++        if (k == 0) { mark_dead(c, PSNR_DEAD_PEER_CLOSED, 0); break; }
++        if (k < 0) {
++            if (!WOULD_BLOCK()) mark_dead(c, PSNR_DEAD_IO_ERROR, os_error());
++            break;
++        }
+         c->rx_len += (size_t)k;
+     }
+ 
+@@ -126,11 +166,17 @@ static int pump(psnr_client* c)
+ 
+         /* Replies (0x8x, 0x9x, 0xBx) start with the request id; pushes (0xAx) don't. */
+         int has_req = (type & 0xF0) != 0xA0;
++        if (has_req && n < 4) {   /* a reply with no request id is damaged: drop it, do not pass it off as a push */
++            off += 3u + n;
++            continue;
++        }
+         node* nd = (node*)calloc(1, sizeof(node));
+-        if (has_req && n >= 4) { nd->m.req = psnr_get32(p); p += 4; n -= 4; }
++        if (!nd) { mark_dead(c, PSNR_DEAD_NOMEM, os_error()); break; }
++        if (has_req) { nd->m.req = psnr_get32(p); p += 4; n -= 4; }
+         nd->m.type = type;
+         nd->m.len = n;
+         nd->m.data = (uint8_t*)malloc(n ? n : 1);
++        if (!nd->m.data) { mark_dead(c, PSNR_DEAD_NOMEM, os_error()); free(nd); break; }
+         memcpy(nd->m.data, p, n);
+         if (c->tail) c->tail->next = nd; else c->head = nd;
+         c->tail = nd;
+@@ -154,10 +200,32 @@ static int take(psnr_client* c, psnr_msg* out, uint32_t want_req)
+     return 1;
+ }
+ 
++int psnr_rtt_ms(const psnr_client* c)
++{
++    int i, best = -1;
++    for (i = 0; i < c->rtt_n; i++)
++        if (best < 0 || c->rtt[i] < best) best = c->rtt[i];
++    return best;
++}
++
++void psnr_report_rtt(psnr_client* c, int on)
++{
++    c->report_rtt = on != 0;
++}
++
++uint32_t psnr_heartbeat(psnr_client* c)
++{
++    uint8_t body[2];
++    int ms = c->report_rtt ? psnr_rtt_ms(c) : -1;
++    if (ms < 0) return psnr_send(c, PSNR_HEARTBEAT, NULL, 0);   /* as before: no body */
++    psnr_put16(body, (uint16_t)ms);
++    return psnr_send(c, PSNR_HEARTBEAT, body, sizeof(body));
++}
++
+ int psnr_poll(psnr_client* c, psnr_msg* out)
+ {
+     if (!c->dead && time(NULL) - c->last_send >= HEARTBEAT_SECS)
+-        psnr_send(c, PSNR_HEARTBEAT, NULL, 0);
++        psnr_heartbeat(c);
+     if (!c->dead) pump(c);
+     if (take(c, out, 0)) return 1;
+     return c->dead ? -1 : 0;
+@@ -166,13 +234,22 @@ int psnr_poll(psnr_client* c, psnr_msg* out)
+ int psnr_call(psnr_client* c, uint8_t type, const void* body, uint32_t len,
+               psnr_msg* reply, int timeout_ms)
+ {
++    uint64_t t0 = now_ms();
+     uint32_t req = psnr_send(c, type, body, len);
+-    uint64_t end = now_ms() + (uint64_t)timeout_ms;
++    uint64_t end = t0 + (uint64_t)timeout_ms;
+     if (!req) return -1;
+     for (;;) {
+         pollfd_t pf;
+         if (!c->dead) pump(c);
+-        if (take(c, reply, req)) return 1;
++        if (take(c, reply, req)) {
++            uint64_t ms = now_ms() - t0;   /* send to reply: this player's round trip, server time included */
++            if (ms <= RTT_MAX_MS) {
++                c->rtt[c->rtt_next] = (uint16_t)ms;
++                c->rtt_next = (c->rtt_next + 1) % RTT_SAMPLES;
++                if (c->rtt_n < RTT_SAMPLES) c->rtt_n++;
++            }
++            return 1;
++        }
+         if (c->dead) return -1;
+         if (now_ms() >= end) return 0;
+         pf.fd = c->s; pf.events = POLLIN; pf.revents = 0;
+@@ -187,14 +264,81 @@ void psnr_msg_free(psnr_msg* m)
+ }
+ 
+ static int s_connect_error;
++static psnr_connect_policy_fn s_policy;
++static void* s_policy_user;
+ 
+-psnr_client* psnr_connect(const char* host, uint16_t port,
+-                          const char* comm_id, const char* online_id, uint16_t p2p_port,
+-                          uint32_t* out_user_id, uint8_t out_public_ip[4])
++void psnr_set_connect_policy(psnr_connect_policy_fn fn, void* user)
++{
++    s_policy = fn;
++    s_policy_user = user;
++}
++
++/* 1 if the host's policy (if any) allows a connection to ip:port. */
++static int policy_allows(int purpose, const char* host, const uint8_t ip[4], uint16_t port)
++{
++    return !s_policy || s_policy(s_policy_user, purpose, host, ip, port) != 0;
++}
++
++static void set_nonblock(sock_t s)
++{
++#ifdef _WIN32
++    u_long nb = 1;
++    ioctlsocket(s, FIONBIO, &nb);
++#else
++    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
++#endif
++}
++
++/* Milliseconds left until deadline, 0 once it has passed. */
++static int remaining_ms(uint64_t deadline)
++{
++    uint64_t now = now_ms();
++    return now < deadline ? (int)(deadline - now) : 0;
++}
++
++/* Connect within the caller's monotonic deadline, retrying interrupted waits
++ * without restarting its budget. A negative timeout waits indefinitely. The
++ * socket is left non-blocking; 0 means connected. */
++static int connect_bounded(sock_t s, const struct addrinfo* ai, uint64_t deadline, int timeout_ms)
++{
++    pollfd_t pf;
++    int err = 0;
++    socklen_t el = sizeof(err);
++    set_nonblock(s);
++    if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) return 0;
++    if (!CONNECT_PENDING()) return -1;
++    pf.fd = s; pf.events = POLLOUT; pf.revents = 0;
++    for (;;) {
++        int wait = timeout_ms < 0 ? -1 : remaining_ms(deadline);
++        int r;
++        if (wait == 0) return -1;
++        r = poll(&pf, 1, wait);
++        if (r > 0) break;
++        if (r == 0) return -1;
++#ifdef _WIN32
++        if (WSAGetLastError() != WSAEINTR) return -1;
++#else
++        if (errno != EINTR) return -1;
++#endif
++    }
++    if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &el) != 0 || err) return -1;
++    return 0;
++}
++
++/* timeout_ms < 0 is psnr_connect: the blocking connect it has always made, then the 5 s HELLO
++ * wait. Otherwise the connect and the HELLO wait share the one budget of timeout_ms. */
++static psnr_client* connect_impl(const char* host, uint16_t port,
++                                 const char* comm_id, const char* online_id, uint16_t p2p_port,
++                                 uint32_t* out_user_id, uint8_t out_public_ip[4], int timeout_ms)
+ {
+     struct addrinfo hints, *res = NULL, *ai;
+     char portstr[8];
+     sock_t s = BAD_SOCK;
++    int denied = 0, tried = 0;
++    uint64_t deadline = now_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0);
++
++    /* The wire fields are 12 and 16 bytes: refuse a longer name instead of cutting it. */
++    if (!host || !comm_id || !online_id || strlen(comm_id) > PSNR_COMM_ID_MAX || strlen(online_id) > PSNR_ONLINE_ID_MAX) return NULL;
+ 
+ #ifdef _WIN32
+     WSADATA w;
+@@ -205,27 +349,34 @@ psnr_client* psnr_connect(const char* host, uint16_t port,
+     hints.ai_socktype = SOCK_STREAM;
+     snprintf(portstr, sizeof(portstr), "%u", port);
+     if (getaddrinfo(host, portstr, &hints, &res) != 0) return NULL;
++    s_connect_error = 0;
+     for (ai = res; ai; ai = ai->ai_next) {
++        if (ai->ai_family == AF_INET) {
++            const uint8_t* ipb = (const uint8_t*)&((const struct sockaddr_in*)ai->ai_addr)->sin_addr;
++            if (!policy_allows(PSNR_PURPOSE_SERVER, host, ipb, port)) { denied = 1; continue; }
++        }
++        tried = 1;
+         s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+         if (s == BAD_SOCK) continue;
+-        if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
++        if (timeout_ms < 0 ? connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0
++                           : connect_bounded(s, ai, deadline, timeout_ms) == 0) break;
+         sock_close(s);
+         s = BAD_SOCK;
+     }
+     freeaddrinfo(res);
+-    if (s == BAD_SOCK) return NULL;
++    if (s == BAD_SOCK) {
++        if (denied && !tried) s_connect_error = PSNR_E_POLICY;
++        return NULL;
++    }
+ 
+     {   /* small request/reply frames: don't let Nagle sit on them */
+         int one = 1;
+         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+     }
+-#ifdef _WIN32
+-    { u_long nb = 1; ioctlsocket(s, FIONBIO, &nb); }
+-#else
+-    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+-#endif
++    set_nonblock(s);
+ 
+     psnr_client* c = (psnr_client*)calloc(1, sizeof(psnr_client));
++    if (!c) { sock_close(s); return NULL; }
+     c->s = s;
+     {   /* UDP goes to the same server address and port; the local end is
+          * this machine's address on the way to the server, for peers on the
+@@ -242,12 +393,12 @@ psnr_client* psnr_connect(const char* host, uint16_t port,
+ 
+     /* HELLO: comm_id [12] | online_id [16] | p2p_port u16 */
+     uint8_t hello[30] = {0};
+-    strncpy((char*)hello, comm_id, 12);
+-    strncpy((char*)hello + 12, online_id, 16);
++    memcpy(hello, comm_id, strlen(comm_id));
++    memcpy(hello + 12, online_id, strlen(online_id));
+     psnr_put16(hello + 28, p2p_port);
+     psnr_msg ack;
+     s_connect_error = 0;
+-    if (psnr_call(c, PSNR_HELLO, hello, sizeof(hello), &ack, 5000) != 1) {
++    if (psnr_call(c, PSNR_HELLO, hello, sizeof(hello), &ack, timeout_ms < 0 ? 5000 : remaining_ms(deadline)) != 1) {
+         psnr_close(c);
+         return NULL;
+     }
+@@ -263,6 +414,21 @@ psnr_client* psnr_connect(const char* host, uint16_t port,
+     return c;
+ }
+ 
++psnr_client* psnr_connect(const char* host, uint16_t port,
++                          const char* comm_id, const char* online_id, uint16_t p2p_port,
++                          uint32_t* out_user_id, uint8_t out_public_ip[4])
++{
++    return connect_impl(host, port, comm_id, online_id, p2p_port, out_user_id, out_public_ip, -1);
++}
++
++psnr_client* psnr_connect_timeout(const char* host, uint16_t port,
++                                  const char* comm_id, const char* online_id, uint16_t p2p_port,
++                                  uint32_t* out_user_id, uint8_t out_public_ip[4], int timeout_ms)
++{
++    if (timeout_ms <= 0) return NULL;
++    return connect_impl(host, port, comm_id, online_id, p2p_port, out_user_id, out_public_ip, timeout_ms);
++}
++
+ void psnr_server_addr(const psnr_client* c, uint8_t ip[4], uint16_t* port)
+ {
+     memcpy(ip, c->server_ip, 4);
+@@ -330,50 +496,99 @@ int psnr_relay_unwrap(const void* buf, size_t len, uint32_t* from_user,
+     return 1;
+ }
+ 
++/* psnr_relay_unwrap for a datagram read from the P2P socket: 0 unless it came
++ * from the server's UDP address, so a room member can't send a forged sender. */
++int psnr_relay_unwrap_from(const psnr_client* c, const uint8_t src_ip[4], uint16_t src_port,
++                           const void* buf, size_t len, uint32_t* from_user,
++                           const uint8_t** payload, size_t* payload_len)
++{
++    if (!c || !src_ip || src_port != c->server_port || memcmp(src_ip, c->server_ip, 4) != 0) return 0;
++    return psnr_relay_unwrap(buf, len, from_user, payload, payload_len);
++}
++
++/* Transfer a setup frame on a non-blocking relay leg. Every wait and every
++ * fragment shares the same deadline; a partial reply cannot restart it. */
++static int stream_transfer(sock_t s, uint8_t* p, size_t n, int sending,
++                            uint64_t deadline, int timeout_ms)
++{
++    while (n) {
++        pollfd_t pf;
++        int k, wait;
++        if (timeout_ms >= 0 && !remaining_ms(deadline)) return -1;
++        k = sending ? send(s, (const char*)p, (int)n, 0) : recv(s, (char*)p, (int)n, 0);
++        if (k == 0) return -1;
++        if (k > 0) { p += k; n -= (size_t)k; continue; }
++#ifdef _WIN32
++        if (WSAGetLastError() == WSAEINTR) continue;
++#else
++        if (errno == EINTR) continue;
++#endif
++        if (!WOULD_BLOCK()) return -1;
++        wait = timeout_ms < 0 ? -1 : remaining_ms(deadline);
++        if (wait == 0) return -1;
++        pf.fd = s; pf.events = sending ? POLLOUT : POLLIN; pf.revents = 0;
++        k = poll(&pf, 1, wait);
++        if (k == 0) return -1;
++        if (k < 0) {
++#ifdef _WIN32
++            if (WSAGetLastError() == WSAEINTR) continue;
++#else
++            if (errno == EINTR) continue;
++#endif
++            return -1;
++        }
++    }
++    return 0;
++}
++
+ /* A relay leg: a fresh connection to the server whose first message is
+  * STREAM_CONNECT or STREAM_ACCEPT, returned once the server says READY. */
+ static int64_t stream_leg(const psnr_client* c, uint8_t type, const uint8_t* body, uint16_t len,
+                           int timeout_ms)
+ {
+     struct sockaddr_in a;
++    struct addrinfo ai;
+     uint8_t f[64], hdr[3];
+-    pollfd_t pfd;
++    uint64_t deadline;
+     int one = 1;
+-    sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++    sock_t s;
++    if (!policy_allows(PSNR_PURPOSE_STREAM, NULL, c->server_ip, c->server_port)) return -1;
++    deadline = now_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0);
++    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+     if (s == BAD_SOCK) return -1;
+     memset(&a, 0, sizeof(a));
+     a.sin_family = AF_INET;
+     memcpy(&a.sin_addr, c->server_ip, 4);
+     a.sin_port = htons(c->server_port);
+-    if (connect(s, (struct sockaddr*)&a, sizeof(a)) != 0) goto fail;
++    memset(&ai, 0, sizeof(ai));
++    ai.ai_addr = (struct sockaddr*)&a;
++    ai.ai_addrlen = sizeof(a);
++    if (connect_bounded(s, &ai, deadline, timeout_ms) != 0) goto fail;
+     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
+ 
+     f[0] = type;
+     psnr_put16(f + 1, (uint16_t)(4 + len));
+     psnr_put32(f + 3, 1);
+     memcpy(f + 7, body, len);
+-    if (send(s, (const char*)f, 7 + len, PS3_NET_HOST_SEND_FLAGS) != 7 + len) goto fail;
++    if (stream_transfer(s, f, 7u + len, 1, deadline, timeout_ms) != 0) goto fail;
+ 
+     /* The reply: READY, or an ERROR. The server waits up to 10 s for the
+      * other side to accept. */
+-    for (int got = 0; got < 3; ) {
+-        pfd.fd = s;
+-        pfd.events = POLLIN;
+-        pfd.revents = 0;
+-        if (poll(&pfd, 1, timeout_ms) <= 0) goto fail;
+-        int n = (int)recv(s, (char*)hdr + got, 3 - got, 0);
+-        if (n <= 0) goto fail;
+-        got += n;
+-    }
++    if (stream_transfer(s, hdr, sizeof(hdr), 0, deadline, timeout_ms) != 0) goto fail;
+     uint16_t plen = psnr_get16(hdr + 1);
+     for (uint16_t got = 0; got < plen; ) {   /* req u32 (+ an error code) */
+         uint8_t skip[16];
+         int want = plen - got > (int)sizeof(skip) ? (int)sizeof(skip) : plen - got;
+-        int n = (int)recv(s, (char*)skip, want, 0);
+-        if (n <= 0) goto fail;
+-        got = (uint16_t)(got + n);
++        if (stream_transfer(s, skip, (size_t)want, 0, deadline, timeout_ms) != 0) goto fail;
++        got = (uint16_t)(got + want);
+     }
+     if (hdr[0] != PSNR_STREAM_READY) goto fail;
++    /* The caller owns a blocking raw stream after setup, as before. */
++#ifdef _WIN32
++    { u_long nb = 0; if (ioctlsocket(s, FIONBIO, &nb) != 0) goto fail; }
++#else
++    { int flags = fcntl(s, F_GETFL, 0); if (flags < 0 || fcntl(s, F_SETFL, flags & ~O_NONBLOCK) != 0) goto fail; }
++#endif
+     return (int64_t)s;
+ fail:
+     sock_close(s);
+@@ -415,3 +630,287 @@ void psnr_close(psnr_client* c)
+     free(c->rx);
+     free(c);
+ }
++
++int psnr_dead_reason(const psnr_client* c)
++{
++    return c->dead ? c->dead_reason : PSNR_DEAD_NONE;
++}
++
++int psnr_last_os_error(const psnr_client* c)
++{
++    return c->dead_os_err;
++}
++
++/* LAN discovery (docs/api.md, "LAN discovery"). */
++#define DISC_REQ_LEN   64
++#define DISC_REPLY_LEN 52
++#define DISC_MAX_DEST  32
++
++static uint32_t disc_nonce(void)
++{
++    static uint32_t counter;
++    uint32_t v = 0;
++#ifdef _WIN32
++    LARGE_INTEGER q;
++    QueryPerformanceCounter(&q);
++    v = (uint32_t)q.QuadPart ^ (uint32_t)GetCurrentProcessId() << 16;
++#else
++    FILE* f = fopen("/dev/urandom", "rb");
++    if (f) {
++        if (fread(&v, sizeof(v), 1, f) != 1) v = 0;
++        fclose(f);
++    }
++    if (!v) v = (uint32_t)getpid() << 16;
++#endif
++    v ^= (uint32_t)now_ms() * 2654435761u;
++    return v ^ (++counter * 40503u);
++}
++
++/* Fill the given printable-ASCII, NUL-terminated string from a NUL-padded field. */
++static void disc_text(char* dst, const uint8_t* src, size_t n)
++{
++    size_t i;
++    for (i = 0; i < n && src[i]; i++)
++        dst[i] = (src[i] >= 0x20 && src[i] < 0x7f) ? (char)src[i] : '?';
++    dst[i] = 0;
++}
++
++/* Probes every address in dests (IPv4, host order) at port, then collects replies.
++ * Not in psnr.h: the public psnr_discover builds the broadcast list and calls
++ * this; test_psnr.c calls it directly with a loopback address. */
++int psnr_discover_to(uint16_t port, int timeout_ms, psnr_found* out, int max,
++                     const uint32_t* dests, int ndests);
++int psnr_discover_to(uint16_t port, int timeout_ms, psnr_found* out, int max,
++                     const uint32_t* dests, int ndests)
++{
++    uint8_t req[DISC_REQ_LEN] = {0}, buf[128];
++    uint32_t nonce = disc_nonce();
++    uint64_t deadline;
++    sock_t s;
++    int one = 1, sent = 0, found = 0, i;
++
++    if (!out || max <= 0) return -1;
++    if (timeout_ms < 0) timeout_ms = 0;
++#ifdef _WIN32
++    { WSADATA w; WSAStartup(MAKEWORD(2, 2), &w); }
++#endif
++    s = socket(AF_INET, SOCK_DGRAM, 0);
++    if (s == BAD_SOCK) return -1;
++    setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&one, sizeof(one));
++
++    memcpy(req, "PSNR", 4);
++    req[4] = 0x04;
++    psnr_put32(req + 5, nonce);
++    for (i = 0; i < ndests; i++) {
++        struct sockaddr_in a;
++        memset(&a, 0, sizeof(a));
++        a.sin_family = AF_INET;
++        a.sin_port = htons(port);
++        a.sin_addr.s_addr = htonl(dests[i]);
++        if (sendto(s, (const char*)req, DISC_REQ_LEN, 0, (struct sockaddr*)&a, sizeof(a)) == DISC_REQ_LEN) sent++;
++    }
++    if (!sent) { sock_close(s); return -1; }
++
++    deadline = now_ms() + (uint64_t)timeout_ms;
++    while (found < max) {
++        uint64_t now = now_ms();
++        pollfd_t pf;
++        struct sockaddr_in from;
++        socklen_t fl = sizeof(from);
++        int r, k;
++        if (now >= deadline) break;
++        pf.fd = s;
++        pf.events = POLLIN;
++        pf.revents = 0;
++        r = poll(&pf, 1, (int)(deadline - now));
++        if (r < 0) {
++#ifndef _WIN32
++            if (errno == EINTR) continue;
++#endif
++            found = -1;
++            break;
++        }
++        if (r == 0) break;
++        r = (int)recvfrom(s, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&from, &fl);
++        if (r != DISC_REPLY_LEN || memcmp(buf, "PSNR", 4) != 0 || buf[4] != 0x84 ||
++            psnr_get32(buf + 5) != nonce)
++            continue;
++        {
++            psnr_found f;
++            memset(&f, 0, sizeof(f));
++            memcpy(f.ip, &from.sin_addr, 4);
++            f.tcp_port = psnr_get16(buf + 9);
++            f.udp_port = psnr_get16(buf + 11);
++            f.relay = buf[13] & 1;
++            f.players = psnr_get16(buf + 14);
++            disc_text(f.name, buf + 16, 24);
++            disc_text(f.version, buf + 40, 12);
++            for (k = 0; k < found; k++)
++                if (memcmp(out[k].ip, f.ip, 4) == 0 && out[k].tcp_port == f.tcp_port) break;
++            if (k == found) out[found++] = f;
++        }
++    }
++    sock_close(s);
++    return found;
++}
++
++int psnr_discover(uint16_t port, int timeout_ms, psnr_found* out, int max)
++{
++    uint32_t dests[DISC_MAX_DEST];
++    int n = 0;
++    dests[n++] = 0xffffffffu;
++#ifndef _WIN32
++    {   /* each IPv4 interface's directed broadcast; Windows uses 255.255.255.255 only */
++        struct ifaddrs *ifa, *p;
++        if (getifaddrs(&ifa) == 0) {
++            for (p = ifa; p; p = p->ifa_next) {
++                uint32_t d;
++                int k;
++                if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET || !p->ifa_broadaddr) continue;
++                if ((p->ifa_flags & (IFF_BROADCAST | IFF_UP)) != (IFF_BROADCAST | IFF_UP)) continue;
++                d = ntohl(((struct sockaddr_in*)p->ifa_broadaddr)->sin_addr.s_addr);
++                if (!d) continue;
++                for (k = 0; k < n && dests[k] != d; k++) {}
++                if (k == n && n < DISC_MAX_DEST) dests[n++] = d;
++            }
++            freeifaddrs(ifa);
++        }
++    }
++#endif
++    return psnr_discover_to(port ? port : 36100, timeout_ms, out, max, dests, n);
++}
++
++/* ---- payload decoders --------------------------------------------------- */
++
++static void copy_name(char out[PSNR_ONLINE_ID_MAX + 1], const uint8_t* p)
++{
++    memcpy(out, p, PSNR_ONLINE_ID_MAX);
++    out[PSNR_ONLINE_ID_MAX] = 0;
++    for (size_t i = 0; out[i]; i++) if ((unsigned char)out[i] < 0x20 || (unsigned char)out[i] > 0x7E) out[i] = '?';
++}
++
++/* A u16-length blob at p within len bytes: 1 and the pointers on success. */
++static int take_blob(const uint8_t* p, size_t len, const uint8_t** data, uint16_t* n, size_t* used)
++{
++    if (len < 2) return 0;
++    *n = psnr_get16(p);
++    if (len - 2 < *n) return 0;
++    *data = p + 2;
++    *used = 2u + *n;
++    return 1;
++}
++
++int psnr_caps_parse(const psnr_msg* m, psnr_caps* out)
++{
++    size_t used;
++    if (m->type != PSNR_CAPS || m->len < 4) return 0;
++    if (!take_blob(m->data + 4, m->len - 4, &out->version, &out->version_len, &used)) return 0;
++    if (used != m->len - 4) return 0;
++    out->bits = psnr_get32(m->data);
++    return 1;
++}
++
++int psnr_member_parse(const uint8_t* p, size_t len, psnr_member* out, size_t* used)
++{
++    size_t b;
++    if (len < 29) return 0;
++    out->member_id = psnr_get16(p);
++    out->user_id = psnr_get32(p + 2);
++    copy_name(out->online_id, p + 6);
++    memcpy(out->ip, p + 22, 4);
++    out->p2p_port = psnr_get16(p + 26);
++    out->owner = p[28];
++    if (!take_blob(p + 29, len - 29, &out->data, &out->data_len, &b)) return 0;
++    if (used) *used = 29 + b;
++    return 1;
++}
++
++int psnr_member_next(psnr_cursor* c, psnr_member* out)
++{
++    size_t used;
++    if (c->count == 0 || !psnr_member_parse(c->p, c->left, out, &used)) return 0;
++    c->p += used; c->left -= used; c->count--;
++    return 1;
++}
++
++int psnr_room_joined_parse(const psnr_msg* m, psnr_room_joined* out)
++{
++    const uint8_t* p = m->data;
++    size_t len = m->len, b;
++    psnr_cursor probe;
++    psnr_member mb;
++    if (len < 17) return 0;
++    out->room_id = psnr_get64(p);
++    out->my_member = psnr_get16(p + 8);
++    out->owner = psnr_get16(p + 10);
++    out->max = p[12];
++    out->flags = psnr_get32(p + 13);
++    p += 17; len -= 17;
++    if (!take_blob(p, len, &out->external, &out->external_len, &b)) return 0;
++    p += b; len -= b;
++    if (!take_blob(p, len, &out->internal, &out->internal_len, &b)) return 0;
++    p += b; len -= b;
++    if (len < 1) return 0;
++    out->members.count = p[0];
++    out->members.p = p + 1;
++    out->members.left = len - 1;
++    probe = out->members;               /* every member must parse, and nothing may trail */
++    while (probe.count) if (!psnr_member_next(&probe, &mb)) return 0;
++    return probe.left == 0;
++}
++
++int psnr_room_list_parse(const psnr_msg* m, psnr_cursor* c, uint16_t* total)
++{
++    psnr_cursor probe;
++    psnr_room r;
++    if (m->len < 4) return 0;
++    if (total) *total = psnr_get16(m->data);
++    c->count = psnr_get16(m->data + 2);
++    c->p = m->data + 4;
++    c->left = m->len - 4;
++    probe = *c;
++    while (probe.count) if (!psnr_room_next(&probe, &r)) return 0;
++    return probe.left == 0;
++}
++
++int psnr_room_next(psnr_cursor* c, psnr_room* out)
++{
++    size_t b;
++    if (c->count == 0 || c->left < 30) return 0;
++    if (!take_blob(c->p + 30, c->left - 30, &out->external, &out->external_len, &b)) return 0;
++    out->room_id = psnr_get64(c->p);
++    copy_name(out->owner, c->p + 8);
++    out->cur = c->p[24];
++    out->max = c->p[25];
++    out->flags = psnr_get32(c->p + 26);
++    c->p += 30 + b; c->left -= 30 + b; c->count--;
++    return 1;
++}
++
++int psnr_ranking_parse(const psnr_msg* m, psnr_cursor* c, uint32_t* total)
++{
++    psnr_cursor probe;
++    psnr_rank r;
++    if (m->len < 6) return 0;
++    if (total) *total = psnr_get32(m->data);
++    c->count = psnr_get16(m->data + 4);
++    c->p = m->data + 6;
++    c->left = m->len - 6;
++    probe = *c;
++    while (probe.count) if (!psnr_rank_next(&probe, &r)) return 0;
++    return probe.left == 0;
++}
++
++int psnr_rank_next(psnr_cursor* c, psnr_rank* out)
++{
++    size_t b;
++    if (c->count == 0 || c->left < 28) return 0;
++    if (!take_blob(c->p + 28, c->left - 28, &out->comment, &out->comment_len, &b)) return 0;
++    if (c->left - 28 - b < 8) return 0;
++    out->rank = psnr_get32(c->p);
++    copy_name(out->online_id, c->p + 4);
++    out->score = (int64_t)psnr_get64(c->p + 20);
++    out->recorded_unix = psnr_get64(c->p + 28 + b);
++    c->p += 36 + b; c->left -= 36 + b; c->count--;
++    return 1;
++}
+diff --git a/libs/network/psnr/psnr.h b/libs/network/psnr/psnr.h
+index 61a4f86..ecd5bd3 100644
+--- a/libs/network/psnr/psnr.h
++++ b/libs/network/psnr/psnr.h
+@@ -2,17 +2,37 @@
+  * psnr.h - client for the psnr server (docs/api.md), in C for ps3recomp's
+  * sceNp modules to vendor.
+  *
+- * No threads. psnr_send() queues a request and returns its id; the reply and
+- * any server pushes come back out of psnr_poll(), which never blocks. That is
+- * the shape NP's async APIs already have: the HLE module sends when the title
+- * starts a request, and drains psnr_poll() on a guest thread (the title's own
+- * poll or callback-check call), so callbacks run where the title expects them.
+- * psnr_call() is the blocking form, for setup and tests.
++ * No threads. psnr_send() transmits a request and returns its id; the reply and
++ * any server pushes come back out of psnr_poll(). Its receive path does not
++ * wait for new data. A write may wait for writability, but no longer than
++ * PSNR_SEND_TIMEOUT_MS in total; then the connection is dead (psnr_dead_reason).
++ * An adapter owns transport calls serially and delivers completions through
++ * the title's guest callback queue. Keep potentially blocking transport work
++ * away from timing-sensitive guest execution. psnr_call() is the blocking
++ * form, for setup and tests.
+  *
+- * psnr_poll() also sends the heartbeat, so a client that stops polling for
+- * 90 seconds is dropped, which is the right outcome for a hung title.
++ * Poll regularly for replies and idle heartbeats. The server drops a
++ * connection that sends nothing for 90 seconds.
+  *
+  * Not thread-safe: one thread per psnr_client at a time.
++ *
++ * What it touches. The client owns only the sockets it makes itself: the TCP
++ * connection psnr_connect opens to the server, and the TCP connection each
++ * relay stream opens (psnr_stream_connect and psnr_stream_accept return it to
++ * the caller, who owns and closes it) and, only if the title calls
++ * psnr_discover, one temporary UDP socket that call opens and closes before it
++ * returns. A host can refuse the first two with psnr_set_connect_policy. It never opens, reads, writes or closes
++ * a socket of the title's; the UDP peer socket is the title's, and the library
++ * only builds and reads the packets it exchanges. Connecting and disconnecting
++ * are explicit: nothing connects until the title calls psnr_connect, nothing
++ * reconnects by itself (psnr_poll returns -1 once the connection is lost), and
++ * psnr_close closes it. A title that never calls psnr_connect sends nothing.
++ * Process-wide effects: on Windows each psnr_connect and psnr_discover calls WSAStartup (2.2) and
++ * the library never calls WSACleanup; psnr_connect_error and the connect policy
++ * (psnr_set_connect_policy) are process-global values; the library starts no threads and installs no signal handlers or
++ * timers. It sends with plain send(), so on POSIX a write to a connection the
++ * server has closed can raise SIGPIPE unless the title ignores that signal. It
++ * resolves and connects over IPv4 only.
+  */
+ #ifndef PSNR_H
+ #define PSNR_H
+@@ -26,18 +46,19 @@ extern "C" {
+ 
+ /* Message types; payloads in docs/api.md. */
+ enum {
+-    PSNR_HELLO = 0x01, PSNR_HEARTBEAT = 0x02,
++    PSNR_HELLO = 0x01, PSNR_HEARTBEAT = 0x02, PSNR_PEER_AUTH = 0x03, PSNR_GET_CAPS = 0x04,
+     PSNR_CREATE_ROOM = 0x10, PSNR_SEARCH_ROOMS = 0x11, PSNR_JOIN_ROOM = 0x12,
+     PSNR_LEAVE_ROOM = 0x13, PSNR_SET_ROOM_DATA = 0x14, PSNR_ROOM_MESSAGE = 0x15,
+-    PSNR_KICK_MEMBER = 0x16,
++    PSNR_KICK_MEMBER = 0x16, PSNR_SET_ROOM_ACCESS = 0x17, PSNR_JOIN_BY_CODE = 0x18,
++    PSNR_GET_ROOM_ACCESS = 0x19,
+     PSNR_RECORD_SCORE = 0x20, PSNR_GET_RANKING = 0x21, PSNR_GET_RANKING_BY_ID = 0x22,
+ 
+-    PSNR_HELLO_ACK = 0x81, PSNR_ROOM_JOINED = 0x90, PSNR_ROOM_LIST = 0x91,
+-    PSNR_OK = 0x93, PSNR_SCORE_RECORDED = 0xB0, PSNR_RANKING = 0xB1,
++    PSNR_HELLO_ACK = 0x81, PSNR_CAPS = 0x94, PSNR_ROOM_JOINED = 0x90, PSNR_ROOM_LIST = 0x91,
++    PSNR_ROOM_ACCESS = 0x97, PSNR_OK = 0x93, PSNR_SCORE_RECORDED = 0xB0, PSNR_RANKING = 0xB1,
+     PSNR_ERROR = 0x8F,
+ 
+     PSNR_MEMBER_JOINED = 0xA1, PSNR_MEMBER_LEFT = 0xA2, PSNR_ROOM_DATA = 0xA3,
+-    PSNR_ROOM_MSG = 0xA4, PSNR_KICKED = 0xA5,
++    PSNR_ROOM_MSG = 0xA4, PSNR_KICKED = 0xA5, PSNR_PEER_KEY = 0xA8,
+ 
+     /* the relay (docs/api.md, "Relay") */
+     PSNR_STREAM_CONNECT = 0x30, PSNR_STREAM_ACCEPT = 0x31, PSNR_STREAM_READY = 0x96,
+@@ -52,6 +73,10 @@ enum {
+     PSNR_E_NAME_TAKEN = 8, PSNR_E_NO_RELAY = 9
+ };
+ 
++/* Set by the client itself, not sent by a server: the host's connect policy refused every address
++ * (see psnr_set_connect_policy). Reported by psnr_connect_error. */
++#define PSNR_E_POLICY 1000
++
+ typedef struct psnr_client psnr_client;
+ 
+ /* One reply or push. req is 0 for pushes. data excludes the request id and
+@@ -63,7 +88,14 @@ typedef struct {
+     uint32_t len;
+ } psnr_msg;
+ 
+-/* Connect and say HELLO. comm_id is the title's NP communication ID
++/* Name limits on the wire: comm_id 12 bytes, online_id 16, NUL-padded and not necessarily
++ * terminated. psnr_connect refuses longer ones (NULL) instead of cutting them. Copy a name
++ * you read from a payload into a char[PSNR_ONLINE_ID_MAX + 1] and terminate it. */
++#define PSNR_COMM_ID_MAX   12
++#define PSNR_ONLINE_ID_MAX 16
++
++/* Blocking connect and HELLO setup (DNS/connect/send are not bounded by a
++ * caller deadline; psnr_connect_timeout bounds the connect and HELLO). comm_id is the title's NP communication ID
+  * ("NPWR00860_00"), online_id the player's name, p2p_port the UDP port the
+  * title takes peer traffic on (0 if none). Fills the id the server assigned
+  * and the address it sees this client at. NULL on failure. */
+@@ -71,11 +103,45 @@ psnr_client* psnr_connect(const char* host, uint16_t port,
+                           const char* comm_id, const char* online_id, uint16_t p2p_port,
+                           uint32_t* out_user_id, uint8_t out_public_ip[4]);
+ 
++/* psnr_connect with a time limit. The TCP connect is non-blocking and waits at most timeout_ms,
++ * and so does the wait for HELLO_ACK: timeout_ms is one budget for both, the HELLO wait gets what
++ * the connect left. timeout_ms <= 0 gives NULL. Otherwise the same as psnr_connect, which keeps its
++ * blocking connect. DNS (getaddrinfo) is still blocking and is NOT covered by timeout_ms; a numeric
++ * IPv4 host avoids it. NULL on failure, and on timeout. */
++psnr_client* psnr_connect_timeout(const char* host, uint16_t port,
++                                  const char* comm_id, const char* online_id, uint16_t p2p_port,
++                                  uint32_t* out_user_id, uint8_t out_public_ip[4], int timeout_ms);
++
++/* Connect policy: lets the host title (or the runtime around it) refuse a TCP connection before the
++ * client opens it. Why a callback: the client opens these sockets itself, so a host that restricts
++ * where a game may connect cannot otherwise see or stop them.
++ *   PSNR_PURPOSE_SERVER  the connection psnr_connect or psnr_connect_timeout makes. host is the name
++ *                        as typed; ip is one address it resolved to. The callback runs once per
++ *                        resolved address, before the socket is made; a refused address is skipped
++ *                        and the next one tried. If every address is refused, the connect returns
++ *                        NULL and psnr_connect_error() is PSNR_E_POLICY.
++ *   PSNR_PURPOSE_STREAM  a relay leg (psnr_stream_connect, psnr_stream_accept) to the server the
++ *                        client is connected to. host is NULL; ip is the server's address. A refusal
++ *                        returns -1 and opens nothing.
++ * The callback returns nonzero to allow and 0 to refuse. No callback registered (the default, or
++ * NULL) allows everything, exactly as before. The registration is process-wide, because
++ * psnr_connect has no client yet: set it before the first connect, from the thread that connects;
++ * the library keeps no lock. The callback must not call back into the library. Not covered:
++ * psnr_discover (its UDP socket exists only if the title calls it) and the title's own P2P socket. */
++enum { PSNR_PURPOSE_SERVER = 1, PSNR_PURPOSE_STREAM = 2 };
++typedef int (*psnr_connect_policy_fn)(void* user, int purpose, const char* host,
++                                      const uint8_t ip[4], uint16_t port);
++void psnr_set_connect_policy(psnr_connect_policy_fn fn, void* user);
++
+ /* NAT traversal (docs/api.md, "UDP"). The caller owns the P2P socket; these
+  * build and read the packets it exchanges. Every one starts with "PSNR".
+- *   - Send a PROBE from the P2P socket to psnr_server_addr, now and then (a
+- *     router forgets an idle mapping), until a probe reply comes back. The
+- *     server then hands other players this socket's public endpoint.
++ *   - Send a PROBE from the title's own P2P socket to psnr_server_addr until a
++ *     probe reply comes back; the server then hands other players this
++ *     socket's public endpoint. Keep sending one about every 15 seconds while
++ *     the title is online: some home gateways drop an idle UDP mapping after
++ *     30 seconds (a 2010 measurement study of home gateways, Haetoenen et al.,
++ *     IMC 2010, reported a minimum near 30 seconds and a median near 3
++ *     minutes; RFC 4787 asks for at least 2 minutes).
+  *   - Send a few PUNCHes to a peer when it appears, so this side's router
+  *     lets the peer's packets in.
+  *   - Drop anything psnr_is_control() matches before the title sees it. */
+@@ -92,40 +158,192 @@ int  psnr_probe_reply(const void* buf, size_t len, uint8_t ip[4], uint16_t* port
+  * if the server runs with -relay.
+  *   Datagrams: wrap a payload for a peer and send it to psnr_server_addr from
+  *   the P2P socket; what comes back from the server unwraps to the sender and
+- *   the payload.
++ *   the payload. Check the source address of every datagram that unwraps:
++ *   use psnr_relay_unwrap_from, which returns 0 unless it came from the server.
++ *   Any room member can send a datagram with this header straight to the
++ *   title's UDP port, so a title that unwraps without the source check can be
++ *   sent a forged from_user.
+  *   Streams: when a ROUTE push says a peer takes streams only through the
+  *   relay, psnr_stream_connect opens one to it; the peer gets a STREAM_OFFER
+  *   push (stream_id u32 | from_user u32 | vport u16) and answers with
+  *   psnr_stream_accept. Both return a connected, blocking socket carrying the
+- *   stream's raw bytes (a SOCKET on Windows, an fd elsewhere), or -1. */
++ *   stream's raw bytes (a SOCKET on Windows, an fd elsewhere), or -1. A nonnegative
++ *   timeout_ms bounds the complete TCP connect, setup write and READY reply; fragments
++ *   share that one budget, including retries after interrupted waits. A negative
++ *   value waits without a deadline. The host's connect-policy callback runs
++ *   before that budget starts. */
+ int     psnr_relay_available(const psnr_client* c);
+ size_t  psnr_relay_wrap(const psnr_client* c, uint32_t to_user, const void* payload, size_t len,
+                         uint8_t* out, size_t cap);   /* 0 if it doesn't fit */
++/* Does not check the source: prefer psnr_relay_unwrap_from. Kept for
++ * compatibility; it accepts a datagram from anywhere. */
+ int     psnr_relay_unwrap(const void* buf, size_t len, uint32_t* from_user,
+                           const uint8_t** payload, size_t* payload_len);
++/* psnr_relay_unwrap, but returns 0 unless the datagram's source (src_ip,
++ * src_port, as the UDP socket reports it) is the server's UDP address
++ * (psnr_server_addr). Use this one for every datagram a title reads from its
++ * P2P socket. */
++int     psnr_relay_unwrap_from(const psnr_client* c, const uint8_t src_ip[4], uint16_t src_port,
++                               const void* buf, size_t len, uint32_t* from_user,
++                               const uint8_t** payload, size_t* payload_len);
+ int64_t psnr_stream_connect(const psnr_client* c, uint32_t to_user, uint16_t vport, int timeout_ms);
+ int64_t psnr_stream_accept(const psnr_client* c, uint32_t stream_id, int timeout_ms);
+ 
+-/* After psnr_connect returned NULL: the ERROR code the server refused the
+- * HELLO with (PSNR_E_NAME_TAKEN: another player on the server has that
+- * name), or 0 if it never answered. */
++/* LAN discovery. One server found on the local network. name and version are
++ * NUL-terminated printable ASCII; ip is where the reply came from, tcp_port is
++ * the port to give psnr_connect. */
++typedef struct {
++    uint8_t  ip[4];
++    uint16_t tcp_port;
++    uint16_t udp_port;
++    uint8_t  relay;      /* 1 if the server's relay is on */
++    uint16_t players;
++    char     name[25];
++    char     version[13];
++} psnr_found;
++
++/* Looks for servers on the local network (the DISCOVER packets in docs/api.md). Opens
++ * its own temporary UDP socket, never a title socket, sets SO_BROADCAST, sends
++ * one request to 255.255.255.255:port and, on POSIX, to each IPv4 interface's
++ * directed broadcast address (Windows: 255.255.255.255 only), then collects
++ * replies until timeout_ms has passed or max are found, and closes the socket.
++ * port is the UDP port to probe; 0 means 36100, the default server port. Fills
++ * out[0..max) and returns the number found, or -1 on error. Only a server
++ * started with its discovery option answers, and only same-subnet, non-isolated
++ * networks are reached: keep a manual host:port path. IPv4 only, no threads,
++ * blocks for about timeout_ms at most, and does not touch psnr_connect_error. */
++int psnr_discover(uint16_t port, int timeout_ms, psnr_found* out, int max);
++
++/* Last HELLO refusal diagnostic, process-global (PSNR_E_NAME_TAKEN: another
++ * player has that name). An earlier DNS/TCP failure may retain a prior code;
++ * do not treat it as the definitive cause of every NULL connect result. */
+ int psnr_connect_error(void);
+ void psnr_close(psnr_client* c);
+ 
+-/* Queue a request. body excludes the request id. Returns the id, or 0 if
+- * the connection is gone. */
++/* Why the connection was lost. PSNR_DEAD_NONE while it is up. Set once, at the first failure:
++ *   PEER_CLOSED  the server closed the connection (a read returned end of stream)
++ *   IO_ERROR     a read or write failed; psnr_last_os_error says why
++ *   NOMEM        an allocation failed
++ *   SEND_TIMEOUT a write waited PSNR_SEND_TIMEOUT_MS for writability in total */
++enum psnr_dead_reason {
++    PSNR_DEAD_NONE = 0, PSNR_DEAD_PEER_CLOSED, PSNR_DEAD_IO_ERROR, PSNR_DEAD_NOMEM, PSNR_DEAD_SEND_TIMEOUT
++};
++int psnr_dead_reason(const psnr_client* c);
++/* errno (POSIX) or WSAGetLastError() (Windows), captured when the connection was marked dead;
++ * 0 if there was none (a peer close, a timeout). */
++int psnr_last_os_error(const psnr_client* c);
++
++/* How long one write may wait for writability in total before the connection is marked dead
++ * (PSNR_DEAD_SEND_TIMEOUT). Define it before including this header to change it. */
++#ifndef PSNR_SEND_TIMEOUT_MS
++#  define PSNR_SEND_TIMEOUT_MS 5000
++#endif
++
++/* Transmit a request synchronously; may wait for socket writability, for at most
++ * PSNR_SEND_TIMEOUT_MS in total. body excludes the request id. Returns the id, or 0 on failure;
++ * after a failed write the connection is unusable. */
+ uint32_t psnr_send(psnr_client* c, uint8_t type, const void* body, uint32_t len);
+ 
+-/* 1: *out holds the next reply or push. 0: nothing yet. -1: disconnected. */
++/* Round trip reported to the server. The library times every psnr_call (send to
++ * reply, so the server's own time is included) and keeps the smallest of the last
++ * eight; psnr_rtt_ms returns it in milliseconds, or -1 before the first reply.
++ * HEARTBEAT (automatic in psnr_poll, or psnr_heartbeat) carries it as an optional
++ * 2-byte body, which the server shows next to the player's name on its status
++ * page as reported by the player. Servers that do not know the field ignore it.
++ * It is off until the title calls psnr_report_rtt(c, 1), which is recommended: hosts then see
++ * who is lagging. psnr_report_rtt(c, 0) stops it again; nothing else changes.
++ * psnr_heartbeat sends a HEARTBEAT now and returns the request id, or 0 on failure. */
++int      psnr_rtt_ms(const psnr_client* c);
++void     psnr_report_rtt(psnr_client* c, int on);
++uint32_t psnr_heartbeat(psnr_client* c);
++
++/* 1: *out holds the next reply or push. 0: nothing yet. -1: disconnected after
++ * queued messages drain (psnr_dead_reason says why). Automatic heartbeat sends may wait for
++ * writability, as psnr_send does. */
+ int psnr_poll(psnr_client* c, psnr_msg* out);
+ 
+-/* Send and wait up to timeout_ms for that request's reply. Pushes and other
+- * replies that arrive meanwhile stay queued for psnr_poll. 1 / 0 (timeout) / -1. */
++/* Send, then wait up to timeout_ms for that request's reply (not a full-operation
++ * deadline). Timeout does not cancel the request; a late reply can still arrive.
++ * Pushes and other replies stay queued for psnr_poll. 1 / 0 (timeout) / -1. */
+ int psnr_call(psnr_client* c, uint8_t type, const void* body, uint32_t len,
+               psnr_msg* reply, int timeout_ms);
+ 
+ void psnr_msg_free(psnr_msg* m);
+ 
++/* Decoders for the payloads in docs/api.md. Each checks every length against the message
++ * before it reads a field, so a short or damaged payload gives 0 and never reads past the
++ * end. The pointers inside a result (blobs) point into the psnr_msg's data: they are valid
++ * until psnr_msg_free. online_id fields come out NUL-terminated.
++ *
++ *   psnr_msg_free(&m) after psnr_room_joined_parse(&m, &rj) ... psnr_member_next(&rj.members, &mb)
++ *   is the pattern: a cursor starts valid and next returns 1 per entry, then 0 at the end. */
++typedef struct { const uint8_t* p; size_t left; uint32_t count; } psnr_cursor;
++
++typedef struct {
++    uint16_t member_id;
++    uint32_t user_id;
++    char     online_id[PSNR_ONLINE_ID_MAX + 1];
++    uint8_t  ip[4];
++    uint16_t p2p_port;
++    uint8_t  owner;
++    const uint8_t* data;      /* the member's own data blob */
++    uint16_t data_len;
++} psnr_member;
++
++typedef struct {
++    uint64_t room_id;
++    uint16_t my_member, owner;
++    uint8_t  max;
++    uint32_t flags;
++    const uint8_t* external;  uint16_t external_len;
++    const uint8_t* internal;  uint16_t internal_len;
++    psnr_cursor members;      /* read with psnr_member_next */
++} psnr_room_joined;
++
++typedef struct {
++    uint64_t room_id;
++    char     owner[PSNR_ONLINE_ID_MAX + 1];
++    uint8_t  cur, max;
++    uint32_t flags;
++    const uint8_t* external;  uint16_t external_len;
++} psnr_room;
++
++typedef struct {
++    uint32_t rank;
++    char     online_id[PSNR_ONLINE_ID_MAX + 1];
++    int64_t  score;
++    const uint8_t* comment;   uint16_t comment_len;
++    uint64_t recorded_unix;
++} psnr_rank;
++
++int psnr_room_joined_parse(const psnr_msg* m, psnr_room_joined* out);  /* ROOM_JOINED; 1 ok, 0 bad */
++int psnr_member_parse(const uint8_t* p, size_t len, psnr_member* out, size_t* used); /* a MEMBER_JOINED body after room_id, or one entry; 1 ok */
++int psnr_member_next(psnr_cursor* c, psnr_member* out);
++int psnr_room_list_parse(const psnr_msg* m, psnr_cursor* c, uint16_t* total); /* ROOM_LIST; 1 ok, 0 bad */
++int psnr_room_next(psnr_cursor* c, psnr_room* out);
++int psnr_ranking_parse(const psnr_msg* m, psnr_cursor* c, uint32_t* total);   /* RANKING; 1 ok, 0 bad */
++int psnr_rank_next(psnr_cursor* c, psnr_rank* out);
++
++/* Capability report. Send PSNR_GET_CAPS (no body, after HELLO) with psnr_call; the reply is PSNR_CAPS, or a
++ * PSNR_ERROR with PSNR_E_BAD_REQUEST from a server that predates it (treat that as "nothing reported").
++ * A clear bit means the server does not offer the feature to this player; ignore bits you do not know. The
++ * probe and relay bits are per title: a server can turn them off for a title (-no-peer-titles). */
++enum {
++    PSNR_CAP_ROOMS = 1u << 0,      /* create, search, join and leave rooms */
++    PSNR_CAP_SCORES = 1u << 1,     /* record and read scores */
++    PSNR_CAP_ROOM_CODES = 1u << 2, /* invite-only rooms and join by code */
++    PSNR_CAP_PEER_KEYS = 1u << 3,  /* PEER_AUTH and PEER_KEY pushes */
++    PSNR_CAP_PROBE = 1u << 4,      /* the server answers a UDP PROBE from this player's P2P socket */
++    PSNR_CAP_RELAY = 1u << 5,      /* relay streams and datagrams for this player */
++    PSNR_CAP_DISCOVER = 1u << 6    /* the server answers LAN discovery */
++};
++typedef struct {
++    uint32_t bits;
++    const uint8_t* version;   /* the server's version text, not NUL-terminated; points into the message */
++    uint16_t version_len;
++} psnr_caps;
++int psnr_caps_parse(const psnr_msg* m, psnr_caps* out);   /* CAPS; 1 ok, 0 bad (short, or bytes left over) */
++
+ /* Big-endian field helpers for building and reading payloads. */
+ static inline uint8_t* psnr_put16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; return p + 2; }
+ static inline uint8_t* psnr_put32(uint8_t* p, uint32_t v) { psnr_put16(p, (uint16_t)(v >> 16)); return psnr_put16(p + 2, (uint16_t)v); }

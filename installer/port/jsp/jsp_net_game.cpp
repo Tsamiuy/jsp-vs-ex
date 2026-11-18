@@ -38,6 +38,7 @@ extern "C" void jsp_net_env_part(int) {}
 #include "jsp_overlay_api.h"
 #include "jsp_net_session.h"
 #include "jsp_net_online.h"
+#include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
 #include "jsp_net_m2_link.h"
 #include "jsp_session_handshake.h"
@@ -45,6 +46,7 @@ extern "C" void jsp_net_env_part(int) {}
 #include "jsp_session_manifest.h"
 
 extern "C" {
+int jsp_online_repsn_identity(char* server, int sn, char* name, int nn, char* comm, int cn, int* report_rtt);   // jsp_online.cpp: repsn.ini even with enabled=0
 extern int (*jsp_session_text_hook)(const char* key, char* out, int n);   // jsp_settings.cpp
 int jsp_setting_get(const char* key, char* out, int n);
 void jsp_setting_changed(void);   // jsp_settings.cpp: bumps jsp_setting_gen so the cached readers re-read
@@ -195,7 +197,9 @@ enum class Phase { Off, Handshake, Armed, Running, Ended };
 struct State {
     bool host = false;
     uint16_t listen_port = 0; Endpoint join{};
-    UdpMux mux; std::unique_ptr<MessageHub> hub; std::unique_ptr<DirectRendezvous> rz;
+    UdpMux mux; std::unique_ptr<MessageHub> hub; std::unique_ptr<IRendezvous> rz;
+    std::unique_ptr<PsnrClientTransport> rp; RePsnRendezvous* rrz = nullptr;   // ENHANCEMENT (rollback over re-psn): the client transport and the rendezvous over it (rz owns the rendezvous)
+    std::string path_line; uint64_t path_until = 0;   // the "direct" / "relay" line shown for the first seconds of the match
     std::unique_ptr<M2LinkT<jpsm::Transport>> link; M2Pump pump;
     GameReader reader; jpsm::EffectiveValues ev{&reader}; jpsm::Caps caps;
     std::unique_ptr<jpsm::Host> mh; std::unique_ptr<jpsm::Client> mc;
@@ -233,6 +237,7 @@ void show(const std::string& s)
     jsp_overlay_end();
 }
 
+uint64_t rz_rejected() { if (auto* d = dynamic_cast<DirectRendezvous*>(g.rz.get())) return d->rejected_hello; return g.rrz ? g.rrz->rejected_members : 0; }
 void log(const char* what, const std::string& s) { std::fprintf(stderr, "[net] %s%s%s\n", what, s.empty() ? "" : ": ", s.c_str()); }
 std::string take_text() { std::lock_guard<std::mutex> lk(g.txt_mu); return g.fail_text; }
 void set_text(const std::string& t) { std::lock_guard<std::mutex> lk(g.txt_mu); g.fail_text = t; }
@@ -281,6 +286,7 @@ uint64_t random_session_id()
 void pump_tick(uint64_t t)
 {
     if (g.phase.load() == Phase::Off || g.m2_ended.load()) return;   // once ended nothing more is logged or driven (no 10 lines a second after a refusal)
+    if (g.rp) g.rp->pump();   // re-psn: from the very first tick, BEFORE the startup-evidence wait (up to 240 s): the server drops a client that does not poll for 90 s (heartbeat inside psnr_poll); this thread is the only one that calls the psnr client
     if (!g.evidence_ready.load()) {   // the handshake belongs after boot: Startup-field evidence (renderer pipe state, installed render60 mode) must exist when a proposal is checked
         static uint64_t first = 0, next = 0;
         if (!first) first = t;
@@ -301,7 +307,7 @@ void pump_tick(uint64_t t)
             std::fprintf(stderr, "[net] waiting: phase=%d plan=%d m2=%d m2_started=%d m2_ended=%d sent=%llu recv=%llu dropped=%llu unknown_tag=%llu send_fail=%llu (err %d) hub_ignored=%llu rz_rejected=%llu\n",
                          (int)g.phase.load(), (int)g.plan_ready, g.plan_ready ? (int)(g.host ? g.mh->state() : g.mc->state()) : -1, (int)g.m2_started.load(), (int)g.m2_ended.load(),
                          (unsigned long long)g.mux.sent, (unsigned long long)g.mux.received, (unsigned long long)g.mux.dropped, (unsigned long long)g.mux.unknown_tag,
-                         (unsigned long long)g.mux.send_fail, g.mux.last_send_err, (unsigned long long)g.hub->ignored, (unsigned long long)g.rz->rejected_hello);
+                         (unsigned long long)g.mux.send_fail, g.mux.last_send_err, (unsigned long long)g.hub->ignored, (unsigned long long)rz_rejected());
         }
     }
     if (g.m2_ended.load()) return;
@@ -324,7 +330,8 @@ void pump_tick(uint64_t t)
             if (g.mc->join(g.plan.session_id, 0, t) != jpsm::Reason::None) { pump_fail("settings handshake: cannot join"); return; }
         }
         g.plan_ready = true;
-        log("rendezvous", to_string(g.plan.remotes[0].ep));
+        log("rendezvous", to_string(g.plan.remotes[0].ep) + (g.rrz ? std::string(" via re-psn, path ") + path_name(g.rrz->path()) + ", room " + std::to_string((unsigned long long)g.rrz->room_id()) : std::string()));
+        if (g.rrz) g.path_line = std::string("re-psn: ") + path_name(g.rrz->path()) + (g.rrz->path() == Path::Relay ? " (through the server)" : "");
         return;
     }
     // The handshake keeps ticking for the whole match (keep-alives, Start retransmits, Cancel handling); after handover() it only stops its own silence checks.
@@ -476,13 +483,14 @@ void boundary(ppu_context* c)
         if (!g.cancel_since) g.cancel_since = GetTickCount64();
         if (GetTickCount64() - g.cancel_since > 1500) { g.sess.abort("match ended by the player"); end_with("Match ended"); return; }
     } else g.cancel_since = 0;
+    if (g.path_until && GetTickCount64() > g.path_until) { g.path_until = 0; if (g.shown == g.path_line) show(""); }   // never blanks a later message (a reconnect or an end line)
     const uint64_t u0 = g.glue->updates();
     const jsx::Op op = g.glue->iteration(true);   // update is called whenever the stepper has nothing queued (skipping it for pacing stalled both peers in a two-copy test)
     if (g.glue->updates() != u0) { jsp_snapshot_ext_budget_reset(); if (const uint32_t ms = g.sess.pace_sleep_ms(33)) Sleep(ms); }
     else g.sess.poll();   // replay / regrant / stall iterations: the network is still serviced
     for (const SessionEvent& e : g.sess.take_events()) {
         switch (e.kind) {
-        case SessionEventKind::Started: log("gekko session synchronized", ""); show(""); break;
+        case SessionEventKind::Started: log("gekko session synchronized", ""); if (!g.path_line.empty()) { show(g.path_line); g.path_until = GetTickCount64() + 6000; } else show(""); break;
         case SessionEventKind::Disconnected:   // GekkoNet fires it after the disconnect timeout = the grace window: the match is over
             { std::string why; if (m2_cancelled_within(300, &why)) { g.sess.abort(why); end_with(why); return; } }   // the peer's handshake Cancel (a local failure there) names the reason
             g.sess.abort("opponent disconnected"); end_with("Opponent disconnected"); return;
@@ -544,12 +552,29 @@ extern "C" void jsp_net_game_install(void)
     const bool have_listen = jsp_setting_get("JSP_ROLLBACK_LISTEN", b, sizeof b) && b[0];
     char j[96] = {};
     const bool have_join = jsp_setting_get("JSP_ROLLBACK_JOIN", j, sizeof j) && j[0];
-    if (have_listen == have_join) { std::fprintf(stderr, "[net] BUG: the start decision (jpno::resolve_env) let JSP_ROLLBACK=1 through without exactly one role key: off\n"); return; }   // unreachable: refused before main()
-    g.host = have_listen;
+    char via[24] = {}, role[24] = {}, relay[8] = {};
+    const bool via_repsn = jsp_setting_get(jpno::kKeyVia, via, sizeof via) && jps::ieq(via, "repsn");
     std::string err;
-    if (g.host) g.listen_port = (uint16_t)std::atoi(b);
-    else if (!parse_endpoint(j, g.join)) { std::fprintf(stderr, "[net] JSP_ROLLBACK_JOIN is not IP:PORT: off\n"); return; }
-    if (!g.mux.open(g.host ? g.listen_port : 0, &err)) { std::fprintf(stderr, "[net] cannot open the UDP socket: %s: off\n", err.c_str()); return; }
+    RepsnIdentity rid; bool repsn_host = true, repsn_relay = false;
+    if (via_repsn) {   // ENHANCEMENT (rollback over re-psn): a room on the player's re-psn server arranges the session; our UdpMux socket is the P2P socket
+        jsp_setting_get(jpno::kKeyRole, role, sizeof role);
+        repsn_host = jps::ieq(role, "host");
+        repsn_relay = jsp_setting_get(jpno::kKeyRelay, relay, sizeof relay) && jpno::flag_on(relay);
+        char srv[160] = {}, nm[64] = {}, cid[24] = {}; int rep_rtt = 0;
+        if (!jsp_online_repsn_identity(srv, sizeof srv, nm, sizeof nm, cid, sizeof cid, &rep_rtt) || !parse_server(srv, rid.host, rid.port) || !nm[0]) {
+            std::fprintf(stderr, "[net] re-psn: no server / online name in repsn.ini (set them on the Online page under Delay): off\n"); return;
+        }
+        if (std::strlen(nm) > 16) { std::fprintf(stderr, "[net] re-psn: the online name '%s' is longer than 16 characters (repsn.ini name=): off\n", nm); return; }
+        rid.name = nm; if (cid[0]) rid.comm_id = cid; rid.report_rtt = rep_rtt != 0;
+        g.host = repsn_host;
+        g.listen_port = have_listen ? (uint16_t)std::atoi(b) : 0;   // a fixed UDP port is optional (firewalls); 0 = any
+    } else {
+        if (have_listen == have_join) { std::fprintf(stderr, "[net] BUG: the start decision (jpno::resolve_env) let JSP_ROLLBACK=1 through without exactly one role key: off\n"); return; }   // unreachable: refused before main()
+        g.host = have_listen;
+        if (g.host) g.listen_port = (uint16_t)std::atoi(b);
+        else if (!parse_endpoint(j, g.join)) { std::fprintf(stderr, "[net] JSP_ROLLBACK_JOIN is not IP:PORT: off\n"); return; }
+    }
+    if (!g.mux.open(g.host ? g.listen_port : (via_repsn ? g.listen_port : 0), &err)) { std::fprintf(stderr, "[net] cannot open the UDP socket: %s: off\n", err.c_str()); return; }
     // F9 is the cancel key: a VK 0x78 binding (settings pages save PAD_KEY_* as 0x78 / decimal) is dropped from the environment the pad layer reads.
     for (char** e = environ; e && *e; ++e) {
         if (std::strncmp(*e, "PAD_KEY_", 8) != 0) continue;
@@ -567,11 +592,23 @@ extern "C" void jsp_net_game_install(void)
     g.ev.set_local(jpsm::Id::Rollback, 1);
     jsp_session_text_hook = session_text;
     g.hub.reset(new MessageHub(g.mux));
-    g.rz.reset(g.host ? new DirectRendezvous(g.mux, *g.hub, 1, random_session_id()) : new DirectRendezvous(g.mux, *g.hub, 1, g.join));
+    if (via_repsn) {
+        g.rp.reset(new PsnrClientTransport(g.mux, rid));
+        RePsnRendezvous::Config rc; rc.host = repsn_host; rc.build = g.caps.build; rc.allow_relay = repsn_relay; rc.local_count = 1;
+        g.rrz = new RePsnRendezvous(*g.rp, g.mux, *g.hub, rc);
+        g.rrz->on_path = [](Path p, uint32_t peer_user) {   // runs inside rz->poll() (the pump thread)
+            g.rp->set_peer_user(peer_user);
+            g.rp->set_relay_mode(p == Path::Relay);   // Relay: every datagram to the peer goes through the server from now on, until the session ends
+            std::fprintf(stderr, "[net] re-psn path: %s\n", path_name(p));
+        };
+        g.rz.reset(g.rrz);
+        g.rp->start(repsn_relay);
+    } else g.rz.reset(g.host ? new DirectRendezvous(g.mux, *g.hub, 1, random_session_id()) : new DirectRendezvous(g.mux, *g.hub, 1, g.join));
     g.link.reset(new M2LinkT<jpsm::Transport>(g.mux));
     g.phase = Phase::Handshake;
     install_all(std::make_integer_sequence<int, sizeof k_ents / sizeof k_ents[0]>());
-    std::fprintf(stderr, "[net] listening/joining: %s, local UDP port %u\n", g.host ? "host" : to_string(g.join).c_str(), (unsigned)g.mux.local_port());
+    if (via_repsn) std::fprintf(stderr, "[net] re-psn: %s a room on %s:%u as %s (relay %s), local UDP port %u\n", g.host ? "creating" : "joining", rid.host.c_str(), (unsigned)rid.port, rid.name.c_str(), repsn_relay ? "allowed" : "not allowed", (unsigned)g.mux.local_port());
+    else std::fprintf(stderr, "[net] listening/joining: %s, local UDP port %u\n", g.host ? "host" : to_string(g.join).c_str(), (unsigned)g.mux.local_port());
     g.pump.start(g.mux, *g.link,
         [](uint8_t peer, const uint8_t* d, size_t n, uint64_t ms) {   // runs on the pump thread under its mutex
             if (g.host && g.mh) g.mh->on_message(peer, d, n, ms);

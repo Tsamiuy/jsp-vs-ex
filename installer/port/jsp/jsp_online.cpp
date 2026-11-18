@@ -222,6 +222,8 @@ static std::string join(const std::string& d, const char* f)
  * Read only (editing works on its own working copy, EditState, below). method: 0 off, 1 re-psn, 2 community (not supported yet), 3 both enabled (refused). */
 struct View {
     int files = 0, rejected = 0, rep_enabled = 0, com_enabled = 0, online = 0, presets = 0, method = 0, valid = 0;
+    char comm[24] = "";   /* repsn.ini comm_id (empty: the caller uses the title default) */
+    int report_rtt = 0;   /* repsn.ini report_rtt=1 */
     char server[160] = "", name[64] = "", active[64] = "", via[24] = "file", name_via[24] = "file";   /* via/name_via: where the effective method+server / name came from: "--psnr flag", "environment", "--username flag", "file" */
 };
 static View g_view;
@@ -305,6 +307,8 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
         snprintf(v.server, sizeof v.server, "%s", eff_server.c_str());
         snprintf(v.name, sizeof v.name, "%s", eff_name.c_str());
         snprintf(v.active, sizeof v.active, "%s", st.active.c_str());
+        snprintf(v.comm, sizeof v.comm, "%s", st.comm_id.c_str());
+        v.report_rtt = st.report_rtt == "1";
         snprintf(v.via, sizeof v.via, "%s", via);
         snprintf(v.name_via, sizeof v.name_via, "%s", nvia);
     }
@@ -616,6 +620,17 @@ extern "C" void jsp_online_edit_cycle(int field, int dir)   /* method (0): Off, 
         k = k < 0 ? (dir < 0 ? cnt - 1 : 0) : ((k + (dir < 0 ? -1 : 1)) % cnt + cnt) % cnt;
         s.active = s.presets[k];
     }
+}
+
+/* ENHANCEMENT (rollback over re-psn): the server, online name and comm id of repsn.ini for the rollback client, even with enabled=0 (the game's own re-psn online must stay off while
+ * rollback runs). 1 = server and name are both set. report_rtt: repsn.ini report_rtt=1. */
+extern "C" int jsp_online_repsn_identity(char* server, int sn, char* name, int nn, char* comm, int cn, int* report_rtt)
+{
+    const jsp_online::View& v = jsp_online::g_view;
+    if (!v.valid || !v.server[0] || !v.name[0]) return 0;
+    snprintf(server, (size_t)sn, "%s", v.server); snprintf(name, (size_t)nn, "%s", v.name); snprintf(comm, (size_t)cn, "%s", v.comm);
+    if (report_rtt) *report_rtt = v.report_rtt;
+    return 1;
 }
 
 /* ENHANCEMENT (in-game netcode option): the Netcode row of the page drives the method directly and asks whether the working copy can be saved. */
