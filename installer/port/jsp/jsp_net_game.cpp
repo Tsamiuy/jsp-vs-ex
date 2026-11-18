@@ -4,9 +4,11 @@
 // Game-specific; the game-independent logic is in jsp_net_glue.h, jsp_net_session.h, jsp_net_m2_link.h and the settings handshake's jsp_session_*.h.
 //
 // Switches (JSP_ROLLBACK=1 sets sensible defaults for the snapshot ring, the fight hash and the canonical pad hook before main(); the player never sets those):
-//   JSP_ROLLBACK=1            opt-in
-//   JSP_ROLLBACK_LISTEN=PORT  host: bind this UDP port and wait for one client (direct-IP host). The in-game Online page has no such field yet: the key is read
-//   JSP_ROLLBACK_JOIN=IP:PORT client: join that host (direct-IP join).                           through jsp_setting_get, so the launcher / settings file can carry it.
+//   JSP_ROLLBACK=1            opt-in (any non-zero value: not empty, first character not '0')
+//   JSP_ROLLBACK_LISTEN=PORT  host: bind this UDP port and wait for one client (direct-IP host). The in-game Online page (Port Settings - Online: Netcode = Rollback, Role,
+//   JSP_ROLLBACK_JOIN=IP:PORT client: join that host (direct-IP join).      Port / Host address, jsp_net_online.h) writes these keys to play_settings.txt; the launcher turns them into
+//                             environment variables at the next start (a variable set by hand does the same; the file line wins over an inherited variable, as for every key).
+//                             Rollback and the game's own online (PS3_NET_ONLINE) both on: refused before main(), neither runs (docs/ROLLBACK.md).
 //   JSP_ROLLBACK_ALLOW_DEBUG=1  test tooling only (WORKAROUND to replace): the handshake's debug-switch refusal is off (the two-instance test runs the auto-pilot route; both peers need the same fight
 //                             seed until the host's plan seed is applied to the game, see the doc)
 // Flow: settings handshake on a pump thread (starts at once; survives scene loads) -> Started -> at the first fight tick the session starts: GekkoNet session,
@@ -18,6 +20,7 @@
 
 #ifndef JSP_ROLLBACK_BUILD
 extern "C" void jsp_net_game_install(void) {}
+extern "C" void jsp_net_env_part(int) {}
 #else
 
 #include <atomic>
@@ -34,6 +37,7 @@ extern "C" void jsp_net_game_install(void) {}
 #include "jsp_hook_chain.h"
 #include "jsp_overlay_api.h"
 #include "jsp_net_session.h"
+#include "jsp_net_online.h"
 #include "jsp_net_glue.h"
 #include "jsp_net_m2_link.h"
 #include "jsp_session_handshake.h"
@@ -80,24 +84,28 @@ constexpr uint32_t kMaxPrediction = 8, kRingDepth = 12;   // ring depth must exc
 bool env_on(const char* n) { const char* e = std::getenv(n); return e && *e && e[0] != '0'; }
 std::vector<std::string> g_own_env;   // names this module set itself: they must not count as debug switches
 
-// JSP_ROLLBACK=1 before main(): the snapshot ring (incremental, driven from outside), the per-tick fight hash it reads, the canonical pad hook (installed at session start).
-struct EnvInit {
-    EnvInit()
-    {
-        if (!env_on("JSP_ROLLBACK")) return;
-        struct KV { const char* k; const char* v; } kv[] = {
-            {"JSP_FIGHT_HASH", "1000000"}, {"JSP_FIGHT_HASH_START", "1"}, {"JSP_SNAPSHOT", "1"}, {"JSP_SNAPSHOT_EXT", "1"}, {"JSP_SNAPSHOT_WW", "1"},
-            {"JSP_SNAPSHOT_WW_DEPTH", "12"}, {"JSP_SNAPSHOT_SUSPEND", "1"},
-            {"JSP_STEP_TURBO", "1"},   // turbo: replays run on the virtual clock and are not presented (stepper contract)
-            // Quiesce enforced, polled gate, registry threads, job-server gate
-            // (the registry once hung after a rollback; the cause was an SPU job straddling the target tick, which the job-server condition of the gate now excludes).
-            {"JSP_SNAPSHOT_THREADS", "registry"}, {"JSP_SNAPSHOT_QUIESCE", "2"}, {"JSP_SNAPSHOT_GATE", "poll"}, {"JSP_SNAPSHOT_GATE_JOBSERVER", "1"},
-            // The commit gate gives up after 15 s of gate time between two session updates (the session is polled meanwhile); the frozen-write check stays off.
-            {"JSP_SNAPSHOT_SYNC_MS", "15000"}, {"JSP_SNAPSHOT_FROZEN_WRITES", "0"},
-        };
-        for (const KV& e : kv) { if (!std::getenv(e.k) || !*std::getenv(e.k)) { _putenv_s(e.k, e.v); g_own_env.push_back(e.k); } }
-    }
-} g_env_init;
+// ENHANCEMENT (in-game netcode option): ONE place decides the rollback start, before main(), once the online files have been applied (jsp_online.cpp's boot sets PS3_NET_ONLINE).
+// The two static constructors (this file's EnvInit and jsp_online_boot, which calls jsp_net_env_part) run in an unspecified order, so each reports in and the last one
+// decides (jpno::Rendezvous). The decision (jpno::resolve_env, host-tested) sets the defaults of the snapshot ring, the per-tick fight hash and the turbo stepper
+// (what JSP_ROLLBACK=1 always set before) ONLY when it is a valid start; a refused one (the game's own online also on, or not exactly one valid role key) sets none,
+// clears JSP_ROLLBACK (sets it to 0) and sets JSP_NET_REFUSED=1; for the pair it also removes PS3_NET_ONLINE so neither runs. Why removing that one variable is enough (toolkit
+// libs/network, runtime/ppu/ppu_sysprx.cpp): the game's own online needs PS3_NET_ONLINE in every gate (np_psnr_enabled = PS3_NET_ONLINE and PSNR_SERVER, netctl_online, the host
+// socket registration), so PSNR_SERVER and the other keys jsp_online.cpp sets stay inert without it. ASSUMPTION: the runtime reads it lazily (after main()) and nothing in the jsp
+// exe sets it later (np_psnr_setup only sets it from a --psnr argument, which the runtime's own boot_main handles, not this exe).
+// Remaining: jsp_thread_registry.cpp's TLS callback reads JSP_ROLLBACK at process attach, before any decision, and enables the thread registry (bookkeeping only).
+jpno::Rendezvous g_rv;                // constant-initialized (no constructor): safe to use from another translation unit's static constructor
+void decide_env()
+{
+    std::string why;
+    const jpno::Boot r = jpno::resolve_env([](const char* k) { return std::getenv(k); },
+                                           [](const char* k, const char* v) { _putenv_s(k, v ? v : ""); },   // "" removes the variable on Windows
+                                           &g_own_env, &why);
+    std::fprintf(stderr, "[net] env decision: %s (static constructors arrived: %s first, %s last)\n",
+                 r == jpno::Boot::Go ? "rollback start" : r == jpno::Boot::Refused ? "REFUSED" : "rollback not requested",
+                 g_rv.order[0] == 1 ? "EnvInit" : "online boot", g_rv.order[1] == 1 ? "EnvInit" : "online boot");
+    if (r == jpno::Boot::Refused) std::fprintf(stderr, "[net] REFUSED: %s\n", why.c_str());
+}
+struct EnvInit { EnvInit() { g_rv.arrive(1, decide_env); } } g_env_init;
 
 // ---- the temporary session layer: what jsp_setting_get answers while a session is installed -----------------------------------------------------------------
 std::mutex g_pub_mu;
@@ -536,7 +544,7 @@ extern "C" void jsp_net_game_install(void)
     const bool have_listen = jsp_setting_get("JSP_ROLLBACK_LISTEN", b, sizeof b) && b[0];
     char j[96] = {};
     const bool have_join = jsp_setting_get("JSP_ROLLBACK_JOIN", j, sizeof j) && j[0];
-    if (have_listen == have_join) { std::fprintf(stderr, "[net] JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): off\n"); return; }
+    if (have_listen == have_join) { std::fprintf(stderr, "[net] BUG: the start decision (jpno::resolve_env) let JSP_ROLLBACK=1 through without exactly one role key: off\n"); return; }   // unreachable: refused before main()
     g.host = have_listen;
     std::string err;
     if (g.host) g.listen_port = (uint16_t)std::atoi(b);
@@ -572,5 +580,8 @@ extern "C" void jsp_net_game_install(void)
         [](uint64_t t) { pump_tick(t); }, 100);
     std::fprintf(stderr, "[net] rollback opt-in: %s, build %08x, hooks installed\n", g.host ? "host" : "client", g.caps.build);
 }
+
+// Called by jsp_online.cpp's boot when the online files and --psnr have been applied; EnvInit reports through the same rendezvous.
+extern "C" void jsp_net_env_part(int part) { g_rv.arrive(part, decide_env); }
 
 #endif  // JSP_ROLLBACK_BUILD

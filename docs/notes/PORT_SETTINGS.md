@@ -71,7 +71,7 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 
 ## State of the tests
 
-- Host tests: `bash installer/tools/settings_test.sh` (above), `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
+- Host tests: `bash installer/tools/settings_test.sh` (above), `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/net_online_test.sh` (the Online page's Netcode choice: rows, save order, validation, the rollback start decision), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
   (canvas, rectangles, text, dirty rectangles; run against the exported and patched toolkit), a series export of all patches in order
   (`installer/tools/export_toolkit.py`), and syntax-only compiles of the backend, `jsp_port_menu.cpp`, `jsp_online.cpp` and `stubs.cpp`.
 - In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows): with `JSP_PORT_MENU=1` a

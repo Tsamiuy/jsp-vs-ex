@@ -618,6 +618,27 @@ extern "C" void jsp_online_edit_cycle(int field, int dir)   /* method (0): Off, 
     }
 }
 
+/* ENHANCEMENT (in-game netcode option): the Netcode row of the page drives the method directly and asks whether the working copy can be saved. */
+extern "C" int jsp_online_edit_method(void)   /* 0 off, 1 re-psn, 2 community (the working copy) */
+{
+    using namespace jsp_online;
+    return g_es.rep_enabled ? 1 : g_es.com_enabled ? 2 : 0;
+}
+
+extern "C" void jsp_online_edit_set_method(int m)   /* anything but 1 or 2 is off */
+{
+    using namespace jsp_online;
+    g_es.rep_enabled = m == 1; g_es.com_enabled = m == 2;
+}
+
+extern "C" int jsp_online_edit_check(char* why, int n)   /* 0 the working copy can be saved, 1 not (reason in why) */
+{
+    using namespace jsp_online;
+    const std::string e = edit_check(g_es);
+    put(why, n, e);
+    return e.empty() ? 0 : 1;
+}
+
 extern "C" int jsp_online_edit_save(char* msg, int n)   /* 1 saved (msg: the confirmation), 0 refused or failed (msg: why); then the working copy is read again */
 {
     using namespace jsp_online;
@@ -631,6 +652,7 @@ extern "C" int jsp_online_edit_save(char* msg, int n)   /* 1 saved (msg: the con
 }
 
 #ifndef JSP_ONLINE_TEST
+extern "C" void jsp_net_env_part(int part);   /* jsp_net_game.cpp */
 #ifdef _WIN32
 #include <stdlib.h>
 #endif
@@ -666,6 +688,7 @@ static void jsp_online_boot(void)
     resolve_dirs(env, exe_dir, appdata, shared, game);
     g_shared = shared;   /* the in-game page writes where the reader reads */
     apply(env, shared, game, psnr, user);
+    jsp_net_env_part(2);   /* ENHANCEMENT (in-game netcode option): PS3_NET_ONLINE is final now; the rollback start decision (jsp_net_game.cpp) runs once both static constructors have reported */
 }
 namespace { struct JspOnlineInit { JspOnlineInit() { jsp_online_boot(); } } s_jsp_online_init; }
 #endif
