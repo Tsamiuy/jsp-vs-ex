@@ -7,7 +7,7 @@ DIR is the patched toolkit (installer/tools/export_toolkit.py --out DIR). The po
 the player's EBOOT, so a real build and link are impossible without it. The toolkit's own tools/check_ppu_scaffold.py faces the same
 problem and builds a stand-in from the lifter's HEADER_PREAMBLE (the real ABI: ppu_context, vm_* helpers, PPU_FENCE); this does the same
 and compiles with `-fsyntax-only`, with the include directories and the flags installer/port/jsp/CMakeLists.txt gives the jsp target:
-  C++20  installer/port/jsp/*.cpp  and the PPU boot scaffold runtime/ppu/{ppu_loader,ppu_hle,ppu_fs,ppu_sysprx}.cpp
+  C++20  installer/port/jsp/*.cpp (with the rollback build definitions; the pinned GekkoNet copy in gekkonet/ is not checked)  and the PPU boot scaffold runtime/ppu/{ppu_loader,ppu_hle,ppu_fs,ppu_sysprx}.cpp
   C17    runtime/spu/spu_dispatch_mt.c  (built by the port with SPU_USE_DISPATCH_MT)
 Not covered: anything generated (the lifted PPU and SPU code, the NID table), the runtime library, linking, running.
 Compilers: the llvm-mingw clang the installer bundles (x86_64-w64-mingw32-clang++ / -clang). Standard library only.
@@ -23,6 +23,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 INCS = ["include", "runtime/ppu", "runtime/spu", "runtime/memory", "runtime/syscalls", "runtime/platform", "libs/video"]
 FLAGS = ["-fsyntax-only", "-w", "-ffp-contract=off", "-mavx2", "-mfma", "-fno-strict-aliasing", "-fwrapv"]   # CMakeLists.txt: JSP_AVX2 on
+# CMakeLists.txt: the jsp target is built with JSP_ROLLBACK_BUILD and links jsp_gekkonet, whose include folder and definitions are PUBLIC
+PORT_DEFS = ["-DJSP_ROLLBACK_BUILD=1", "-DGEKKONET_STATIC", "-DGEKKONET_NO_ASIO"]
 SCAFFOLD = ["ppu_loader", "ppu_hle", "ppu_fs", "ppu_sysprx"]
 FILE_INCS = {"jsp_net_probe.cpp": ["libs/network"]}   # CMakeLists.txt: set_source_files_properties(... INCLUDE_DIRECTORIES)
 
@@ -46,8 +48,8 @@ def main():
         (pathlib.Path(stub) / "ppu_recomp.h").write_text(
             lifter.HEADER_PREAMBLE + '\n#ifdef __cplusplus\nextern "C" {\n#endif\nvoid ppu_recomp_register(void);\n' + decls
             + '#ifdef __cplusplus\n}\n#endif\n', encoding="utf-8")
-        incs = [f"-I{stub}", *[f"-I{tk / d}" for d in INCS], f"-I{port}"]
-        jobs = [(a.cxx, ["-std=c++20", "-x", "c++"], p) for p in sorted(port.glob("*.cpp"))]
+        incs = [f"-I{stub}", *[f"-I{tk / d}" for d in INCS], f"-I{port}", f"-I{port / 'gekkonet/include'}"]
+        jobs = [(a.cxx, ["-std=c++20", *PORT_DEFS, "-x", "c++"], p) for p in sorted(port.glob("*.cpp"))]
         jobs += [(a.cxx, ["-std=c++20", "-x", "c++"], tk / "runtime/ppu" / f"{n}.cpp") for n in SCAFFOLD]
         jobs += [(a.cc, ["-std=c17", "-DSPU_USE_DISPATCH_MT", "-x", "c"], tk / "runtime/spu/spu_dispatch_mt.c")]
         bad = 0

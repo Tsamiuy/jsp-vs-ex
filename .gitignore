@@ -170,6 +170,16 @@ __pycache__/
 !/installer/tools/pad_join_test.c
 !/installer/tools/overlay_font_test.cpp
 !/installer/tools/overlay_font_test.sh
+!/installer/tools/session_manifest_test.cpp
+!/installer/tools/session_manifest_test.sh
+!/installer/tools/net_transport_test.cpp
+!/installer/tools/net_m2_link_test.cpp
+!/installer/tools/net_session_test.cpp
+!/installer/tools/net_session_test.sh
+!/installer/tools/stepper_test.cpp
+!/installer/tools/stepper_test.sh
+!/installer/tools/snapshot_ring_test.cpp
+!/installer/tools/snapshot_ring_test.sh
 !/installer/patches/
 /installer/patches/*
 !/installer/patches/*.patch
@@ -186,6 +196,13 @@ __pycache__/
 !/installer/port/jsp/lift_game_hooks.json
 !/installer/port/jsp/lod_hooks.py
 !/installer/port/jsp/CMakeLists.txt
+# GekkoNet (BSD-2-Clause, with zpp_bits, MIT): a pinned copy of the library sources for the experimental rollback netcode; no asio
+!/installer/port/jsp/gekkonet/
+!/installer/port/jsp/gekkonet/**/
+!/installer/port/jsp/gekkonet/**/*.h
+!/installer/port/jsp/gekkonet/**/*.cpp
+!/installer/port/jsp/gekkonet/**/LICENSE
+!/installer/port/jsp/gekkonet/PIN.md
 !/installer/port/patches/
 /installer/port/patches/*
 !/installer/port/patches/*.patch

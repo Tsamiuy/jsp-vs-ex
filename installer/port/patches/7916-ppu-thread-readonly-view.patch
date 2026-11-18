@@ -1,0 +1,47 @@
+Patch 7916 (experimental, rollback netcode): a read-only view of one PPU thread slot, for the rollback snapshot's job-server check.
+
+runtime/syscalls/sys_ppu_thread.c gains ps3_ppu_thread_view(tid, out, name) (host thread id, saved cia / lr / r1, profiler pc and name of a
+PPU thread slot) and ps3_ppu_thread_regs(tid, io, 0) (the slot's callee-saved registers, lr, ctr, cr and r1). Both only read; a write
+request (set != 0) returns 0, there is no write path. The snapshot gate (installer/port/jsp/jsp_snapshot.cpp, sample_jobserver, used only
+with JSP_ROLLBACK=1) uses them to find the SPU job server thread and see whether it is parked at its poll.
+No behaviour change: nothing calls them unless the port does. Applies after 7915.
+
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index ea29875..45fd987 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -1495,3 +1495,34 @@ void sys_ppu_thread_init(lv2_syscall_table* tbl)
+     lv2_syscall_register(tbl, SYS_PPU_THREAD_GET_STACK_INFORMATION, sys_ppu_thread_get_stack_information);
+     lv2_syscall_register(tbl, SYS_PPU_THREAD_RENAME,              sys_ppu_thread_rename);
+ }
++
++/* Patch 7916 (rollback netcode, read only): view of one PPU thread slot for the snapshot gate's job-server check. tid is 1..PPU_THREAD_MAX.
++ * Returns 1 when the slot is in use. out[0] host thread id (Windows; 0 elsewhere), out[1] saved cia, out[2] saved lr, out[3] saved r1, out[4] prof_pc; name receives the
++ * 64-byte thread name. No lock: the caller has the other threads suspended. */
++int ps3_ppu_thread_view(uint32_t tid, uint64_t* out, char* name)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX) return 0;
++    const ppu_thread_info* t = &g_ppu_threads[tid - 1];
++    if (t->state == PPU_THREAD_STATE_FREE) return 0;
++#ifdef _WIN32
++    out[0] = (uint64_t)t->host_tid;
++#else
++    out[0] = 0;
++#endif
++    out[1] = t->ctx.cia; out[2] = t->ctx.lr; out[3] = t->ctx.gpr[1]; out[4] = t->prof_pc;
++    memcpy(name, t->name, 64); name[63] = 0;
++    return 1;
++}
++
++/* Patch 7916 (rollback netcode, read only): the callee-saved register file of one PPU thread slot: io[0..17] = r14..r31, io[18] = lr, io[19] = ctr, io[20] = cr,
++ * io[21] = r1. `set` must be 0: a write request returns 0 (there is no write path). Returns 1 when the slot's thread is alive, else 0 and io is untouched. No lock. */
++int ps3_ppu_thread_regs(uint32_t tid, uint64_t* io, int set)
++{
++    if (set) return 0;   /* read only: there is no write path */
++    if (tid == 0 || tid > PPU_THREAD_MAX) return 0;
++    const ppu_thread_info* t = &g_ppu_threads[tid - 1];
++    if (t->state != PPU_THREAD_STATE_RUNNING && t->state != PPU_THREAD_STATE_DETACHED) return 0;
++    for (int i = 0; i < 18; i++) io[i] = t->ctx.gpr[14 + i];
++    io[18] = t->ctx.lr; io[19] = t->ctx.ctr; io[20] = t->ctx.cr; io[21] = t->ctx.gpr[1];
++    return 1;
++}

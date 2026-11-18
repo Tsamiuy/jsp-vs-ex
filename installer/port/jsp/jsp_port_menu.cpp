@@ -400,6 +400,9 @@ struct Menu {
         }
         if (vk == 0x1B) { capturing = false; smsg = "Cancelled."; smsg_err = false; dirty = true; return; }
         if (vk == 0x7A) { smsg = "F11 is kept for fullscreen."; smsg_err = true; dirty = true; return; }
+#ifdef JSP_ROLLBACK_BUILD
+        { const char* rb = std::getenv("JSP_ROLLBACK"); if (vk == 0x78 && rb && *rb && rb[0] != '0') { smsg = "F9 is kept for the rollback cancel key."; smsg_err = true; dirty = true; return; } }
+#endif
         const SRow r = srows[(size_t)ssel];
         model.set_key(r.idx, vk);
         capturing = false;

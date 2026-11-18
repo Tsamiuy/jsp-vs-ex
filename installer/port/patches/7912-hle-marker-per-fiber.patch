@@ -1,0 +1,187 @@
+Patch 7912 (experimental, rollback netcode): the HLE-call marker of patch 7911 is kept per execution context (a fiber has its own stack)
+and keyed by the real host thread.
+
+Why: cellFiber switches a fiber away inside an HLE call (cellFiberPpuWaitSignal and Yield return only when the fiber is resumed, possibly
+on another thread; cellFiberPpuExit never returns), so a per-thread counter gained one level per suspended or ended fiber, and the thread
+that resumed it saw a leave without an enter. A fiber's ppu_context also carries its creator's thread id, so a fiber run by another thread
+counted against its creator.
+Change: sys_snapshot_census.c keeps the marker stack in a mark_ctx; ps3_hle_mark_fiber(tid, fiber_store, sched_store) swaps the fiber's
+stack into the thread slot (and sets a thread-local real thread id used by enter and leave), ps3_hle_mark_fiber_back swaps it out on yield,
+block or end (an ended fiber's entries are dropped with its store); fibers no longer make a thread "unreliable".
+cellFiber.c: Fiber.hle_mark_store (zeroed on creation), t_run_tid (the scheduler's real thread id), host_resume swaps on both host
+back ends. No behaviour change unless the port sets g_ps3_hle_mark_on. Always-on bookkeeping, which changes nothing the game does while
+the flag is off: on every fiber switch the marker stack is swapped (two 72-byte copies through a 96-byte stack buffer) and a relaxed
+atomic counter g_ps3_hle_mark_fiber_swaps is incremented; Fiber grows by 96 bytes; two thread-locals (t_run_tid, t_mark_tid).
+
+diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+index f2f9f76..d4accf4 100644
+--- a/libs/spurs/cellFiber.c
++++ b/libs/spurs/cellFiber.c
+@@ -91,6 +91,7 @@ struct Fiber {
+     void*   host_stack;
+ #endif
+     ppu_context ctx;
++    uint64_t hle_mark_store[12];   /* patch 7912: this fiber's HLE marker stack (sys_snapshot_census.c mark_ctx, 96 bytes) while it is not running */
+ };
+ 
+ struct Sched {
+@@ -156,6 +157,7 @@ static int gf_spu_woke(const Fiber* f)
+ 
+ /* The fiber running on this host thread, if any. */
+ static PPU_THREAD_LOCAL Fiber* t_cur;
++static PPU_THREAD_LOCAL uint64_t t_run_tid;   /* patch 7912: the thread running the scheduler (fiber contexts carry their creator's id) */
+ 
+ #ifdef _WIN32
+ static SRWLOCK            s_lock = SRWLOCK_INIT;
+@@ -231,10 +233,12 @@ static void host_destroy(Fiber* f)
+ /* RunFibers -> fiber. The calling thread becomes a fiber itself on first use. */
+ static void host_resume(Sched* s, Fiber* f)
+ {
+-    { extern void ps3_hle_mark_fiber(uint64_t); ps3_hle_mark_fiber(f->ctx.thread_id); }   /* patch 7911: fibers share the thread id and switch inside HLE calls: its marker is unreliable */
++    uint64_t sched_mark[12];   /* patch 7912: the scheduler's HLE marker stack while the fiber runs (a fiber has its own) */
++    { extern void ps3_hle_mark_fiber(uint64_t, void*, void*); ps3_hle_mark_fiber(t_run_tid ? t_run_tid : f->ctx.thread_id, f->hle_mark_store, sched_mark); }
+     if (!IsThreadAFiber()) ConvertThreadToFiber(NULL);
+     s->back = GetCurrentFiber();
+     SwitchToFiber(f->host_fiber);
++    { extern void ps3_hle_mark_fiber_back(uint64_t, void*, void*); ps3_hle_mark_fiber_back(t_run_tid ? t_run_tid : f->ctx.thread_id, f->hle_mark_store, sched_mark); }
+ }
+ 
+ static void host_yield(Fiber* f)
+@@ -269,8 +273,10 @@ static void host_destroy(Fiber* f)
+ 
+ static void host_resume(Sched* s, Fiber* f)
+ {
+-    { extern void ps3_hle_mark_fiber(uint64_t); ps3_hle_mark_fiber(f->ctx.thread_id); }   /* patch 7911: fibers share the thread id and switch inside HLE calls: its marker is unreliable */
++    uint64_t sched_mark[12];   /* patch 7912: the scheduler's HLE marker stack while the fiber runs (a fiber has its own) */
++    { extern void ps3_hle_mark_fiber(uint64_t, void*, void*); ps3_hle_mark_fiber(t_run_tid ? t_run_tid : f->ctx.thread_id, f->hle_mark_store, sched_mark); }
+     swapcontext(&s->back, &f->uc);
++    { extern void ps3_hle_mark_fiber_back(uint64_t, void*, void*); ps3_hle_mark_fiber_back(t_run_tid ? t_run_tid : f->ctx.thread_id, f->hle_mark_store, sched_mark); }
+ }
+ 
+ static void host_yield(Fiber* f)
+@@ -489,6 +495,7 @@ s32 cellFiberPpuRunFibers(CellFiberPpuScheduler* scheduler)
+ 
+         ppu_context* saved_active = g_active_ctx;
+         t_cur        = f;
++        t_run_tid    = saved_active ? saved_active->thread_id : 0;   /* patch 7912: the real thread, not the fiber creator's id in f->ctx */
+         g_active_ctx = &f->ctx;
+         host_resume(s, f);       /* back here when f blocks, yields or ends */
+         g_active_ctx = saved_active;
+diff --git a/runtime/syscalls/sys_snapshot_census.c b/runtime/syscalls/sys_snapshot_census.c
+index 6245b94..7ecd6ab 100644
+--- a/runtime/syscalls/sys_snapshot_census.c
++++ b/runtime/syscalls/sys_snapshot_census.c
+@@ -7,6 +7,7 @@
+  * ppu_sysprx.cpp adds kind 3 around the lwmutex acquire of sys_lwcond_wait. kind 1 = HLE import (id = NID), 2 = lv2 syscall (id = number),
+  * 3 = internal (id 1 = acquiring an lwmutex). obj = r3 at entry, lr = the caller's return address. Nested calls keep a small stack.
+  */
++#include <string.h>
+ #include "sys_event.h"
+ #include "sys_semaphore.h"
+ #include "sys_mutex.h"
+@@ -17,29 +18,43 @@
+ _Static_assert(SYS_EVENT_QUEUE_MAX == 128 && SYS_SEMAPHORE_MAX == 256 && PPU_THREAD_MAX == 64, "jsy::kEvq / kSem / kThr");
+ 
+ #define MARK_DEPTH 4
++#define PS3_HLE_MARK_CTX_BYTES 96   /* == the size of Fiber.hle_mark_store in cellFiber.c */
+ typedef struct { uint32_t kind, id, obj, lr; } hle_mark;
+-/* depth counts the nesting; the innermost entry is always kept (past MARK_DEPTH it overwrites the last slot and ovf is set until the thread is back
+- * at depth 0, because the outer entries are then lost). fiber: a cellFiber of this thread ran (fibers share the thread id and switch inside HLE
+- * calls, so enter/leave are not LIFO for it). Either makes the marker unreliable: the census reports the thread as "unknown", never as parked. */
+-static struct { volatile int depth; volatile int ovf; volatile int fiber; hle_mark st[MARK_DEPTH]; } s_mark[PPU_THREAD_MAX + 1];
++/* The marker stack of one EXECUTION CONTEXT (a host thread, or a cellFiber while it runs): depth counts the nesting; the innermost entry is always kept
++ * (past MARK_DEPTH it overwrites the last slot and ovf is set until the context is back at depth 0, because the outer entries are then lost). An ovf
++ * context is reported as "unknown" by the census, never as parked.
++ * Patch 7912: fibers have their own stack. Before it the stack was per thread id only, and cellFiber breaks that: a fiber leaves its thread
++ * inside an HLE call (cellFiberPpuWaitSignal/Yield switch away, no return), may be resumed by another thread, and cellFiberPpuExit never returns at all.
++ * Each of those left the thread's depth +1 (past MARK_DEPTH: ~2.6M overflows per run) or, on the thread that resumed it, a leave without an enter
++ * (~600 unbalanced). host_resume now swaps the running fiber's stack into the thread slot and the scheduler's stack back out. */
++typedef struct { volatile int depth; volatile int ovf; hle_mark st[MARK_DEPTH]; } mark_ctx;
++static struct { mark_ctx c; volatile int fiber; } s_mark[PPU_THREAD_MAX + 1];
++/* cellFiber.c keeps one mark_ctx per Fiber (zeroed by calloc = depth 0) as opaque storage of this size */
++_Static_assert(sizeof(mark_ctx) <= PS3_HLE_MARK_CTX_BYTES, "cellFiber.c Fiber.hle_mark_store");
+ volatile int g_ps3_hle_mark_on = 0;
+-volatile long g_ps3_hle_mark_overflows = 0, g_ps3_hle_mark_unbalanced = 0;
++/* While a thread runs a fiber, the fiber's ppu_context carries the thread id of the fiber's CREATOR (cellFiber.c, parent->thread_id), which can be another
++ * thread: its HLE calls would then push onto that thread's stack (misattributed, and unsynchronised with it running). The runner sets the real id here. */
++static __thread uint64_t t_mark_tid;
++#define MARK_TID(tid) do { if (t_mark_tid) (tid) = t_mark_tid; } while (0)
++volatile long g_ps3_hle_mark_overflows = 0, g_ps3_hle_mark_unbalanced = 0, g_ps3_hle_mark_fiber_swaps = 0;
+ 
+ void ps3_hle_mark_enter(uint64_t tid, uint32_t kind, uint32_t id, uint32_t obj, uint32_t lr)
+ {
++    MARK_TID(tid);
+     if (tid == 0 || tid > PPU_THREAD_MAX) return;
+-    const int d = s_mark[tid].depth;
++    const int d = s_mark[tid].c.depth;
+     const int idx = d < MARK_DEPTH ? (d < 0 ? 0 : d) : MARK_DEPTH - 1;
+     hle_mark m = { kind, id, obj, lr };
+-    s_mark[tid].st[idx] = m;
+-    if (d >= MARK_DEPTH) { s_mark[tid].ovf = 1; g_ps3_hle_mark_overflows++; }
+-    s_mark[tid].depth = d + 1;
++    s_mark[tid].c.st[idx] = m;
++    if (d >= MARK_DEPTH) { s_mark[tid].c.ovf = 1; g_ps3_hle_mark_overflows++; }
++    s_mark[tid].c.depth = d + 1;
+ }
+ 
+ void ps3_hle_mark_leave(uint64_t tid)
+ {
++    MARK_TID(tid);
+     if (tid == 0 || tid > PPU_THREAD_MAX) return;
+-    if (s_mark[tid].depth > 0) { if (--s_mark[tid].depth == 0) s_mark[tid].ovf = 0; }
++    if (s_mark[tid].c.depth > 0) { if (--s_mark[tid].c.depth == 0) s_mark[tid].c.ovf = 0; }
+     else g_ps3_hle_mark_unbalanced++;
+ }
+ 
+@@ -47,14 +62,32 @@ void ps3_hle_mark_leave(uint64_t tid)
+ void ps3_hle_mark_reset(uint64_t tid)
+ {
+     if (tid == 0 || tid > PPU_THREAD_MAX) return;
+-    s_mark[tid].depth = 0; s_mark[tid].ovf = 0; s_mark[tid].fiber = 0;
++    s_mark[tid].c.depth = 0; s_mark[tid].c.ovf = 0; s_mark[tid].fiber = 0;
+ }
+ 
+-/* cellFiber.c host_resume: this thread runs fibers. */
+-void ps3_hle_mark_fiber(uint64_t tid)
++/* cellFiber.c host_resume (patch 7912): the thread is about to run fiber `fiber_store` (a mark_ctx owned by the Fiber). The scheduler's own stack goes to
++ * `sched_store` (a local of host_resume, same size), the fiber's stack becomes the thread's. ps3_hle_mark_fiber_back undoes it when the fiber yields, blocks
++ * or ends (whatever its depth was: an ended fiber's leaked entries are dropped with its store). Not atomic against a census freeze: a thread suspended
++ * inside the copy can read a half-swapped slot (a few stores wide; the census would see a plausible innermost entry or depth 0). */
++void ps3_hle_mark_fiber(uint64_t tid, void* fiber_store, void* sched_store)
+ {
+-    if (tid == 0 || tid > PPU_THREAD_MAX) return;
++    if (tid == 0 || tid > PPU_THREAD_MAX || !fiber_store || !sched_store) return;
++    mark_ctx* slot = &s_mark[tid].c;
++    t_mark_tid = tid;
++    memcpy(sched_store, (const void*)slot, sizeof(mark_ctx));
++    memcpy((void*)slot, fiber_store, sizeof(mark_ctx));
+     s_mark[tid].fiber = 1;
++    __atomic_add_fetch(&g_ps3_hle_mark_fiber_swaps, 1, __ATOMIC_RELAXED);   /* any thread runs fibers */
++}
++
++void ps3_hle_mark_fiber_back(uint64_t tid, void* fiber_store, void* sched_store)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX || !fiber_store || !sched_store) return;
++    mark_ctx* slot = &s_mark[tid].c;
++    memcpy(fiber_store, (const void*)slot, sizeof(mark_ctx));
++    memcpy((void*)slot, sched_store, sizeof(mark_ctx));
++    s_mark[tid].fiber = 0;
++    t_mark_tid = 0;
+ }
+ 
+ /* Innermost marker of every thread slot 1..64 (index = tid), whether the slot's thread is alive, and whether its marker is unreliable. kind 0 = outside
+@@ -67,11 +100,11 @@ void ps3_hle_thread_census(uint32_t* kind, uint32_t* id, uint32_t* obj, uint32_t
+         if (t == 0) continue;
+         const int st = g_ppu_threads[t - 1].state;
+         alive[t] = (st == PPU_THREAD_STATE_RUNNING || st == PPU_THREAD_STATE_DETACHED) ? 1 : 0;
+-        unreliable[t] = (s_mark[t].ovf || s_mark[t].fiber) ? 1 : 0;
+-        int d = s_mark[t].depth;
++        unreliable[t] = (s_mark[t].c.ovf) ? 1 : 0;
++        int d = s_mark[t].c.depth;
+         if (d <= 0) continue;
+         if (d > MARK_DEPTH) d = MARK_DEPTH;
+-        const hle_mark m = s_mark[t].st[d - 1];
++        const hle_mark m = s_mark[t].c.st[d - 1];
+         kind[t] = m.kind; id[t] = m.id; obj[t] = m.obj; lr[t] = m.lr;
+     }
+     if (overflows) *overflows = (uint32_t)g_ps3_hle_mark_overflows;

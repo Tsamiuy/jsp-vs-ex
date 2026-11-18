@@ -51,9 +51,9 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
   save in the newer tree (`--tree current`) and a port save in RPCS3. Saves from a real PS3 are encrypted and are a separate
   question (findings in [issue #30](https://github.com/Tsamiuy/jsp-vs-ex/issues/30), closed)
 
-## 4. Online with rollback netcode  📋
+## 4. Online with rollback netcode  🔧
 
-In research. It needs fights that run the same on every machine and a way to save and restore the fight state
+An experimental first version is in the build, off by default. It needs fights that run the same on every machine and a way to save and restore the fight state
 each frame. How it works and the plan, with what we use and fall back to: [ROLLBACK.md](ROLLBACK.md). Online is opt-in: the port connects only when you choose online play, and only to the players or server you
 pick.
 Every gameplay option in a match is the same for all players; ranked uses one fixed rule set.
@@ -61,8 +61,9 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 - 🔧 **The game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server** (a fork of psnr) (experimental, opt-in; how
   to try it: `installer/README.md`, "Online Battle"): in a test of two copies on one PC, both reached a Friendly Match
   room and played into the fight. Play testers report online matches on their Windows PCs since 0.1.0 (no logs yet); the EU build, two real PCs with different settings or versions, and the Impossible mode online are not tried
-- 📋 **Online matches with rollback netcode:** 1v1 first, then 2v2, and 3v3 if the engine allows it (see section 3);
-  direct connection first ([details](FEATURES.md#online-rollback))
+- 🔧 **Online matches with rollback netcode** (experimental, opt-in; how to try it: [ROLLBACK.md, section 5](ROLLBACK.md#5-try-it-experimental-direct-ip-rollback)):
+  a Free Battle fight between two PCs connected by IP address, one player per PC, tested only as two copies on one PC so far, and no complete match has run yet.
+  Then 2v2, and 3v3 if the engine allows it (see section 3); lobbies over re-psn ([details](FEATURES.md#online-rollback))
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
 - 📋 Lobbies, matchmaking, ranked ([details](FEATURES.md#lobbies-ranked))
 - 📋 Online Training for up to 4 players ([details](FEATURES.md#online-training))

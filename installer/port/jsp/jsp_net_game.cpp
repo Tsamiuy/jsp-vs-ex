@@ -1,0 +1,576 @@
+// jsp_net_game.cpp -- ENHANCEMENT (EXPERIMENTAL rollback netcode): the game-side glue of the rollback session. OPT-IN: JSP_ROLLBACK=1; with the switch unset
+// nothing is installed and nothing changes (the hooks below are never registered). Built with the vendored GekkoNet (gekkonet/, JSP_ROLLBACK_BUILD); without
+// JSP_ROLLBACK_BUILD this file is an inert stub. What has run and the known limits: docs/ROLLBACK.md.
+// Game-specific; the game-independent logic is in jsp_net_glue.h, jsp_net_session.h, jsp_net_m2_link.h and the settings handshake's jsp_session_*.h.
+//
+// Switches (JSP_ROLLBACK=1 sets sensible defaults for the snapshot ring, the fight hash and the canonical pad hook before main(); the player never sets those):
+//   JSP_ROLLBACK=1            opt-in
+//   JSP_ROLLBACK_LISTEN=PORT  host: bind this UDP port and wait for one client (direct-IP host). The in-game Online page has no such field yet: the key is read
+//   JSP_ROLLBACK_JOIN=IP:PORT client: join that host (direct-IP join).                           through jsp_setting_get, so the launcher / settings file can carry it.
+//   JSP_ROLLBACK_ALLOW_DEBUG=1  test tooling only (WORKAROUND to replace): the handshake's debug-switch refusal is off (the two-instance test runs the auto-pilot route; both peers need the same fight
+//                             seed until the host's plan seed is applied to the game, see the doc)
+// Flow: settings handshake on a pump thread (starts at once; survives scene loads) -> Started -> at the first fight tick the session starts: GekkoNet session,
+// stepper (frame base = that tick), snapshot ring as save/load (jsp_snapshot_ext_*), canonical pad table, handover() of the handshake on both sides.
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#ifndef JSP_ROLLBACK_BUILD
+extern "C" void jsp_net_game_install(void) {}
+#else
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <random>
+#include <string>
+#include <vector>
+#include <utility>
+#include <windows.h>
+
+#include "ps3emu/ps3types.h"
+#include "ppu_recomp.h"
+#include "jsp_hook_chain.h"
+#include "jsp_overlay_api.h"
+#include "jsp_net_session.h"
+#include "jsp_net_glue.h"
+#include "jsp_net_m2_link.h"
+#include "jsp_session_handshake.h"
+#include "jsp_session_reader.h"
+#include "jsp_session_manifest.h"
+
+extern "C" {
+extern int (*jsp_session_text_hook)(const char* key, char* out, int n);   // jsp_settings.cpp
+int jsp_setting_get(const char* key, char* out, int n);
+void jsp_setting_changed(void);   // jsp_settings.cpp: bumps jsp_setting_gen so the cached readers re-read
+uint64_t jsp_snapshot_ext_pool_evicted(void);
+void jsp_snapshot_ext_set_budget_ms(unsigned ms);   // the commit gate's wall-time budget
+void jsp_snapshot_ext_budget_reset(void);           // after every session update: one budget from the last update across all gates
+void jsp_snapshot_ext_set_idle_hook(void (*fn)());
+void jsp_snapshot_ext_guard_summary(void);
+int jsp_snapshot_ext_rsx_write_hazard(void);       // write guard: the previous capture had RSX commands pending and an RSX-side write into saved memory landed after it
+int rsx_d3d12_pipe_effective_state(void);
+void jsp_stepper_abort(void);
+struct JspTickState { uint32_t done; uint32_t anc_done; uint8_t anc_set, anc_skip; };
+void jsp_fight_hash_get_state(JspTickState* s);
+void jsp_stepper_net_enable(void* table);
+void jsp_stepper_net_disable(void);
+int jsp_stepper_local_pad(int port, uint8_t canon[8]);
+void jsp_stepper_replay(int on, uint32_t done);
+int jsp_snapshot_ext_active(void);
+int jsp_snapshot_ext_commit(uint32_t k, ppu_context* c, uint32_t* hash);
+int jsp_snapshot_ext_rollback(uint32_t k, uint32_t to, ppu_context* c);
+void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
+}
+
+namespace {
+
+// The optional 60 Hz render gate exists only in development builds (JSP_SESSION_RENDER60_PROBE, see jsp_session_startup.cpp); this build has none, so its mode is off.
+#if defined(JSP_SESSION_RENDER60_PROBE) && JSP_SESSION_RENDER60_PROBE == 1
+extern "C" int jsp_render60_mode(void);
+int render60_mode() { return jsp_render60_mode(); }
+#else
+int render60_mode() { return 0; }
+#endif
+
+using namespace jspnet;
+constexpr uint32_t kMaxPrediction = 8, kRingDepth = 12;   // ring depth must exceed the prediction window (NetSession::start refuses otherwise)
+
+bool env_on(const char* n) { const char* e = std::getenv(n); return e && *e && e[0] != '0'; }
+std::vector<std::string> g_own_env;   // names this module set itself: they must not count as debug switches
+
+// JSP_ROLLBACK=1 before main(): the snapshot ring (incremental, driven from outside), the per-tick fight hash it reads, the canonical pad hook (installed at session start).
+struct EnvInit {
+    EnvInit()
+    {
+        if (!env_on("JSP_ROLLBACK")) return;
+        struct KV { const char* k; const char* v; } kv[] = {
+            {"JSP_FIGHT_HASH", "1000000"}, {"JSP_FIGHT_HASH_START", "1"}, {"JSP_SNAPSHOT", "1"}, {"JSP_SNAPSHOT_EXT", "1"}, {"JSP_SNAPSHOT_WW", "1"},
+            {"JSP_SNAPSHOT_WW_DEPTH", "12"}, {"JSP_SNAPSHOT_SUSPEND", "1"},
+            {"JSP_STEP_TURBO", "1"},   // turbo: replays run on the virtual clock and are not presented (stepper contract)
+            // Quiesce enforced, polled gate, registry threads, job-server gate
+            // (the registry once hung after a rollback; the cause was an SPU job straddling the target tick, which the job-server condition of the gate now excludes).
+            {"JSP_SNAPSHOT_THREADS", "registry"}, {"JSP_SNAPSHOT_QUIESCE", "2"}, {"JSP_SNAPSHOT_GATE", "poll"}, {"JSP_SNAPSHOT_GATE_JOBSERVER", "1"},
+            // The commit gate gives up after 15 s of gate time between two session updates (the session is polled meanwhile); the frozen-write check stays off.
+            {"JSP_SNAPSHOT_SYNC_MS", "15000"}, {"JSP_SNAPSHOT_FROZEN_WRITES", "0"},
+        };
+        for (const KV& e : kv) { if (!std::getenv(e.k) || !*std::getenv(e.k)) { _putenv_s(e.k, e.v); g_own_env.push_back(e.k); } }
+    }
+} g_env_init;
+
+// ---- the temporary session layer: what jsp_setting_get answers while a session is installed -----------------------------------------------------------------
+std::mutex g_pub_mu;
+bool g_pub_active = false;
+jpsm::Values g_pub_values;
+
+bool canon_to_text(jpsm::Id id, uint32_t v, char* out, int n)
+{
+    jpss::Key k;
+    if (jpsm::shares_jpss(id, &k)) {
+        const auto& r = jpss::kRules[static_cast<size_t>(k)];
+        if (v >= r.count) return false;
+        std::snprintf(out, (size_t)n, "%s", r.values[v]);
+        return true;
+    }
+    std::snprintf(out, (size_t)n, "%u", v);
+    return true;
+}
+bool text_to_canon(jpsm::Id id, const char* t, uint32_t* out)
+{
+    jpss::Key k;
+    if (jpsm::shares_jpss(id, &k)) {
+        const auto& r = jpss::kRules[static_cast<size_t>(k)];
+        for (uint8_t i = 0; i < r.count; ++i) if (!std::strcmp(t, r.values[i])) { *out = i; return true; }
+        return false;
+    }
+    char* e = nullptr; const unsigned long v = std::strtoul(t, &e, 10);
+    if (e == t || *e) return false;
+    *out = (uint32_t)v;
+    return true;
+}
+// Called with the settings mutex held (jsp_settings.cpp): takes only g_pub_mu, never calls back into jsp_setting_*.
+int session_text(const char* key, char* out, int n)
+{
+    jpsm::Id id;
+    if (!key || !jpsm::find_id(key, &id) || jpsm::rule(id).boundary == jpsm::Boundary::Startup) return 0;
+    std::lock_guard<std::mutex> lk(g_pub_mu);
+    if (!g_pub_active) return 0;
+    return canon_to_text(id, g_pub_values.v[static_cast<size_t>(id)], out, n) ? 1 : 0;
+}
+
+// ---- settings-handshake Reader against the real settings path --------------------------------------------------------------------------------------------------------------
+class GameReader : public jpsm::Reader {
+public:
+    bool startup_value(jpsm::Id id, uint32_t* out) override
+    {
+        jpss::Key k;
+        if (jpsm::shares_jpss(id, &k)) {   // Pipe / Render60: only the actual initialized reader counts, never configuration
+            const jpss::ReaderStartup rs = jpss::reader_startup();
+            if (!rs.available) return false;
+            *out = rs.applied.choices[static_cast<size_t>(k)];
+            return true;
+        }
+        return from_environment(id, out);   // KO target, training cheats, unlock: read once at registration from the environment, so that is their startup value
+    }
+    bool read_back(jpsm::Id id, uint32_t* out) override
+    {
+        if (jpsm::rule(id).boundary == jpsm::Boundary::Startup) return startup_value(id, out);
+        return from_environment(id, out);   // jsp_setting_get: the session layer (hook) first, else the live value, else the environment
+    }
+    void applied(const jpsm::Values& v) override { { std::lock_guard<std::mutex> lk(g_pub_mu); g_pub_values = v; g_pub_active = true; } jsp_setting_changed(); }
+    // Called only when the layer is removed (the session really ended: end_with calls end_match / match_ended; a mid-match Cancel ends the match, see boundary()).
+    void restored() override { { std::lock_guard<std::mutex> lk(g_pub_mu); g_pub_active = false; } jsp_setting_changed(); }
+    const char* debug_switch() override
+    {
+        // WORKAROUND to replace (test tooling only): the two-instance test runs the auto-pilot route and a fixed fight seed, all debug switches by the handshake's list.
+        if (env_on("JSP_ROLLBACK_ALLOW_DEBUG")) return nullptr;
+        for (const jpsm::DebugSwitch& d : jpsm::kDebugSwitches) {
+            bool own = false;
+            for (const std::string& s : g_own_env) if (s == d.name) own = true;
+            if (own) continue;
+            if (jpsm::trigger_hit(d.trigger, std::getenv(d.name), d.arg)) return d.name;
+        }
+        return nullptr;
+    }
+private:
+    static bool from_environment(jpsm::Id id, uint32_t* out)
+    {
+        char b[64];
+        if (!jsp_setting_get(jpsm::rule(id).name, b, sizeof b) || !b[0]) { *out = jpsm::rule(id).def; return true; }
+        return text_to_canon(id, b, out);
+    }
+};
+
+// ---- state ------------------------------------------------------------------------------------------------------------------------------------------------
+enum class Phase { Off, Handshake, Armed, Running, Ended };
+struct State {
+    bool host = false;
+    uint16_t listen_port = 0; Endpoint join{};
+    UdpMux mux; std::unique_ptr<MessageHub> hub; std::unique_ptr<DirectRendezvous> rz;
+    std::unique_ptr<M2LinkT<jpsm::Transport>> link; M2Pump pump;
+    GameReader reader; jpsm::EffectiveValues ev{&reader}; jpsm::Caps caps;
+    std::unique_ptr<jpsm::Host> mh; std::unique_ptr<jpsm::Client> mc;
+    SessionPlan plan; bool plan_ready = false, proposed = false; uint32_t propose_tries = 0;
+    std::mutex txt_mu; std::string fail_text;          // fail_text / m2_text: written by the pump thread or main, under txt_mu
+    std::atomic<Phase> phase{Phase::Off};
+    std::atomic<bool> m2_started{false}, m2_ended{false}, evidence_ready{false};
+    std::string m2_text; uint32_t base = 0;
+    NetSession sess; jsx::Stepper stepper; std::unique_ptr<Glue> glue;
+    ppu_context* ctx = nullptr; uint32_t done_now = 0;
+    uint64_t cancel_since = 0;
+    bool skip_sim = false, skip_pad = false, was_replaying = false;
+    uint64_t last_run_ms = 0, started_ms = 0, settings_shown_ms = 0;
+    std::string shown;
+} g;
+
+uint32_t build_id()
+{
+    const char* e = std::getenv("JSP_NET_BUILD");   // test override
+    if (e && *e) return (uint32_t)std::strtoul(e, nullptr, 0);
+    uint32_t h = 2166136261u;                       // FNV-1a of the compile date and time: two copies of the same exe agree
+    for (const char* p = __DATE__ " " __TIME__; *p; ++p) { h ^= (uint8_t)*p; h *= 16777619u; }
+    return h;
+}
+
+void show(const std::string& s)
+{
+    if (s == g.shown) return;
+    g.shown = s;
+    if (s.empty()) { jsp_overlay_close(); return; }
+    if (!jsp_overlay_begin(1280, 720)) return;
+    const float w = jsp_overlay_text_width(s.c_str(), 1.0f);
+    jsp_overlay_fill_rect(30, 640, (int)(w > 0 ? w : 800) + 40, 50, JSP_RGBA(0, 0, 0, 190));
+    jsp_overlay_text_style(50, 652, s.c_str(), 1.0f, JSP_RGBA(255, 255, 255, 255), 0);
+    jsp_overlay_end();
+}
+
+void log(const char* what, const std::string& s) { std::fprintf(stderr, "[net] %s%s%s\n", what, s.empty() ? "" : ": ", s.c_str()); }
+std::string take_text() { std::lock_guard<std::mutex> lk(g.txt_mu); return g.fail_text; }
+void set_text(const std::string& t) { std::lock_guard<std::mutex> lk(g.txt_mu); g.fail_text = t; }
+// The match is over (session failure, Cancel, disconnect, End match): the local settings come back (handshake end_match / match_ended), the pad hook goes, the fight runs on locally.
+void end_with(const std::string& text)
+{
+    jsp_snapshot_ext_set_idle_hook(nullptr);   // the gate must not call into a finished session
+    jsp_snapshot_ext_guard_summary();
+    set_text(text); g.phase = Phase::Ended; g.skip_sim = g.skip_pad = false;
+    if (g.was_replaying || g.stepper.replaying()) jsp_stepper_replay(0, g.done_now);   // an end during a replay: gate, clock and flag off
+    g.was_replaying = false;
+    jsp_stepper_abort();
+    jsp_stepper_net_disable();
+    { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host && g.mh) g.mh->end_match(); else if (!g.host && g.mc) g.mc->match_ended(); }
+    log("ended", text); show(text);
+}
+// After a local failure the peer is told WHY by a handshake Cancel (Gekko's disconnect alone would show it only 'Opponent disconnected'). The peer waits a moment for it.
+void send_failure_cancel()
+{
+    std::lock_guard<std::mutex> lk(g.pump.mutex());
+    if (g.host && g.mh) g.mh->cancel(jpsm::Reason::SessionFailed); else if (!g.host && g.mc) g.mc->abort(jpsm::Reason::SessionFailed);
+}
+bool m2_cancelled_within(int ms, std::string* text)
+{
+    for (int waited = 0;; waited += 20) {
+        { std::lock_guard<std::mutex> lk(g.pump.mutex());
+          if (g.plan_ready) {
+              const jpsm::State st = g.host ? g.mh->state() : g.mc->state();
+              if (jpsm::terminal(st) && st != jpsm::State::Ended) { *text = std::string("match cancelled: ") + jpsm::explain(g.host ? g.mh->reason() : g.mc->reason()); return true; }
+          } }
+        if (waited >= ms) return false;
+        Sleep(20);
+    }
+}
+void pump_fail(const std::string& t) { log("settings layer / rendezvous ended", t); { std::lock_guard<std::mutex> lk(g.txt_mu); if (!g.m2_ended.load()) g.m2_text = t; } g.m2_ended = true; }   // the main thread acts on it (boundary)
+
+uint64_t random_session_id()
+{
+    uint64_t r = 0;
+    try { std::random_device rd; r = ((uint64_t)rd() << 32) | rd(); } catch (...) {}
+    r ^= now_ms() * 0x9e3779b97f4a7c15ull;
+    return r ? r : 1;
+}
+
+// ---- the pump thread: rendezvous, handshake objects, handshake driving (everything under the pump mutex) ----------------------------------------------------------
+void pump_tick(uint64_t t)
+{
+    if (g.phase.load() == Phase::Off || g.m2_ended.load()) return;   // once ended nothing more is logged or driven (no 10 lines a second after a refusal)
+    if (!g.evidence_ready.load()) {   // the handshake belongs after boot: Startup-field evidence (renderer pipe state, installed render60 mode) must exist when a proposal is checked
+        static uint64_t first = 0, next = 0;
+        if (!first) first = t;
+        if (!jpss::reader_startup().available) {
+            if (t >= next) { next = t + 5000; std::fprintf(stderr, "[net] waiting for startup evidence (render60 mode=%d, pipe state=%d, %llu s)\n", render60_mode(), rsx_d3d12_pipe_effective_state(), (unsigned long long)((t - first) / 1000)); }
+            // Cases where it can never arrive: another render60 mode is installed (no canonical choice), or the renderer's pipe witness stays unavailable past a generous bound.
+            if (render60_mode() != 0) pump_fail(std::string(jpsm::explain(jpsm::Reason::NoStartupEvidence)) + " (render60 mode is on: rollback needs it off)");
+            else if (t - first > 240000) pump_fail(std::string(jpsm::explain(jpsm::Reason::NoStartupEvidence)) + " (the renderer pipe state never became available)");
+            return;
+        }
+        g.evidence_ready = true; log("startup evidence available", "starting the rendezvous");
+    }
+    g.hub->pump();   // channels keep retransmitting / acknowledging after the plan too
+    {   // one line every 5 s: where a failed run stopped
+        static uint64_t next = 0;
+        if (t >= next) {
+            next = t + (g.phase.load() == Phase::Running ? 30000 : 5000);   // dense before the session starts, sparse after
+            std::fprintf(stderr, "[net] waiting: phase=%d plan=%d m2=%d m2_started=%d m2_ended=%d sent=%llu recv=%llu dropped=%llu unknown_tag=%llu send_fail=%llu (err %d) hub_ignored=%llu rz_rejected=%llu\n",
+                         (int)g.phase.load(), (int)g.plan_ready, g.plan_ready ? (int)(g.host ? g.mh->state() : g.mc->state()) : -1, (int)g.m2_started.load(), (int)g.m2_ended.load(),
+                         (unsigned long long)g.mux.sent, (unsigned long long)g.mux.received, (unsigned long long)g.mux.dropped, (unsigned long long)g.mux.unknown_tag,
+                         (unsigned long long)g.mux.send_fail, g.mux.last_send_err, (unsigned long long)g.hub->ignored, (unsigned long long)g.rz->rejected_hello);
+        }
+    }
+    if (g.m2_ended.load()) return;
+    {   // every state change of the handshake, both roles
+        static int last = -2;
+        const int cur = g.plan_ready ? (int)(g.host ? g.mh->state() : g.mc->state()) : -1;
+        if (cur != last) { last = cur; std::fprintf(stderr, "[net] handshake state -> %d (%s)\n", cur, g.host ? "host" : "client"); }
+    }
+    if (!g.plan_ready) {
+        const int r = g.rz->poll();
+        if (r < 0) { pump_fail("rendezvous failed: " + g.rz->error()); return; }
+        if (r == 0) return;
+        g.plan = g.rz->plan();
+        g.link->set_peer(g.host ? 1 : 0, g.plan.remotes[0].ep);
+        if (g.host) {
+            g.mh.reset(new jpsm::Host(*g.link, g.ev, g.caps, 0));
+            if (g.mh->begin(g.plan.session_id, 0b11, g.plan.session_id ^ 0x5eedull, t) != jpsm::Reason::None) { pump_fail("settings handshake: cannot begin"); return; }
+        } else {
+            g.mc.reset(new jpsm::Client(*g.link, g.ev, g.caps, 1));
+            if (g.mc->join(g.plan.session_id, 0, t) != jpsm::Reason::None) { pump_fail("settings handshake: cannot join"); return; }
+        }
+        g.plan_ready = true;
+        log("rendezvous", to_string(g.plan.remotes[0].ep));
+        return;
+    }
+    // The handshake keeps ticking for the whole match (keep-alives, Start retransmits, Cancel handling); after handover() it only stops its own silence checks.
+    if (g.host) {
+        g.mh->tick(t);
+        const jpsm::State st = g.mh->state();
+        if (st == jpsm::State::Open && (g.mh->hellos() & 0b10) && g.propose_tries < 20) {
+            jpsm::Values v = g.ev.local_values();
+            v.v[static_cast<size_t>(jpsm::Id::Rollback)] = 1;
+            const jpsm::Reason r = g.mh->propose(v, t);
+            g.propose_tries++;
+            if (r != jpsm::Reason::None) {
+                const jpsm::Id bad = g.mh->bad_id();   // Host::bad_id names the field of a capability / range refusal (ev.fail_id() is only for install failures)
+                log("propose refused", std::string(jpsm::explain(r)) + " (field " + jpsm::rule(bad).name + ")");
+                if (r != jpsm::Reason::NotReady || g.propose_tries >= 20) {   // only NotReady can change by waiting; every other refusal is deterministic: no retry
+                    g.mh->cancel(r);   // the client gets a handshake Cancel with this reason and ends at once with its text
+                    pump_fail(std::string("host settings refused: ") + jpsm::explain(r));
+                }
+            }
+        }
+        if (st == jpsm::State::Ready) g.mh->start(0);
+        if (jpsm::terminal(st) && st != jpsm::State::Ended) pump_fail(std::string("match cancelled: ") + jpsm::explain(g.mh->reason()));
+        if (st == jpsm::State::Started) g.m2_started = true;
+    } else {
+        g.mc->tick(t);
+        const jpsm::State st = g.mc->state();
+        if (jpsm::terminal(st) && st != jpsm::State::Ended) pump_fail(std::string("match cancelled: ") + jpsm::explain(g.mc->reason()) + " (field " + jpsm::rule(g.mc->bad_id()).name + ")");
+        if (st == jpsm::State::Started) g.m2_started = true;
+    }
+}
+
+// ---- the game side of the glue ----------------------------------------------------------------------------------------------------------------------------
+class GameGlue : public IGlueGame {
+public:
+    uint32_t done() override { return g.done_now; }
+    bool commit(uint32_t tick, uint32_t* hash, uint32_t* token) override
+    {
+        const int r = jsp_snapshot_ext_commit(tick, g.ctx, hash);
+        if (r == 0) { log("snapshot commit failed", std::to_string(tick)); return false; }
+        if (r == 2) { log("snapshot layout changed", "older rollback targets are gone: ending the session"); return false; }
+        const uint32_t raw = *hash;
+        if (raw == 0) { log("no per-tick hash (the fight hash tap gave 0): the session cannot check state", std::to_string(tick)); return false; }   // raw 0 is never mixed or hidden
+        if (jsp_snapshot_ext_rsx_write_hazard()) { log("RSX wrote into guest memory with a commit pending (JSP_NET_RSX_WRITE_GUARD=0 turns the guard off)", std::to_string(tick)); return false; }
+        if (jsp_snapshot_ext_pool_evicted() != 0) { log("snapshot ring pool too short: an entry was evicted early", std::to_string(tick)); return false; }
+        *hash = raw ^ (tick * 2654435761u);   // the tick number is part of the checksum: peers whose base ticks differ desync at once
+        if (*hash == 0) *hash = 1;
+        *token = ++serial_;
+        std::fprintf(stderr, "[net] commit tick=%u hash=%08x raw=%08x\n", tick, *hash, raw);   // a two-instance test compares the LAST commit line per tick across the two peers
+        return true;
+    }
+    bool rollback(uint32_t tick) override
+    {
+        if (jsp_snapshot_ext_rollback(g.done_now, tick, g.ctx) != 1) { log("snapshot rollback failed", std::to_string(tick)); return false; }
+        g.done_now = tick;
+        std::fprintf(stderr, "[net] rollback to tick=%u (longest game-thread stretch without a session call since the last rollback: %u ms, keepalive polls so far: %llu)\n", tick, g.sess.take_max_gap_ms(), (unsigned long long)g.sess.keepalive_polls());
+        return true;
+    }
+    void local_pad(uint8_t, uint8_t wire[8]) override
+    {
+        uint8_t canon[8];
+        if (!jsp_stepper_local_pad(0, canon)) { jsi::Pad n; n.connected = true; const auto b = n.pack(); for (int i = 0; i < 8; i++) canon[i] = b[i]; }
+        pad_pack_to_wire(canon, wire);   // the device is physical port 0 on every machine; the table slot it feeds is the plan's local slot
+    }
+private:
+    uint32_t serial_ = 100;
+} g_game_glue;
+
+// WORKAROUND TO REPLACE (a bound, not a cause): the commit gate waits for the frame pipeline threads to reach their park points; a slow frame (a cold pipeline build took 4.4 s on a client and
+// 14 s on a host in two-copy tests) keeps them away. The session network is polled while the gate waits (idle hook); every other long stretch on the game thread (a replayed
+// frame, flips, vblank acks, a pipeline build before the boundary) is NOT covered by the hook: NetSession's keepalive thread polls whenever the game thread has not (GekkoNet's Poll
+// sends the 250-500 ms health ping the peer's disconnect timer counts). This constant is only the point where a gate that never clears is declared hung. Warm pipeline caches shorten the frames.
+constexpr unsigned kGateBudgetMs = 15000;
+
+void start_session(ppu_context* c)
+{
+    (void)c;
+    jpsm::Values vals;
+    { std::lock_guard<std::mutex> lk(g.pump.mutex()); vals = g.host ? g.mh->manifest().values : g.mc->manifest().values; }
+    g.base = g.done_now;
+    jsp_snapshot_ext_set_budget_ms(kGateBudgetMs);   // gate time between two session updates; the network is polled while the gate waits, so the grace window is not the limit
+    jsp_snapshot_ext_set_idle_hook([] { g.sess.poll(); });
+    SessionConfig cfg;
+    cfg.max_prediction = (uint8_t)kMaxPrediction; cfg.ring_depth = kRingDepth;
+    cfg.local_delay.assign(g.plan.local_count, (uint8_t)vals.v[static_cast<size_t>(jpsm::Id::InputDelay)]);          // from the manifest: both peers agree
+    cfg.disconnect_timeout_ms = vals.v[static_cast<size_t>(jpsm::Id::GraceSeconds)] * 1000u;                          // the grace window = the disconnect timeout
+    std::string why;
+    if (!jsp_snapshot_ext_active()) why = "the snapshot ring is not active (JSP_SNAPSHOT_EXT/WW did not start)";
+    else if (!g.sess.start(g.mux, g.plan, cfg)) why = "session refused: " + g.sess.error();
+    if (!why.empty()) {   // a refusal becomes a handshake Cancel with a reason, so the other side learns why (and the layer is removed on both)
+        { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host) g.mh->cancel(jpsm::Reason::SessionRefused); else g.mc->abort(jpsm::Reason::SessionRefused); }
+        end_with(std::string("Rollback session could not start: ") + why);   // (the handshake Cancel above already told the other side)
+        return;
+    }
+    g.stepper.begin(g.done_now, kRingDepth);
+    g.stepper.table().set_mask((1u << g.plan.total_players) - 1);
+    jsp_stepper_net_enable(&g.stepper.table());
+    g.glue.reset(new Glue(g.sess, g.stepper, g_game_glue));
+    { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host) g.mh->handover(); else g.mc->handover(); }   // the rollback session owns liveness from here
+    g.phase = Phase::Running; g.last_run_ms = GetTickCount64(); g.started_ms = g.last_run_ms;
+    log("session started", "base tick " + std::to_string(g.done_now) + " slots " + std::to_string(g.plan.local_first) + " of " + std::to_string(g.plan.total_players));
+    show("Connecting to opponent...");
+}
+
+// The cancel / end-match key is F9 (Esc quits the game: patch 2500). Held for 1.5 s while a match runs; a press while waiting.
+bool window_focused() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
+bool cancel_key() { return window_focused() && (GetAsyncKeyState(VK_F9) & 0x8000) != 0; }
+void ui_and_cancel()
+{
+    static bool was = false;
+    const bool k = cancel_key(), edge = k && !was; was = k;
+    const Phase ph = g.phase;
+    if (ph == Phase::Handshake || ph == Phase::Armed) {
+        std::lock_guard<std::mutex> lk(g.pump.mutex());
+        if (g.host) {
+            if (edge && g.plan_ready) { g.mh->cancel(); g.phase = Phase::Ended; set_text("Cancelled: local settings restored"); show(take_text()); return; }
+            if (ph == Phase::Handshake && g.plan_ready) { show("Waiting for client... (F9 cancels)"); return; }   // only until Start
+        } else if (g.plan_ready) {
+            const auto hw = g.mc->host_wait(now_ms());
+            const jpsm::State st = g.mc->state();
+            if (edge) { g.mc->leave(); g.phase = Phase::Ended; set_text("Left the session: local settings restored"); show(take_text()); return; }
+            if (g.mc->applied() && g.ev.active()) {
+                if (!g.settings_shown_ms) g.settings_shown_ms = GetTickCount64();
+                if (GetTickCount64() - g.settings_shown_ms < 6000) { show("Settings received: controlled by host"); return; }
+            }
+            if (hw.waiting && st != jpsm::State::Started) { show("Waiting for host... (" + std::to_string(hw.waited_ms / 1000) + " s, F9 cancels)"); return; }
+        }
+        if (ph == Phase::Armed) show("");
+    }
+    if (ph == Phase::Ended) { const std::string t = take_text(); if (!t.empty()) show(t); }
+}
+
+// ---- the boundary: BeginFrame entry, once per main-loop iteration ------------------------------------------------------------------------------------------------
+void boundary(ppu_context* c)
+{
+    JspTickState ts; jsp_fight_hash_get_state(&ts);
+    g.ctx = c; g.done_now = ts.done;
+    Phase ph = g.phase;
+    if (ph == Phase::Off) return;
+    if (g.m2_ended.load() && ph != Phase::Ended) {   // a Cancel / failure of the settings layer while waiting, armed or in the match: the match ends on this side too
+        std::string t; { std::lock_guard<std::mutex> lk(g.txt_mu); t = g.m2_text; }
+        if (ph == Phase::Running) g.sess.abort("settings layer ended: " + t);
+        end_with(t); return;
+    }
+    if (ph == Phase::Handshake && g.m2_started.load()) { g.phase = Phase::Armed; ph = Phase::Armed; log("phase", "armed (settings agreed, waiting for the first fight tick)"); }
+    // done >= 1 already implies the camera anchor (g_done counts only after it is set; the hash tap needs the cameras), so tick `done` has a raw hash. ts.anc_set is the PRESS anchor and is never set here.
+    if (ph == Phase::Armed && ts.done >= 1) { start_session(c); ph = g.phase; if (ph != Phase::Running) return; }
+    else if (ph != Phase::Running) { ui_and_cancel(); return; }
+    if (cancel_key()) {   // End match: F9 held 1.5 s
+        if (!g.cancel_since) g.cancel_since = GetTickCount64();
+        if (GetTickCount64() - g.cancel_since > 1500) { g.sess.abort("match ended by the player"); end_with("Match ended"); return; }
+    } else g.cancel_since = 0;
+    const uint64_t u0 = g.glue->updates();
+    const jsx::Op op = g.glue->iteration(true);   // update is called whenever the stepper has nothing queued (skipping it for pacing stalled both peers in a two-copy test)
+    if (g.glue->updates() != u0) { jsp_snapshot_ext_budget_reset(); if (const uint32_t ms = g.sess.pace_sleep_ms(33)) Sleep(ms); }
+    else g.sess.poll();   // replay / regrant / stall iterations: the network is still serviced
+    for (const SessionEvent& e : g.sess.take_events()) {
+        switch (e.kind) {
+        case SessionEventKind::Started: log("gekko session synchronized", ""); show(""); break;
+        case SessionEventKind::Disconnected:   // GekkoNet fires it after the disconnect timeout = the grace window: the match is over
+            { std::string why; if (m2_cancelled_within(300, &why)) { g.sess.abort(why); end_with(why); return; } }   // the peer's handshake Cancel (a local failure there) names the reason
+            g.sess.abort("opponent disconnected"); end_with("Opponent disconnected"); return;
+        case SessionEventKind::Desync:   // includes a base-tick mismatch: the per-tick hash carries the tick number
+            std::fprintf(stderr, "[net] DESYNC at tick %u (stepper tick numbering, session-relative; add the base %u): local=%08x remote=%08x\n", (unsigned)e.tick, g.base, e.local_hash, e.remote_hash);
+            if (e.tick <= 3) std::fprintf(stderr, "[net] base mismatch suspected: the desync is at the first compared ticks; the two peers probably armed at different ticks (local base %u; the base is part of the per-tick hash, it is not exchanged)\n", g.base);
+            g.sess.abort("desync detected"); end_with("Desync detected: match ended"); return;
+        default: break;
+        }
+    }
+    if (g.sess.failed()) { send_failure_cancel(); end_with("Rollback session ended: " + g.sess.failure()); return; }
+    const uint64_t now = GetTickCount64();
+    if (op.kind == jsx::OpKind::Run) {
+        g.skip_sim = false; g.skip_pad = op.regrant;
+        if (!op.regrant) g.last_run_ms = now;
+        if (g.shown.rfind("Reconnecting", 0) == 0) show("");
+    } else {
+        g.skip_sim = true; g.skip_pad = true;   // no tick may run: skip phases 1, 2 and the pad poll (a render-only iteration) and keep presenting
+        if (g.sess.synced() && now - g.last_run_ms > 1000)
+            show("Reconnecting... " + std::to_string((now - g.last_run_ms) / 1000) + " s (F9 held: end match)");
+    }
+    const bool rep = g.stepper.replaying();
+    if (g.was_replaying && !rep) jsp_stepper_replay(0, g.done_now);   // the replay's last tick is done: fast clock and effect gate off
+    g.was_replaying = rep;
+}
+
+// ---- hooks ------------------------------------------------------------------------------------------------------------------------------------------------
+typedef void (*fn_t)(ppu_context*);
+enum Ev { E_BEGIN, E_P1, E_P2, E_PAD };
+struct Ent { uint32_t addr; Ev ev; const char* name; };
+constexpr Ent k_ents[] = { {0x00642C3C, E_BEGIN, "BeginFrame"}, {0x0064EBEC, E_P1, "F.vt[8]"}, {0x0064EF10, E_P2, "F.vt[0xC]"}, {0x003F7E2C, E_PAD, "pad_update"} };
+
+template <int I> struct Hook {
+    static fn_t orig;
+    static void run(ppu_context* c)
+    {
+        const Ev ev = k_ents[I].ev;
+        if (ev == E_BEGIN) boundary(c);
+        else if (g.phase == Phase::Running) {
+            if ((ev == E_P1 || ev == E_P2) && g.skip_sim) return;
+            if (ev == E_PAD && (g.skip_sim || g.skip_pad)) return;   // regrant: the pad must not be polled twice for one tick (see Stepper::boundary)
+        }
+        orig(c);
+    }
+    static void install()
+    {
+        if (!jsp_hook_chain::install(k_ents[I].addr, &run, &orig)) std::fprintf(stderr, "[net] no lifted function at %08X (%s)\n", k_ents[I].addr, k_ents[I].name);
+    }
+};
+template <int I> fn_t Hook<I>::orig;
+template <int... Is> void install_all(std::integer_sequence<int, Is...>) { (Hook<Is>::install(), ...); }
+
+}  // namespace
+
+extern "C" void jsp_net_game_install(void)
+{
+    if (!env_on("JSP_ROLLBACK")) return;
+    char b[96] = {};
+    const bool have_listen = jsp_setting_get("JSP_ROLLBACK_LISTEN", b, sizeof b) && b[0];
+    char j[96] = {};
+    const bool have_join = jsp_setting_get("JSP_ROLLBACK_JOIN", j, sizeof j) && j[0];
+    if (have_listen == have_join) { std::fprintf(stderr, "[net] JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): off\n"); return; }
+    g.host = have_listen;
+    std::string err;
+    if (g.host) g.listen_port = (uint16_t)std::atoi(b);
+    else if (!parse_endpoint(j, g.join)) { std::fprintf(stderr, "[net] JSP_ROLLBACK_JOIN is not IP:PORT: off\n"); return; }
+    if (!g.mux.open(g.host ? g.listen_port : 0, &err)) { std::fprintf(stderr, "[net] cannot open the UDP socket: %s: off\n", err.c_str()); return; }
+    // F9 is the cancel key: a VK 0x78 binding (settings pages save PAD_KEY_* as 0x78 / decimal) is dropped from the environment the pad layer reads.
+    for (char** e = environ; e && *e; ++e) {
+        if (std::strncmp(*e, "PAD_KEY_", 8) != 0) continue;
+        const char* eq = std::strchr(*e, '='); if (!eq) continue;
+        char* end = nullptr; const long vk = std::strtol(eq + 1, &end, 0);
+        if (end != eq + 1 && vk == 0x78) { const std::string name(*e, (size_t)(eq - *e)); _putenv_s(name.c_str(), ""); std::fprintf(stderr, "[net] binding %s = F9 dropped (F9 is the rollback cancel key)\n", name.c_str()); e = environ - 1; }
+    }
+    g.caps.build = build_id();
+    // local preferences into the effective-value object (the proposal of a host starts from these; a client's own layer sits under the host's)
+    for (size_t i = 0; i < jpsm::kCount; ++i) {
+        const jpsm::Id id = static_cast<jpsm::Id>(i);
+        char t[64]; uint32_t v;
+        if (jsp_setting_get(jpsm::rule(id).name, t, sizeof t) && t[0] && text_to_canon(id, t, &v) && jpsm::in_range(id, v)) g.ev.set_local(id, v);
+    }
+    g.ev.set_local(jpsm::Id::Rollback, 1);
+    jsp_session_text_hook = session_text;
+    g.hub.reset(new MessageHub(g.mux));
+    g.rz.reset(g.host ? new DirectRendezvous(g.mux, *g.hub, 1, random_session_id()) : new DirectRendezvous(g.mux, *g.hub, 1, g.join));
+    g.link.reset(new M2LinkT<jpsm::Transport>(g.mux));
+    g.phase = Phase::Handshake;
+    install_all(std::make_integer_sequence<int, sizeof k_ents / sizeof k_ents[0]>());
+    std::fprintf(stderr, "[net] listening/joining: %s, local UDP port %u\n", g.host ? "host" : to_string(g.join).c_str(), (unsigned)g.mux.local_port());
+    g.pump.start(g.mux, *g.link,
+        [](uint8_t peer, const uint8_t* d, size_t n, uint64_t ms) {   // runs on the pump thread under its mutex
+            if (g.host && g.mh) g.mh->on_message(peer, d, n, ms);
+            else if (!g.host && g.mc) g.mc->on_message(peer, d, n, ms);
+        },
+        [](uint64_t t) { pump_tick(t); }, 100);
+    std::fprintf(stderr, "[net] rollback opt-in: %s, build %08x, hooks installed\n", g.host ? "host" : "client", g.caps.build);
+}
+
+#endif  // JSP_ROLLBACK_BUILD

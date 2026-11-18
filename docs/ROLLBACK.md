@@ -1,9 +1,11 @@
 # Rollback netcode: how it works and how this port will do it
 
-Status: **planned, in research.** Nothing in a release uses rollback yet. Today's online play is the game's own Online
-Battle over a [re-psn](https://github.com/undecuple/re-psn) server ([ONLINE.md](ONLINE.md)). That uses the game's original
-peer-to-peer code, not rollback. This page explains rollback in general, then how this port plans to add it, what it is
-built on, and what we fall back to. The roadmap item is [ROADMAP.md, section 4](ROADMAP.md).
+Status: **experimental, opt-in.** A first version for two PCs connected by IP address is in the build, off unless you turn
+it on ([section 5](#5-try-it-experimental-direct-ip-rollback)). Turned off, the game runs exactly as before. Today's
+online play is still the game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server
+([ONLINE.md](ONLINE.md)). That uses the game's original peer-to-peer code, not rollback. This page explains rollback in
+general, then how this port adds it, what it is built on, and what we fall back to. The roadmap item is
+[ROADMAP.md, section 4](ROADMAP.md).
 
 ## 1. What rollback netcode is
 
@@ -160,11 +162,81 @@ flowchart LR
 | 1. Determinism | Done: two runs with the same seed and inputs gave identical per-tick state hashes from the fight's start |
 | 2. Library | Done: GekkoNet passed the acceptance test above |
 | 3. Snapshot prototype (route A) | Done for correctness. The first run missed the heap and did not match. With the heap saved, the game was restored 60 ticks back and replayed them, and every per-tick state hash matched the first pass. Saving the full 144 MB takes 15 ms and restoring it 23 ms, more than one 33 ms tick together, so copying everything each tick is too slow. Over those 60 ticks, 1,634 of 35,278 memory pages changed. |
-| 4. Shipping snapshot | Next: copy only the pages that changed since the last save, then longer replays (300 and 1,800 ticks) |
-| 5 to 7 | Not started |
+| 4. Shipping snapshot | In the build, experimental: each tick saves only the memory pages written since the last save (Windows write watch) into a ring of the last 12 ticks |
+| 5. Local loopback | Passed twice, on two successive development builds: two copies of the game on one PC, with 30 ms ± 10 ms of simulated network delay and a warm pipeline cache, played a Free Battle to tick 3329. The 3,299 compared ticks had equal state hashes on both copies, with 139 and 136 rollbacks and no desync. The second run compared 2,843 ticks, all equal, with 115 and 119 rollbacks |
+| 6. Two PCs | Opt-in for testing ([section 5](#5-try-it-experimental-direct-ip-rollback)); not tested on two PCs yet |
+| 7 | Not started |
 
 What does not change: rollback play stays opt-in. The port connects only when you choose online play, and only to the
 players or server you pick. Every gameplay option in a match is the same for all players.
+
+## 5. Try it: experimental direct-IP rollback
+
+This is for testers. Expect rough edges, and report what you see (with the support bundle) in an issue.
+
+**Turn it on** on both PCs by adding lines to `play_settings.txt` (in the install folder, or
+`%APPDATA%\JSP Fan Revival\`; the settings windows keep lines they do not know):
+
+| Who | Lines |
+|---|---|
+| Host | `JSP_ROLLBACK=1` and `JSP_ROLLBACK_LISTEN=36200` (any free UDP port) |
+| Client | `JSP_ROLLBACK=1` and `JSP_ROLLBACK_JOIN=<host IP>:36200` |
+
+Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. There are no menu entries for it yet.
+
+**Network:** the host receives on that one UDP port. On a home network that just works; over the internet the host must
+forward the UDP port on the router (and allow it in the firewall). The client needs no open port. There is no relay and no
+lobby yet, and re-psn matchmaking does not start rollback matches yet.
+
+**What happens:**
+
+1. Both games start as usual. Once each has finished starting up, the client connects to the host. The client shows
+   *Waiting for host...* and the host *Waiting for client...*; F9 cancels.
+2. The host's match rules (input delay `JSP_INPUT_DELAY`, 0 to 8 ticks, default 2; the reconnect grace time
+   `JSP_NET_GRACE_S`, 1 to 30 s, default 5; the match timer) are sent to the client for this match only. The client shows
+   *Settings received: controlled by host*. Your own settings come back when the match ends; nothing is saved. Settings that
+   only apply at start-up must already be the same on both PCs (for example the KO count, the 60 fps drawing mode, and the
+   cheats, which must be off); otherwise the match does not start and both PCs show which setting differs.
+3. Both players set up the same **Free Battle** fight on their own PC: menus and character select are not linked yet. The
+   rollback session starts at the first tick of the fight. The host plays as player 1, the client as player 2.
+4. During the fight only inputs travel. If no input arrives for over a second the screen shows *Reconnecting... N s*;
+   holding F9 for 1.5 s ends the match. If the other PC stays silent past the grace time (5 s by default), the match ends
+   with *Opponent disconnected*. A detected desync ends the match too. After any of these the fight continues offline on each PC.
+
+**Known limits (experimental):**
+
+- Free Battle only, one player per PC (two players on two PCs). The session layer handles up to four players on two PCs,
+  but the game side is not wired for it yet.
+- Not tested on two PCs yet. Two copies on one PC have passed two Free Battle runs with rollbacks and no desync (see step 5
+  above).
+- A warm pipeline cache is recommended: on a first launch, building the graphics pipelines can take seconds per frame,
+  which stalls the session. Play an offline fight first on each PC.
+- Workaround to replace: the snapshot waits for the game's frame threads to pause before each save; if they have not
+  paused within 15 s of waiting between two session updates, the match ends as hung. The session keeps its connection
+  alive while it waits.
+- Menus, character and stage selection are not synchronized; both sides must pick the same fight.
+- Every rollback match uses the same fixed random seed (the host's own seed is not applied yet).
+- An earlier freeze after a rollback (an SPU job running across the saved tick) is now avoided by waiting for the job
+  server before each save; it has not recurred in the runs above.
+- When a match ends early (disconnect, desync, F9), the fight continues offline; there is no return to the menu for both.
+- The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it.
+- Only direct IP. The re-psn server is not used for rollback yet; the connection part is replaceable so it can be added.
+
+**Always on, even with rollback off.** None of this changes what the game does; it is listed so nothing is hidden:
+
+- Toolkit patch 7911: one flag load per HLE call, syscall, lwcond wait, event-queue receive (two sites) and semaphore
+  wait; the marker is reset at thread start and exit; each lwmutex slot gets a dead flag set on destroy (the slot grows by
+  8 bytes, so the 65,536-slot static table grows by 512 KiB).
+- 7912: on every fiber switch the HLE marker stack is swapped (two 72-byte copies through a 96-byte stack buffer) and a
+  relaxed atomic counter is incremented; the Fiber struct grows by 96 bytes; two thread-locals.
+- 7913: two counters (SPURS jobs in flight, SPU async threads running). 7914: one relaxed load per gate site.
+  7915: a delivered-vblank counter.
+- 7917: one call, one address compare, one counter increment and one NULL check per RSX store, row or word run into guest
+  memory, and one counter increment per FIFO drain pass.
+- The port: one call and one relaxed atomic load per frame-clock pass (about every 4 ms), a NULL check per setting read,
+  a `getenv` on an F9 binding and at static initialisation; the thread registry's TLS callback (two environment reads at
+  process start, then one relaxed load and a return on every thread start and exit); a 64 KiB static ring for the RSX
+  write log.
 
 ## Further reading
 

@@ -1,0 +1,170 @@
+Patch 7913 (experimental, rollback netcode): read-only census of SPURS jobs, cellFiber fibers and the GCM flip state, for the rollback
+snapshot's quiesce check (installer/port/jsp/jsp_snapshot.cpp, used only with JSP_ROLLBACK=1).
+
+Why: a snapshot also needs (a) no SPURS job running on a host thread (its local store and DMA are not in the snapshot), (b) every fiber at
+a state the scheduler defines (a fiber running on another thread has host stack and registers outside the snapshot), (c) no flip
+outstanding and no flip command ahead of the FIFO drain.
+Change: spu_workload.c: g_ps3_spu_jobs_inflight, +1/-1 around spu_run_spurs_job, and
+g_ps3_spu_async_running, +1/-1 (seq_cst) around each SPU async thread run on both branches: two always-on counters, read only by the census. cellSpursJq.c:
+ps3_spurs_jq_pending(). cellSpurs.c: ps3_spurs_census(out[7]) = job-chain jobs in flight (not taskset tasks or thread groups), HLE queue
+pending, busy policy-module slots, job-chain walkers, chains, live instances, async SPU threads running.
+cellFiber.c: ps3_fiber_census(out[9]) = fibers by state, running-but-not-the-caller's ("away"), schedulers in RunFibers, state lock held.
+cellGcmSys.c: cellGcm_flip_census(out[9]) = flip status, request/tick sequence, flips queued/reached/completed, direct pending,
+undelivered pump bits, flip lock. The runtime keeps no label queue (labels are written while the drain parses), so put == get plus
+queued == reached is the label condition.
+
+diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+index d4accf4..61ea8da 100644
+--- a/libs/spurs/cellFiber.c
++++ b/libs/spurs/cellFiber.c
+@@ -624,3 +624,27 @@ s32 cellFiberPpuJoinFiber(CellFiberPpu* fiber, s32* status)
+     UNLOCK();
+     return rc;
+ }
++
++/* Patch 7913 (read-only, takes no lock, call it with the other threads suspended): the state of every fiber, for the rollback snapshot's
++ * quiesce gate. A fiber is at a known boundary when it is READY (yielded or not started), WAIT_SIGNAL, WAIT_JOIN or DONE; one that is RUNNING on another
++ * thread is mid-flight (its host stack and registers are not in the snapshot). The caller's own fiber (t_cur of the calling thread, the frame fiber that runs
++ * the snapshot hook) is RUNNING by definition and is not counted as away.
++ * out[0] fibers  out[1] ready  out[2] running (all)  out[3] wait_signal  out[4] wait_join  out[5] done  out[6] away (running, not the caller's)
++ * out[7] sched_running (schedulers with a thread inside RunFibers)  out[8] lock_held (the state lock is taken: a thread was suspended inside the scheduler) */
++void ps3_fiber_census(uint32_t* out)
++{
++    uint32_t n = 0, c[5] = {0, 0, 0, 0, 0}, away = 0, sr = 0;
++    for (Fiber* f = s_fibers; f; f = f->next) {
++        n++;
++        if (f->state >= F_READY && f->state <= F_DONE) c[f->state]++;
++        if (f->state == F_RUNNING && f != t_cur) away++;
++    }
++    for (Sched* s = s_scheds; s; s = s->next) if (s->running) sr++;
++    out[0] = n; out[1] = c[F_READY]; out[2] = c[F_RUNNING]; out[3] = c[F_WAIT_SIGNAL]; out[4] = c[F_WAIT_JOIN]; out[5] = c[F_DONE];
++    out[6] = away; out[7] = sr;
++#ifdef _WIN32
++    out[8] = *(void* volatile*)&s_lock != NULL ? 1 : 0;
++#else
++    out[8] = 0;
++#endif
++}
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 37fc269..6345d7a 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -3829,3 +3829,32 @@ s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
+     if (PS3_LOG_FIRST(_n, 8)) printf("[cellSpurs] LFQueueAttachLv2EventQueue(q=0x%08X)\n", (u32)queue_ea);
+     return CELL_OK;
+ }
++
++/* Patch 7913 (read-only, takes no lock): what the SPURS runtime keeps, for the rollback snapshot's quiesce gate (jsp_snapshot.cpp).
++ * out[0] jobs_inflight   SPURS jobs executing on a host thread (spu_workload.c counter)
++ * out[1] jq_pending      jobs the HLE job queues count as pending (cellSpursJq.c)
++ * out[2] pm_busy         policy-module slots running a workload module now (a waiting policy occupies its slot, so this is a note, not a block)
++ * out[3] jc_running      job chains with a host walker thread (a walker parked on a guard is idle, a note)
++ * out[4] jc_total        job chains registered
++ * out[5] instances       SPURS instances with a live kernel
++ * out[6] async_running   host threads inside spu_async_run: taskset tasks and SPU thread-group threads (note only: they can be long-lived)
++ *
++ * SCOPE of out[0]: only SPURS JOB-CHAIN jobs (spu_workload_dispatch_job -> spu_run_spurs_job). Taskset tasks and SPU thread groups are out[6]; out[1] is the HLE queue
++ * (cellSpursJq.c), whose jobs complete at push, so it is ~0 for a title that uses the guest-side job queue like this one.
++ * Only out[0] + out[1] are "work in flight": the guest's own job queue / job chain structures live in guest memory and are in the snapshot. */
++extern volatile long g_ps3_spu_jobs_inflight;
++extern volatile long g_ps3_spu_async_running;
++extern u32 ps3_spurs_jq_pending(void);
++void ps3_spurs_census(uint32_t* out)
++{
++    uint32_t pm = 0, inst = 0, jr = 0, jt = 0;
++    for (int i = 0; i < MAX_SPURS_INST; i++) {
++        if (!s_inst[i].ea) continue;
++        if (s_inst[i].kernel_live) inst++;
++        for (u32 s = 0; s < s_inst[i].nspus && s < 6; s++) if (s_inst[i].slots[s].busy) pm++;
++    }
++    for (int i = 0; i < MAX_JOBCHAINS; i++) { if (s_jobchains[i].jc_ea) jt++; if (s_jobchains[i].running) jr++; }
++    long j = g_ps3_spu_jobs_inflight;
++    long a = g_ps3_spu_async_running;
++    out[0] = j > 0 ? (uint32_t)j : 0; out[1] = ps3_spurs_jq_pending(); out[2] = pm; out[3] = jr; out[4] = jt; out[5] = inst; out[6] = a > 0 ? (uint32_t)a : 0;
++}
+diff --git a/libs/spurs/cellSpursJq.c b/libs/spurs/cellSpursJq.c
+index ffb6e54..7f66e1b 100644
+--- a/libs/spurs/cellSpursJq.c
++++ b/libs/spurs/cellSpursJq.c
+@@ -271,3 +271,11 @@ s32 cellSpursJobQueueSemaphoreTryAcquire(CellSpursJobQueue* jq)
+     (void)jq;
+     return CELL_OK;
+ }
++
++/* Patch 7913 (read-only, takes no lock): jobs the HLE queues still count as pending (jobCount of every queue in use). */
++u32 ps3_spurs_jq_pending(void)
++{
++    u32 n = 0;
++    for (int i = 0; i < CELL_SPURS_JQ_MAX_QUEUES; i++) if (s_queues[i].in_use) n += s_queues[i].jobCount;
++    return n;
++}
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 3ecab89..a584f14 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1097,6 +1097,20 @@ void cellGcmTickFlip(void)
+     if (waiting) GCM_PENDING_SET(2);
+ }
+ 
++/* Patch 7913 (read-only, takes no lock): the flip / pending-event state, for the rollback snapshot's quiesce gate.
++ * out[0] flip_status (CELL_GCM_FLIP_STATUS_*: DONE = no flip outstanding)  out[1] flip_req_seq  out[2] flip_tick_seq
++ * out[3] flips_queued (flip commands the guest put in the FIFO)  out[4] flips_reached (executed by the drain)  out[5] flips_completed
++ * out[6] direct_pending (a direct flip waiting for its tick)  out[7] gcm_pending (bit0 vblank, bit1 flip: a handler call not yet delivered)
++ * out[8] flip_lock_held
++ * Labels: the drain writes a label release while it parses the command, so with put == get every label the guest emitted is written; a flip command
++ * still ahead of the drain (queued != reached) is the observable form of "labels not yet written". The runtime keeps no other label queue. */
++void cellGcm_flip_census(uint32_t* out)
++{
++    out[0] = s_flip_status; out[1] = s_flip_req_seq; out[2] = s_flip_tick_seq;
++    out[3] = s_fifo_flips_queued; out[4] = s_fifo_flips_reached; out[5] = s_fifo_flips_completed;
++    out[6] = (uint32_t)s_flip_direct_pending; out[7] = (uint32_t)s_gcm_pending; out[8] = (uint32_t)s_flip_lock;
++}
++
+ /* Drain the game's GCM FIFO into the RSX backend. Called from the present thread
+  * (boot_main vblank_ticker). Not yet active: s_control.put stays 0 because
+  * cellGcmGetControlRegister returns a HOST pointer, so the title's put writes
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index f922b74..248e387 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -7,6 +7,11 @@
+  */
+ #include "spu_workload.h"
+ #include "spu_lifted_job.h"   /* spu_run_lifted_job */
++/* Patch 7913: SPURS jobs running right now on a host thread (entered spu_run_spurs_job, not yet back). Read by ps3_spurs_census. */
++volatile long g_ps3_spu_jobs_inflight = 0;
++/* Patch 7913: host threads inside spu_async_run (taskset tasks and SPU thread-group threads started by spu_workload_dispatch_async). These can be long-lived
++ * (a task waiting for work, a persistent SPU thread), so the census reports them as a note and never blocks on them. */
++volatile long g_ps3_spu_async_running = 0;
+ #include "../ps3_log.h"      /* ps3_log_verbose */
+ #include <stdio.h>
+ #include <time.h>
+@@ -1012,7 +1017,9 @@ static DWORD WINAPI spu_async_thread(LPVOID p) {
+      * runaway brsl recursion) can actually reach the STACKOVERFLOW reporter
+      * instead of killing the process silently with 0x80000001. */
+     { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }
++    __atomic_add_fetch(&g_ps3_spu_async_running, 1, __ATOMIC_SEQ_CST);
+     spu_async_run((spu_async_job*)p);
++    __atomic_sub_fetch(&g_ps3_spu_async_running, 1, __ATOMIC_SEQ_CST);
+     /* Nothing on this stack may stay in the lock-line reserver set. */
+     { ULONG_PTR lo, hi; GetCurrentThreadStackLimits(&lo, &hi);
+       extern void spu_coh_forget_range(uintptr_t, uintptr_t);
+@@ -1021,7 +1028,7 @@ static DWORD WINAPI spu_async_thread(LPVOID p) {
+     return 0;
+ }
+ #else
+-static void* spu_async_thread(void* p) { spu_async_run((spu_async_job*)p); return NULL; }
++static void* spu_async_thread(void* p) { __atomic_add_fetch(&g_ps3_spu_async_running, 1, __ATOMIC_SEQ_CST); spu_async_run((spu_async_job*)p); __atomic_sub_fetch(&g_ps3_spu_async_running, 1, __ATOMIC_SEQ_CST); return NULL; }
+ #endif
+ 
+ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+@@ -1086,7 +1093,9 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+     if (s_prof < 0) { const char* e = ps3_env_once("SPU_JOBPROF"); s_prof = e ? atoi(e) : 0; }
+     struct timespec t0, t1;
+     if (s_prof) timespec_get(&t0, TIME_UTC);
++    __atomic_add_fetch(&g_ps3_spu_jobs_inflight, 1, __ATOMIC_SEQ_CST);   /* patch 7913 */
+     int rc = spu_run_spurs_job(fn, image_id, job_ea, job_desc_size);
++    __atomic_sub_fetch(&g_ps3_spu_jobs_inflight, 1, __ATOMIC_SEQ_CST);
+     if (s_prof) {
+         static double acc[64], last; static unsigned cnt[64];
+         timespec_get(&t1, TIME_UTC);
