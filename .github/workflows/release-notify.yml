@@ -2,6 +2,7 @@ name: release-notify
 
 # Posts one message to the project's Discord forum when a release is published (pre-releases too): a new thread per
 # release, with the release notes (new features, fixes and changes) cut to 1,800 characters and a link to the full notes.
+# It pings only the project's own Discord role (ROLE, a public number), never @everyone, @here or a person.
 # The webhook must belong to a forum channel (thread_name opens the thread; a text-channel webhook refuses it).
 # The release workflow only creates a draft; publishing it is done by a person, so this trigger runs then.
 # The webhook URL lives only in the repository secret DISCORD_RELEASE_WEBHOOK; without it (forks) the job does nothing.
@@ -24,6 +25,7 @@ jobs:
           URL: ${{ github.event.release.html_url }}
           PRERELEASE: ${{ github.event.release.prerelease }}
           BODY: ${{ github.event.release.body }}
+          ROLE: "1572342306839724295"   # the project's Discord role (public number, see the table)
         run: |
           set -euo pipefail
           if [ -z "$WEBHOOK" ]; then
@@ -32,11 +34,12 @@ jobs:
           fi
           kind="release"
           [ "$PRERELEASE" = "true" ] && kind="pre-release"
-          # allowed_mentions empty: the message can never ping anyone, whatever the release title says.
-          jq -n --arg tag "$TAG" --arg url "$URL" --arg kind "$kind" --arg body "$BODY" '{
+          # allowed_mentions names the one project role: the message pings that role only, whatever the release title says.
+          jq -n --arg tag "$TAG" --arg url "$URL" --arg kind "$kind" --arg body "$BODY" --arg role "$ROLE" '{
             username: "J-Stars Victory VS-EX",
             thread_name: (("J-Stars Victory VS-EX " + $tag) | .[0:100]),
-            allowed_mentions: {parse: []},
+            content: ("<@&" + $role + ">"),
+            allowed_mentions: {parse: [], roles: [$role]},
             embeds: [{
               title: ("J-Stars Victory VS-EX " + $tag + " is out"),
               url: $url,
