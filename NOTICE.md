@@ -22,6 +22,15 @@ copyright and licence header (it names the authors), unchanged. `SMAA_hlsl.inc` 
 carries a one-line attribution. The patch puts them into the patched toolkit, where the
 patched video library uses them for the "SMAA" edge smoothing option. Keep the header with any copy of these files.
 
+## GekkoNet
+
+The experimental rollback netcode (off unless `JSP_ROLLBACK=1`) is built on [GekkoNet](https://github.com/HeatXD/GekkoNet)
+by Jamie Meyer, licensed under the BSD 2-Clause licence. `installer/port/jsp/gekkonet/` is an unchanged copy of its library
+sources at commit `45dac7e5` (`installer/port/jsp/gekkonet/PIN.md` lists what was taken), with its `LICENSE`. It includes
+[zpp_bits](https://github.com/eyalz800/zpp_bits) by Eyal Z (MIT, `installer/port/jsp/gekkonet/thirdparty/zpp/LICENSE`). Both
+licence texts travel with the sources into the installer package (`port\gekkonet\`) and are compiled into the game exe on the
+player's PC. Keep both licence texts with any copy of these files.
+
 ## rpcs3_locate
 
 `installer/tools/rpcs3_locate.py` and its test `installer/tools/test_rpcs3_locate.py` are a helper shared between several unofficial ports of PS3 games,

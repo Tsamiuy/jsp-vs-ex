@@ -1,0 +1,272 @@
+Patch 7914 (experimental, rollback netcode): a gate sequence that the rollback snapshot can wait on instead of polling
+(installer/port/jsp/jsp_snapshot_sync.h, gate_ev). Disarmed by default; the netcode keeps the polling wait unless JSP_SNAPSHOT_GATE=ev.
+
+Change: sys_snapshot_census.c: struct ps3_gate_line_t g_ps3_gate_line (one 64-byte line holding everything the sites write: the sequence,
+the waiter count and 12 per-site counters; g_ps3_gate_armed sits on another line), ps3_gate_bump(site) (seq_cst increment, WakeByAddressAll
+only while the port waits), ps3_gate_arm(on, park lrs, n), ps3_gate_arm_transit(nids, n), ps3_gate_bump_counts(out[12]); site 0 in
+ps3_hle_mark_enter when the lr is a parked role's lr; site 7 in ps3_hle_mark_leave after the depth drop when the frame left is a transit.
+cellGcmSys.c: site 1 where cellGcm_request_tick / cellGcmTickFlip set the flip pending bit, site 2 where the flip pump marks the flip
+DONE, site 3 where the FIFO drain publishes a new get equal to put. spu_workload.c: site 4 when job-chain jobs in flight drop to 0.
+cellFiber.c: site 5 when a fiber enters cellFiberPpuWaitSignal. ppu_sysprx.cpp: site 6 in lwm_release; and the lwmutex census caches the
+readability of each guest page (one VirtualQuery per page instead of per lwmutex), dropped by ps3_lwm_census_invalidate().
+Sites not covered (a wait for them ends by the port's timeout): sys_mutex / sys_rwlock release, SPURS job-queue pending, the fiber
+scheduler lock, the flip lock and the pending bits other than the flip bit.
+Disarmed (the default), every site is one relaxed load.
+
+diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+index 61ea8da..e6760fe 100644
+--- a/libs/spurs/cellFiber.c
++++ b/libs/spurs/cellFiber.c
+@@ -45,6 +45,8 @@ _Static_assert(sizeof(ucontext_t) > 64,
+ #endif
+ 
+ extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++extern volatile int g_ps3_gate_armed;   /* patch 7914 (runtime/syscalls/sys_snapshot_census.c) */
++void ps3_gate_bump(int site);
+ 
+ /* Host stack of each fiber. The guest stack is separate: it holds the guest's own frames, this one the host frames of
+  * the lifted code and of the trampoline. */
+@@ -536,6 +538,7 @@ s32 cellFiberPpuWaitSignal(void)
+     }
+     f->state = F_WAIT_SIGNAL;
+     UNLOCK();
++    if (g_ps3_gate_armed) ps3_gate_bump(5);   /* patch 7914 site 5: this fiber leaves RUNNING */
+     host_yield(f);               /* RunFibers runs the others until SendSignal makes this one ready */
+     return CELL_OK;
+ }
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index a584f14..10397d2 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -901,6 +901,10 @@ static atomic_flag s_gcm_pumping = ATOMIC_FLAG_INIT;
+ #define GCM_PUMP_LEAVE()     atomic_flag_clear_explicit(&s_gcm_pumping, memory_order_release)
+ #endif
+ 
++/* Patch 7914: bump sites of the snapshot gate sequence (runtime/syscalls/sys_snapshot_census.c); no-ops unless the port armed them. */
++extern volatile int g_ps3_gate_armed;
++void ps3_gate_bump(int site);
++
+ /* Called by the vblank ticker thread. NO guest code -- advance the vblank count
+  * and mark a vblank+flip tick pending for the main thread to deliver. */
+ static u32 s_fifo_getoff;   /* tentative: defined below */
+@@ -925,6 +929,7 @@ void cellGcm_request_tick(void)
+           const int flip = s_fifo_getoff == put;
+           if (flip) { FLIP_LOCK(); s_flip_tick_seq = s_flip_req_seq; FLIP_UNLOCK(); }
+           GCM_PENDING_SET(flip ? 3 : 1);
++          if (flip && g_ps3_gate_armed) ps3_gate_bump(1);   /* patch 7914 site 1 */
+           return;
+       } }
+     /* A flip queued in the command stream completes when the drain reaches
+@@ -937,6 +942,7 @@ void cellGcm_request_tick(void)
+     if (gcm_flip_executed_take()) {
+         FLIP_LOCK(); s_flip_tick_seq = s_flip_req_seq; FLIP_UNLOCK();
+         GCM_PENDING_SET(3);
++        if (g_ps3_gate_armed) ps3_gate_bump(1);   /* patch 7914 site 1 */
+     } else {
+         GCM_PENDING_SET(1);
+     }
+@@ -1045,10 +1051,14 @@ void ppu_gcm_pump(void)
+          * handler would never run. inFAMOUS 2 writes its next FIFO put from
+          * the flip handler, and hung with get == put on exactly that. Leave
+          * the newer flip WAITING for the next tick. */
++        int done = 0;
+         FLIP_LOCK();
+-        if (s_flip_tick_seq == s_flip_req_seq)
++        if (s_flip_tick_seq == s_flip_req_seq) {
+             s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
++            done = 1;
++        }
+         FLIP_UNLOCK();
++        if (done && g_ps3_gate_armed) ps3_gate_bump(2);   /* patch 7914 site 2 */
+         ftl_done(s_fifo_flips_completed);
+         if (s_flip_handler_opd && g_ps3_guest_caller) {
+             ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
+@@ -1094,7 +1104,10 @@ void cellGcmTickFlip(void)
+     const int waiting = s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && gcm_flip_executed_take();
+     if (waiting) s_flip_tick_seq = s_flip_req_seq;
+     FLIP_UNLOCK();
+-    if (waiting) GCM_PENDING_SET(2);
++    if (waiting) {
++        GCM_PENDING_SET(2);
++        if (g_ps3_gate_armed) ps3_gate_bump(1);   /* patch 7914 site 1 */
++    }
+ }
+ 
+ /* Patch 7913 (read-only, takes no lock): the flip / pending-event state, for the rollback snapshot's quiesce gate.
+@@ -3280,6 +3293,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+      * walker says it is drained: is the title reading `get`, or something else?
+      * If the overflow survives this, `get` is not what it consults. */
+     vm_write32(GCM_CONTROL_GUEST_ADDR + 4, gcm_get_eq_put() ? put : s_fifo_getoff);
++    if (g_ps3_gate_armed) {   /* patch 7914 site 3: a NEW get that reached put (the FIFO drained); unchanged get = no bump */
++        static u32 s_gate_last_get = 0xFFFFFFFFu;
++        const u32 g = gcm_get_eq_put() ? put : s_fifo_getoff;
++        if (g != s_gate_last_get) { s_gate_last_get = g; if (g == put) ps3_gate_bump(3); }
++    }
+ 
+     AcquireSRWLockExclusive(&s_ref_pub_lock);                           /* ref */
+     gcm_ref_publish_one();
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index c51644a..d614958 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -247,9 +247,13 @@ static int lwm_acquire(struct LwmSlot* sl, uint64_t timeout_us)
+     }
+     return 1;
+ }
++/* Patch 7914 (runtime/syscalls/sys_snapshot_census.c): bump site 6 = an lwmutex's host word was released (sys_lwmutex_unlock,
++ * sys_lwcond_wait's release, a re-create): the snapshot gate's "lwmutex held" reason may have ended. No-op unless the port armed it. */
++extern "C" { extern volatile int g_ps3_gate_armed; void ps3_gate_bump(int site); }
+ static void lwm_release(struct LwmSlot* sl)
+ {
+     if (InterlockedExchange(&sl->state, 0) == 2) ReleaseSemaphore(sl->sem, 1, NULL);
++    if (g_ps3_gate_armed) ps3_gate_bump(6);
+ }
+ /* Contention-probe window flag: 0 by default (prints stay bounded). A title's
+  * diagnostic code may set it around a suspect wait to uncap the [LWM-BLOCK]
+@@ -410,13 +414,25 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
+  * destroyed lwmutex, skipped), 4 stale (free on the host, guest owner or count not 0: reused heap address or a rewound mirror; reported,
+  * does not block), 5 unreadable (the guest page is not committed: skipped, never touched). first_live_ea / first_stale_ea = first guest
+  * address of live_held / stale (0 = none). Every guest read is preceded by a commit check: vm_read32 is a raw copy. */
++/* Patch 7914: readability is cached per 4 KB guest page in a small direct-mapped table so the census costs one VirtualQuery per distinct
++ * page instead of one per lwmutex (91 per precheck). The cache is dropped by ps3_lwm_census_invalidate(): the port calls it after every per-tick layout
++ * discovery (the committed set is unchanged while it stays valid) and before every frozen sample; the census is only ever called from the port's snapshot thread. */
++#define LWM_RD_SLOTS 128
++static struct { uint32_t page, epoch; uint8_t ok; } s_lwm_rd[LWM_RD_SLOTS];
++static uint32_t s_lwm_rd_epoch = 1;
++extern "C" void ps3_lwm_census_invalidate(void) { s_lwm_rd_epoch++; }
+ static int lwm_census_readable(uint32_t a)
+ {
+ #ifdef _WIN32
++    const uint32_t pg = a >> 12;
++    const int cacheable = (a & 0xFFFu) <= 0xFF0u;   /* owner (+0) .. count (+0xC) inside the page */
++    if (cacheable) { const auto& c = s_lwm_rd[pg % LWM_RD_SLOTS]; if (c.epoch == s_lwm_rd_epoch && c.page == pg) return c.ok; }
+     MEMORY_BASIC_INFORMATION m;
+-    if (!VirtualQuery(vm_base + a, &m, sizeof m)) return 0;
+-    if (m.State != MEM_COMMIT || (m.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !m.Protect) return 0;
+-    return (uint8_t*)m.BaseAddress + m.RegionSize >= vm_base + (uint64_t)a + 0x10;   /* owner (+0) and count (+0xC) in the same region */
++    int ok = 0;
++    if (VirtualQuery(vm_base + a, &m, sizeof m) && m.State == MEM_COMMIT && !(m.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && m.Protect)
++        ok = (uint8_t*)m.BaseAddress + m.RegionSize >= vm_base + (uint64_t)a + 0x10;   /* owner (+0) and count (+0xC) in the same region */
++    if (cacheable) { auto& c = s_lwm_rd[pg % LWM_RD_SLOTS]; c.page = pg; c.epoch = s_lwm_rd_epoch; c.ok = (uint8_t)ok; }
++    return ok;
+ #else
+     (void)a; return 1;
+ #endif
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 248e387..97ee3f6 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -9,6 +9,8 @@
+ #include "spu_lifted_job.h"   /* spu_run_lifted_job */
+ /* Patch 7913: SPURS jobs running right now on a host thread (entered spu_run_spurs_job, not yet back). Read by ps3_spurs_census. */
+ volatile long g_ps3_spu_jobs_inflight = 0;
++extern volatile int g_ps3_gate_armed;   /* patch 7914 (runtime/syscalls/sys_snapshot_census.c) */
++void ps3_gate_bump(int site);
+ /* Patch 7913: host threads inside spu_async_run (taskset tasks and SPU thread-group threads started by spu_workload_dispatch_async). These can be long-lived
+  * (a task waiting for work, a persistent SPU thread), so the census reports them as a note and never blocks on them. */
+ volatile long g_ps3_spu_async_running = 0;
+@@ -1095,7 +1097,8 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+     if (s_prof) timespec_get(&t0, TIME_UTC);
+     __atomic_add_fetch(&g_ps3_spu_jobs_inflight, 1, __ATOMIC_SEQ_CST);   /* patch 7913 */
+     int rc = spu_run_spurs_job(fn, image_id, job_ea, job_desc_size);
+-    __atomic_sub_fetch(&g_ps3_spu_jobs_inflight, 1, __ATOMIC_SEQ_CST);
++    if (__atomic_sub_fetch(&g_ps3_spu_jobs_inflight, 1, __ATOMIC_SEQ_CST) == 0 && g_ps3_gate_armed)
++        ps3_gate_bump(4);   /* patch 7914 site 4: job-chain jobs in flight dropped to 0 */
+     if (s_prof) {
+         static double acc[64], last; static unsigned cnt[64];
+         timespec_get(&t1, TIME_UTC);
+diff --git a/runtime/syscalls/sys_snapshot_census.c b/runtime/syscalls/sys_snapshot_census.c
+index 7ecd6ab..0221959 100644
+--- a/runtime/syscalls/sys_snapshot_census.c
++++ b/runtime/syscalls/sys_snapshot_census.c
+@@ -13,6 +13,9 @@
+ #include "sys_mutex.h"
+ #include "sys_rwlock.h"
+ #include "sys_ppu_thread.h"
++#ifdef _WIN32
++#include <windows.h>   /* patch 7914: WakeByAddressAll */
++#endif
+ 
+ /* the port's View (jsp_snapshot_sync.h) is sized for exactly these tables */
+ _Static_assert(SYS_EVENT_QUEUE_MAX == 128 && SYS_SEMAPHORE_MAX == 256 && PPU_THREAD_MAX == 64, "jsy::kEvq / kSem / kThr");
+@@ -38,6 +41,53 @@ static __thread uint64_t t_mark_tid;
+ #define MARK_TID(tid) do { if (t_mark_tid) (tid) = t_mark_tid; } while (0)
+ volatile long g_ps3_hle_mark_overflows = 0, g_ps3_hle_mark_unbalanced = 0, g_ps3_hle_mark_fiber_swaps = 0;
+ 
++/* Patch 7914: the gate sequence of the port's event-driven quiesce gate (jsp_snapshot_sync.h gate_ev, JSP_SNAPSHOT_GATE=ev). Each bump site is
++ * a no-op unless the port armed it: one relaxed load of g_ps3_gate_armed. Armed, a site increments g_ps3_gate_line.seq (seq_cst) and, when the port's main thread
++ * waits on it (g_ps3_gate_line.waiters, seq_cst), wakes it with WakeByAddressAll. The waiter reads the sequence BEFORE its unfrozen precheck and WaitOnAddress
++ * compares it, so a bump between the two is never lost. The sites (counted per site for the log): 0 a thread enters an HLE call at a role park lr (the port's
++ * list), 1 a flip completion is marked pending (cellGcm_request_tick / cellGcmTickFlip set bit 2), 2 the flip pump (the interrupt thread's) marks the flip DONE, 3 the FIFO drain publishes
++ * a new get equal to put, 4 SPURS job-chain jobs in flight drop to 0, 5 a fiber enters cellFiberPpuWaitSignal. A missing site only costs a wait timeout
++ * (counted by the port as wake_timeouts): the frozen judge still decides every capture. */
++#define PS3_GATE_SITES 12
++/* One cache line holds everything the bumps WRITE (the sequence, the waiter count, the per-site counters) and nothing else, so the hot read of g_ps3_gate_armed
++ * (written once at init) never shares a line with it. The port waits on &g_ps3_gate_line.seq. */
++struct ps3_gate_line_t { volatile uint32_t seq; volatile int32_t waiters; volatile uint32_t bumps[PS3_GATE_SITES]; uint8_t pad[8]; } __attribute__((aligned(64)));
++struct ps3_gate_line_t g_ps3_gate_line;
++volatile int g_ps3_gate_armed __attribute__((aligned(64))) = 0;
++static uint32_t s_gate_lr[8];
++static volatile int s_gate_nlr = 0;
++static uint32_t s_gate_tnid[8];   /* HLE import NIDs that are a transit call (the port's Cfg::nid_transit): leaving one ends a block */
++static volatile int s_gate_ntnid = 0;
++void ps3_gate_bump(int site)
++{
++    if (site >= 0 && site < PS3_GATE_SITES) __atomic_add_fetch(&g_ps3_gate_line.bumps[site], 1, __ATOMIC_RELAXED);
++    __atomic_add_fetch(&g_ps3_gate_line.seq, 1, __ATOMIC_SEQ_CST);
++#ifdef _WIN32
++    if (__atomic_load_n(&g_ps3_gate_line.waiters, __ATOMIC_SEQ_CST)) WakeByAddressAll((PVOID)&g_ps3_gate_line.seq);
++#endif
++}
++/* The port arms the sites once at init (before any thread waits) with the role park lrs (at most 8). on = 0 disarms. */
++void ps3_gate_arm(int on, const uint32_t* park_lrs, int n)
++{
++    if (n < 0) n = 0;
++    if (n > 8) n = 8;
++    for (int i = 0; i < n; i++) s_gate_lr[i] = park_lrs[i];
++    s_gate_nlr = n;
++    __atomic_store_n(&g_ps3_gate_armed, on ? 1 : 0, __ATOMIC_SEQ_CST);
++}
++/* Transit NIDs (at most 8), set once at init like the park lrs. */
++void ps3_gate_arm_transit(const uint32_t* nids, int n)
++{
++    if (n < 0) n = 0;
++    if (n > 8) n = 8;
++    for (int i = 0; i < n; i++) s_gate_tnid[i] = nids[i];
++    s_gate_ntnid = n;
++}
++void ps3_gate_bump_counts(uint32_t* out)   /* out[PS3_GATE_SITES = 12] */
++{
++    for (int i = 0; i < PS3_GATE_SITES; i++) out[i] = g_ps3_gate_line.bumps[i];
++}
++
+ void ps3_hle_mark_enter(uint64_t tid, uint32_t kind, uint32_t id, uint32_t obj, uint32_t lr)
+ {
+     MARK_TID(tid);
+@@ -48,13 +98,25 @@ void ps3_hle_mark_enter(uint64_t tid, uint32_t kind, uint32_t id, uint32_t obj,
+     s_mark[tid].c.st[idx] = m;
+     if (d >= MARK_DEPTH) { s_mark[tid].c.ovf = 1; g_ps3_hle_mark_overflows++; }
+     s_mark[tid].c.depth = d + 1;
++    if (g_ps3_gate_armed)   /* patch 7914 site 0: the marker now says "parked at a role site" */
++        for (int i = 0; i < s_gate_nlr; i++) if (s_gate_lr[i] == lr) { ps3_gate_bump(0); break; }
+ }
+ 
+ void ps3_hle_mark_leave(uint64_t tid)
+ {
+     MARK_TID(tid);
+     if (tid == 0 || tid > PPU_THREAD_MAX) return;
+-    if (s_mark[tid].c.depth > 0) { if (--s_mark[tid].c.depth == 0) s_mark[tid].c.ovf = 0; }
++    if (s_mark[tid].c.depth > 0) {
++        int transit = 0;
++        if (g_ps3_gate_armed) {   /* patch 7914 site 7: a thread leaves a transit call (the port classes kind 3 ids 1..3, syscalls 97/99 and the armed transit NIDs as transit): its block ends here */
++            const int d = s_mark[tid].c.depth;
++            const hle_mark m = s_mark[tid].c.st[(d <= MARK_DEPTH ? d : MARK_DEPTH) - 1];
++            transit = (m.kind == 3 && m.id >= 1 && m.id <= 3) || (m.kind == 2 && (m.id == 97 || m.id == 99));
++            if (!transit && m.kind == 1) for (int i = 0; i < s_gate_ntnid; i++) if (s_gate_tnid[i] == m.id) { transit = 1; break; }
++        }
++        if (--s_mark[tid].c.depth == 0) s_mark[tid].c.ovf = 0;
++        if (transit) ps3_gate_bump(7);   /* after the depth drop: a precheck woken by this bump must see the thread outside the call */
++    }
+     else g_ps3_hle_mark_unbalanced++;
+ }
+ 

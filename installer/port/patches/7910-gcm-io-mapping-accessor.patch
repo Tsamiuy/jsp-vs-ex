@@ -1,0 +1,28 @@
+Patch 7910 (experimental, rollback netcode): cellGcm_io_mapping(i, &ea, &size), a read-only accessor for the GCM IO mappings.
+
+The rollback snapshot (installer/port/jsp/jsp_snapshot.cpp, used only with JSP_ROLLBACK=1) leaves RSX-visible main memory out of its save
+and restore, because the RSX thread reads those pages while the game runs. Returns -1 past the table, 0 for an unused slot, 1 with (ea, size).
+No behaviour change: nothing calls it unless the port does. Applies after 2001 (its context lines are 2001's accessors).
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 16c43af..3ecab89 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -4649,6 +4649,17 @@ void cellGcmInitDefaultFifoMode(s32 mode)
+ u32 cellGcm_default_context_ea(void)  { return s_gcm_context_ea; }
+ u32 cellGcm_context_slot_ea(void)     { return s_gcm_ctx_out_ea; }
+ 
++/* Patch 7910: IO mapping slot i as (EA, size), for the port's snapshot diagnostic
++ * (jsp_snapshot.cpp), which must leave RSX-visible main memory alone. -1 past the table, 0 for an
++ * unused slot, 1 when filled. Read-only. */
++int cellGcm_io_mapping(u32 i, u32* ea, u32* size)
++{
++    if (i >= CELL_GCM_MAX_IO_MAPPINGS) return -1;
++    if (!s_io_mappings[i].active || !s_io_mappings[i].size) return 0;
++    *ea = s_io_mappings[i].ea; *size = s_io_mappings[i].size;
++    return 1;
++}
++
+ /* Set command buffer to defaults (reset put/get pointers) */
+ void cellGcmSetDefaultCommandBuffer(void)
+ {

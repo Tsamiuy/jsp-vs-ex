@@ -1,0 +1,412 @@
+Patch 7911 (experimental, rollback netcode): sync-state census and a per-thread "inside an HLE call" marker for the rollback snapshot.
+
+The rollback snapshot (installer/port/jsp/jsp_snapshot.cpp, used only with JSP_ROLLBACK=1) must not save or restore guest memory while a
+kernel object is half-way through a change. This patch lets it look:
+(1) ps3_lwmutex_census() in ppu_sysprx.cpp: the lwmutex host state word against the guest owner/recursion mirror, each guest read preceded
+by a commit check, destroyed slots skipped (sys_lwmutex_destroy now marks the slot), abandoned and stale slots counted apart from held ones;
+(2) runtime/syscalls/sys_snapshot_census.c (new; picked up by the runtime source glob): event queue, semaphore, mutex and rwlock tables
+and the per-thread marker;
+(3) ps3_hle_call (ppu_hle.cpp) and lv2_syscall (ppu_loader.cpp) get an RAII marker that sets and clears the marker only while
+g_ps3_hle_mark_on is set (the port sets it only while a rollback session runs);
+(4) marker windows: lwmutex reacquire plus guest write-back in sys_lwcond_wait, event dequeue to copy-out in sys_event.c, semaphore wake
+to value re-check in sys_semaphore.c; the marker is reset at thread start and end in sys_ppu_thread.c, and cellFiber.c host_resume
+flags fibers.
+No behaviour change unless the port sets the flag. Always-on bookkeeping, which changes nothing the game does while the flag is off:
+one flag load (a predictable branch) per HLE call, syscall, lwcond wait, event-queue receive (two sites) and semaphore wait; the
+marker reset at thread start and exit; the lwmutex dead flag (LwmSlot grows 8 bytes, 65,536 slots = +512 KiB static table, set
+on destroy through the lookup-only lwm_find, cleared on create).
+
+diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+index 1bad1ec..f2f9f76 100644
+--- a/libs/spurs/cellFiber.c
++++ b/libs/spurs/cellFiber.c
+@@ -231,6 +231,7 @@ static void host_destroy(Fiber* f)
+ /* RunFibers -> fiber. The calling thread becomes a fiber itself on first use. */
+ static void host_resume(Sched* s, Fiber* f)
+ {
++    { extern void ps3_hle_mark_fiber(uint64_t); ps3_hle_mark_fiber(f->ctx.thread_id); }   /* patch 7911: fibers share the thread id and switch inside HLE calls: its marker is unreliable */
+     if (!IsThreadAFiber()) ConvertThreadToFiber(NULL);
+     s->back = GetCurrentFiber();
+     SwitchToFiber(f->host_fiber);
+@@ -268,6 +269,7 @@ static void host_destroy(Fiber* f)
+ 
+ static void host_resume(Sched* s, Fiber* f)
+ {
++    { extern void ps3_hle_mark_fiber(uint64_t); ps3_hle_mark_fiber(f->ctx.thread_id); }   /* patch 7911: fibers share the thread id and switch inside HLE calls: its marker is unreliable */
+     swapcontext(&s->back, &f->uc);
+ }
+ 
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index fdccde7..a757a65 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -280,8 +280,17 @@ static void hle_top_note(uint32_t nid, const char* name, const ppu_context* ctx,
+     for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
+ }
+ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
++/* Patch 7911: per-thread "in an HLE call" marker for the rollback snapshot; one predictable branch when off. */
++extern "C" { extern volatile int g_ps3_hle_mark_on; void ps3_hle_mark_enter(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t); void ps3_hle_mark_leave(uint64_t); }
++struct Ps3HleMark_ps3_hle_call {
++    uint64_t tid; bool on;
++    Ps3HleMark_ps3_hle_call(ppu_context* c, uint32_t id) : tid(c->thread_id), on(g_ps3_hle_mark_on != 0) {
++        if (on) ps3_hle_mark_enter(tid, 1, id, (uint32_t)c->gpr[3], (uint32_t)c->lr); }
++    ~Ps3HleMark_ps3_hle_call() { if (on) ps3_hle_mark_leave(tid); }
++};
+ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+ {
++    Ps3HleMark_ps3_hle_call _hle_mark(ctx, nid);
+     /* The fast path skips _TocGuard below, but the caller still reloads r2 with
+      * `ld r2,0x28(r1)` after the import: the glink stub it called would have
+      * stored r2 there first (`std r2,40(r1)`), and our stub does not. Without
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 0b89ad0..11662fb 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -3254,8 +3254,17 @@ extern "C" __attribute__((weak)) void ppu_gcm_pump(void);
+ #define PS3_SC_INFLIGHT_MAX 64
+ extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
+ 
++/* Patch 7911: per-thread "in an HLE call" marker for the rollback snapshot; one predictable branch when off. */
++extern "C" { extern volatile int g_ps3_hle_mark_on; void ps3_hle_mark_enter(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t); void ps3_hle_mark_leave(uint64_t); }
++struct Ps3HleMark_lv2_syscall {
++    uint64_t tid; bool on;
++    Ps3HleMark_lv2_syscall(ppu_context* c, uint32_t id) : tid(c->thread_id), on(g_ps3_hle_mark_on != 0) {
++        if (on) ps3_hle_mark_enter(tid, 2, id, (uint32_t)c->gpr[3], (uint32_t)c->lr); }
++    ~Ps3HleMark_lv2_syscall() { if (on) ps3_hle_mark_leave(tid); }
++};
+ extern "C" void lv2_syscall(ppu_context* ctx)
+ {
++    Ps3HleMark_lv2_syscall _hle_mark(ctx, (uint32_t)ctx->gpr[11]);
+     /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
+      * waiting for a store watch to fire. Armed here because lv2_syscall runs
+      * early and unconditionally; used to measure how far a guest block clear
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index fd2c207..c51644a 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -118,6 +118,7 @@ static void sys_process_is_stack(ppu_context* ctx)
+ struct LwmSlot;
+ static struct LwmSlot* lwm_slot(uint32_t addr);   /* fwd (defined below) */
+ static void lwm_release(struct LwmSlot* sl);
++static void lwm_clear_dead(struct LwmSlot* sl);   /* patch 7911 */
+ static void sys_lwmutex_create(ppu_context* ctx)
+ {
+     uint32_t lwm  = (uint32_t)ctx->gpr[3];
+@@ -138,7 +139,7 @@ static void sys_lwmutex_create(ppu_context* ctx)
+     /* A recreate at a reused address must not inherit a locked slot (e.g. the
+      * previous holder exited while holding): release it. Releasing a free
+      * lock does nothing. */
+-    { struct LwmSlot* sl = lwm_slot(lwm); if (sl) lwm_release(sl); }
++    { struct LwmSlot* sl = lwm_slot(lwm); if (sl) { lwm_clear_dead(sl); lwm_release(sl); } }
+     ctx->gpr[3] = 0;
+ }
+ /* REAL mutual exclusion. The old no-op ("boot is single-threaded") corrupted
+@@ -162,11 +163,12 @@ static void sys_lwmutex_create(ppu_context* ctx)
+ #define LWM_HASH 65536u
+ static struct LwmSlot { volatile long addr; HANDLE sem; volatile long state;
+     volatile long holder; volatile long long acq_us; volatile long long acq_fences;
+-    volatile unsigned long long acq_cpu_us; } g_lwm[LWM_HASH];
++    volatile unsigned long long acq_cpu_us; volatile long dead; } g_lwm[LWM_HASH];   /* dead: sys_lwmutex_destroy seen (patch 7911) */
+ extern "C" { extern volatile long long g_gcm_ref_pub_count;    /* cellGcmSys.c */
+              unsigned long long ppu_thread_cpu_us(unsigned tid);   /* sys_ppu_thread.c */
+              unsigned ppu_thread_prof_pc(unsigned tid); }
+ static volatile long g_lwm_tab_lock = 0;
++static void lwm_clear_dead(struct LwmSlot* sl) { sl->dead = 0; }
+ /* PS3_LWMUTEX_TRACE=1: reconstruct the lwmutex lock-convoy that stalls LBP's loader.
+  * Records, per mutex, the acquiring tid + a QPC microsecond timestamp; on a
+  * contended block it logs who holds it and for how long; on unlock it flags a
+@@ -255,6 +257,8 @@ static void lwm_release(struct LwmSlot* sl)
+ volatile int g_nd_inpump = 0;
+ /* syscalls/sys_ppu_thread.c: this thread is about to wait (PS3_PRIO_START). */
+ extern "C" void ppu_thread_note_block(uint64_t tid);
++/* patch 7911 (sys_snapshot_census.c): per-thread HLE-call marker for the rollback snapshot, off unless the port sets g_ps3_hle_mark_on */
++extern "C" { void ps3_hle_mark_enter(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t); void ps3_hle_mark_leave(uint64_t); extern volatile int g_ps3_hle_mark_on; }
+ static void sys_lwmutex_lock(ppu_context* ctx)
+ {
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
+@@ -396,6 +400,49 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
+     ctx->gpr[3] = 0;
+ }
+ 
++/* Patch 7911: read-only census of the lwmutex table for the rollback snapshot (jsp_snapshot.cpp, JSP_SNAPSHOT).
++ * A rollback rewinds the guest owner/recursion mirror (LWM_OWNER, LWM_RECUR) but not the host state word, and the lock paths above
++ * decide from the mirror: a re-lock by the recorded owner only bumps the count, an unlock with count > 1 only decrements. Meant for a
++ * moment when the other threads are suspended (takes no lock). thread_alive[tid] (tid 1..64) comes from ps3_hle_thread_census.
++ * out[]: 0 tracked slots, 1 live_held (held on the host, the guest owner is a live thread: blocks a rollback), 2 abandoned (held by an owner thread
++ * that has ended: its holder will never release it; reported, does not block), 6 held_unowned (held on the host, guest owner 0: the holder is
++ * unknown and may be a thread between taking the word and stamping the mirror, e.g. the reacquire of sys_lwcond_wait; blocks), 3 dead (slot of a
++ * destroyed lwmutex, skipped), 4 stale (free on the host, guest owner or count not 0: reused heap address or a rewound mirror; reported,
++ * does not block), 5 unreadable (the guest page is not committed: skipped, never touched). first_live_ea / first_stale_ea = first guest
++ * address of live_held / stale (0 = none). Every guest read is preceded by a commit check: vm_read32 is a raw copy. */
++static int lwm_census_readable(uint32_t a)
++{
++#ifdef _WIN32
++    MEMORY_BASIC_INFORMATION m;
++    if (!VirtualQuery(vm_base + a, &m, sizeof m)) return 0;
++    if (m.State != MEM_COMMIT || (m.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !m.Protect) return 0;
++    return (uint8_t*)m.BaseAddress + m.RegionSize >= vm_base + (uint64_t)a + 0x10;   /* owner (+0) and count (+0xC) in the same region */
++#else
++    (void)a; return 1;
++#endif
++}
++extern "C" void ps3_lwmutex_census(const uint8_t* thread_alive, uint32_t* out, uint32_t* first_live_ea, uint32_t* first_stale_ea)
++{
++    uint32_t o[7] = {0, 0, 0, 0, 0, 0, 0}, fl = 0, fs = 0;
++    for (uint32_t i = 0; i < LWM_HASH; i++) {
++        const uint32_t a = (uint32_t)g_lwm[i].addr;
++        if (!a) continue;
++        o[0]++;
++        if (g_lwm[i].dead) { o[3]++; continue; }
++        if (!lwm_census_readable(a)) { o[5]++; continue; }
++        const long st = g_lwm[i].state;
++        const uint32_t own = vm_read32(a + LWM_OWNER), rec = vm_read32(a + LWM_RECUR);
++        if (st) {
++            if (!own) { o[6]++; if (!fl) fl = a; }
++            else if (own > 64u || thread_alive[own]) { o[1]++; if (!fl) fl = a; }   /* ids past the table (0x7FFFFFFE, unregistered) count as live */
++            else o[2]++;
++        } else if (own || rec) { o[4]++; if (!fs) fs = a; }
++    }
++    for (int k = 0; k < 7; k++) out[k] = o[k];
++    if (first_live_ea) *first_live_ea = fl;
++    if (first_stale_ea) *first_stale_ea = fs;
++}
++
+ /* sys_lwcond (sysPrxForUser) — guest-side condition variable, paired with an
+  * lwmutex. The CRT and (newly) libsre's cellSpurs create/wait/signal these. Like
+  * sys_lwmutex above, model it directly in guest memory so the args stay GUEST
+@@ -435,9 +482,11 @@ static void sys_lwcond_wait(ppu_context* ctx)
+         ppu_thread_note_block(ctx->thread_id);
+         lwm_release(sl);
+         Sleep(1);
++        if (g_ps3_hle_mark_on) ps3_hle_mark_enter(ctx->thread_id, 3, 1, lwmutex, 0);   /* patch 7911: the reacquire is in transit, the Sleep above is parked */
+         lwm_acquire(sl, 0);
+         vm_write32(lwmutex + LWM_OWNER, own);
+         vm_write32(lwmutex + LWM_RECUR, rc ? rc : 1);
++        if (g_ps3_hle_mark_on) ps3_hle_mark_leave(ctx->thread_id);   /* after the write-back: the host word is held with guest owner 0 until here */
+     }
+     ctx->gpr[3] = 0;
+ }
+@@ -510,6 +559,7 @@ static void sys_lwmutex_destroy_counted(ppu_context* ctx)
+       if (getenv("LWM_COUNT") && (_n<=24 || (_n%50000)==0))
+         fprintf(stderr, "[LWM] destroy #%lld lwm=0x%08X r4=0x%08X r5=0x%08X\n", _n,
+                 (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5]); }
++    { struct LwmSlot* sl = lwm_find((uint32_t)ctx->gpr[3]); if (sl) sl->dead = 1; }   /* patch 7911: the census skips it; a create clears it */
+     ctx->gpr[3] = 0;
+ }
+ 
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index 4ee9a14..215b099 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -11,6 +11,10 @@
+ #include <string.h>
+ #include <stdlib.h>               /* getenv */
+ #include "ps3emu/log_first.h"
++/* patch 7911 (sys_snapshot_census.c): per-thread HLE-call marker for the rollback snapshot, off unless the port sets g_ps3_hle_mark_on */
++extern volatile int g_ps3_hle_mark_on;
++extern void ps3_hle_mark_enter(uint64_t tid, uint32_t kind, uint32_t id, uint32_t obj, uint32_t lr);
++extern void ps3_hle_mark_leave(uint64_t tid);
+ 
+ /* Recorded by sys_spu_thread_initialize (lv2_register.c): the SPURS kernel
+  * context EA the title's SPU task runtime is dispatched against. */
+@@ -690,6 +694,8 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
+ 
++    /* patch 7911: from here to the copy-out the receiver holds an event and is in transit, not parked (kind 3 id 2). */
++    if (g_ps3_hle_mark_on) ps3_hle_mark_enter(ctx->thread_id, 3, 2, queue_id, 0);
+     sys_event_t evt = q->buffer[q->head];
+     q->head = (q->head + 1) % q->capacity;
+     q->count--;
+@@ -743,6 +749,8 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
+ 
++    /* patch 7911: from here to the copy-out the receiver holds an event and is in transit, not parked (kind 3 id 2). */
++    if (g_ps3_hle_mark_on) ps3_hle_mark_enter(ctx->thread_id, 3, 2, queue_id, 0);
+     sys_event_t evt = q->buffer[q->head];
+     q->head = (q->head + 1) % q->capacity;
+     q->count--;
+@@ -776,6 +784,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+         out[2] = bswap64(evt.data2);
+         out[3] = bswap64(evt.data3);
+     }
++    if (g_ps3_hle_mark_on) ps3_hle_mark_leave(ctx->thread_id);   /* patch 7911: end of the post-dequeue window */
+     /* Diagnostic: prove the blocked receiver was WOKEN and is returning an event
+      * (vs. staying blocked forever). Distinguishes a wake bug from game logic. */
+     /* Was hardcoded to queue 1, which makes every other queue look silent: the
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index b997931..82a6ea0 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -197,6 +197,7 @@ static void* ppu_host_thread_proc(void* param)
+      * reservation and prevents ABA corruption of the guest's lock-free lists. */
+     { extern void ppu_resv_register(ppu_context*); ppu_resv_register(&info->ctx); }
+     ps3_tprof_thread('P', (uint32_t)info->ctx.thread_id);
++    { extern void ps3_hle_mark_reset(uint64_t); ps3_hle_mark_reset(info->ctx.thread_id); }   /* patch 7911: a reused thread id starts with a clean marker */
+ 
+     fprintf(stderr, "[THREAD %llu] host thread started, entry=0x%08llX hosttid=%lu\n",
+             (unsigned long long)info->ctx.thread_id,
+@@ -211,6 +212,7 @@ static void* ppu_host_thread_proc(void* param)
+             fprintf(stderr, "[THREAD %llu] unwound out of sys_ppu_thread_exit\n",
+                     (unsigned long long)info->ctx.thread_id);
+         s_exit_armed = 0;
++        { extern void ps3_hle_mark_reset(uint64_t); ps3_hle_mark_reset(info->ctx.thread_id); }   /* patch 7911: sys_ppu_thread_exit longjmps past the marker objects */
+         fprintf(stderr, "[THREAD %llu] entry RETURNED (r3=0x%llX) -- thread finished\n",
+                 (unsigned long long)info->ctx.thread_id,
+                 (unsigned long long)info->ctx.gpr[3]);
+diff --git a/runtime/syscalls/sys_semaphore.c b/runtime/syscalls/sys_semaphore.c
+index 1e17c72..ba0d6f4 100644
+--- a/runtime/syscalls/sys_semaphore.c
++++ b/runtime/syscalls/sys_semaphore.c
+@@ -10,6 +10,10 @@
+ #include <string.h>
+ #include <stdlib.h>      /* getenv (else the pointer return is truncated to int) */
+ #include "ps3emu/log_first.h"
++/* patch 7911 (sys_snapshot_census.c): per-thread HLE-call marker for the rollback snapshot, off unless the port sets g_ps3_hle_mark_on */
++extern volatile int g_ps3_hle_mark_on;
++extern void ps3_hle_mark_enter(uint64_t tid, uint32_t kind, uint32_t id, uint32_t obj, uint32_t lr);
++extern void ps3_hle_mark_leave(uint64_t tid);
+ 
+ /* ---------------------------------------------------------------------------
+  * Globals
+@@ -421,19 +425,23 @@ static int64_t sys_semaphore_wait_impl(ppu_context* ctx)
+     /* value is the only count. The kernel semaphore is only a wake channel;
+      * every wake re-checks value under the lock. */
+     int64_t deadline = (timeout_us > 0) ? lv2_usec_deadline(timeout_us) : 0;
++    int woke = 0;   /* patch 7911: between a wake and the value re-check the waiter is in transit (marker kind 3 id 3) */
+     for (;;) {
+         /* Take a token if available (the ONLY count, under the lock). */
+         EnterCriticalSection(&s->value_lock);
+         if (s->value > 0) {
+             s->value--;
++            if (woke) ps3_hle_mark_leave(ctx->thread_id);
+             LeaveCriticalSection(&s->value_lock);
+             return CELL_OK;
+         }
+         if (timeout_us > 0 && lv2_deadline_passed(deadline)) {
++            if (woke) ps3_hle_mark_leave(ctx->thread_id);
+             LeaveCriticalSection(&s->value_lock);
+             return (int64_t)(int32_t)CELL_ETIMEDOUT;
+         }
+         s->waiters++;
++        if (woke) { ps3_hle_mark_leave(ctx->thread_id); woke = 0; }
+         LeaveCriticalSection(&s->value_lock);
+ 
+         /* Bounded slices keep timed waits on the QPC deadline. */
+@@ -448,6 +456,7 @@ static int64_t sys_semaphore_wait_impl(ppu_context* ctx)
+             WaitForSingleObject(s->sem_handle, ms);
+         }
+ 
++        if (g_ps3_hle_mark_on && !woke) { ps3_hle_mark_enter(ctx->thread_id, 3, 3, sem_id, 0); woke = 1; }   /* patch 7911: before waiters-- */
+         EnterCriticalSection(&s->value_lock);
+         if (s->waiters > 0) s->waiters--;
+         LeaveCriticalSection(&s->value_lock);
+diff --git a/runtime/syscalls/sys_snapshot_census.c b/runtime/syscalls/sys_snapshot_census.c
+new file mode 100644
+index 0000000..6245b94
+--- /dev/null
++++ b/runtime/syscalls/sys_snapshot_census.c
+@@ -0,0 +1,102 @@
++/*
++ * Patch 7911: read-only census of the lv2 sync objects and a per-thread "in an HLE call" marker, for the rollback snapshot
++ * (jsp_snapshot.cpp, JSP_SNAPSHOT). A snapshot rewinds guest memory but not these host tables nor the other threads; the port's sync gate
++ * (jsp_snapshot_sync.h) reads them while those threads are suspended. Takes no lock. No behaviour change unless g_ps3_hle_mark_on is set.
++ *
++ * Marker: ps3_hle_call (ppu_hle.cpp) and lv2_syscall (ppu_loader.cpp) call ps3_hle_mark_enter/leave around the call while the flag is on;
++ * ppu_sysprx.cpp adds kind 3 around the lwmutex acquire of sys_lwcond_wait. kind 1 = HLE import (id = NID), 2 = lv2 syscall (id = number),
++ * 3 = internal (id 1 = acquiring an lwmutex). obj = r3 at entry, lr = the caller's return address. Nested calls keep a small stack.
++ */
++#include "sys_event.h"
++#include "sys_semaphore.h"
++#include "sys_mutex.h"
++#include "sys_rwlock.h"
++#include "sys_ppu_thread.h"
++
++/* the port's View (jsp_snapshot_sync.h) is sized for exactly these tables */
++_Static_assert(SYS_EVENT_QUEUE_MAX == 128 && SYS_SEMAPHORE_MAX == 256 && PPU_THREAD_MAX == 64, "jsy::kEvq / kSem / kThr");
++
++#define MARK_DEPTH 4
++typedef struct { uint32_t kind, id, obj, lr; } hle_mark;
++/* depth counts the nesting; the innermost entry is always kept (past MARK_DEPTH it overwrites the last slot and ovf is set until the thread is back
++ * at depth 0, because the outer entries are then lost). fiber: a cellFiber of this thread ran (fibers share the thread id and switch inside HLE
++ * calls, so enter/leave are not LIFO for it). Either makes the marker unreliable: the census reports the thread as "unknown", never as parked. */
++static struct { volatile int depth; volatile int ovf; volatile int fiber; hle_mark st[MARK_DEPTH]; } s_mark[PPU_THREAD_MAX + 1];
++volatile int g_ps3_hle_mark_on = 0;
++volatile long g_ps3_hle_mark_overflows = 0, g_ps3_hle_mark_unbalanced = 0;
++
++void ps3_hle_mark_enter(uint64_t tid, uint32_t kind, uint32_t id, uint32_t obj, uint32_t lr)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX) return;
++    const int d = s_mark[tid].depth;
++    const int idx = d < MARK_DEPTH ? (d < 0 ? 0 : d) : MARK_DEPTH - 1;
++    hle_mark m = { kind, id, obj, lr };
++    s_mark[tid].st[idx] = m;
++    if (d >= MARK_DEPTH) { s_mark[tid].ovf = 1; g_ps3_hle_mark_overflows++; }
++    s_mark[tid].depth = d + 1;
++}
++
++void ps3_hle_mark_leave(uint64_t tid)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX) return;
++    if (s_mark[tid].depth > 0) { if (--s_mark[tid].depth == 0) s_mark[tid].ovf = 0; }
++    else g_ps3_hle_mark_unbalanced++;
++}
++
++/* A thread id is reused and sys_ppu_thread_exit longjmps past the marker objects: sys_ppu_thread.c resets the slot at thread start and after the entry returns. */
++void ps3_hle_mark_reset(uint64_t tid)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX) return;
++    s_mark[tid].depth = 0; s_mark[tid].ovf = 0; s_mark[tid].fiber = 0;
++}
++
++/* cellFiber.c host_resume: this thread runs fibers. */
++void ps3_hle_mark_fiber(uint64_t tid)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX) return;
++    s_mark[tid].fiber = 1;
++}
++
++/* Innermost marker of every thread slot 1..64 (index = tid), whether the slot's thread is alive, and whether its marker is unreliable. kind 0 = outside
++ * any HLE call. overflows / unbalanced are the global counts of nesting overflows and leaves without an enter. */
++void ps3_hle_thread_census(uint32_t* kind, uint32_t* id, uint32_t* obj, uint32_t* lr, uint8_t* alive, uint8_t* unreliable,
++                           uint32_t* overflows, uint32_t* unbalanced)
++{
++    for (int t = 0; t <= PPU_THREAD_MAX; t++) {
++        kind[t] = id[t] = obj[t] = lr[t] = 0; alive[t] = 0; unreliable[t] = 0;
++        if (t == 0) continue;
++        const int st = g_ppu_threads[t - 1].state;
++        alive[t] = (st == PPU_THREAD_STATE_RUNNING || st == PPU_THREAD_STATE_DETACHED) ? 1 : 0;
++        unreliable[t] = (s_mark[t].ovf || s_mark[t].fiber) ? 1 : 0;
++        int d = s_mark[t].depth;
++        if (d <= 0) continue;
++        if (d > MARK_DEPTH) d = MARK_DEPTH;
++        const hle_mark m = s_mark[t].st[d - 1];
++        kind[t] = m.kind; id[t] = m.id; obj[t] = m.obj; lr[t] = m.lr;
++    }
++    if (overflows) *overflows = (uint32_t)g_ps3_hle_mark_overflows;
++    if (unbalanced) *unbalanced = (uint32_t)g_ps3_hle_mark_unbalanced;
++}
++
++/* Raw tables. evq_count[i] = buffered events (-1 = queue not alive), evq_wait[i] = receivers inside the receive; sem_val[i] / sem_wait[i] likewise
++ * (sem_wait -1 = not alive); mtx_held = heavy mutexes with lock_count > 0; rw_held = rwlocks with a reader or the writer. */
++void ps3_syscall_census(int32_t* evq_count, int32_t* evq_wait, int32_t* sem_val, int32_t* sem_wait, uint32_t* mtx_held, uint32_t* rw_held)
++{
++    for (int i = 0; i < SYS_EVENT_QUEUE_MAX; i++) {
++        const sys_event_queue_info* q = &g_sys_event_queues[i];
++        evq_count[i] = q->active ? q->count : -1;
++        evq_wait[i] = q->active ? q->waiters : 0;
++    }
++    for (int i = 0; i < SYS_SEMAPHORE_MAX; i++) {
++        const sys_semaphore_info* s = &g_sys_semaphores[i];
++        sem_val[i] = s->active ? s->value : 0;
++        sem_wait[i] = s->active ? s->waiters : -1;
++    }
++    uint32_t mh = 0, rh = 0;
++    for (int i = 0; i < SYS_MUTEX_MAX; i++)
++        if (g_sys_mutexes[i].active && g_sys_mutexes[i].lock_count > 0) mh++;
++    for (int i = 0; i < SYS_RWLOCK_MAX; i++)
++        if (g_sys_rwlocks[i].active && (g_sys_rwlocks[i].readers > 0 || g_sys_rwlocks[i].writer_tid)) rh++;
++    if (mtx_held) *mtx_held = mh;
++    if (rw_held) *rw_held = rh;
++}

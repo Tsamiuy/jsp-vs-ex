@@ -208,6 +208,7 @@ static void present_guest_frame(void)
     InterlockedIncrement(&g_frames_presented);
 }
 
+extern "C" int jsp_rollback_clock_turbo(int rsx_ok);   /* jsp_stepper.cpp (experimental rollback netcode, JSP_ROLLBACK=1 only): a rollback replay runs without the 60 Hz grid and presents nothing; 1 = this pass was handled */
 static DWORD WINAPI frame_clock(LPVOID)
 {
     const char* title = getenv("PS3_TITLE");
@@ -234,7 +235,17 @@ static DWORD WINAPI frame_clock(LPVOID)
     double q_next = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
     if (vqpc) fprintf(stderr, "[rsx] VBLANK_QPC: vblank tick from QPC, %.4f ms\n", q_period);
 
+    int turbo_left = 0, turbo_reset = 0;
     for (;;) {
+        if (jsp_rollback_clock_turbo(rsx_ok)) { turbo_left = 1; continue; }
+        if (turbo_left) {   /* leaving a replay: restart both clocks from now, or the grid fires its missed ticks in a burst */
+            turbo_left = 0;
+            QueryPerformanceCounter(&qn);
+            q_next = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart + q_period;
+            next_tick = GetTickCount64();
+            last_flip = cellGcm_flip_request_count();   /* the replay's flips were taken, not presented: the first pass must not present a half-built frame as "new" */
+            turbo_reset = 1;                            /* LATE_FLIP state (q_last_done, q_held) restarts too */
+        }
         if (vqpc) {
             QueryPerformanceCounter(&qn);
             const double qms = (double)qn.QuadPart * 1000.0 / (double)qf.QuadPart;
@@ -257,6 +268,7 @@ static DWORD WINAPI frame_clock(LPVOID)
             static double q_last_done = 0.0, late_vb = 2.5, q_t0 = 0.0;
             static unsigned n_late = 0, n_gate = 0, n_dbg = 0;
             const double q_gap = 2.0 * q_period;   /* one flip per 33.3 ms */
+            if (turbo_reset) { turbo_reset = 0; q_last_done = 0.0; q_held = 0; }   /* after a rollback replay (JSP_STEP_TURBO) */
             if (late < 0) { const char* e = getenv("LATE_FLIP"); late = (e && *e == '0') ? 0 : 1;
                             const char* v = getenv("LATE_VBLANK_MS"); if (v && *v) late_vb = atof(v);
                             late_dbg = getenv("LATE_FLIP_DBG") != NULL; q_t0 = qms;
@@ -435,11 +447,14 @@ static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
 }
 #endif
 
+extern "C" uint8_t* jsp_rollback_reserve_guest(size_t size);   /* jsp_rollback.cpp: the write-watched reservation of the rollback snapshot (JSP_ROLLBACK=1), else nullptr */
+extern "C" void jsp_rollback_after_table(void);                  /* jsp_rollback.cpp: the rollback stepper and session hooks (JSP_ROLLBACK=1 only) */
 static bool alloc_guest_vm(void)
 {
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, vm_commit_veh);
-    vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
+    vm_base = jsp_rollback_reserve_guest(VM_SIZE);
+    if (!vm_base) vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
 #else
     /* No vectored exception handlers off Windows, so the arena is mapped up
@@ -670,6 +685,7 @@ int main(int argc, char** argv)
 
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
+    jsp_rollback_after_table();   /* after ppu_recomp_register and the PRX overrides, or the table registration overwrites its hooks */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
     ps3_hle_register_ctx(0xBC982946u, "cellGcmSetDefaultCommandBuffer", gcm_set_default_command_buffer);
     ppu_sysprx_register();   /* boot-critical CRT */

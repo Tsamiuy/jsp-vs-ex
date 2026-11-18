@@ -33,6 +33,10 @@
 #include <unistd.h>
 #endif
 
+// ENHANCEMENT (rollback netcode): the temporary session layer (jsp_session_effective.h, set by jsp_net_game.cpp) answers here. NULL unless JSP_ROLLBACK=1.
+// The hook is called with g_mu held: it must not call back into jsp_setting_* and must take no lock a thread holding g_mu could wait for.
+extern "C" { int (*jsp_session_text_hook)(const char* key, char* out, int n) = nullptr; }
+
 namespace {
 std::mutex g_mu;
 std::map<std::string, std::string> g_live;   // key -> value set from the in-game page
@@ -71,6 +75,7 @@ int setting_get_locked(const char* key, char* out, int n)
             }
         }
     }
+    if (jsp_session_text_hook && jsp_session_text_hook(key, out, n)) return 1;
     const auto it = g_live.find(key);
     const char* value = it != g_live.end() ? it->second.c_str() : std::getenv(key);
     if (!value) return 0;
@@ -113,6 +118,13 @@ extern "C" int jsp_setting_get(const char* key, char* out, int n)
 {
     std::lock_guard<std::mutex> lk(g_mu);
     return setting_get_locked(key, out, n);
+}
+
+// ENHANCEMENT (rollback netcode): the session layer changed (installed or removed): the cached readers re-read at their next call.
+extern "C" void jsp_setting_changed(void)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    changed_locked();
 }
 
 // An in-game change of a live setting: the readers see it at their next call. "" = back to unset.

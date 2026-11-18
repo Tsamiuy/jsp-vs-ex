@@ -1,0 +1,182 @@
+Patch 7917 (experimental, rollback netcode): RSX-side writes into guest main memory are reported, and a read-only view of the FIFO walker.
+
+libs/video notes every RSX-side store into guest MAIN memory (destination below 0xC0000000, so not local memory) through
+ps3_rsx_note_write(ea, bytes, kind): the 2D engines' row stores (gcm_store, the scaled-image row loop, the inline and per-word 2D writes,
+the tiled writes through rsx_tiling_put), the draw engine's surface and depth write-back to guest memory (linear and tiled), GET_REPORT
+and NOTIFY into main memory (kind 0), and semaphore / label releases (kind 1: the 0x6C label method, the 0x1D70/0x1D74 release). The loops
+notify once per row or word run, not per pixel. Not covered: the HLE semaphore injects at VM_HLE_INJECT_BASE.
+ps3_gcm_walker_view(out) reads the drain passes, the walker's get offset, flips queued / reached / completed, the drain thread id, the 7
+command words at get and the write counter, for the snapshot gate's failure line. ps3_rsx_guest_write_hook (NULL by default) lets the
+rollback snapshot's write guard (installer/port/jsp/jsp_snapshot.cpp, only with JSP_ROLLBACK=1) test each write against its saved ranges.
+No behaviour change. Always-on bookkeeping, which changes nothing the game does while the hook is NULL: one call, one address compare, one counter
+increment and one NULL check of the hook per noted store, row or word run, and one counter increment per FIFO drain
+pass. Applies after 7916.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index bc07a5a..560e517 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1330,9 +1330,18 @@ static void nv3089_engine_wrote(u32 dst_pitch, u32 x0, u32 y0, u32 x1, u32 y1)
+  * pixel: an SPU holding a reservation on a 128-byte line the row overwrites
+  * loses it and gets its lost-reservation event. The two byte swaps a
+  * vm_read32/vm_write32 pair does cancel, so the bytes move verbatim. */
++static volatile u32 s_rsx_guest_writes = 0;   /* patch 7917: RSX-side writes into guest MAIN memory (below 0xC0000000: not the local memory), one per store / row / word run */
++void (*ps3_rsx_guest_write_hook)(u32 ea, u32 n, u32 kind) = 0;   /* patch 7917: optional observer (the rollback snapshot's write guard): ea, byte count, kind 0 = data (2D engine, report, notify) 1 = label / semaphore release */
++void ps3_rsx_note_write(u32 ea, u32 n, u32 kind)
++{
++    if (ea >= 0xC0000000u) return;
++    s_rsx_guest_writes++;
++    if (ps3_rsx_guest_write_hook) ps3_rsx_guest_write_hook(ea, n, kind);
++}
+ static void gcm_store(u32 d, const u8* src, u32 n)
+ {
+     extern u8* vm_base;
++    ps3_rsx_note_write(d, n, 0);
+     const u32 l0 = d & ~127u, l1 = (d + n - 1) & ~127u;
+     int reserved = 0;
+     for (u32 a = l0; a <= l1 && !reserved; a += 128) reserved = spu_coh_is_reserved(a);
+@@ -1612,6 +1621,7 @@ static void nv3089_blit(void)
+         if (dy < cy0 || dy >= cy1) continue;
+         u64 sv = nv3089_origin(v0) + (u64)y * s_nv3089.dt_dy;
+         u32 sy = (u32)(sv >> 20);
++        ps3_rsx_note_write(dst + dy * dst_pitch + out_x * bpp, out_w * bpp, 0);   /* patch 7917: the row the scaled loop writes */
+         for (u32 x = 0; x < out_w; x++) {
+             u32 dx = out_x + x;
+             if (dx < cx0 || dx >= cx1) continue;
+@@ -1655,6 +1665,7 @@ static int gcm_2d_inline_run(u32 method, u32 io_off, u32 count)
+     const u32 at = s_gcm2d.dst_offset + py * dst_pitch + px * 4;
+     if (gcm_rect_tiled(local, at, 4u * count, 1)) return 0;
+     const u32 ea = cellGcmResolveLocated(local, s_gcm2d.dst_offset) + py * dst_pitch + px * 4;
++    ps3_rsx_note_write(ea, count * 4u, 0);   /* patch 7917 */
+     for (u32 i = 0; i < count; i++) vm_write32(ea + i * 4, vm_read32(dea + i * 4));
+     { static int lg = 0; if (PS3_LOG_FIRST(lg, 2))
+           printf("[GCM2D] 2919: inline run of %u words to 0x%08X (%s)%c", count, ea, local ? "local" : "main", 10); }
+@@ -1732,6 +1743,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+                   printf("[GCM2D] inline write dst=0x%08X (off=0x%X dma=0x%X pt=%u,%u pitch=%u) = 0x%08X\n",
+                          base + py * dst_pitch + px * 4, s_gcm2d.dst_offset,
+                          s_gcm2d.dst_dma, px, py, dst_pitch, data); }
++            ps3_rsx_note_write(base + py * dst_pitch + px * 4, 4, 0);   /* patch 7917: tiled or not, the word lands in this guest page */
+             const u32 at = s_gcm2d.dst_offset + py * dst_pitch + px * 4;
+             if (gcm_rect_tiled(local, at, 4, 1)) {
+                 const u8 word[4] = { (u8)(data >> 24), (u8)(data >> 16), (u8)(data >> 8), (u8)data };
+@@ -2009,6 +2021,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+                 if (m == 0x64u) s_sema_offset = v;
+                 else if (m == 0x6Cu) {
+                     atomic_thread_fence(memory_order_release);
++                    ps3_rsx_note_write(GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu), 4, 1);   /* patch 7917 */
+                     vm_write32(GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu), v);
+                     labels++;
+                 } else if (m == 0x01A4u || m == 0x1D6Cu || m == 0x1D70u || m == 0x1D74u) {
+@@ -2300,8 +2313,10 @@ static void wprof_note_walker(void) {}
+ /* Host thread that last walked the FIFO, for PS3_SAMPLE_DRAIN. */
+ volatile unsigned long g_gcm_drain_tid;
+ 
++static volatile u32 s_drain_passes = 0;   /* patch 7917: read-only drain statistics for the rollback snapshot gate */
+ void cellGcm_rsx_process_fifo(void)
+ {
++    s_drain_passes++;
+     wprof_note_walker();
+     g_gcm_drain_tid = GetCurrentThreadId();
+     const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+@@ -2384,6 +2399,7 @@ static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
+             /* CellGcmReportData, big-endian: u64 timer, u32 value, u32 padding. */
+             const u32 rea = gcm_io2ea(off);
+             if (rea) {
++                ps3_rsx_note_write(rea, 16, 0);   /* patch 7917 */
+                 vm_write32(rea, (u32)(ts >> 32));
+                 vm_write32(rea + 4u, (u32)ts);
+                 vm_write32(rea + 8u, val);
+@@ -2872,6 +2888,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                         if (!gcm_get_eq_put())
+                             vm_write32(GCM_CONTROL_GUEST_ADDR + 4, s_fifo_getoff + 4 + count * 4);
+                         atomic_thread_fence(memory_order_release);
++                        ps3_rsx_note_write(la, 4, 1);   /* patch 7917 */
+                         vm_write32(la, v);
+                         { static int rn = 0; if (s_sema_offset != 0x400u && PS3_LOG_FIRST(rn, 40))   /* TEMP */
+                             fprintf(stderr, "[SEMA-REL] get=0x%08X off=0x%X val=0x%08X\n", s_fifo_getoff, s_sema_offset, v); }
+@@ -4967,3 +4984,13 @@ void cellGcm_syscall_set_fifo(u32 put, u32 get)
+     s_fifo_getoff  = get;
+     s_fifo_calloff = 0;
+ }
++
++/* Patch 7917 (rollback netcode; read only, no behaviour change): where the RSX FIFO walker is, for the snapshot gate's failure line. out[0] = drain passes so far,
++ * out[1] = get offset (IO), out[2] = flips queued, out[3] = flips reached, out[4] = flips completed, out[5] = the walker's drain thread id, out[6..12] = the 7 command words at
++ * get (0xFFFFFFFF = no IO mapping there), out[13] = RSX-side writes into guest main memory so far. No lock: an unlocked read, only for a log line and a counter. */
++void ps3_gcm_walker_view(uint32_t* out)
++{
++    out[0] = s_drain_passes; out[1] = s_fifo_getoff; out[2] = s_fifo_flips_queued; out[3] = s_fifo_flips_reached; out[4] = s_fifo_flips_completed;
++    out[5] = (uint32_t)g_gcm_drain_tid; out[13] = s_rsx_guest_writes;
++    for (u32 i = 0; i < 7; i++) { const u32 ea = gcm_io2ea(s_fifo_getoff + i * 4u); out[6 + i] = ea ? vm_read32(ea) : 0xFFFFFFFFu; }
++}
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index d5eb4f4..cae3a97 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -521,6 +521,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+                   fprintf(stderr, "[RSX] NOTIFY slot %u -> ea 0x%08X\n", (s_notify_ctx & 7u) ^ 7u, ea); }
+               if (ea) {
+                   unsigned long long ts = ps3_ms_now() * 1000000ull;
++                  { extern void ps3_rsx_note_write(u32 ea, u32 n, u32 kind); ps3_rsx_note_write(ea, 16, 0); }   /* patch 7917 */
+                   vm_write32(ea, (u32)(ts >> 32)); vm_write32(ea + 4, (u32)ts);
+                   vm_write32(ea + 8, 0); vm_write32(ea + 12, 0);
+               }
+@@ -540,7 +541,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         u32 ea = gcm_io_offset_to_ea(s_sem_off);
+         u32 val = method == 0x1D74 ? data
+                 : (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
+-        if (ea) vm_write32(ea, val);
++        if (ea) { extern void ps3_rsx_note_write(u32 ea, u32 n, u32 kind); ps3_rsx_note_write(ea, 4, 1); vm_write32(ea, val); }   /* patch 7917 */
+         return 0;
+       }
+       if (method == 0x1D70) {
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 19548e0..17c9ac3 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -272,6 +272,12 @@ void rsx_draw_engine_set_guest_memory(rsx_vertex_guest_ptr_fn reader, void* user
+     s_guest_user = user;
+ }
+ 
++/* patch 7917: a write the engine makes straight into guest memory (the rollback snapshot's write guard notes main-memory stores) */
++static void eng_note_guest_write(const u8* p, u32 n)
++{
++    extern void ps3_rsx_note_write(u32 ea, u32 n, u32 kind);
++    if (vm_base && p >= vm_base && (u64)(p - vm_base) < 0x100000000ull) ps3_rsx_note_write((u32)(p - vm_base), n, 0);
++}
+ static const u8* eng_guest_ptr(void* user, u32 location, u32 offset,
+                                u32 min_bytes)
+ {
+@@ -1019,7 +1025,7 @@ void rsx_draw_engine_guest_read(u32 location, u32 offset, u32 pitch, u32 w, u32
+             eng_row_convert(src, src, n, 0, 1);   /* in place: one pixel per load/store */
+         }
+         if (rsx_tiling_active()) rsx_tiled_write(&s_eng_mem, location, offset + r * pitch, src + skip, bytes);
+-        else                     memcpy(dst, src + skip, bytes);
++        else                     { eng_note_guest_write(dst, bytes); memcpy(dst, src + skip, bytes); }   /* patch 7917 */
+     }
+ }
+ 
+@@ -1716,6 +1722,7 @@ static int eng_zdepth_to_guest(u32 slot)
+                               : (u8*)eng_guest_ptr(NULL, z->location, z->offset + r * z->pitch, w * bpp);
+         if (!row) return 0;
+         eng_depth_row_to_guest(row, s_depth_rows + (size_t)r * w, w, bpp);
++        if (!tiled) eng_note_guest_write(row, w * bpp);   /* patch 7917 */
+         if (tiled) rsx_tiled_write(&s_eng_mem, z->location, z->offset + r * z->pitch, row, w * bpp);
+     }
+     z->guest_dirty = 0;
+diff --git a/libs/video/rsx_tiling.c b/libs/video/rsx_tiling.c
+index 686c3ab..7d6c664 100644
+--- a/libs/video/rsx_tiling.c
++++ b/libs/video/rsx_tiling.c
+@@ -86,7 +86,11 @@ int rsx_tiling_footprint(u32 location, u32 offset, u32 len, u32* lo, u32* span)
+ static void rsx_tiling_put(const rsx_tiled_mem* mem, u8* dst, const u8* src, u32 n)
+ {
+     if (mem->store) mem->store(mem->user, dst, src, n);
+-    else            memcpy(dst, src, n);
++    else {   /* patch 7917: the real destination of a tiled store into guest main memory (the rollback snapshot's write guard); the store route (gcm_store) notes itself */
++        extern u8* vm_base; extern void ps3_rsx_note_write(u32 ea, u32 n, u32 kind);
++        if (vm_base && dst >= vm_base && (u64)(dst - vm_base) < 0x100000000ull) ps3_rsx_note_write((u32)(dst - vm_base), n, 0);
++        memcpy(dst, src, n);
++    }
+ }
+ 
+ /* [pos, stop) as the bytes lie, an IO page at a time. */

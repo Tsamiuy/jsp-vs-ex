@@ -134,6 +134,15 @@ jobs:
         # installer/port/patches on v0.19.0 (the earlier v0.15 series is gone: tag legacy-v15)
         run: python3 tools/ci/check_patch_series.py --scratch "$RUNNER_TEMP/series"
 
+      - name: The patch series applies with core.autocrlf true (Git for Windows' default)
+        # Some pinned upstream files have CR-LF lines that the patches carry byte for byte; the export must not let a user's
+        # autocrlf setting rewrite them. Same pinned checkout as the step above.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "true"
+        run: python3 tools/ci/check_patch_series.py --scratch "$RUNNER_TEMP/series-autocrlf"
+
   # The host tests that need Windows (the launcher's settings order, the generated build script and path quoting) plus the
   # Python tests whose path and quoting handling differs there, run as the installer build runs them: core.autocrlf false
   # and a python3 on PATH.

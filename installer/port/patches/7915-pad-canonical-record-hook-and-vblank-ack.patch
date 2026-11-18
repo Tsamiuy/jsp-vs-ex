@@ -1,0 +1,83 @@
+Patch 7915 (experimental, rollback netcode): canonical pad record hook, pad-info hook and a delivered-vblank counter, for the rollback stepper.
+
+g_cellpad_canon_hook(port, button, len, setting_len, host_connected) runs at the end of cellPadGetData, after the host layer and the 6501
+filters built the record, and may replace it whole (len and button[]). The stepper (installer/port/jsp/jsp_stepper.cpp) uses it to hand
+the game the same bytes on every machine and to give a replayed tick its recorded input instead of a fresh device read.
+g_cellpad_info_hook(info) runs in cellPadGetInfo2 before the copy to guest memory (not used by the port yet).
+cellGcm_vblank_delivered() counts the vblank notifications the GCM pump delivered to the guest: two back-to-back cellGcmTickVBlank calls
+coalesce into one pending bit, so the replay clock waits for this counter after each tick.
+All hooks NULL by default; the counter is always counted (one increment per delivered vblank) and unread unless the port reads it
+(only with JSP_ROLLBACK=1). No behaviour change until the port sets the hooks.
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 1d31c70..639de84 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1541,6 +1541,13 @@ void (*g_cellpad_rstick_filter)(u32 port_no, u16* rx, u16* ry) = 0;          /*
+ /* 6501: a title port that drives player 2 itself asks for port 1 to exist. */
+ int g_cellpad_want_p2 = 0;
+ 
++/* 7915 (rollback stepper): the canonical pad record. The hook sees the record the host layer built for the port (after the
++ * 6501 filters) and may replace it whole (len, button[]): the netplay input is then the same bytes on every peer and a replayed tick reads the
++ * recorded input, not the device. Returns 1 when it wrote the record. NULL by default. */
++int (*g_cellpad_canon_hook)(u32 port_no, u16* button, s32* len, int setting_len, int host_connected) = 0;
++/* 7915: lets the stepper present the session's slots as connected (port_status / now_connect) whatever the host devices are. NULL by default. */
++void (*g_cellpad_info_hook)(CellPadInfo2* info) = 0;
++
+ /* Immutable after startup. Standalone input builds have no network dependency. */
+ int g_cellpad_script_report_index = -1;
+ void (*g_cellpad_script_report_observer)(uint32_t, uint32_t, uint32_t,
+@@ -1913,6 +1920,14 @@ skip_inject: ;
+     }  /* end connected block */
+ 
+ emit:
++    { extern int (*g_cellpad_canon_hook)(u32 port_no, u16* button, s32* len, int setting_len, int host_connected);   /* 7915 */
++      if (g_cellpad_canon_hook && port_no < PAD_MAX_HOST_PORTS) {
++          const u32 st7915 = s_port_setting[port_no];
++          const int sl = (st7915 & CELL_PAD_SETTING_SENSOR_ON) ? CELL_PAD_LEN_CHANGE_SENSOR_ON :
++                         (st7915 & CELL_PAD_SETTING_PRESS_ON) ? CELL_PAD_LEN_CHANGE_PRESS_ON : CELL_PAD_LEN_CHANGE_DEFAULT;
++          s32 l7915 = data->len;
++          if (g_cellpad_canon_hook(port_no, data->button, &l7915, sl, s_host_state[port_no].connected || port_no == 0)) data->len = l7915;   /* connected as cellPadGetInfo2 reports it */
++      } }
+     /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
+      * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
+      * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
+@@ -2041,6 +2056,7 @@ s32 cellPadGetInfo2(CellPadInfo2* info_guest)
+         }
+     }
+     info->now_connect = connected;
++    { extern void (*g_cellpad_info_hook)(CellPadInfo2* info); if (g_cellpad_info_hook) g_cellpad_info_hook(info); }   /* 7915 */
+ 
+     /* copy to guest big-endian (CellPadInfo2 is all u32 fields) */
+     {
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 10397d2..bc3fe7e 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -477,6 +477,7 @@ static u32 s_labels[CELL_GCM_MAX_LABEL_COUNT];
+  * wait for the RSX to catch up before recycling the ring (else the frame's
+  * just-written commands are lost). Updated in cellGcm_rsx_process_fifo. */
+ volatile u32 g_gcm_fifo_drained_ea = 0;
++volatile u32 g_gcm_vblank_delivered = 0;   /* 7915: see cellGcm_vblank_delivered */
+ 
+ /* The guest variable cellGcmInit's ctx_out pointed at -- the title's own
+  * gCellGcmCurrentContext. A title that switches to a command buffer of its own
+@@ -1043,6 +1044,7 @@ void ppu_gcm_pump(void)
+         g_ps3_guest_caller(s_vblank_handler_opd, (uint64_t)s_vblank_count,
+                            0, 0, 0, 0, 0, 0, 0);
+     }
++    if (p & 1) g_gcm_vblank_delivered++;   /* 7915: after the handler returned (no handler registered: counted anyway) */
+     if (p & 2) {
+         /* Delivery waits for a guest thread to reach an HLE call or a timer
+          * sleep, so a newer flip may have been requested (status WAITING
+@@ -1076,6 +1078,10 @@ void ppu_gcm_pump(void)
+ /* Back-compat: the old direct entry points now just mark a tick pending (so any
+  * caller other than the ticker still works) -- delivery stays on the main thread. */
+ void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
++/* 7915: vblank notifications the pump actually delivered. Two back-to-back cellGcmTickVBlank calls coalesce into ONE pending bit, so a
++ * host clock that wants the guest to observe each vblank (the replay clock delivers 2 per flip) waits for this counter to advance after every tick. Only the
++ * pump (one thread at a time) increments it. */
++u32 cellGcm_vblank_delivered(void) { return g_gcm_vblank_delivered; }
+ /* Only deliver a flip completion when a flip is actually outstanding.
+  *
+  * Ticking unconditionally at 60 Hz fires the guest's flip handler even when

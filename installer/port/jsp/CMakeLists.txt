@@ -233,6 +233,14 @@ add_executable(${PROJECT_NAME}
     jsp_settings.cpp   # ENHANCEMENT: settings file, live values for the in-game settings pages (jsp_settings.h)
     jsp_session_startup.cpp # ENHANCEMENT: actual startup state; no session/ACK activation
     jsp_lod_lifetime.cpp # verified emitted entries + actual loader-buffer identity
+    # ENHANCEMENT, EXPERIMENTAL rollback netcode: every file below does nothing unless JSP_ROLLBACK=1 (docs/ROLLBACK.md)
+    jsp_rollback.cpp   # the entry points main.cpp and stubs.cpp call; each returns at once without JSP_ROLLBACK=1
+    jsp_net_game.cpp   # the game glue: settings handshake, session start, frame hooks, overlays
+    jsp_net_session.cpp # UDP transport, rendezvous, GekkoNet session (no game dependency)
+    jsp_stepper.cpp    # replay clock and canonical pad record (toolkit patch 7915)
+    jsp_snapshot.cpp   # the write-watched snapshot ring the session saves to and rolls back with (toolkit patches 7910-7917)
+    jsp_thread_registry.cpp # thread table for the snapshot's freeze (TLS callback in every build; it registers threads only with JSP_ROLLBACK=1 or JSP_SNAPSHOT_THREADS=registry)
+    jsp_fight_hash.cpp # fight tick counter and per-tick state hash (the session's tick number and checksum)
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -247,6 +255,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jsp_render60.cpp")
 endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_SESSION_RENDER60_ABSENT=1)
 add_dependencies(${PROJECT_NAME} jsp_verify_lod_hooks)
+
+# EXPERIMENTAL rollback netcode (off unless JSP_ROLLBACK=1 at run time): GekkoNet, a pinned unchanged copy in gekkonet/ (BSD-2-Clause,
+# gekkonet/PIN.md), built as its own static library so its private headers (net.h, event.h, sync.h, ...) never shadow the toolkit's. Built
+# without asio: jsp_net_session.cpp has its own UDP transport (ws2_32 is linked below with the runtime's imports).
+file(GLOB GEKKONET_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/src/*.cpp")
+add_library(jsp_gekkonet STATIC ${GEKKONET_SOURCES})
+target_include_directories(jsp_gekkonet
+    PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/include"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/include/private" "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/thirdparty")
+target_compile_definitions(jsp_gekkonet PUBLIC GEKKONET_STATIC GEKKONET_NO_ASIO)
+if(NOT MSVC)
+    target_compile_options(jsp_gekkonet PRIVATE -w)   # third-party code, unchanged: its warnings are upstream's
+endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE jsp_gekkonet)
+target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_ROLLBACK_BUILD=1)
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
