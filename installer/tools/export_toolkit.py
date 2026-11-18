@@ -68,7 +68,10 @@ def export(repo, out, fetch=True, say=print):
         # GIT_CEILING_DIRECTORIES: the folder may lie inside a checkout of this repository (build/installer/payload), where git apply
         # would resolve the paths against that checkout and skip the files outside the current folder without failing
         env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(out.resolve().parent))
-        r = subprocess.run(["git", "apply", "--verbose", "-p1", "--whitespace=nowarn", str(p)], cwd=out, capture_output=True, text=True, env=env)
+        # core.autocrlf=false: some pinned upstream files have CR-LF lines and the patches carry them byte for byte; a user's
+        # core.autocrlf=true (Git for Windows' default) would rewrite the preimage and the hunk would not apply
+        r = subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "--verbose", "-p1", "--whitespace=nowarn", str(p)], cwd=out,
+                           capture_output=True, text=True, env=env)
         # and require git's confirmation anyway
         if r.returncode or "Applied patch" not in r.stderr + r.stdout:
             raise RuntimeError(f"patch {p.name} does not apply to ps3recomp {TAG}:\n{r.stdout}{r.stderr}")

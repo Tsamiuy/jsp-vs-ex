@@ -107,8 +107,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
-uint32_t g_fw_events = 0, g_fw_pages = 0; bool g_fw_on = true;   // frozen-interval write check (JSP_SNAPSHOT_FROZEN_WRITES=0 off)
-uint64_t wall_ms() { return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count(); }
+bool g_fw_on = true;   // frozen-interval write check (JSP_SNAPSHOT_FROZEN_WRITES=0 off)
 
 bool g_on = false, g_failed = false, g_suspend = true, g_ls = false, g_dirty = false;
 // A failed ResumeThread can leave a process lock held by a frozen worker. No CRT, logging, mutex or cleanup path is safe.
@@ -157,7 +156,7 @@ jsy::Roles g_roles;                 // frame-pipeline park points (JSP_SNAPSHOT_
 int g_quiesce = 0;                  // JSP_SNAPSHOT_QUIESCE: 0 off, 1 park points in the log (notes), 2 enforce (implies SYNC=2) and refuse an unclean target
 bool g_io = false;                  // JSP_SNAPSHOT_IO=1: save the GCM IO mapping too (see discover())
 bool g_save_clean = false;          // full mode: the save's census had no blocking reason
-uint32_t g_rebase_k = 0, g_rebases = 0;   // incremental mode: tick of the last re-baseline after a committed-set change, and how many
+uint32_t g_rebases = 0;   // incremental mode: how many re-baselines after a committed-set change
 int g_ww = 0;                     // JSP_SNAPSHOT_WW: 0 off, 1 ring, 2 ring + full verify
 bool g_ext = false;               // JSP_SNAPSHOT_EXT=1 (rollback session): no scripted rounds; the netcode drives commit/rollback through jsp_snapshot_ext_*
 uint32_t g_ext_hash = 0, g_ext_hash_tick = 0xffffffffu;   // the port's per-tick hash (fight hash `all` component folded to 32 bits) of the last counted pass
@@ -516,6 +515,7 @@ extern "C" int ps3_ppu_thread_view(uint32_t tid, uint64_t* out, char* name);   /
 extern "C" int ps3_ppu_thread_regs(uint32_t tid, uint64_t* io, int set);       // patch 7916
 bool g_js_learned_note = false;
 uint32_t g_js_mgr = 0, g_js_unlearned = 0;   // g_js_unlearned: commits taken before the manager was learned (no job-server check applied to them)
+constexpr uint64_t kSpuJobServerRecvLr = 0x578568;   // @0x578568: event_queue_receive call in func_005784EC (sp_job_server_spu_thread)
 void sample_jobserver(jsy::View* v)
 {
 #ifdef _WIN32
@@ -525,7 +525,7 @@ void sample_jobserver(jsy::View* v)
             uint64_t o[5]; char nm[64] = {0};
             if (!ps3_ppu_thread_view((uint32_t)t, o, nm) || std::strcmp(nm, "sp_job_server_spu_thread") != 0) continue;
             uint64_t io[22];
-            if (!ps3_ppu_thread_regs((uint32_t)t, io, 0) || io[18] != 0x578568) continue;
+            if (!ps3_ppu_thread_regs((uint32_t)t, io, 0) || io[18] != kSpuJobServerRecvLr) continue;
             const uint32_t m = (uint32_t)io[16];
             if (ok_addr(m) && ok_addr(vm_read32(m + 0x90u)) && vm_read32(m + 0x94u) >= 1 && vm_read32(m + 0x94u) <= 4096) { g_js_mgr = m; g_js_learned_note = true; break; }   // printed by report() after the resume (nothing is formatted while the threads are frozen)
         }
@@ -946,8 +946,6 @@ uint32_t ww_peek_dirty(uint32_t* first)
 // This adapter executes the same transaction tested with fake operations on the host. No formatted output or allocation
 // occurs inside its frozen interval. Get/set of hash counters stays outside that interval because it takes mutexes.
 bool g_gate_jobserver = false;   // JSP_SNAPSHOT_GATE_JOBSERVER=1: the job server work state is a quiesce condition of the gate (also on with QUIESCE_JOBS)
-uint32_t g_js_commits = 0, g_js_delayed = 0, g_js_refused = 0;   // commits where the job server condition was seen / was true at the first sample (delayed) / still true at the end (refused)
-constexpr uint64_t kSpuJobServerRecvLr = 0x578568;   // @0x578568: event_queue_receive call in func_005784EC (sp_job_server_spu_thread)
 bool ww_layout_changed();   // defined after WwOps
 bool frozen_layout_same();
 struct WwOps {
@@ -991,7 +989,6 @@ struct WwOps {
         t_frozen = gop.t_frozen; frozen = gr.suspended;
         no_saved = restore_to != kNoTick && !saved;
         if (restore_to == kNoTick && g_gate_jobserver && !gr.view.js_valid) g_js_unlearned++;
-        if (restore_to == kNoTick && gr.view.js_valid) { g_js_commits++; if (gr.first_reasons & jsy::JobServerBusy) g_js_delayed++; if (gr.reasons & jsy::JobServerBusy) g_js_refused++; }
         if (gr.ok && restore_to == kNoTick) g_views.put(k, gr.view, gr.reasons == 0);   // preallocated plain stores; the clean bit: a rollback may only return to a clean tick
         suspend_ms = ms_since(t); return gr.ok;
     }
@@ -1094,7 +1091,7 @@ void ww_baseline(uint32_t k, ppu_context* c, bool initial = true)
     op.verification_line("baseline");
     if (!result.ok()) { capture_failed("WW baseline transaction", result.failures); return; }
     if (initial) { g_save_k = k; g_pass1 = true; g_active = true; }
-    else { g_rebase_k = k; g_rebases++; }
+    else g_rebases++;
     g_ww_hist.clear();
     std::fprintf(stderr, "[snap] ww %s k=%u ms=%.2f bytes=%zu ranges=%zu pages=%u ring_bytes=%zu depth=%u pool=%zu threads=%d running=%d rebases=%u\n", initial ? "baseline" : "REBASELINE", k, ms,
                  (size_t)g_ring.map().pages() * jss::kPage, keep.size(), g_ring.map().pages(), g_ring.bytes(), g_ww_depth, g_ww_pool, cen.n, cen.running, g_rebases);
@@ -1217,7 +1214,7 @@ bool ww_transaction(uint32_t k, ppu_context* c, uint32_t restore_to)
         if (restore_to == kNoTick) g_last_commit_notes = op.gr.verdict.notes;   // commits log on a change of the note set, on a block, and every 300th tick
     }
     op.verification_line(restore_to == kNoTick ? "commit" : "rollback");
-    if (op.fw_pages) { g_fw_events++; g_fw_pages += op.fw_pages; std::fprintf(stderr, "[snap] FROZEN-WRITES k=%u %s pages=%u first=0x%08X: guest pages written between the freeze's collect/reset and the resume (a thread the freeze did not cover, or main)\n", k, restore_to == kNoTick ? "commit" : "rollback", op.fw_pages, op.fw_first); }
+    if (op.fw_pages) { std::fprintf(stderr, "[snap] FROZEN-WRITES k=%u %s pages=%u first=0x%08X: guest pages written between the freeze's collect/reset and the resume (a thread the freeze did not cover, or main)\n", k, restore_to == kNoTick ? "commit" : "rollback", op.fw_pages, op.fw_first); }
     if (!result.ok()) { capture_failed("WW tick transaction", result.failures); return false; }
     if (restore_to == kNoTick) {
         g_ww_hist.push_back({g_ring.stats().last_commit_pages, op.collect_ms, op.apply_ms, total_ms + prep_ms});

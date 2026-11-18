@@ -49,9 +49,6 @@ struct Registry {
     // A/B (JSP_SNAPSHOT_BIRTHGATE=0): 0 = freeze_begin does not raise `freezing`, so add()/remove() never wait; a thread born during a freeze then runs unfrozen until the next
     // freeze (the Toolhelp listing's limitation), and one exiting during a freeze is not held in its detach callback. Only to tell whether the gate is what an earlier post-rollback hang needed.
     std::atomic<uint32_t> gate_births{1};
-    // Hooks kept for a diagnostic build, unused here: skip_tid = a thread the freeze must leave alone (0 = none, the value in this build); `waiting` = threads
-    // blocked in add()/remove() on the birth gate right now (a gauge nothing reads in this build).
-    std::atomic<uint32_t> skip_tid{0}, waiting{0};
 
     // wait(addr, expected): block while *addr == expected (WaitOnAddress / std::atomic::wait); spurious returns are fine.
     template<class Wait> void enter(Wait wait)
@@ -61,9 +58,7 @@ struct Registry {
             if (!freezing.load(std::memory_order_seq_cst)) return;
             inflight.fetch_sub(1, std::memory_order_seq_cst);
             gated.fetch_add(1, std::memory_order_relaxed);
-            waiting.fetch_add(1, std::memory_order_relaxed);
             while (freezing.load(std::memory_order_seq_cst)) wait(&freezing, 1u);
-            waiting.fetch_sub(1, std::memory_order_relaxed);
         }
     }
     void leave() { inflight.fetch_sub(1, std::memory_order_seq_cst); }
@@ -172,9 +167,8 @@ struct Registry {
     size_t copy_live(Entry* out, size_t cap, uint32_t self, bool* overflow) const
     {
         size_t n = 0; *overflow = false;
-        const uint32_t skip = skip_tid.load(std::memory_order_relaxed);
         for (int i = 0; i < kSlots; i++) {
-            if (s[i].state.load(std::memory_order_acquire) != Live || s[i].tid == self || (skip && s[i].tid == skip)) continue;
+            if (s[i].state.load(std::memory_order_acquire) != Live || s[i].tid == self) continue;
             if (n == cap) { *overflow = true; break; }
             out[n].h = s[i].h; out[n].tid = s[i].tid; out[n].seeded = s[i].seeded; n++;
         }

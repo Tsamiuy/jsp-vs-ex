@@ -351,8 +351,9 @@ def main():
             name = relative.with_suffix("." + suffix)
             (work / name).write_bytes((args.runtime / name).read_bytes())
         if not args.already_patched:
-            subprocess.run(["git", "apply", "--check", str(patch)], cwd=work, check=True)
-            subprocess.run(["git", "apply", str(patch)], cwd=work, check=True)
+            # core.autocrlf=false: apply the patch byte for byte, whatever the user's git configuration (see export_toolkit.py)
+            subprocess.run(["git", "-c", "core.autocrlf=false", "apply", "--check", str(patch)], cwd=work, check=True)
+            subprocess.run(["git", "-c", "core.autocrlf=false", "apply", str(patch)], cwd=work, check=True)
         source = (work / relative).read_text()
         header = (work / relative.with_suffix(".h")).read_text()
         if "int rsx_d3d12_pipe_effective_state(void);" not in header:

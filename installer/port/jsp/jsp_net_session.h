@@ -178,17 +178,17 @@ public:
 // message of every new sender: only a well-formed HELO makes a client; a stray datagram is dropped and does not fail the host.
 class DirectRendezvous : public IRendezvous {
 public:
-    DirectRendezvous(UdpMux& mux, MessageHub& hub, uint8_t local_count, uint64_t session_id) // host
-        : mux_(mux), hub_(hub), host_(true), local_count_(local_count) { plan_.session_id = session_id; }
-    DirectRendezvous(UdpMux& mux, MessageHub& hub, uint8_t local_count, const Endpoint& host_ep)  // client
-        : mux_(mux), hub_(hub), host_(false), local_count_(local_count), host_ep_(host_ep) {}
+    DirectRendezvous(UdpMux&, MessageHub& hub, uint8_t local_count, uint64_t session_id) // host (the mux is reached through the hub)
+        : hub_(hub), host_(true), local_count_(local_count) { plan_.session_id = session_id; }
+    DirectRendezvous(UdpMux&, MessageHub& hub, uint8_t local_count, const Endpoint& host_ep)  // client
+        : hub_(hub), host_(false), local_count_(local_count), host_ep_(host_ep) {}
     int poll() override;
     const SessionPlan& plan() const override { return plan_; }
     const std::string& error() const override { return err_; }
     MessageChannel* peer_channel() override { return ch_; }
     uint64_t rejected_hello = 0;
 private:
-    UdpMux& mux_; MessageHub& hub_;
+    MessageHub& hub_;
     bool host_; uint8_t local_count_; Endpoint host_ep_;
     SessionPlan plan_; std::string err_; MessageChannel* ch_ = nullptr; bool sent_hello_ = false; int state_ = 0; uint8_t hello_count_ = 0;
 };
