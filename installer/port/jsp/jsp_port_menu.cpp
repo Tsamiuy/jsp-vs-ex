@@ -44,11 +44,13 @@
 //   - the idle timers of the main menu are untouched by the pad filter because the swallowed report is "no input"
 //     exactly like an idle player; if the demo starts behind the page it needs the activity counter (not done).
 //   - the port's "Exit Game" option (jsp_game.cpp, exit_option_on_entry) shares the Options panel (it takes over Cross-Save, row 0, drawn at
-//     the bottom; Port Settings is row 5, drawn at the top). It opens its box on Cross/Start only when two words of the game read as they did
-//     on the five-row list: the Options cursor counted from the bottom (0x008E63FC == 0) and the menu state (0x0095654C == 5, the Options
-//     list; 9 = the Cross-Save submenu). ASSUMPTION: with six rows 0x008E63FC is still 0 only on Cross-Save (never on the Port Settings row)
-//     and 0x0095654C still reads 5 on the six-row list and while this page is open over it (the game sees no input then). Its filter runs
-//     before this one on the raw report (g_prev_filter). Not checked: needs a run with both on (both are on by default now).
+//     the bottom; Port Settings is row 5, drawn at the top). It opens its box on Cross/Start only when in_menu_scene() holds and two words
+//     of the game read as they did on the five-row list: the Options cursor counted from the bottom (0x008E63FC == 0) and the menu state
+//     (0x0095654C == 5, the Options list; 9 = the Cross-Save submenu). ASSUMPTION: with six rows 0x008E63FC is still 0 only on Cross-Save
+//     (never on the Port Settings row) and 0x0095654C still reads 5 on the six-row list and while this page is open over it. Exit Game's
+//     filter runs before this one on the raw report (g_prev_filter) and handles ports 0 and 1; this page empties port 0's report only
+//     (pad_filter returns early for any other port), so while the page is open the game still sees port 1's input. Not checked: needs a
+//     run with both on (both are on by default now).
 
 #include <cstdint>
 #include <cstring>
