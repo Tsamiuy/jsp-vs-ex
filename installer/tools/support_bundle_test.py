@@ -354,6 +354,38 @@ def main():
         check(into10 == {"repsn": {"enabled": "1", "server": "a.example:36100"}} and raw10["repsn"]["name"] == ["x" * 600],
               "ini: a line over 512 bytes is rejected and the section stays, its value still a secret")
 
+        # fourth review: '#' and ';' inside values, peer names with ',' or ')', preset labels, unknown sections, the label of the launch before
+        for raw, want in [("PS3_NP_ONLINE_ID=Neo #Anderson\r\n", "PS3_NP_ONLINE_ID=<set>\r\n"), ("PSNR_SERVER=a.example;Zed.example\n", "PSNR_SERVER=<set>\n"),
+                          ("JSP_ROLLBACK_JOIN=1.2.3.4:5 # note\n", "JSP_ROLLBACK_JOIN=<set>\n"), ("name=Bob;x\r\n", "name=<set>\r\n"),
+                          ("server = s.example # old\n", "server = <set>\n"), ("; name = Bob#x\n", "; name = <set>\n"),
+                          ("[preset Friend House]\r\n", "[preset <preset>]\r\n"), ("[Alice server]\n", "[<set>]\n"), ("[repsn]\r\n", "[repsn]\r\n"),
+                          ("[community]\n", "[community]\n"),
+                          ("[online] community method enabled (preset FriendHouse): not supported yet, staying offline\n",
+                           "[online] community method enabled (preset <preset>): not supported yet, staying offline\n"),
+                          ("[online] C:/x/repsn.ini:3: rejected (unknown section [Alice server])\r\n", "[online] C:/x/repsn.ini:3: rejected (unknown section [<set>])\r\n"),
+                          ("[sceNpSignaling] conn 1 (Peer, Guy), 203.0.113.9:3658) established\r\n", "[sceNpSignaling] conn 1 (<online name>, <IPv4>:3658) established\r\n"),
+                          ("[sceNpSignaling] ActivateConnection(ctx=1, Pe)er) -> conn 1 (pending)\r\n", "[sceNpSignaling] ActivateConnection(ctx=1, <online name>) -> conn 1 (pending)\r\n"),
+                          ("[sceNpMatching2] signaling: member 2 (Pe) atX) at 1.2.3.4:5\r\n", "[sceNpMatching2] signaling: member 2 (<online name>) at <IPv4>:5\r\n")]:
+            got = sb.net_scrub(raw, {})
+            check(got == want, f"fourth review: {raw.strip()[:50]!r} -> {got!r}")
+        app11 = t / "app11"
+        w(app11 / "VERSION.txt", "x\n")
+        w(app11 / "settings_here.txt", "")
+        w(app11 / "play_settings.txt", "PS3_NP_ONLINE_ID=prev #Anderson\nPSNR_SERVER=a.example;Zed.example\nPS3RECOMP_SHARED_DIR=@APP@/shared\n")
+        w(app11 / "shared/repsn.ini", "[repsn]\nenabled=0\nname=Bob;x\n")
+        w(app11 / "shared/community.ini", "[community]\nenabled=1\nactive=FriendHouse\n[preset FriendHouse]\naddress=c.example\n")
+        w(app11 / "game/run/play_stderr.prev.txt", "[net] rollback opt-in: host, build 1a2b3c4d, hooks installed\n")
+        w(app11 / "game/run/play_stderr.txt", "[net] gekko session synchronized\n")
+        w(app11 / "game/run/play_stdout.txt", "[online] community method enabled (preset FriendHouse): not supported yet\nFriendHouse again\n")
+        zp11 = sb.make(app11, out, None, None)
+        z11 = zipfile.ZipFile(zp11)
+        all11 = "\n".join(z11.namelist()) + b"".join(z11.read(n) for n in z11.namelist()).decode()
+        f11 = z11.read("facts.txt").decode()
+        z11.close()
+        for bad in ("Anderson", "Zed.example", "Bob;x", ";x", "FriendHouse", "c.example"):
+            check(bad not in all11, f"fourth review: {bad!r} appears nowhere in the zip")
+        check("(the launch before):" in f11 and "rollback started: yes (host)" in f11, "fourth review: the launch before keeps its label when a secret renames its file")
+
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")
     print("FAILED: " + "; ".join(FAILS) if FAILS else "all passed")

@@ -9,10 +9,12 @@ Stdlib only. Contacts no server: the zip is only made, never sent; the tester at
 What goes in (text only: .log .txt .ini .cmd), every file and file name through firstrun.scrub (the user's profile folder becomes
 %USERPROFILE%) and net_scrub, which puts placeholders in for:
   - the address and name fields of the known log lines ([online], [net], [psnr], [sceNp], [sceNpMatching2], [sceNpSignaling]: this
-    player's and other players' online names, the server, the peer's address) and the values of the settings keys server, name, address,
-    PSNR_SERVER, PS3_NP_ONLINE_ID and JSP_ROLLBACK_JOIN, also on lines commented out with '#' or ';' (LF or CRLF line ends);
+    player's and other players' online names (also with ',' or ')' in them), the server, the peer's address, community preset labels and
+    unknown section names) and the whole values of the settings keys server, name, address, PSNR_SERVER, PS3_NP_ONLINE_ID and
+    JSP_ROLLBACK_JOIN ('#' and ';' inside a value included), also on lines commented out with '#' or ';' (LF or CRLF line ends);
+  - an ini section header line other than [repsn], [community] and [install] (preset labels, sections the user wrote);
   - wherever else they appear: every value of those keys in play_settings.txt, repsn.ini and community.ini (also earlier lines of a key and
-    commented-out lines; names also as the runtime cleans them), and the login name (USERNAME / USER and the profile folder's last part,
+    commented-out lines; names also as the runtime cleans them; community.ini's preset labels and active=), and the login name (USERNAME / USER and the profile folder's last part,
     as written and cleaned: the runtime makes it the online name when none is set);
   - every IPv4 address except loopback (127.x) and 0.0.0.0.
   Known limits: a name or host name that is in none of those settings files and in no known line format stays as written (for example a
@@ -660,6 +662,10 @@ def net_secrets(s, env=None):
             add(v, "<server>", True)
         for v in vals("name"):
             name(v)
+        for v in vals("active"):
+            add(v, "<preset>")
+        if sec.startswith("preset "):
+            add(sec[7:].strip(), "<preset>")
     prof = env.get("USERPROFILE") or ""
     for v in (env.get("USERNAME"), env.get("USER"), re.split(r"[\\/]", prof.rstrip("\\/"))[-1] if prof else None):
         add(v, "<user name>")
@@ -669,7 +675,12 @@ def net_secrets(s, env=None):
 
 _IPV4 = re.compile(r"(?<![\d.])((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(?![\d]|\.\d)")
 _NET_RULES = (   # always applied, also when the settings files were not found
-    (re.compile(r"(?im)^(\s*[#;]?\s*(?:server|name|address|JSP_ROLLBACK_JOIN|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)[^\s#;][^\r\n#;]*"), r"\1<set>"),
+    (re.compile(r"(?im)^(\s*[#;]?\s*(?:server|name|address|JSP_ROLLBACK_JOIN|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)\S[^\r\n]*"), r"\1<set>"),   # the whole value: '#' or ';' inside it is part of it
+    # an ini section header of its own line that is not one of the program's (a preset label, an unknown section the user wrote)
+    (re.compile(r"(?im)^(\s*\[\s*preset\s+)[^\]\r\n]*(\]\s*)(?=\r?$)"), r"\1<preset>\2"),
+    (re.compile(r"(?im)^(\s*\[)(?!\s*(?:repsn|community|install|preset\s[^\]\r\n]*)\s*\])[^\]\r\n]*(\]\s*)(?=\r?$)"), r"\1<set>\2"),
+    (re.compile(r"(\[online\] community method enabled \(preset )[^\r\n]*?(\): not supported yet)"), r"\1<preset>\2"),
+    (re.compile(r"(rejected \(unknown section \[)[^\r\n]*(\]\))"), r"\1<set>\2"),
     (re.compile(r"(\[online\] re-psn enabled: server )\S+"), r"\1<server>"),
     (re.compile(r"(\[online\] online id )\S+"), r"\1<online name>"),
     (re.compile(r"(\[online\] --psnr )\S+"), r"\1<server>"),
@@ -688,9 +699,10 @@ _NET_RULES = (   # always applied, also when the settings files were not found
     (re.compile(r"(\[sceNp\] (?:GetNpId|GetOnlineId|GetOnlineName|GetUserProfile)\(user=-?\d+\) -> )\"[^\"\r\n]*\""), r"\1<online name>"),
     (re.compile(r"(\[sceNp\] Init\(poolSize=\d+, username=)\"[^\"\r\n]*\""), r"\1<online name>"),
     (re.compile(r"(?m)(\[sceNpMatching2\] room \d+: )[^\r\n]*?( joined as member \d+| left)(?=\r?$)"), r"\1<online name>\2"),
-    (re.compile(r"(\[sceNpMatching2\] signaling: member \d+ \()[^\r\n]*?(\) at )"), r"\1<online name>\2"),
-    (re.compile(r"(\[sceNpSignaling\] conn \d+ \()[^,\r\n]*(, )"), r"\1<online name>\2"),
-    (re.compile(r"(\[sceNpSignaling\] ActivateConnection\(ctx=\d+, )[^)\r\n]*(\))"), r"\1<online name>\2"),
+    # a peer's name may hold ',' or ')': each rule runs up to the fixed tail of its format
+    (re.compile(r"(\[sceNpMatching2\] signaling: member \d+ \()[^\r\n]*(\) at \d+\.\d+\.\d+\.\d+:\d+)"), r"\1<online name>\2"),
+    (re.compile(r"(\[sceNpSignaling\] conn \d+ \()[^\r\n]*(, \d+\.\d+\.\d+\.\d+:\d+\) (?:established|dead))"), r"\1<online name>\2"),
+    (re.compile(r"(\[sceNpSignaling\] ActivateConnection\(ctx=\d+, )[^\r\n]*(\) -> conn \d+ \((?:active|pending)\))"), r"\1<online name>\2"),
 )
 # The program's own log tags and ini section names at the start of a line ("[net]", "[online]", "[repsn]"): never a private value, so a
 # name that happens to read "net" or "online" does not turn every tag into a placeholder. Only these: any other bracketed word is scrubbed.
@@ -698,7 +710,7 @@ _LINE_TAG = (r"(?m:^\s*\[(?:net|online|psnr|repsn|community|install|portmenu|ver
              r"sceNp[A-Za-z0-9]*|cell[A-Z][A-Za-z0-9]*)\])")
 
 
-_PLACEHOLDER = r"<(?:set|server|online name|join address|user name|peer address|IPv4)>"
+_PLACEHOLDER = r"<(?:set|server|online name|join address|user name|peer address|IPv4|preset)>"
 
 
 def net_scrub(text, secrets=None):
@@ -765,7 +777,7 @@ def net_line_safe(line, secrets=None):
     return net_scrub(line, secrets)   # the whole line: the [net] rules need the tag (net_scrub keeps it)
 
 
-def net_log_lines(blobs, secrets=None):
+def net_log_lines(blobs, secrets=None, shown=None):
     """The facts.txt lines for what the game's [net] lines say (pure). `blobs`: the logs' RAW text (str or bytes; only firstrun.scrub applied),
     before the size cap and before net_scrub: the summary is computed from every line as the game wrote it, and each line passes
     net_line_safe() before anything is read from it, so no server, join address or online name is printed."""
@@ -787,7 +799,7 @@ def net_log_lines(blobs, secrets=None):
         off = [ln[6:] for ln in lines if ln.endswith(": off")]
         path = last("[net] re-psn path: ") or ("direct IP" if any(ln.startswith("[net] listening/joining: ") for ln in lines) else None)
         ended = last("[net] ended: ")
-        out.append(f"  {name}{label}:")
+        out.append(f"  {(shown or {}).get(name, name)}{label}:")
         out.append("    env decision: " + (last("[net] env decision: ") or "not in the logs"))
         out.append("    rollback started: " + (f"yes ({started.split(',')[0]})" if started is not None else "no"))
         out.append("    refused: " + (refused if refused is not None else "no") + ("" if not off else "   stopped before the start: " + off[-1]))
@@ -799,7 +811,7 @@ def net_log_lines(blobs, secrets=None):
         if key is None:
             noisy = ("[net] commit tick=", "[net] rollback to tick=", "[net] waiting")
             kept = [ln for ln in lines if not ln.startswith(noisy)]
-            key = (name, kept if len(kept) <= NET_KEY_LINES else kept[:10] + ["..."] + kept[-(NET_KEY_LINES - 10):])
+            key = ((shown or {}).get(name, name), kept if len(kept) <= NET_KEY_LINES else kept[:10] + ["..."] + kept[-(NET_KEY_LINES - 10):])
     if not out:
         return ["  not in the logs (no [net] lines: rollback was off, or the game has not run since it was installed)"]
     out.append(f"  key [net] lines of {key[0]} (per-tick commit, rollback and waiting lines left out; kept here even when the log is cut):")
@@ -884,7 +896,7 @@ def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
     ns = net_settings(app, appdata)
     secrets = net_secrets(ns)
     blobs = {}
-    net_logs = None
+    net_logs, shown = None, {}
     for name0, p in entries.items():
         try:
             raw = read_raw(p)
@@ -895,9 +907,10 @@ def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
             name = name.rsplit(".", 1)[0] + "-1." + name.rsplit(".", 1)[-1] if "." in name else name + "-1"
         if "[net] " in raw:
             net_logs = net_logs or {}
-            net_logs[name] = raw                                 # the [net] summary reads the raw text (net_scrub could change its words)
+            net_logs[name0] = raw                                 # the [net] summary reads the raw text (net_scrub could change its words)
+        shown[name0] = name
         blobs[name] = net_scrub(raw, secrets).encode("utf-8")
-    net = {"mode": net_mode(ns), "logs": net_log_lines(net_logs or {}, secrets), "secrets": secrets}   # before trim(): the summary sees every line
+    net = {"mode": net_mode(ns), "logs": net_log_lines(net_logs or {}, secrets, shown), "secrets": secrets}   # before trim(): the summary sees every line
     net_logs = None
     cuts = trim(blobs, cap - 30000)                              # room for facts.txt
     names = sorted(list(blobs) + ["facts.txt"])
