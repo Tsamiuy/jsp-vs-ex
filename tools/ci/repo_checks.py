@@ -5,12 +5,13 @@
     python3 tools/ci/repo_checks.py --commits A..B   # also check the commits in A..B
 
 Checks: no game or build files, no large files, no personal paths or e-mail
-addresses, no AI tool or vendor names outside AGENTS.md, no merge-conflict
-markers, Python files parse; with --commits: noreply
+addresses, no AI tool or vendor names outside AGENTS.md, one Discord invite
+(data/nav.json), no merge-conflict markers, Python files parse; with --commits: noreply
 identities and no tool trailers. Needs only Python 3 and git.
 """
 import argparse
 import ast
+import json
 import re
 import subprocess
 import sys
@@ -42,6 +43,7 @@ EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]{1,64}@[\w-]{1,63}(\.[\w-]{1,63}){1,8}")
 NOREPLY = re.compile(r"(@users\.noreply\.github\.com|^noreply@github\.com)$", re.I)
 AI_EXEMPT = {"AGENTS.md"}
 SELF = "tools/ci/repo_checks.py"  # holds the patterns themselves
+DISCORD = re.compile(r"https?://(?:www\.)?discord(?:app)?\.(?:gg|com/invite)/[A-Za-z0-9-]+")   # as tools/site/check_site.py
 TRAILER = re.compile(r"^(Co-Authored-By|Claude-Session|Generated with)\b|claude\.ai/code", re.I | re.M)
 
 
@@ -51,6 +53,10 @@ def git(*args):
 
 def check_files(problems):
     # Submodules (mode 160000) are pointers to another repository's commit, not files here: skip them.
+    try:   # the one Discord invite (the wide button of data/nav.json); tools/site/test_site.py checks the same in the host tests
+        invite = json.load(open("data/nav.json", encoding="utf-8"))["wide"]["href"]
+    except (OSError, ValueError, KeyError, TypeError):
+        invite = None
     gitlinks = {e.split("\t", 1)[1] for e in git("ls-files", "-s", "-z").split("\0") if e.startswith("160000 ")}
     for path in git("ls-files", "-z").split("\0"):
         if not path or path in gitlinks:
@@ -68,6 +74,10 @@ def check_files(problems):
         if b"\0" in data[:8192]:
             continue
         text = data.decode("utf-8", errors="replace")
+        if invite and path != SELF:
+            for m in sorted(set(DISCORD.findall(text))):
+                if m != invite:
+                    problems.append(f"{path}: Discord invite {m} is not the one in data/nav.json")
         for n, line in enumerate(text.splitlines(), 1):
             if path == SELF:
                 break

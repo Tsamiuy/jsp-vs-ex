@@ -14,8 +14,9 @@ concurrency:
 
 jobs:
   # Tells the slow jobs below whether this pull request needs them. A pull request that only changes the plain text
-  # files listed in TEXT_ONLY (no README: the site test reads it; no docs/ folder: tests and the features page read it)
-  # skips them; their "skipped" result counts as passed. Pushes to main and any other change run everything.
+  # files listed in TEXT_ONLY (no README, NOTICE.md or docs/ folder: the site build and tests read them) skips them; a
+  # skipped job counts as passed. Pushes to main and any other change run everything, and so does a failed or missing
+  # answer from this job (the slow jobs test `!= 'false'`, with !cancelled() so a failed `changes` does not skip them).
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -33,17 +34,18 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-          TEXT_ONLY: CHANGELOG.md CONTRIBUTING.md AGENTS.md KNOWN_ISSUES.md CONTRIBUTORS.md SECURITY.md NOTICE.md
+          TEXT_ONLY: CHANGELOG.md CONTRIBUTING.md AGENTS.md KNOWN_ISSUES.md CONTRIBUTORS.md SECURITY.md
         run: |
           heavy=true
           if [ "$EVENT" = pull_request ]; then
-            files=$(git diff --name-only "$BASE...$HEAD")
-            echo "changed files:"; echo "$files"
-            heavy=false
-            for f in $files; do
-              case " $TEXT_ONLY " in *" $f "*) ;; *) heavy=true ;; esac
-            done
-            [ -n "$files" ] || heavy=true
+            heavy=false; n=0
+            while IFS= read -r -d '' f; do
+              n=$((n+1)); echo "changed: $f"
+              text=false
+              for t in $TEXT_ONLY; do [ "$f" = "$t" ] && text=true; done
+              $text || heavy=true
+            done < <(git diff -z --name-only "$BASE...$HEAD")
+            [ "$n" -gt 0 ] || heavy=true
           fi
           echo "heavy=$heavy" >> "$GITHUB_OUTPUT"
           echo "slow jobs needed: $heavy"
@@ -96,7 +98,7 @@ jobs:
 
   launcher:
     needs: changes
-    if: needs.changes.outputs.heavy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -120,7 +122,7 @@ jobs:
   # one named result per test. A test file in git that is neither listed nor excluded there fails the coverage step.
   host-tests:
     needs: changes
-    if: needs.changes.outputs.heavy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -174,7 +176,7 @@ jobs:
   # release is built. Same tool as the installer build (export_toolkit.py: git archive of the pin, git apply only).
   patches:
     needs: changes
-    if: needs.changes.outputs.heavy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -201,7 +203,7 @@ jobs:
   # and a python3 on PATH.
   host-tests-windows:
     needs: changes
-    if: needs.changes.outputs.heavy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 25
     env:
@@ -242,7 +244,7 @@ jobs:
   # and the runtime library link are made on the player's PC from their EBOOT, so a full build and link are not possible here.
   port-compile:
     needs: changes
-    if: needs.changes.outputs.heavy == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 20
     env:
