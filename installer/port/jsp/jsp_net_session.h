@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,12 +63,20 @@ public:
     void set_link_model(const LinkModel& m);
     void send(const Endpoint& to, uint8_t tag, const uint8_t* data, size_t len);
     void pump();                                             // flush delayed sends, read every pending datagram into the tag queues
+    // ENHANCEMENT (rollback over re-psn; jsp_net_repsn_client.h): hooks of the re-psn client. Both run with the mux lock held and must not call pump().
+    //   rx_hook: every received datagram, before the tag test. 0 = not mine, 1 = consumed (dropped), 2 = rewritten: buf / n / from now hold the unwrapped relay payload (it is never longer than the datagram).
+    //   tx_hook: the final bytes of every send (tag included). true = the hook sent them through the relay itself.
+    std::function<int(Endpoint& from, uint8_t* buf, int& n)> rx_hook;
+    std::function<bool(const Endpoint& to, const std::vector<uint8_t>& bytes)> tx_hook;
+    void set_hooks(std::function<int(Endpoint&, uint8_t*, int&)> rx, std::function<bool(const Endpoint&, const std::vector<uint8_t>&)> tx);   // under the mux lock: no hook is running when it returns
+    void send_control(const Endpoint& to, const uint8_t* data, size_t len);   // PROBE / PUNCH / relay-wrapped bytes from THIS socket: no tag, no link model, no tx_hook
     bool pop(uint8_t tag, Endpoint& from, std::vector<uint8_t>& data, uint64_t* arrived_ms = nullptr);
     uint64_t sent = 0, received = 0, dropped = 0, overflow = 0, oversize = 0, unknown_tag = 0, send_fail = 0; int last_send_err = 0;   // counters (dropped = by the LinkModel)
 private:
     struct Delayed { uint64_t due_us; Endpoint to; std::vector<uint8_t> bytes; };
     struct Queued { Endpoint from; std::vector<uint8_t> data; uint64_t ms; };
     void raw_send(const Endpoint& to, const std::vector<uint8_t>& bytes);
+    void raw_send_plain(const Endpoint& to, const std::vector<uint8_t>& bytes);
     uint32_t rnd();
     std::recursive_mutex mu_;
     intptr_t sock_ = -1;
@@ -178,17 +187,21 @@ public:
 // message of every new sender: only a well-formed HELO makes a client; a stray datagram is dropped and does not fail the host.
 class DirectRendezvous : public IRendezvous {
 public:
-    DirectRendezvous(UdpMux&, MessageHub& hub, uint8_t local_count, uint64_t session_id) // host (the mux is reached through the hub)
-        : hub_(hub), host_(true), local_count_(local_count) { plan_.session_id = session_id; }
-    DirectRendezvous(UdpMux&, MessageHub& hub, uint8_t local_count, const Endpoint& host_ep)  // client
-        : hub_(hub), host_(false), local_count_(local_count), host_ep_(host_ep) {}
+    DirectRendezvous(UdpMux& mux, MessageHub& hub, uint8_t local_count, uint64_t session_id) // host
+        : mux_(mux), hub_(hub), host_(true), local_count_(local_count) { plan_.session_id = session_id; }
+    DirectRendezvous(UdpMux& mux, MessageHub& hub, uint8_t local_count, const Endpoint& host_ep)  // client
+        : mux_(mux), hub_(hub), host_(false), local_count_(local_count), host_ep_(host_ep) {}
     int poll() override;
     const SessionPlan& plan() const override { return plan_; }
     const std::string& error() const override { return err_; }
     MessageChannel* peer_channel() override { return ch_; }
     uint64_t rejected_hello = 0;
+    // ENHANCEMENT (rollback over re-psn): the host takes a HELO only from this endpoint (the room's other player as the server gave it), so another host of the
+    // internet that knows the UDP port cannot take the client's seat before the plan is agreed. Not set = any endpoint (direct IP).
+    void set_only_peer(const Endpoint& e) { only_ = e; has_only_ = true; }
 private:
-    MessageHub& hub_;
+    Endpoint only_{}; bool has_only_ = false;
+    UdpMux& mux_; MessageHub& hub_;
     bool host_; uint8_t local_count_; Endpoint host_ep_;
     SessionPlan plan_; std::string err_; MessageChannel* ch_ = nullptr; bool sent_hello_ = false; int state_ = 0; uint8_t hello_count_ = 0;
 };

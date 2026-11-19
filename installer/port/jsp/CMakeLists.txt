@@ -308,6 +308,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${PS3RECOMP_DIR}/runtime/syscalls"
     "${PS3RECOMP_DIR}/runtime/platform"        # win32_compat.h and friends
     "${PS3RECOMP_DIR}/libs/video"
+    "${PS3RECOMP_DIR}/libs/network/psnr"      # psnr.h (the re-psn client, toolkit patch 7918) for the rollback-over-re-psn transport (jsp_net_repsn_client.h)
     "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 

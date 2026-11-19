@@ -9,6 +9,7 @@ All notable changes are listed here, newest first. The format follows
 ### Added
 
 - Choose the netcode in the game, not yet tried in a running game (Port Settings, `JSP_PORT_MENU=1`, Online page): a Netcode row with Off, Delay (the game's own online) or Rollback (experimental, direct IP: Role, Port or Host address). Only one can be on; saving applies on the next start; a hand-edited pair with both on is refused and neither runs. Host-tested only.
+- Rollback over a re-psn server instead of a typed address, **not yet run against a real re-psn server or across real routers** (experimental, opt-in; Online page: Netcode = Rollback, Connection = re-psn; toolkit patch 7918 brings in the re-psn v0.8.0 client): one player creates a room, the other joins it, the two PCs punch a direct path and use the server's relay only if allowed. Host-tested against a fake server only.
 
 ## [0.5.0] - 2026-11-18
 

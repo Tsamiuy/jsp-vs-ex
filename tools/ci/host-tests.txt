@@ -24,6 +24,7 @@ posix   | tools/ci/test_release_tag.py
 posix   | installer/tools/online_settings_test.sh
 posix   | installer/tools/port_menu_test.sh
 posix   | installer/tools/net_online_test.sh
+posix   | installer/tools/net_repsn_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py
@@ -50,6 +51,8 @@ exclude | installer/tools/matching2_stale_test.c | optional baseline fixture com
 exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
 exclude | installer/tools/port_menu_test.cpp | compiled and run by port_menu_test.sh
 exclude | installer/tools/net_online_test.cpp | compiled and run by net_online_test.sh
+exclude | installer/tools/net_repsn_test.cpp | compiled and run by net_repsn_test.sh
+exclude | installer/tools/net_repsn_client_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh
 exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh

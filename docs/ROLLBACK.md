@@ -192,7 +192,7 @@ Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice
 |---|---|---|
 | Off | no online play | none |
 | Delay (the game's own online) | the game's own netcode over re-psn or a community server (`repsn.ini` / `community.ini`, as before) | Method (re-psn / Community server), Server, Online name, Community preset |
-| Rollback (experimental) | the rollback path of this section, direct IP, two players | Role (Host / Join), Port (host) or Host address (join) |
+| Rollback (experimental) | the rollback path of this section, two players, direct IP or through a re-psn room | Connection (Direct IP / re-psn), Role (Host / Join), then Port (host) or Host address (join) for direct IP, or Allow relay for re-psn |
 
 Cross on Port, Host address, Server or Online name opens the pad letter picker the page already had. **Save (applies on
 the next start)** writes the choice; Discard changes reads the files again; Circle leaves without saving. Under the rows
@@ -230,8 +230,8 @@ the page says which method is on and what this session runs against what is save
   address are not accepted (IPv4 only, like the direct-IP join).
 
 **Network:** the host receives on that one UDP port. On a home network that just works; over the internet the host must
-forward the UDP port on the router (and allow it in the firewall). The client needs no open port. There is no relay and no
-lobby yet, and re-psn matchmaking does not start rollback matches yet.
+forward the UDP port on the router (and allow it in the firewall). The client needs no open port. There is no lobby yet.
+Over re-psn instead of a typed address (with an optional relay): see "Rollback over re-psn" below.
 
 **What happens:**
 
@@ -265,7 +265,45 @@ lobby yet, and re-psn matchmaking does not start rollback matches yet.
   server before each save; it has not recurred in the runs above.
 - When a match ends early (disconnect, desync, F9), the fight continues offline; there is no return to the menu for both.
 - The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it.
-- Only direct IP. The re-psn server is not used for rollback yet; the connection part is replaceable so it can be added.
+- Rollback over re-psn exists but has not been run against a real server or across real routers (see its section below); direct IP is the tested path.
+
+### Rollback over re-psn (experimental, not yet run against a real server)
+
+Instead of typing an address, the two players can meet in a room on a re-psn server (the same server and online name as the
+game's own online, `repsn.ini`; see `docs/ONLINE.md`). **This has not been run against a real re-psn server, and the
+connection has not been tried across real routers (NATs).** What has run: host tests against a fake server that speaks the
+server's documented wire format (below). Treat it as untested until a report says otherwise.
+
+- Turn it on: Port Settings -> Online -> Netcode = Rollback -> Connection = re-psn, Role = Host (creates a room) or Join (joins the
+  oldest matching room), Allow relay Yes or No, Save, restart. The server and online name must already be set in `repsn.ini`
+  (set them under Delay first; they are kept). By hand: `play_settings.txt` lines `JSP_ROLLBACK=1`, `JSP_ROLLBACK_VIA=repsn`,
+  `JSP_ROLLBACK_ROLE=host` or `join`, `JSP_ROLLBACK_RELAY=1` to allow the server's relay (default 0); optionally
+  `JSP_ROLLBACK_LISTEN=PORT` to pin the UDP port (firewalls; otherwise any free port).
+- One method at a time still holds: the game's own online stays off while rollback runs (the page saves Rollback with the
+  game's own online off, and a start with both on is refused).
+- How it works (`jsp_net_repsn.h`, `jsp_net_repsn_client.h`): the rollback session's own UDP socket is the peer-to-peer
+  socket. The host creates a room that carries a rollback flag and a record `rb=1;ver=<build>` (ASSUMPTION: room flag bit 30,
+  `kRoomFlagRollback`); the joiner searches, keeps only rooms with the flag, the same record and a free seat (it looks at
+  most at the first 64 rooms of a search), joins the oldest and checks the owner's record. Both then send punch datagrams
+  from that socket every 200 ms while the normal handshake runs. If nothing arrives within 4 s the connection goes
+  through the server's relay only when the player allowed it and the server offers it; otherwise it ends with the reason.
+  The path ("direct" or "relay") is shown for the first seconds of the match (and never replaces a later message). Nothing
+  falls back to the game's own online. The host takes the handshake's first message only from the room's other player (the
+  endpoint the server gave for that member), so another machine that knows the UDP port cannot take the seat; ASSUMPTION:
+  that endpoint is the one the other player's datagrams come from (a router that maps the port differently per destination
+  cannot be punched either). A lost server connection or a failed request before a room exists ends the start with a reason.
+  `JSP_ROLLBACK_LISTEN`, if set, must be a port from 1 to 65535, or the start is refused.
+- The client is the re-psn v0.8.0 C client, which replaces the vendored copy in the toolkit (toolkit patch 7918). The
+  callers in the runtime keep their function signatures (compared by declaration text); the game's own Online Battle goes
+  through the same client, and that has not been run with it either.
+- Tests (no game, no GPU, native Linux, loopback only): `bash installer/tools/net_repsn_test.sh TOOLKIT_DIR` runs the
+  rendezvous with a fake transport (room flag and record, roles, punch, relay only when allowed and offered, forged or
+  mismatched members ignored) and the real transport over the C client against a fake server (HELLO, CREATE / SEARCH /
+  JOIN / LEAVE ROOM and their pushes, UDP probe and relay, room ids above 2^32, request bodies compared with bytes written
+  out by hand from the protocol's field tables, control and forged relay datagrams never reaching the session).
+- Not covered: a real re-psn server, real NATs (hole punching and relay), the connect timing on slow DNS, more than two
+  players, a room list to choose from (the oldest matching room is joined), the page and the "direct / relay" line in a
+  running game.
 
 **Always on, even with rollback off.** None of this changes what the game does; it is listed so nothing is hidden:
 
@@ -278,6 +316,9 @@ lobby yet, and re-psn matchmaking does not start rollback matches yet.
   7915: a delivered-vblank counter.
 - 7917: one call, one address compare, one counter increment and one NULL check per RSX store, row or word run into guest
   memory, and one counter increment per FIFO drain pass.
+- 7918: the toolkit's psnr client (used by the game's own Online Battle) is the re-psn v0.8.0 one; with no re-psn online
+  configured it is not used. The UDP mux has two optional hooks (a null test per datagram received and per send) and a
+  64-byte larger receive buffer.
 - The port: one call and one relaxed atomic load per frame-clock pass (about every 4 ms), a NULL check per setting read,
   a `getenv` on an F9 binding and at static initialisation (the start decision reads the rollback keys and `PS3_NET_ONLINE`
   there once and sets nothing when `JSP_ROLLBACK` is off); the thread registry's TLS callback (two environment reads at

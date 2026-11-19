@@ -254,7 +254,7 @@ struct Menu {
     // the rows of the Online page, top to bottom (row ids of jpno): the older page without net_on
     std::vector<int> orows() const
     {
-        if (net_on) return jpno::rows_for(nc, rb.host);
+        if (net_on) return jpno::rows_for(nc, rb.host, rb.repsn);
         return std::vector<int>{ ROW_METHOD, ROW_SERVER, ROW_NAME, ROW_PRESET, ROW_SAVE, ROW_DISCARD };
     }
     int orow() const { const std::vector<int> r = orows(); return r[(size_t)(osel < (int)r.size() ? osel : 0)]; }
@@ -285,6 +285,8 @@ struct Menu {
     {
         const bool rbon = nc == jpno::NC_ROLLBACK;
         std::string why = rbon ? rb.check() : be->check();
+        if (why.empty() && rbon && rb.repsn && (be->get_text(ROW_SERVER).empty() || be->get_text(ROW_NAME).empty()))
+            why = "Rollback over re-psn needs the server and online name of repsn.ini: set them under Delay first (they are kept).";
         if (!why.empty()) { m = why; return false; }
         auto write_file = [&](std::string& err) {
             std::string text, note;
@@ -321,6 +323,12 @@ struct Menu {
         if (edge & BTN_UP) { osel = (osel + n - 1) % n; dirty = true; }
         const int row = orow();   // ENHANCEMENT (in-game netcode option): the older page is the identity (row == osel)
         if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_NETCODE) net_choose((nc + ((edge & BTN_LEFT) ? 2 : 1)) % 3);
+        else if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && (row == jpno::R_CONN || row == jpno::R_RELAY)) {   // ENHANCEMENT (rollback over re-psn)
+            if (row == jpno::R_CONN) { rb.repsn = !rb.repsn; if (osel >= (int)orows().size()) osel = (int)orows().size() - 1; }
+            else rb.relay = !rb.relay;
+            edited = true; msg = row == jpno::R_RELAY ? "Relay: used only if a direct path fails and the server offers it." : "Not saved yet."; msg_err = false; dirty = true;
+            events.push_back(std::string("online edit: rollback ") + (row == jpno::R_CONN ? (rb.repsn ? "connection re-psn" : "connection direct IP") : (rb.relay ? "relay allowed" : "relay not allowed")));
+        }
         else if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_ROLE) {
             rb.host = !rb.host; edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
             events.push_back(std::string("online edit: rollback role ") + (rb.host ? "host" : "join"));
