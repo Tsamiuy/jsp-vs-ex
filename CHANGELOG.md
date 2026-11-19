@@ -18,12 +18,14 @@ Each version starts with **For players**: a few plain lines about what changed i
 **Fixed**
 
 - **Build again** in the settings window now rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
+- The fan site's tables keep their words whole, and its menu is one straight list with no second row of buttons.
 
 ### Changed
 
-- Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; versions before 0.2.0 print their whole section. The technical entries stay as the full record; 0.2.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
+- Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; a version without that heading prints its whole section. The technical entries stay as the full record; 0.1.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
 - CI: the host-tests job's package step gives up on a mirror request after 30 s without data (3 retries), treats a failed index update as an error, tries the apt part a second time and has its own 8-minute limit, so a mirror problem fails that step by name instead of leaving the tests without time.
 - CI: a new `changes` job lists the files a pull request touches; when they are all among `CHANGELOG.md`, `CONTRIBUTING.md`, `AGENTS.md`, `KNOWN_ISSUES.md`, `CONTRIBUTORS.md`, `SECURITY.md` and `NOTICE.md`, the slow jobs (`launcher`, `host-tests`, `patches`, `host-tests-windows`, `port-compile`) are skipped, so a pull request that only changes those files no longer waits for the package mirror and the Windows runners. `checks` always runs; pushes to `main` and every other change run everything (so does any change to the workflow itself). README, `docs/` and the site files are not in the list, because tests read them.
+- Fan site (`tools/site/site.py`): the button row under the title is gone (the menu's sections cover those pages; the links no section has, the download page and the changelog, are a short Links list under the menu, the source stays in the footer, and `check_site.py` still finds every `data/nav.json` link on both pages); the menu scrolls inside itself when the window is shorter than it; the menu items no longer step to the right one by one; text breaks only where a word does not fit (`overflow-wrap: break-word` instead of `anywhere`, which split table words letter by letter), and table headings stay on one line.
 
 ### Added
 
@@ -215,6 +217,25 @@ files are included. On the Windows PC it was tested on, it boots, plays the menu
 per second, and the installer builds and starts it. It needs a 64-bit CPU with AVX2.
 It is a pre-release with known problems and fewer tests than it needs:
 see [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9). `docs/FEATURES.md` lists each feature with how it was tested.
+
+### For players
+
+This is the first pre-release: it works, but it has known problems and has been tried on few PCs. You need your own copy of the game (disc image or disc folder); no game files are included. Your PC needs a 64-bit processor with AVX2.
+
+**New**
+
+- **The installer:** `jsp-setup.exe` (or the portable zip) builds the game on your PC from your own copy of the disc, and a launcher starts it. On the PC it was tested on, it reaches the menus and plays fights with sound at about 30 frames per second.
+- **Picture:** higher resolutions, a resizable window, borderless fullscreen, and "EX" in the title logo.
+- **Controls:** play with the keyboard, the keyboard and mouse, or a controller, each with its own button layout. A second player can use the keyboard or a second controller.
+- **Options:** a setting for the size of the fight HUD (the bars and icons during a fight), an Exit Game entry in the Options menu, a Hide HUD row in Training Mode, and an FPS counter.
+- **Online tab in the settings window:** choose Off, a re-psn server or a community server, and a Find on LAN button looks for a server on your network. Not tried on Windows yet.
+- **"Unlock everything" cheat** (opt-in, on the Cheats tab): unlocks all characters and extras. It makes a backup of your save first and works for one start only.
+
+**Changed**
+
+- Setup checks that your game's main file (the EBOOT) is the known version 1.00 and refuses the other region's.
+- Fight intros no longer show half-drawn characters, and new objects or camera turns no longer freeze the game for a moment.
+- Importing a save from RPCS3 is safer: your old save is kept if the import fails.
 
 ### What you get
 
