@@ -230,6 +230,62 @@ def main():
         sc = sb.net_scrub("server = h.example:1\nJSP_ROLLBACK_JOIN=198.51.100.4:7000\nname=abc # c\nSDK 10.0.19041.0\n")
         check("h.example" not in sc and "198.51.100.4" not in sc and "abc" not in sc and "10.0.19041.0" in sc, "net scrub: key lines without the settings, version numbers kept")
 
+        # second review: a BOM in repsn.ini, the login name, other players' names, a name with a space, the direct host line, key case
+        app7 = t / "app7"
+        w(app7 / "VERSION.txt", "0.5.1-test\n")
+        w(app7 / "settings_here.txt", "")
+        w(app7 / "play_settings.txt", "jsp_rollback=1\nJSP_Rollback_Listen=7000\nps3recomp_shared_dir=@APP@/shared\n")
+        (app7 / "shared").mkdir(parents=True, exist_ok=True)
+        (app7 / "shared/repsn.ini").write_bytes(b"\xef\xbb\xbf[repsn]\nenabled=0\nserver=bom.example.org\nname=host\n")
+        w(app7 / "game/run/play_stderr.txt", "[net] env decision: rollback start (static constructors arrived: EnvInit first, online boot last)\n"
+          "[net] listening/joining: host, local UDP port 7000\n[net] rollback opt-in: host, build 1a2b3c4d, hooks installed\n"
+          "[net] re-psn: joining a room on bom.example.org:36100 as Bob Smith (relay allowed), local UDP port 1\n"
+          "[net] settings layer / rendezvous ended: no reply from bom.example.org:36100\n")
+        w(app7 / "game/run/play_stdout.txt", '[psnr] player "Winuser9"\n[sceNp] GetOnlineId(user=0) -> "Winuser9"\n[sceNp] GetNpId(user=0) -> "Winuser9"\n'
+          '[sceNp] Init(poolSize=1, username="Winuser9")\n[psnr] "Win user" is not a valid online ID (3-16 letters, digits, - or _, starting with a letter)\n'
+          '[psnr] connected to bom.example.org:36100 as "Winuser9" (NPWR00000_00), user 2, seen from 198.51.100.8, p2p port 3658\n'
+          '[sceNpMatching2] room 5: Peer Guy joined as member 2\n[sceNpMatching2] room 5: PeerGuy left\n'
+          '[sceNpMatching2] signaling: member 2 (PeerGuy) at 203.0.113.9:3658\n[sceNpSignaling] conn 1 (PeerGuy, 203.0.113.9:3658) established\n'
+          '[sceNpSignaling] ActivateConnection(ctx=1, PeerGuy) -> conn 1 (pending)\n[Winuser9] tag-like line\n')
+        old_env = {k: os.environ.get(k) for k in ("USERNAME", "USER", "USERPROFILE")}
+        os.environ.update({"USERNAME": "Win user9", "USERPROFILE": "C:\\Users\\Win user9"})
+        os.environ.pop("PS3RECOMP_SHARED_DIR", None)
+        try:
+            ns7 = sb.net_settings(app7, None, env={})
+            check(ns7["ini"].get("repsn", {}).get("server") == "bom.example.org:36100", "BOM: repsn.ini with a UTF-8 BOM is read (jsp_online.cpp skips it)")
+            check(ns7["play"].get("JSP_ROLLBACK") == "1" and ns7["play"].get("JSP_ROLLBACK_LISTEN") == "7000", "keys: case-insensitive, as Windows passes them")
+            sec7 = sb.net_secrets(ns7)
+            check(sec7.get("Win user9") == "<user name>" and sec7.get("Winuser9") == "<user name>", "secrets: the login name, as written and as np_psnr cleans it")
+            zp7 = sb.make(app7, out, None, None)
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        z7 = zipfile.ZipFile(zp7)
+        f7 = z7.read("facts.txt").decode()
+        all7 = b"".join(z7.read(n) for n in z7.namelist()).decode()
+        z7.close()
+        for bad in ("bom.example.org", "Winuser9", "Win user", "PeerGuy", "Peer Guy", "Bob Smith", "198.51.100.8", "203.0.113.9"):
+            check(bad not in all7, f"second review: {bad!r} appears nowhere in the zip")
+        check("mode: Rollback direct host" in f7, "second review: lower-case keys decide the mode")
+        check("[net] listening/joining: host, local UDP port 7000" in f7 and "path: direct IP" in f7 and "rollback started: yes (host)" in f7,
+              "second review: the direct host line stays as written with the online name 'host'")
+        check("[net] re-psn: joining a room on <server> as <online name> (relay allowed), local UDP port 1" in f7, "second review: a name with a space is replaced whole")
+        check('[psnr] player <online name>' in all7 and "[sceNpMatching2] room 5: <online name> joined as member 2" in all7
+              and "[sceNpSignaling] conn 1 (<online name>, <IPv4>:3658)" in all7 and "ActivateConnection(ctx=1, <online name>)" in all7,
+              "second review: the NP lines lose this player's and other players' names")
+        sc8 = sb.net_scrub("[net] re-psn: creating a room on s.example:1 as Bob Smith\n", {})
+        check(sc8 == "[net] re-psn: creating a room on <server> as <online name>\n", "second review: a room line without its tail loses the rest of the line")
+        d8 = t / "ini8"
+        w(d8 / "repsn.ini", "[repsn]\nenabled=0\n[repsn\nenabled=1\nserver=a.example\n")
+        into8 = {}
+        sb.read_online_ini(d8 / "repsn.ini", into8, "repsn")
+        check(into8 == {"repsn": {"enabled": "0"}}, "ini: a '[' line without ']' ends the section, as jsp_online.cpp rejects it")
+        check(sb.net_scrub("[Bobby] hello\n[net] x\n", {"Bobby": "<online name>", "net": "<online name>"}) == "[<online name>] hello\n[net] x\n",
+              "tags: only the program's own tags are kept")
+
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")
     print("FAILED: " + "; ".join(FAILS) if FAILS else "all passed")

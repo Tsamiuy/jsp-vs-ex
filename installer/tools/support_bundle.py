@@ -7,7 +7,11 @@ Writes jsp-support-YYYYmmdd-HHMMSS.zip to DIR (default: the Desktop, else the in
 Stdlib only. Contacts no server: the zip is only made, never sent; the tester attaches it by hand.
 
 What goes in (text only: .log .txt .ini .cmd), every file through firstrun.scrub (the user's profile folder becomes %USERPROFILE%) and net_scrub
-(the re-psn server address, the rollback join address, the online names and every IPv4 address but loopback become placeholders):
+(placeholders replace: wherever they appear, the server and join addresses and online names found in play_settings.txt, repsn.ini and
+community.ini, and the login name (USERNAME / USER, the profile folder's last part, also as the runtime cleans it into an online name);
+the address and name fields of the known log lines ([online], [net], [psnr], [sceNp], [sceNpMatching2], [sceNpSignaling]: this player's
+and other players' online names, the server) and of the settings keys; every IPv4 address but loopback. Known limit: a name or host
+name that is in none of those files and in no known line format stays as written):
   logs\\*.log, build\\**\\*.log (step logs), game\\run\\*.txt (play_stderr.prev.txt is the launch before the last one), the *.log, *.txt, *.ini and *.cmd files of the install folder
   (play_settings.txt, jsp-install.ini, build-again.cmd, paths.txt, VERSION.txt, tree.txt when present), the settings file in
   %APPDATA%\\JSP Fan Revival, and the newest two Inno Setup logs in %TEMP% that mention this app. Plus facts.txt.
@@ -413,7 +417,9 @@ NET_KEY_LINES = 30
 def read_kv(path, app=None):
     """KEY=VALUE lines of play_settings.txt exactly as jsp-launcher.exe's load_env (installer/launcher/launcher.c) turns them into the game's
     environment: a line starting with '#' or ';' or without '=' is skipped, the key is the text before the first '=' as it stands, trailing
-    CR, LF and spaces leave the value, a value starting with @APP@ gets the install folder instead of the token, the last line of a key wins."""
+    CR, LF and spaces leave the value, a value starting with @APP@ gets the install folder instead of the token, the last line of a key wins.
+    Environment names are case-insensitive on Windows (jsp_rollback=1 is JSP_ROLLBACK=1 to the game), so the keys are returned in upper case.
+    A UTF-8 BOM stays part of the first key, as load_env reads it (that line names no variable the game reads; net_secrets still sees it)."""
     out = {}
     try:
         text = pathlib.Path(path).read_bytes()[:1000000].decode("utf-8", "replace")
@@ -426,7 +432,7 @@ def read_kv(path, app=None):
         v = v.rstrip("\r\n ")
         if app is not None and v.startswith("@APP@"):
             v = str(app) + v[5:]
-        out[k] = v
+        out[k.upper()] = v
     return out
 
 
@@ -449,27 +455,34 @@ _INI_KEYS = {"repsn": {"enabled": lambda v: v in ("0", "1"), "server": _valid_ho
 
 def read_online_ini(path, into, kind, raw=None):
     """repsn.ini (kind 'repsn') / community.ini (kind 'community') into `into` ({section lower: {key lower: value}}) as jsp_online.cpp's parse()
-    reads them: only the sections of that file kind, only the keys it knows with valid values (later files win per key). `raw` gets every
-    key=value of every section, valid or not (the values net_secrets() must keep out of the zip)."""
+    reads them: a UTF-8 BOM is skipped, a line over 512 bytes is rejected, a '[' line without ']' ends the section, only the sections of that
+    file kind (and preset labels it accepts), only the keys it knows with valid values (later files win per key). Known limits: the
+    64 KB file cap is applied by cutting, not by refusing the file as jsp_online.cpp does. `raw` gets every key=value of the file, in any
+    section or none, valid or not (the values net_secrets() must keep out of the zip)."""
     try:
-        text = pathlib.Path(path).read_bytes()[:65536].decode("utf-8", "replace")
+        text = pathlib.Path(path).read_bytes()[:65536].decode("utf-8-sig", "replace")
     except OSError:
         return False
     sec = ""
-    for line in text.splitlines():
+    for line in text.split("\n"):
+        too_long = len(line.encode("utf-8")) > 512
         line = line.strip()
         if not line or line[0] in ";#":
             continue
-        if line.startswith("[") and line.endswith("]"):
-            sec = line[1:-1].strip()
+        if line.startswith("["):
+            sec = line[1:-1].strip() if line.endswith("]") and not too_long else ""
             continue
         k, eq, v = line.partition("=")
-        if not eq or not sec:
+        if not eq:
             continue
         k, v, ls = k.strip().lower(), v.strip(), sec.lower()
         if raw is not None:
             raw.setdefault(ls, {})[k] = v
-        group = ls if ls == kind else "preset" if kind == "community" and ls.startswith("preset ") else None
+        if too_long or not sec:
+            continue
+        label = sec[7:].strip() if ls.startswith("preset ") else ""
+        group = ls if ls == kind else "preset" if kind == "community" and label and len(label) <= 32 and \
+            all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in label) else None
         check = _INI_KEYS.get(group or "", {}).get(k)
         if check is not None and check(v):
             into.setdefault(ls if group != "preset" else "preset " + sec[7:].strip(), {})[k] = \
@@ -578,9 +591,17 @@ def net_mode(s):
             "  settings files read: " + (", ".join(s["read"]) if s["read"] else "none found")]
 
 
-def net_secrets(s):
-    """{value: placeholder} of the private values in the settings files: server and join addresses (whole and host part), online names."""
-    p, ini = s["play"], s.get("ini_raw", s["ini"])
+def _clean_online_id(v):   # np_psnr.c clean_online_id: the allowed characters, at most 16
+    return "".join(ch for ch in v if ch.isascii() and (ch.isalnum() or ch in "-_"))[:16]
+
+
+def net_secrets(s, env=None):
+    """{value: placeholder} of the private values: server and join addresses (whole and host part) and online names from the settings files,
+    and the login name (USERNAME / USER and the profile folder's last part, as written and as np_psnr.c cleans it: the runtime uses it as the
+    online name when none is set)."""
+    env = os.environ if env is None else env
+    p = {k.lstrip("\ufeff"): v for k, v in s["play"].items()}   # a BOM on the first line hides the key from the game, not from us
+    ini = s.get("ini_raw", s["ini"])
     out = {}
 
     def add(v, what, address=False):
@@ -598,6 +619,10 @@ def net_secrets(s):
         add(kv.get("server"), "<server>", True)
         add(kv.get("address"), "<server>", True)
         add(kv.get("name"), "<online name>")
+    prof = env.get("USERPROFILE") or ""
+    for v in (env.get("USERNAME"), env.get("USER"), re.split(r"[\\/]", prof.rstrip("\\/"))[-1] if prof else None):
+        add(v, "<user name>")
+        add(_clean_online_id(v or ""), "<user name>")
     return out
 
 
@@ -607,12 +632,28 @@ _NET_RULES = (   # always applied, also when the settings files were not found
     (re.compile(r"(\[online\] re-psn enabled: server )\S+"), r"\1<server>"),
     (re.compile(r"(\[online\] online id )\S+"), r"\1<online name>"),
     (re.compile(r"(\[online\] --psnr )\S+"), r"\1<server>"),
-    (re.compile(r"(\[net\] re-psn: (?:creating|joining) a room on )\S+( as )\S+"), r"\1<server>\2<online name>"),
+    # jsp_net_game.cpp: the name may hold anything up to the fixed tail; without the tail the rest of the line is the name
+    (re.compile(r"(?m)(\[net\] re-psn: (?:creating|joining) a room on )\S+( as )[^\r\n]*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)$"),
+     r"\1<server>\2<online name>\3"),
+    (re.compile(r"(\[net\] re-psn: (?:creating|joining) a room on )(?!<server> as <online name> \(relay)\S+( as )[^\r\n]*"), r"\1<server>\2<online name>"),
     (re.compile(r"(the online name ')[^'\r\n]*(')"), r"\1<online name>\2"),
+    # the toolkit's NP lines (libs/network): this player's and other players' online names, the server
+    (re.compile(r"(\[psnr\] player )\"[^\"\r\n]*\""), r"\1<online name>"),
+    (re.compile(r"(\[psnr\] )\"[^\"\r\n]*\"( is not a valid online ID)"), r"\1<online name>\2"),
+    (re.compile(r"(\[psnr\] connected to )[^\s:]+(:\d+ as )\"[^\"\r\n]*\""), r"\1<server>\2<online name>"),
+    (re.compile(r"(\[psnr\] )[^\s:]+(:\d+: another player there is already )\"[^\"\r\n]*\""), r"\1<server>\2<online name>"),
+    (re.compile(r"(\[psnr\] could not reach )[^\s:]+"), r"\1<server>"),
+    (re.compile(r"(\[sceNp\] (?:GetNpId|GetOnlineId|GetOnlineName|GetUserProfile)\(user=-?\d+\) -> )\"[^\"\r\n]*\""), r"\1<online name>"),
+    (re.compile(r"(\[sceNp\] Init\(poolSize=\d+, username=)\"[^\"\r\n]*\""), r"\1<online name>"),
+    (re.compile(r"(?m)(\[sceNpMatching2\] room \d+: )[^\r\n]*?( joined as member \d+| left)$"), r"\1<online name>\2"),
+    (re.compile(r"(\[sceNpMatching2\] signaling: member \d+ \()[^\r\n]*?(\) at )"), r"\1<online name>\2"),
+    (re.compile(r"(\[sceNpSignaling\] conn \d+ \()[^,\r\n]*(, )"), r"\1<online name>\2"),
+    (re.compile(r"(\[sceNpSignaling\] ActivateConnection\(ctx=\d+, )[^)\r\n]*(\))"), r"\1<online name>\2"),
 )
-# A log tag or an ini section header at the start of a line ("[net]", "[online]", "[repsn]"): program words, never a private value, so a
-# name or server that happens to read "net" or "online" does not turn every tag into a placeholder.
-_LINE_TAG = r"(?m:^\s*\[[A-Za-z0-9_-]+\])"
+# The program's own log tags and ini section names at the start of a line ("[net]", "[online]", "[repsn]"): never a private value, so a
+# name that happens to read "net" or "online" does not turn every tag into a placeholder. Only these: any other bracketed word is scrubbed.
+_LINE_TAG = (r"(?m:^\s*\[(?:net|online|psnr|repsn|community|install|portmenu|version|jstars-game|support_bundle|D3D12|"
+             r"sceNp[A-Za-z0-9]*|cell[A-Z][A-Za-z0-9]*)\])")
 
 
 def net_scrub(text, secrets=None):
@@ -652,10 +693,11 @@ _NET_PUBLIC = re.compile("|".join([
     r"startup evidence available: starting the rendezvous",
     r"re-psn: no server / online name in repsn\.ini \(set them on the Online page under Delay\): off",
     r"JSP_ROLLBACK_JOIN is not IP:PORT: off",
+    r"listening/joining: host, local UDP port \d+",
     r"ended: (?:Opponent disconnected|Match ended|Desync detected: match ended)",
 ]))
 _NET_PRIVATE = (
-    (re.compile(r"(re-psn: (?:creating|joining) a room on )\S+( as )\S+( \(relay (?:allowed|not allowed)\), local UDP port \d+)"), r"\1<server>\2<online name>\3"),
+    (re.compile(r"(re-psn: (?:creating|joining) a room on )\S+( as ).*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)"), r"\1<server>\2<online name>\3"),
     (re.compile(r"(re-psn: the online name ').*(' is longer than 16 characters \(repsn\.ini name=\): off)"), r"\1<online name>\2"),
     (re.compile(r"(listening/joining: )(?!host,).*(, local UDP port \d+)"), r"\1<join address>\2"),
     (re.compile(r"(rendezvous: )\S+((?: via re-psn, path (?:direct|relay|punching|-), room \d+)?)"), r"\1<peer address>\2"),
@@ -670,7 +712,7 @@ def net_line_safe(line, secrets=None):
     for pat, rep in _NET_PRIVATE:
         if pat.fullmatch(rest):
             return "[net] " + pat.sub(rep, rest)
-    return "[net] " + net_scrub(rest, secrets)
+    return net_scrub(line, secrets)   # the whole line: the [net] rules need the tag (net_scrub keeps it)
 
 
 def net_log_lines(blobs, secrets=None):
