@@ -27,8 +27,9 @@ facts.txt: version, Windows, CPU count and model, AVX2, RAM, free space, the gam
 each display adapter's driver version (read from the registry, never changed), and each display (monitor name, size, refresh rate, which one
 the game window is on when the game is running; no serial numbers), and a Netcode section: the mode the settings files choose, decided as the
 game decides it (Off, Delay over re-psn, Rollback direct or over re-psn with host / join and the relay choice, or the refusal and why; server,
-join address and online name only as "set" / "not set") and, per launch, what the game's [net] lines say (rollback started, refused and why, path, session synchronized,
-rollback and desync counts, the key lines), read before the size cap cuts anything.
+join address and online name only as "set" / "not set"; whether the rollback status badge JSP_ROLLBACK_BADGE is on) and, per launch, what the game's
+[net] lines say (rollback started, refused and why, path, session synchronized, rollback and desync counts, the badge and the last status line: path,
+input delay, last and largest rollback, the key lines), read before the size cap cuts anything.
 What never goes in: the EBOOT, disc files, saves (hdd0, .sav), lift output (.c/.h), shader caches, binaries, environment dumps.
 A total cap (CAP_BYTES, uncompressed) applies: over it, the oldest lines of the largest logs go first and facts.txt says what was cut
 (the netcode summary and key [net] lines in facts.txt are made before the cut, so they survive it).
@@ -622,6 +623,7 @@ def net_mode(s):
     st = lambda b: "set" if b else "not set"
     return [f"  mode: {mode}",
             f"  re-psn server: {st(server)}   online name: {st(name)}   rollback join address: {st(p.get('JSP_ROLLBACK_JOIN'))}",
+            "  rollback status badge (JSP_ROLLBACK_BADGE): " + ("on" if _flag(p.get("JSP_ROLLBACK_BADGE", "")) else "off"),
             "  settings files read: " + (", ".join(s["read"]) if s["read"] else "none found")]
 
 
@@ -740,6 +742,8 @@ _RESOLVE_WHY = (   # jpno::resolve_env's refusal reasons (jsp_net_online.h)
     "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off",
     "JSP_ROLLBACK_JOIN is not IP:PORT: rollback off",
 )
+# jsp_net_badge.h log_line: path, input delay, last and largest rollback in ticks ("-" when not known yet), rollback count.
+_NET_STATUS = r"status: path (?:direct|relay|-), delay (?:\d+f|-), last rollback (?:\d+f|-), largest (?:\d+f|-), rollbacks \d+"
 _NET_PUBLIC = re.compile("|".join([
     r"env decision: (?:rollback start|REFUSED|rollback not requested) \(static constructors arrived: (?:EnvInit|online boot) first, (?:EnvInit|online boot) last\)",
     "REFUSED: (?:" + "|".join(re.escape(w) for w in _RESOLVE_WHY) + ")",
@@ -757,6 +761,8 @@ _NET_PUBLIC = re.compile("|".join([
     r"JSP_ROLLBACK_JOIN is not IP:PORT: off",
     r"listening/joining: host, local UDP port \d+",
     r"ended: (?:Opponent disconnected|Match ended|Desync detected: match ended)",
+    r"status badge: (?:on|off)",
+    _NET_STATUS,
 ]))
 _NET_PRIVATE = (
     (re.compile(r"(re-psn: (?:creating|joining) a room on )\S+( as ).*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)"), r"\1<server>\2<online name>\3"),
@@ -806,15 +812,18 @@ def net_log_lines(blobs, secrets=None, shown=None):
         out.append("    path: " + (path or "not in the logs"))
         out.append("    session synchronized: " + ("yes" if any(ln.startswith("[net] gekko session synchronized") for ln in lines) else "no"))
         out.append(f"    rollbacks: {sum(ln.startswith('[net] rollback to tick=') for ln in lines)}   desync lines: {sum(ln.startswith('[net] DESYNC at tick') for ln in lines)}")
+        status = [ln[len("[net] status: "):] for ln in lines if re.fullmatch(_NET_STATUS, ln[6:])]   # only the exact program line (a scrubbed one never matches)
+        badge = last("[net] status badge: ")
+        out.append("    last status line: " + (status[-1] if status else "not in the logs") + "   status badge: " + (badge or "not in the logs"))
         if ended is not None:
             out.append("    session ended: " + ended)
         if key is None:
-            noisy = ("[net] commit tick=", "[net] rollback to tick=", "[net] waiting")
+            noisy = ("[net] commit tick=", "[net] rollback to tick=", "[net] waiting", "[net] status: ")
             kept = [ln for ln in lines if not ln.startswith(noisy)]
             key = ((shown or {}).get(name, name), kept if len(kept) <= NET_KEY_LINES else kept[:10] + ["..."] + kept[-(NET_KEY_LINES - 10):])
     if not out:
         return ["  not in the logs (no [net] lines: rollback was off, or the game has not run since it was installed)"]
-    out.append(f"  key [net] lines of {key[0]} (per-tick commit, rollback and waiting lines left out; kept here even when the log is cut):")
+    out.append(f"  key [net] lines of {key[0]} (per-tick commit, rollback, waiting and status lines left out; kept here even when the log is cut):")
     out += [f"    {ln[:240]}" for ln in key[1]]
     return out
 

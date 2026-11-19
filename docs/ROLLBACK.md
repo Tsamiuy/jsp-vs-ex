@@ -269,8 +269,39 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
 - An earlier freeze after a rollback (an SPU job running across the saved tick) is now avoided by waiting for the job
   server before each save; it has not recurred in the runs above.
 - When a match ends early (disconnect, desync, F9), the fight continues offline; there is no return to the menu for both.
-- The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it and the one of the launch before, and its `facts.txt` sums up the `[net]` lines (started or refused, path, synchronized, rollback and desync counts) before the size cap shortens the log.
+- The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it and the one of the launch before, and its `facts.txt` sums up the `[net]` lines (started or refused, path, synchronized, rollback and desync counts, the last status line of the [status badge](#rollback-status-badge)) before the size cap shortens the log.
 - Rollback over re-psn exists but has not been run against a real server or across real routers (see its section below); direct IP is the tested path.
+
+### Rollback status badge
+
+Opt-in, off by default (display only). With `JSP_ROLLBACK_BADGE=1` in `play_settings.txt` (the launcher passes the line on, as
+for every key; there is no box in the launcher or row in Port Settings yet), a running rollback match shows one small line in
+the top-left corner, above the fight HUD's top bar:
+
+`Rollback | direct | delay 2f | last 3f`
+
+| Part | What it is | Where the value comes from |
+|---|---|---|
+| path | `direct`, or `relay` when the match goes through the re-psn server; `-` before it is known | direct IP is always direct; over re-psn, the path the rendezvous chose |
+| delay | the input delay of this match in game ticks (30 per second) | the host's `JSP_INPUT_DELAY`, sent to the client in the settings handshake, so both PCs show the same |
+| last | how many ticks the last rollback went back and ran again; `-` before the first | counted by the port each time the session rolls back |
+
+The text is rebuilt at most four times a second and redrawn only when it changes. It uses the game font of the port's overlay
+(ASCII only, hence `|` and not a middle dot) on the same overlay layer as the match messages (*Reconnecting...*, *Opponent
+disconnected*), which stay at the bottom left; the badge goes away when the match ends. The switch is read once at start-up.
+
+Whether the switch is on or off, the game writes the same values to its log: `[net] status badge: on` (or `off`) at start,
+then `[net] status: path direct, delay 2f, last rollback 3f, largest 7f, rollbacks 12` every 30 s of a match and once when it
+ends. A support bundle's `facts.txt` shows, in its Netcode section, whether `JSP_ROLLBACK_BADGE` is on in the settings and, for
+each of the last two launches, the last status line (program words and numbers only: no address or name).
+
+What has run and what has not: the text, the values, the refresh gate and the layout have a host test
+(`bash installer/tools/net_badge_test.sh`, which also checks that the bundle reads every status line the game can write), the
+bundle's summary is tested in `installer/tools/support_bundle_test.py`, and the game code is compile-checked (MinGW-w64). **The
+badge has not been seen on screen yet:** no game was run with it. The place above the top bar was measured on a fight screenshot
+of the original HUD size; it was not checked against every stage, a smaller HUD size or the training screen. If another part of
+the port closes the overlay layer during the match, the badge is drawn again within a quarter of a second; a part that draws
+its own page on that layer while a match runs would lose it when the badge text changes (none is known to do so during a fight).
 
 ### Rollback over re-psn (experimental, not yet run against a real server)
 

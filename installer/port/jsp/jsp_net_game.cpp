@@ -9,6 +9,8 @@
 //   JSP_ROLLBACK_JOIN=IP:PORT client: join that host (direct-IP join).      Port / Host address, jsp_net_online.h) writes these keys to play_settings.txt; the launcher turns them into
 //                             environment variables at the next start (a variable set by hand does the same; the file line wins over an inherited variable, as for every key).
 //                             Rollback and the game's own online (PS3_NET_ONLINE) both on: refused before main(), neither runs (docs/ROLLBACK.md).
+//   JSP_ROLLBACK_BADGE=1      ENHANCEMENT (display, opt-in): the status badge "Rollback | path | delay Nf | last Mf" in the top-left corner while the session
+//                             runs, and a "[net] status:" line every 30 s and at the end (jsp_net_badge.h; docs/ROLLBACK.md)
 //   JSP_ROLLBACK_ALLOW_DEBUG=1  test tooling only (WORKAROUND to replace): the handshake's debug-switch refusal is off (the two-instance test runs the auto-pilot route; both peers need the same fight
 //                             seed until the host's plan seed is applied to the game, see the doc)
 // Flow: settings handshake on a pump thread (starts at once; survives scene loads) -> Started -> at the first fight tick the session starts: GekkoNet session,
@@ -38,6 +40,7 @@ extern "C" void jsp_net_env_part(int) {}
 #include "jsp_overlay_api.h"
 #include "jsp_net_session.h"
 #include "jsp_net_online.h"
+#include "jsp_net_badge.h"
 #include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
 #include "jsp_net_m2_link.h"
@@ -214,6 +217,9 @@ struct State {
     bool skip_sim = false, skip_pad = false, was_replaying = false;
     uint64_t last_run_ms = 0, started_ms = 0, settings_shown_ms = 0;
     std::string shown;
+    // ENHANCEMENT (status badge, JSP_ROLLBACK_BADGE=1): main-thread only (boundary, the glue's rollback, end_with). path_word is set once the plan exists.
+    bool badge_on = false; std::string badge_shown; jpnb::Values bv; jpnb::Every badge_every, status_every;
+    std::atomic<int> path_kind{0};   // 0 unknown, 1 direct, 2 relay: written by the pump thread when the rendezvous ends, read by the main thread
 } g;
 
 uint32_t build_id()
@@ -229,17 +235,28 @@ uint32_t build_id()
 #endif
 }
 
-void show(const std::string& s)
+// The glue's overlay layer holds the message line (bottom left) and, when on, the status badge (top left); a change of either redraws both.
+void redraw()
 {
-    if (s == g.shown) return;
-    g.shown = s;
-    if (s.empty()) { jsp_overlay_close(); return; }
+    const std::string& s = g.shown; const std::string& b = g.badge_shown;
+    if (s.empty() && b.empty()) { jsp_overlay_close(); return; }
     if (!jsp_overlay_begin(1280, 720)) return;
-    const float w = jsp_overlay_text_width(s.c_str(), 1.0f);
-    jsp_overlay_fill_rect(30, 640, (int)(w > 0 ? w : 800) + 40, 50, JSP_RGBA(0, 0, 0, 190));
-    jsp_overlay_text_style(50, 652, s.c_str(), 1.0f, JSP_RGBA(255, 255, 255, 255), 0);
+    if (!b.empty()) {
+        const float bw = jsp_overlay_text_width(b.c_str(), jpnb::kScale);
+        jsp_overlay_fill_rect(jpnb::kBoxX, jpnb::kBoxY, (int)(bw > 0 ? bw : 360) + 2 * jpnb::kBoxPad, jpnb::kBoxH, JSP_RGBA(0, 0, 0, 160));
+        jsp_overlay_text_style(jpnb::kX, jpnb::kY, b.c_str(), jpnb::kScale, JSP_RGBA(255, 255, 255, 255), 0);
+    }
+    if (!s.empty()) {
+        const float w = jsp_overlay_text_width(s.c_str(), 1.0f);
+        jsp_overlay_fill_rect(30, 640, (int)(w > 0 ? w : 800) + 40, 50, JSP_RGBA(0, 0, 0, 190));
+        jsp_overlay_text_style(50, 652, s.c_str(), 1.0f, JSP_RGBA(255, 255, 255, 255), 0);
+    }
     jsp_overlay_end();
 }
+void show(const std::string& s) { if (s == g.shown) return; g.shown = s; redraw(); }
+void badge(const std::string& b) { if (b == g.badge_shown) return; g.badge_shown = b; redraw(); }
+std::string path_word() { const int k = g.path_kind.load(); return k == 1 ? "direct" : k == 2 ? "relay" : ""; }
+void log_status() { g.bv.path = path_word(); std::fprintf(stderr, "[net] %s\n", jpnb::log_line(g.bv).c_str()); }
 
 uint64_t rz_rejected() { if (auto* d = dynamic_cast<DirectRendezvous*>(g.rz.get())) return d->rejected_hello; return g.rrz ? g.rrz->rejected_members : 0; }
 void log(const char* what, const std::string& s) { std::fprintf(stderr, "[net] %s%s%s\n", what, s.empty() ? "" : ": ", s.c_str()); }
@@ -250,6 +267,8 @@ void end_with(const std::string& text)
 {
     jsp_snapshot_ext_set_idle_hook(nullptr);   // the gate must not call into a finished session
     jsp_snapshot_ext_guard_summary();
+    if (g.started_ms) log_status();   // the session ran: its last status line
+    badge("");
     set_text(text); g.phase = Phase::Ended; g.skip_sim = g.skip_pad = false;
     if (g.was_replaying || g.stepper.replaying()) jsp_stepper_replay(0, g.done_now);   // an end during a replay: gate, clock and flag off
     g.was_replaying = false;
@@ -336,6 +355,7 @@ void pump_tick(uint64_t t)
         g.plan_ready = true;
         log("rendezvous", to_string(g.plan.remotes[0].ep) + (g.rrz ? std::string(" via re-psn, path ") + path_name(g.rrz->path()) + ", room " + std::to_string((unsigned long long)g.rrz->room_id()) : std::string()));
         if (g.rrz) g.path_line = std::string("re-psn: ") + path_name(g.rrz->path()) + (g.rrz->path() == Path::Relay ? " (through the server)" : "");
+        g.path_kind = !g.rrz ? 1 : g.rrz->path() == Path::Direct ? 1 : g.rrz->path() == Path::Relay ? 2 : 0;   // direct IP is always direct
         return;
     }
     // The handshake keeps ticking for the whole match (keep-alives, Start retransmits, Cancel handling); after handover() it only stops its own silence checks.
@@ -389,6 +409,7 @@ public:
     bool rollback(uint32_t tick) override
     {
         if (jsp_snapshot_ext_rollback(g.done_now, tick, g.ctx) != 1) { log("snapshot rollback failed", std::to_string(tick)); return false; }
+        jpnb::note_rollback(g.bv, (int64_t)g.done_now - (int64_t)tick);   // the ticks gone back and run again (status badge and status line)
         g.done_now = tick;
         std::fprintf(stderr, "[net] rollback to tick=%u (longest game-thread stretch without a session call since the last rollback: %u ms, keepalive polls so far: %llu)\n", tick, g.sess.take_max_gap_ms(), (unsigned long long)g.sess.keepalive_polls());
         return true;
@@ -420,6 +441,7 @@ void start_session(ppu_context* c)
     SessionConfig cfg;
     cfg.max_prediction = (uint8_t)kMaxPrediction; cfg.ring_depth = kRingDepth;
     cfg.local_delay.assign(g.plan.local_count, (uint8_t)vals.v[static_cast<size_t>(jpsm::Id::InputDelay)]);          // from the manifest: both peers agree
+    g.bv.delay = (int)vals.v[static_cast<size_t>(jpsm::Id::InputDelay)];   // status badge: the match's input delay (the same on both PCs)
     cfg.disconnect_timeout_ms = vals.v[static_cast<size_t>(jpsm::Id::GraceSeconds)] * 1000u;                          // the grace window = the disconnect timeout
     std::string why;
     if (!jsp_snapshot_ext_active()) why = "the snapshot ring is not active (JSP_SNAPSHOT_EXT/WW did not start)";
@@ -519,6 +541,11 @@ void boundary(ppu_context* c)
     const bool rep = g.stepper.replaying();
     if (g.was_replaying && !rep) jsp_stepper_replay(0, g.done_now);   // the replay's last tick is done: fast clock and effect gate off
     g.was_replaying = rep;
+    if (g.badge_every.due(now, jpnb::kRefreshMs)) {   // the status badge: at most four times a second; drawn again if another layer user closed the layer
+        g.bv.path = path_word();
+        if (g.badge_on) { const std::string b = jpnb::text(g.bv); if (b != g.badge_shown || !jsp_overlay_active()) { g.badge_shown = b; redraw(); } }
+    }
+    if (g.status_every.due(now, jpnb::kLogMs) && now - g.started_ms >= 1000) log_status();   // not at the session's first iteration: the line at the end covers a short one
 }
 
 // ---- hooks ------------------------------------------------------------------------------------------------------------------------------------------------
@@ -587,6 +614,7 @@ extern "C" void jsp_net_game_install(void)
         if (end != eq + 1 && vk == 0x78) { const std::string name(*e, (size_t)(eq - *e)); _putenv_s(name.c_str(), ""); std::fprintf(stderr, "[net] binding %s = F9 dropped (F9 is the rollback cancel key)\n", name.c_str()); e = environ - 1; }
     }
     g.caps.build = build_id();
+    { char bb[16] = {}; g.badge_on = jsp_setting_get(jpnb::kKey, bb, sizeof bb) && jpnb::key_on(bb); }
     // local preferences into the effective-value object (the proposal of a host starts from these; a client's own layer sits under the host's)
     for (size_t i = 0; i < jpsm::kCount; ++i) {
         const jpsm::Id id = static_cast<jpsm::Id>(i);
@@ -620,6 +648,7 @@ extern "C" void jsp_net_game_install(void)
         },
         [](uint64_t t) { pump_tick(t); }, 100);
     std::fprintf(stderr, "[net] rollback opt-in: %s, build %08x, hooks installed\n", g.host ? "host" : "client", g.caps.build);
+    std::fprintf(stderr, "[net] status badge: %s\n", g.badge_on ? "on" : "off");
 }
 
 // Called by jsp_online.cpp's boot when the online files and --psnr have been applied; EnvInit reports through the same rendezvous.

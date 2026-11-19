@@ -30,6 +30,7 @@ posix   | installer/tools/build_id_test.py {scratch}
 posix   | installer/tools/net_repsn_test.sh {toolkit} {scratch}
 posix   | installer/tools/np_dialogs_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
+posix   | installer/tools/net_badge_test.sh
 posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py
 posix   | installer/tools/session_startup_test.py
@@ -59,6 +60,7 @@ exclude | installer/tools/net_online_test.cpp | compiled and run by net_online_t
 exclude | installer/tools/net_repsn_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/net_repsn_client_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
+exclude | installer/tools/net_badge_test.cpp | compiled and run by net_badge_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh
 exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh
 exclude | installer/tools/session_manifest_test.cpp | compiled and run by session_manifest_test.sh
