@@ -49,10 +49,32 @@ def main():
     expect(all(wm._area(p) > 0 for p in polys), "every wordmark piece has the same winding")
     expect(w > 0 and 'aria-label="X"' in wm.svg("X", 10, label="X"), "wordmark SVG")
 
+    chk = load("check_t", HERE / "check_site.py")
+    # one Discord invite in every tracked text file: the wide button's in data/nav.json
+    import json
+    invite = json.loads((ROOT / "data/nav.json").read_text(encoding="utf-8"))["wide"]["href"]
+    other = []
+    try:
+        files = subprocess.run(["git", "ls-files", "-z"], capture_output=True, text=True, cwd=ROOT, check=True).stdout.split("\0")
+    except (OSError, subprocess.CalledProcessError):
+        files = []
+    for f in files:
+        p = ROOT / f
+        if not f or not p.is_file() or p.suffix.lower() in (".png", ".ico", ".bmp"):
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        other += [f"{f}: {m}" for m in set(chk.DISCORD_RE.findall(txt)) if m != invite]
+    expect(bool(files) and not other, f"every tracked file uses the one Discord invite {invite} {other or ''}")
+    wrong = "https://discord" + ".gg/" + "N0tOurInvite"   # split so a repository search for invites stays clean
+    expect(chk.DISCORD_RE.findall("see " + wrong) == [wrong],
+           "the invite pattern finds an invite (negative control)")
+
     rc, out = run(HERE / "badges.py", "--check")
     expect(rc == 0, "README badge and button blocks match the palette and data/nav.json: " + out)
 
-    chk = load("check_t", HERE / "check_site.py")
     with tempfile.TemporaryDirectory() as d:
         site = pathlib.Path(d) / "_site"
         rc, out = run(HERE / "site.py", "--out", site, "--check")
@@ -63,6 +85,7 @@ def main():
             for what, edit, want in (
                 ("a dropped button", lambda s: s.replace('href="https://github.com/Tsamiuy/jsp-vs-ex/blob/main/CHANGELOG.md"', 'href="#start"', 2), "button 'Changelog'"),
                 ("an unstyled class", lambda s: s.replace('<main class="stage">', '<main class="stage nostyle">'), "class 'nostyle'"),
+                ("an old Discord invite", lambda s: s.replace("</main>", f'<a href="{wrong}">x</a></main>'), "Discord invite"),
                 ("an outside script", lambda s: s.replace("</body>", '<script src="https://example.org/x.js"></script></body>'), "loads https://example.org"),
             ):
                 bad = pathlib.Path(d) / "bad"

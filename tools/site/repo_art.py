@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The repository art of J-Stars Victory VS-EX, drawn in code: README banner, GitHub social preview, logo mark and the
 README/site divider strips. Our own drawings in a fighting-game menu look (speed-line burst, red and white stripe frame,
-slanted dark panels, a yellow-to-orange highlight bar, an outlined gradient title); nothing from the game, no font
+slanted dark panels, a yellow-to-orange highlight bar, an outlined gradient title) around the project mark, the ASCII
+star with the J of tools/site/ascii_logo.py (its characters drawn as strokes); nothing from the game, no font
 file (the lettering is tools/site/wordmark.py's polygons). Colours from data/theme.json. Needs Pillow.
 
     python3 -I tools/site/repo_art.py            # write assets/*.png
@@ -155,27 +156,58 @@ def word(im, text, cap, x, y, fill, outline=0, ink=None, slant=wordmark.SLANT):
     return w
 
 
-def star_polys(cx, cy, r, inner=0.48, rot=-90):
-    pts = []
-    for i in range(10):
-        rr = r if i % 2 == 0 else r * inner
-        a = math.radians(rot + i * 36)
-        pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
-    return [pts]
+ascii_logo = _load("ascii_logo")
+# The ASCII mark's characters as strokes in a monospace cell (x across, y down, 0..1): diagonals run corner to corner
+# so the star's lines join from row to row, '_' and '-' run edge to edge. A drawing of the characters, not a font.
+STROKES = {
+    "/": [((1.0, 0.0), (0.0, 1.0))], "\\": [((0.0, 0.0), (1.0, 1.0))], "_": [((0.0, 0.94), (1.0, 0.94))],
+    "-": [((0.1, 0.52), (0.9, 0.52))], "|": [((0.5, 0.0), (0.5, 1.0))], "`": [((0.3, 0.2), (0.62, 0.42))],
+    "'": [((0.5, 0.18), (0.5, 0.42))], ".": [((0.5, 0.86), (0.5, 0.86))],
+}
+CELL_H = 1.97        # row height / cell width of the mark (a monospace font at 1.18 line height)
+MARK_COLORS = {"s": "title_top", "j": "glow_orange"}
 
 
-def mark(im, cx, cy, r, outline):
-    """The logo mark: a gradient five-point star with a black outline, an outlined white slanted J in it."""
-    Image, _ = _pil()
-    sp = star_polys(cx, cy, r)
-    im.paste(C["ink"], (0, 0), _outline_mask(im.size, sp, outline))
-    g = vgrad(2 * r, 2 * r, C["title_top"], C["title_bottom"])
-    layer = Image.new("RGB", im.size, C["title_bottom"])
-    layer.paste(g, (int(cx - r), int(cy - r)))
-    im.paste(layer, (0, 0), _outline_mask(im.size, sp, 0))
-    cap = r * 0.78
-    _p, jw = wordmark.mask_polys("J", cap, 0, 0)
-    word(im, "J", cap, cx - jw / 2 - r * 0.02, cy - cap * 0.42, C["text"], outline * 0.8)
+def mark_size(width):
+    cells = ascii_logo.star_j_cells()
+    cw = width / len(cells[0])
+    return width, cw * CELL_H * len(cells)
+
+
+def _cell_lines(cells, x, y, cw, rh):
+    for j, row in enumerate(cells):
+        for i, (c, t) in enumerate(row):
+            for (x0, y0), (x1, y1) in STROKES.get(c, ()):
+                yield t, (x + (i + x0) * cw, y + (j + y0) * rh), (x + (i + x1) * cw, y + (j + y1) * rh)
+
+
+def mark_mask(size, cx, cy, width, sw, tag=None):
+    """L mask of the ASCII star-J centred at (cx, cy), `width` px wide, strokes sw px wide with round ends."""
+    Image, ImageDraw = _pil()
+    cells = ascii_logo.star_j_cells()
+    w, h = mark_size(width)
+    cw = w / len(cells[0])
+    m = Image.new("L", size, 0)
+    d = ImageDraw.Draw(m)
+    r = sw / 2
+    for t, p0, p1 in _cell_lines(cells, cx - w / 2, cy - h / 2, cw, cw * CELL_H):
+        if tag and t != tag:
+            continue
+        if p0 != p1:
+            d.line([p0, p1], fill=255, width=max(1, int(round(sw))))
+        for px, py in (p0, p1):
+            d.ellipse((px - r, py - r, px + r, py + r), fill=255)
+    return m
+
+
+def mark(im, cx, cy, width, stroke=0.42, outline=0.0):
+    """The project mark: tools/site/ascii_logo.py's star with the 3D J, its characters drawn as strokes: the star in
+    the title yellow, the J in orange, optionally over a black outline. stroke and outline are fractions of a cell."""
+    cw = width / len(ascii_logo.star_j_cells()[0])
+    if outline:
+        im.paste(C["ink"], (0, 0), mark_mask(im.size, cx, cy, width, cw * (stroke + 2 * outline)))
+    for tag, col in MARK_COLORS.items():
+        im.paste(C[col], (0, 0), mark_mask(im.size, cx, cy, width, cw * stroke, tag))
 
 
 def finish(im, w, h):
@@ -196,7 +228,7 @@ def banner(W=2560, H=640, ss=2):
     stripes(im, h - int(52 * s), int(52 * s), ss, flip=True)
     slanted(d, 70 * s, 104 * s, 2420 * s, 470 * s, 60 * s, C["ink"])          # the black shadow edge of the panel
     slanted(d, 50 * s, 96 * s, 2400 * s, 458 * s, 60 * s, C["panel"])
-    mark(im, 300 * s, 278 * s, 150 * s, 9 * s)
+    mark(im, 295 * s, 278 * s, 450 * s)
     word(im, "J-STARS VICTORY", 64 * s, 520 * s, 128 * s, C["text"], 6 * s)
     word(im, "VS-EX", 200 * s, 512 * s, 228 * s, (C["title_top"], C["title_bottom"]), 10 * s)
     glow_bar(im, 1430 * s, 300 * s, 2330 * s, 404 * s)
@@ -218,7 +250,7 @@ def social(W=1280, H=640, ss=3):
     stripes(im, h - 44 * s, 44 * s, ss, flip=True, period=110, gap=12)
     slanted(d, 62 * s, 116 * s, 1226 * s, 452 * s, 40 * s, C["ink"])
     slanted(d, 48 * s, 108 * s, 1212 * s, 442 * s, 40 * s, C["panel"])
-    mark(im, 200 * s, 272 * s, 120 * s, 8 * s)
+    mark(im, 200 * s, 276 * s, 300 * s, stroke=0.48)
     word(im, "J-STARS VICTORY", 44 * s, 360 * s, 146 * s, C["text"], 5 * s)
     word(im, "VS-EX", 150 * s, 352 * s, 214 * s, (C["title_top"], C["title_bottom"]), 8 * s)
     glow_bar(im, 300 * s, 470 * s, 1180 * s, 540 * s, fade=0.12)
@@ -232,8 +264,8 @@ def logo(N=512, ss=3):
     Image, _ = _pil()
     n = N * ss
     im = Image.new("RGB", (n, n))
-    burst(im, n // 2, n // 2, LIGHT["burst_base"], LIGHT["burst_ray"], None, n=36)
-    mark(im, n / 2, n * 0.53, n * 0.44, n * 0.022)
+    im.paste(C["panel"], (0, 0, n, n))
+    mark(im, n / 2, n / 2, n * 0.94, stroke=0.55, outline=0.12)
     return finish(im, N, N)
 
 

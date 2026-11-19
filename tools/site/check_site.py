@@ -13,7 +13,8 @@
      PATH (SKIP otherwise, said on stdout);
   6. every class used in index.html has a selector in style.css, and every class of plain.html one in plain.css
      (NO_RULE_OK lists the hooks only the script uses);
-  7. every link button of data/nav.json (the README's buttons) is a link on both pages, so none can be dropped;
+  7. every link button of data/nav.json (the README's buttons) is a link on both pages, so none can be dropped, and
+     the only Discord invite on either page is the one of its wide button;
   8. every text colour pair the palette declares (data/theme.json "pairs") meets its contrast minimum.
 
 Carried from Qwark's Awakening's tools/release/check_site.py, itself from Project Helghast's (same author, MIT): the
@@ -37,6 +38,7 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 NO_RULE_OK = {"sec"}   # .sec is styled through html.js .sec and .sec + .sec; listed so a rename is noticed
+DISCORD_RE = re.compile(r"https?://(?:www\.)?discord\.(?:gg|com/invite)/[A-Za-z0-9-]+")
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 
@@ -310,6 +312,12 @@ def check(site, src=None, js=None):
         for page, pg in (("index.html", a), ("plain.html", b)):
             if want not in {u for t, k, u in pg.refs if t == "a"}:
                 problems.append(f"{page}: the button {btn['label']!r} ({want}) is missing")
+    # 7b. one Discord invite: the wide button's; any other discord.gg invite on either page is an old or wrong one
+    invite = navj["wide"]["href"]
+    for page in ("index.html", "plain.html"):
+        for m in sorted(set(DISCORD_RE.findall((site / page).read_text(encoding="utf-8")))):
+            if m != invite:
+                problems.append(f"{page}: Discord invite {m} is not the project's ({invite})")
     # 8. palette contrast
     sp = importlib.util.spec_from_file_location("theme_chk", HERE / "theme.py")
     th = importlib.util.module_from_spec(sp)

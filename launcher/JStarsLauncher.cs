@@ -634,6 +634,15 @@ namespace JStarsLauncher
                 Text = "PC port launcher", ForeColor = Color.FromArgb(255, 170, 120), AutoSize = true,
                 Font = new Font("Segoe UI", 9F), Location = P(19, 41) };
             header.Controls.Add(title); header.Controls.Add(sub);
+            // The project mark (the ASCII star with the J, drawn by installer/tools/installer_art.py into jsp-launcher.ico,
+            // which setup puts next to this exe) at the header's right end; nothing is shown when the file is not there.
+            try {
+                string ico = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "jsp-launcher.ico");
+                if (File.Exists(ico))
+                    using (var mark = new Icon(ico, S(48), S(48)))
+                        header.Controls.Add(new PictureBox { Image = mark.ToBitmap(), SizeMode = PictureBoxSizeMode.Zoom,
+                            BackColor = HeaderBack, Location = P(640 - 64, 8), Size = Z(48, 48) });
+            } catch { }
             Controls.Add(header);
 
             tabs = new TabControl { Location = P(12, 76), Size = Z(616, 604) };

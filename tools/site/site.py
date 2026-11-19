@@ -10,7 +10,8 @@ assets/ (the divider strips, the logo mark and the social preview from the repos
 The look is our own drawing of a fighting-game menu, in CSS and inline SVG: a speed-line burst page, red and white
 stripe frames, slanted dark panels, menu items in heavy italic white with a black outline stacked on a diagonal, the
 chosen one on a yellow-to-orange bar, a caption band and a button-hint bar. No game art, no logo, no web font
-(system font stacks; the title is tools/site/wordmark.py's own polygons). Colours from data/theme.json.
+(system font stacks; the mark is tools/site/ascii_logo.py's ASCII star with the J as text, the title is
+tools/site/wordmark.py's own polygons). Colours from data/theme.json.
 Content: README sections (one menu item each, its first sentence as the caption), the feature list from
 docs/features.tsv and NOTICE.md, so the page cannot drift from them. Link buttons from data/nav.json, the same list
 the README's buttons are drawn from. --check runs tools/site/check_site.py on the result.
@@ -39,6 +40,7 @@ def _load(name):  # by path: `python3 -I` keeps the script dir off sys.path
 
 theme = _load("theme")
 wordmark = _load("wordmark")
+ascii_logo = _load("ascii_logo")
 NAME = "J-Stars Victory VS-EX"
 REPO = "https://github.com/Tsamiuy/jsp-vs-ex"
 SITE = "https://tsamiuy.github.io/jsp-vs-ex/"
@@ -262,22 +264,22 @@ def buttons_html(nav, plain_page):
         for l, h, p in items) + "</ul>")
 
 
-def star_svg():
-    pts = []
-    import math
-    for i in range(10):
-        r = 46 if i % 2 == 0 else 22
-        a = math.radians(-90 + i * 36)
-        pts.append(f"{50 + r * math.cos(a):.1f},{54 + r * math.sin(a):.1f}")
-    jp, jw = wordmark.layout("J")
-    s = 3.4
-    d = wordmark.path_d(jp, s, 50 - jw * s / 2 - 1, 54 - 15)
-    return ('<svg class="mark" viewBox="0 0 100 104" width="84" height="88" aria-hidden="true" focusable="false">'
-            '<defs><linearGradient id="g-star" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--title-top)"/>'
-            '<stop offset="1" stop-color="var(--title-bottom)"/></linearGradient></defs>'
-            f'<polygon points="{" ".join(pts)}" fill="url(#g-star)" stroke="var(--ink)" stroke-width="5" stroke-linejoin="round"/>'
-            f'<path d="{d}" fill="var(--ink)" stroke="var(--ink)" stroke-width="4" stroke-linejoin="round"/>'
-            f'<path d="{d}" fill="var(--text)"/></svg>')
+def mark_html():
+    """The project mark: tools/site/ascii_logo.py's star with the 3D J as text cells in a monospace stack, the star in
+    the title yellow and the J in orange (classes .ms and .mj), on the dark title plate."""
+    out = []
+    for row in ascii_logo.star_j_cells():
+        line, i = "", 0
+        while i < len(row):
+            tag = row[i][1]
+            j = i
+            while j < len(row) and (row[j][1] == tag or row[j][0] == " "):
+                j += 1
+            seg = html.escape("".join(c for c, _ in row[i:j]), quote=False)
+            line += f'<span class="m{tag}">{seg}</span>' if tag in ("s", "j") else seg
+            i = j
+        out.append(line.rstrip())
+    return '<pre class="mark" aria-hidden="true">' + "\n".join(out) + "</pre>"
 
 
 def title_svgs():
@@ -322,7 +324,7 @@ def build_index(d, js):
     return (head(f"{NAME}: Fan Revival", "style.css", csp, False) +
             '<body>\n<a class="skip" href="#panel">Skip to the content</a>\n'
             '<div class="frame frame-top" aria-hidden="true"></div>\n'
-            '<header class="masthead">\n<div class="plate-wrap"><div class="plate">' + star_svg() +
+            '<header class="masthead">\n<div class="plate-wrap"><div class="plate">' + mark_html() +
             f'<h1 class="title"><span class="vh">{NAME}</span>{top}{big}</h1>'
             '<p class="sub"><span>Fan Revival</span></p></div></div>\n'
             f'<p class="tagline">{html.escape(d["tagline"])}</p>\n'
@@ -407,7 +409,10 @@ a { color: var(--link); }
 .plate-wrap { filter: drop-shadow(9px 9px 0 var(--ink)); }
 .plate { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 20px; padding: 16px 48px 18px 40px; background: var(--panel);
   clip-path: polygon(24px 0, 100% 0, calc(100% - 24px) 100%, 0 100%); }
-.mark { flex: none; width: 84px; height: auto; }
+.mark { flex: none; margin: 0; font: 800 7px/1.18 var(--mono); letter-spacing: 0; color: var(--title-top); white-space: pre;
+  text-shadow: .4px 0 0 currentColor, -.4px 0 0 currentColor, 0 .3px 0 currentColor; }
+.mark .ms { color: var(--title-top); }
+.mark .mj { color: var(--glow-orange); }
 .title { margin: 0; display: flex; flex-direction: column; gap: 2px; line-height: 0; }
 .title svg { display: block; height: auto; max-width: 100%; }
 .wm-top { width: 300px; }
@@ -500,9 +505,9 @@ html.js .sec + .sec { margin-top: 0; padding-top: 0; border-top: 0; }
   .menu a.on { font-size: 1rem; }
   .panel { padding: 18px 16px 22px 20px; clip-path: polygon(12px 0, 100% 0, 100% 100%, 0 100%); min-height: 0; }
   .plate { padding: 14px 24px 16px 22px; clip-path: polygon(14px 0, 100% 0, calc(100% - 14px) 100%, 0 100%); }
-  .mark { width: 60px; }
   .wm-top { width: 210px; }
   .wm-big { width: 210px; }
+  .mark { font-size: 6px; }
   .sub { margin: 4px 0 0; }
   .sub span { font-size: 1.15rem; padding: 4px 30px; }
   .sec h2 { font-size: 1.5rem; }

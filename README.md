@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS-EX, Fan Revival. A dark slanted panel on a white speed-line burst between red and white striped bars: a gold star with a white J, the title J-Stars Victory VS-EX and Fan Revival on a yellow-to-orange bar; below: unofficial fan port, no game files included, bring your own copy.">
+<img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS-EX, Fan Revival. A dark slanted panel on a white speed-line burst between red and white striped bars: the project's ASCII-art star with a J in yellow and orange, the title J-Stars Victory VS-EX and Fan Revival on a yellow-to-orange bar; below: unofficial fan port, no game files included, bring your own copy.">
 
 <h1>J-Stars Victory VS-EX, Fan Revival</h1>
 
@@ -19,7 +19,7 @@
 <a href="#download-and-play"><img src="https://img.shields.io/badge/platform-Windows%20x64-FF8C12?style=flat-square&labelColor=0E0E10" alt="platform: Windows x64"></a>
 <a href="#status"><img src="https://img.shields.io/badge/status-work%20in%20progress-FF8C12?style=flat-square&labelColor=0E0E10" alt="status: work in progress"></a>
 <a href="https://deepwiki.com/Tsamiuy/jsp-vs-ex"><img src="https://img.shields.io/badge/docs-DeepWiki-FF8C12?style=flat-square&labelColor=0E0E10" alt="docs: DeepWiki"></a>
-<a href="https://discord.gg/W8fMT78Q7k"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white&style=flat-square&labelColor=0E0E10" alt="Discord"></a>
+<a href="https://discord.gg/D2eTEnCK62"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white&style=flat-square&labelColor=0E0E10" alt="Discord"></a>
 <!-- badges:end -->
 
 <br>
@@ -37,7 +37,7 @@
 <a href="docs/BUILDING.md"><img src="assets/nav/building.png" alt="Building" width="250"></a>
 <a href="CONTRIBUTING.md"><img src="assets/nav/contributing.png" alt="Contributing" width="250"></a>
 
-<a href="https://discord.gg/W8fMT78Q7k"><img src="assets/nav/discord-wide.png" alt="Join the Discord" width="758"></a>
+<a href="https://discord.gg/D2eTEnCK62"><img src="assets/nav/discord-wide.png" alt="Join the Discord" width="758"></a>
 
 <sub><a href="#status">Status</a> · <a href="#download-and-play">What you need</a> · <a href="#what-goes-online-and-where-your-data-goes">Online and your data</a> · <a href="#settings-and-controllers">Settings and controllers</a> · <a href="#how-it-works">How it works</a> · <a href="#roadmap">Roadmap</a> · <a href="#how-ai-was-used">How AI was used</a> · <a href="#licence-and-disclaimer">Licence</a> · <a href="#related-projects-and-credits">Credits</a> · <a href="https://tsamiuy.github.io/jsp-vs-ex/">Fan site</a></sub>
 <!-- nav:end -->
@@ -184,7 +184,7 @@ Close the open problems of the v19 tree ([issue #9](https://github.com/Tsamiuy/j
 
 ## Contributing
 
-Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord server](https://discord.gg/W8fMT78Q7k) (unofficial fan work; this project has its own forum there). [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/W8fMT78Q7k)
+Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord server](https://discord.gg/D2eTEnCK62) (unofficial fan work; this project has its own forum there). [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/D2eTEnCK62)
 
 <p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 

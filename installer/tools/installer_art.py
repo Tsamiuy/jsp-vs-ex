@@ -3,8 +3,9 @@
 
 Image sizes per Inno DPI, own ICO writer, --check by bytes (layout adapted from the installer of Project Pyrrhus,
 undecuple's Killzone 2 port). The drawing helpers and the palette are the repository art's (tools/site/repo_art.py,
-data/theme.json): a speed-line burst, red and white stripe frames, a slanted dark panel, the gold star with the J, the
-title in our own polygon letters (tools/site/wordmark.py), "Fan Revival" on the yellow-to-orange bar. No font file, no
+data/theme.json): a speed-line burst, red and white stripe frames, a slanted dark panel, the
+title in our own polygon letters (tools/site/wordmark.py), "Fan Revival" on the yellow-to-orange bar. The mark is the
+project's ASCII star with the J (tools/site/ascii_logo.py), its characters drawn as strokes. No font file, no
 game logo or art. Needs Pillow (`pip install pillow`).
 
     python installer/tools/installer_art.py            # write build/installer/art/*
@@ -13,8 +14,9 @@ game logo or art. Needs Pillow (`pip install pillow`).
     python installer/tools/installer_art.py --out DIR  # write elsewhere
 
 Outputs: wizard-{100,125,150,200}.bmp (Welcome/Finish panel), header-{...}.bmp (small top-right image), and
-jsp-setup.ico, jsp-launcher.ico, jsp-uninstall.ico (16/24/32/48/64 as 32-bit DIB, 256 as PNG): the star with the J;
-its outline is drawn thicker below 48 px so the shape still reads.
+jsp-setup.ico, jsp-launcher.ico, jsp-uninstall.ico (16/24/32/48/64 as 32-bit DIB, 256 as PNG): the ASCII star with the
+J; its strokes are drawn thicker at small sizes so the shape still reads. jsp-launcher.ico is also the launcher's,
+the settings window's and the game window's icon.
 Images are generated at release time, never committed (tools/ci/repo_checks.py bans .png/.jpg/.bmp/.ico in git).
 Deterministic: same script + Pillow = same bytes.
 ASSUMPTION: Inno 6's documented image sizes per DPI (WizardImageFile / WizardSmallImageFile help topics), checked by
@@ -62,9 +64,9 @@ def wizard(dpi):
 
     def Y(v):
         return oy + v * s
-    art.slanted(d, X(12), Y(112), W - 2 * s, Y(258), 8 * s, C["ink"])
-    art.slanted(d, X(6), Y(106), W - 8 * s, Y(252), 8 * s, C["panel"])
-    art.mark(im, W / 2, Y(66), 40 * s, 3 * s)
+    art.slanted(d, X(12), Y(30), W - 2 * s, Y(258), 8 * s, C["ink"])
+    art.slanted(d, X(6), Y(24), W - 8 * s, Y(252), 8 * s, C["panel"])
+    art.mark(im, W / 2 + 2 * s, Y(66), 148 * s, stroke=0.5)
     art.word(im, "J-STARS", 15 * s, X(18), Y(120), C["text"], 1.6 * s)
     art.word(im, "VICTORY", 15 * s, X(18), Y(141), C["text"], 1.6 * s)
     art.word(im, "VS-EX", 31 * s, X(16), Y(166), (C["title_top"], C["title_bottom"]), 2.4 * s)
@@ -87,16 +89,17 @@ def header(dpi):
 
 # --------------------------------------------------------------------------------------------------------- icons
 def icon_image(n):
-    """The star with the J on a transparent background; the outline is thicker at small sizes."""
+    """The ASCII star with the J (tools/site/ascii_logo.py, its characters drawn as strokes) on a transparent
+    background, over a black outline so it reads on light and dark; the strokes are thicker the smaller the icon."""
     from PIL import Image
     S = max(n, 64) * SS * 2
+    stroke, outline = (0.55, 0.14) if n >= 128 else (1.2, 0.3) if n >= 48 else (2.2, 0.5)
     im = Image.new("RGB", (S, S), C["ink"])
-    rel = 0.035 if n >= 48 else 0.06
-    art.mark(im, S / 2, S * 0.535, S * (0.5 - rel - 0.01) / 1.0, S * rel)
-    # alpha: the star with its outline
-    m = art._outline_mask((S, S), art.star_polys(S / 2, S * 0.535, S * (0.5 - rel - 0.01)), S * rel)
+    width = S * 0.96
+    art.mark(im, S / 2, S / 2, width, stroke=stroke, outline=outline)
+    cw = width / len(art.ascii_logo.star_j_cells()[0])
     out = im.convert("RGBA")
-    out.putalpha(m)
+    out.putalpha(art.mark_mask((S, S), S / 2, S / 2, width, cw * (stroke + 2 * outline)))
     return out.resize((n, n), Image.LANCZOS)
 
 

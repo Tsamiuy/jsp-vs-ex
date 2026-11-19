@@ -77,7 +77,7 @@ installer downloads with `installer/tools/fetch_toolchain.py` (versions and SHA-
 their licence texts go into the package under `licenses\`, and `installer/licenses/LGPL-2.1.txt` is the one text kept in this
 tree); the ps3recomp toolkit with `installer/port/patches/`
 applied (MIT, see above; SMAA as above); and the licence texts of this repository. The wizard images and icons are drawn at build
-time from polygons (`installer/tools/installer_art.py`, no font). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301
+time from the project's ASCII star mark and polygon lettering (`installer/tools/installer_art.py`, no font). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301
 (bBoxType/FiraSans, SIL Open Font License 1.1); the font file is not included here or in the package, and the art contains
 only the rendered text.
 
@@ -128,8 +128,9 @@ SOFTWARE.
 ## Images and fonts of the README and the site
 
 The PNG files in `assets/` (banner, social preview, logo mark, divider strips and the README's menu buttons) are the
-project's own drawings, made by `tools/site/repo_art.py` from polygons; their lettering is the project's own polygon
-alphabet (`tools/site/wordmark.py`), not a font. Nothing in them comes from the game. The fan site uses the visitor's
+project's own drawings, made by `tools/site/repo_art.py`: the project mark is the project's own ASCII art of a star with
+a J (`tools/site/ascii_logo.py`), its characters drawn as strokes, and the lettering is the project's own polygon
+alphabet (`tools/site/wordmark.py`), not a font. The installer images and icons are drawn the same way. Nothing in them comes from the game. The fan site uses the visitor's
 system fonts and loads no font, script or image from anywhere else.
 
 ## The game

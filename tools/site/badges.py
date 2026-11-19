@@ -63,7 +63,7 @@ def badges(t):
         ("platform: Windows x64", st("platform", "Windows x64", acc), "#download-and-play"),
         ("status: work in progress", st("status", "work in progress", acc), "#status"),
         ("docs: DeepWiki", st("docs", "DeepWiki", acc), f"https://deepwiki.com/{REPO}"),
-        ("Discord", f"https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white&{q}", "https://discord.gg/W8fMT78Q7k"),
+        ("Discord", f"https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white&{q}", "https://discord.gg/D2eTEnCK62"),
     ]
 
     def line(row):
