@@ -62,6 +62,7 @@
 !/tools/site/
 /tools/site/*
 !/tools/site/*.py
+!/tools/site/site.js
 !/tools/boost/
 !/tools/ci/
 /tools/boost/*.lnk
@@ -125,6 +126,17 @@ __pycache__/
 !/assets/banner-2x.png
 !/assets/social-preview.png
 !/assets/logo-mark-512.png
+!/assets/divider-stripe.png
+!/assets/divider-glow.png
+!/assets/nav/
+/assets/nav/*
+!/assets/nav/*.png
+
+# The palette and the button list (tools/site/: site, README badges and buttons, repository and installer art)
+!/data/
+/data/*
+!/data/theme.json
+!/data/nav.json
 
 # SMAA 1x for the v0.15 toolkit (MIT, upstream files kept byte for byte); the .hlsl is named exactly because *.hlsl is on the never-list
 !/jstars/toolkit/third_party_smaa/

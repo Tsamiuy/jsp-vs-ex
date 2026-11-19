@@ -6,6 +6,10 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A new look for the README, the fan site, the installer images and the social preview, drawn in the style of a fighting-game main menu (our own drawings, no game art) around the project's ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header; the installer images and the settings window header are not yet tried on Windows): menu buttons and palette badges in the README, a site you walk like a menu (Up/Down, Enter, Esc, a game pad or a tap) with a no-script plain page, one palette file (`data/theme.json`) for all of it (`tools/site/`), and the new Discord invite (https://discord.gg/D2eTEnCK62) everywhere.
+
 ## [0.5.1] - 2026-11-19
 
 ### Added

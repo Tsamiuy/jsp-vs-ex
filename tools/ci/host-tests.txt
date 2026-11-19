@@ -19,6 +19,8 @@ all     | tools/test_features.py
 all     | tools/test_release.py
 all     | tools/test_contributors.py
 all     | tools/ci/test_host_tests.py
+# the fan site and the drawn art; Pillow is installed only in the Linux job
+posix   | tools/site/test_site.py
 # release.yml runs the tag step on ubuntu-latest, and this test fakes `gh` with an extension-less script that Windows' CreateProcess cannot start (not a product problem)
 posix   | tools/ci/test_release_tag.py
 posix   | installer/tools/online_settings_test.sh

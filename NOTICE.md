@@ -38,16 +38,20 @@ among them undecuple's Project Pyrrhus (see below), under the same MIT licence, 
 5f98c82632f1e8d6837171080afd62057db2431a1153554f429678d5c0003703), with one change since: a games.yml entry that is an .iso file is recognised (`is_iso`) instead of refused as "not a folder", and is never searched for an EBOOT.elf. It only reads an RPCS3 install's configuration and game folders; its one write is the
 save copy that the installer asks the player to confirm. `installer/tools/rpcs3_wizard.py` is this repository's glue around it.
 
-## Project Pyrrhus and Project Helghast
+## Project Pyrrhus, Project Helghast and Qwark's Awakening
 
-Parts of the installer and the tools started from two other unofficial PS3 ports by undecuple, both under the MIT licence
-(Copyright (c) 2026 undecuple): [Project Pyrrhus](https://github.com/undecuple/project-pyrrhus) (Killzone 2) and
-[Project Helghast](https://github.com/undecuple/project-helghast) (Killzone 3), from which Project Pyrrhus's installer was
-made.
+Parts of the installer, the tools and the fan site started from three other unofficial PS3 ports by undecuple, all under
+the MIT licence (Copyright (c) 2026 undecuple): [Project Pyrrhus](https://github.com/undecuple/project-pyrrhus)
+(Killzone 2), [Project Helghast](https://github.com/undecuple/project-helghast) (Killzone 3), from which Project Pyrrhus's
+installer was made, and [Qwark's Awakening](https://github.com/undecuple/qwarks-awakening) (Ratchet & Clank).
 
 - From Project Pyrrhus's installer: the layout of `installer/jsp.iss`, `installer/launcher/launcher.c`,
   `installer/tools/firstrun.py`, `assemble_payload.py`, `assemble_portable.py`, `fetch_toolchain.py`, `installer_art.py`
   and `llvm-mingw.cmake`. The game-specific parts are this repository's.
+- From Qwark's Awakening, which took them from Project Helghast: `tools/site/site.js` (the section switching, the menu
+  keys and the game pad polling of the fan site) and `tools/site/check_site.py` (the page parser, the rules that the menu
+  page and the plain page agree, the script checks and the class-to-selector rule). The page itself, its drawings, the
+  palette and the other site tools are this repository's.
 - From Project Helghast: `tools/features.py`. Also the approach of the pinned Inno Setup step in
   `.github/workflows/installer.yml` and of `installer/tools/support_bundle.py`, with no code copied for these two.
 
@@ -72,9 +76,8 @@ public-domain parts, some headers derived from Wine under LGPL-2.1 or later; win
 installer downloads with `installer/tools/fetch_toolchain.py` (versions and SHA-256 in `installer/tools/toolchain.json`;
 their licence texts go into the package under `licenses\`, and `installer/licenses/LGPL-2.1.txt` is the one text kept in this
 tree); the ps3recomp toolkit with `installer/port/patches/`
-applied (MIT, see above; SMAA as above); and the licence texts of this repository. The wizard images are drawn at build
-time in IBM Plex Mono Bold (IBM Corp., SIL Open Font License 1.1; the font file is not included here and the images contain
-only the rendered text). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301
+applied (MIT, see above; SMAA as above); and the licence texts of this repository. The wizard images and icons are drawn at build
+time from the project's ASCII star mark and polygon lettering (`installer/tools/installer_art.py`, no font). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301
 (bBoxType/FiraSans, SIL Open Font License 1.1); the font file is not included here or in the package, and the art contains
 only the rendered text.
 
@@ -122,10 +125,13 @@ SOFTWARE.
 - For a hand build: Visual Studio Build Tools, clang-cl, CMake and Ninja. The installer uses the bundled llvm-mingw, CMake and Ninja instead.
 - FFmpeg libraries are loaded at run time from DLLs that you supply. None are included here.
 
-## Fonts in the images
+## Images and fonts of the README and the site
 
-The PNG files in `assets/` are set in IBM Plex Mono Bold (copyright IBM Corp., SIL Open Font License 1.1). The font
-files are not included here; the images contain only the rendered text. The web page uses the system's monospace fonts.
+The PNG files in `assets/` (banner, social preview, logo mark, divider strips and the README's menu buttons) are the
+project's own drawings, made by `tools/site/repo_art.py`: the project mark is the project's own ASCII art of a star with
+a J (`tools/site/ascii_logo.py`), its characters drawn as strokes, and the lettering is the project's own polygon
+alphabet (`tools/site/wordmark.py`), not a font. The installer images and icons are drawn the same way. Nothing in them comes from the game. The fan site uses the visitor's
+system fonts and loads no font, script or image from anywhere else.
 
 ## The game
 

@@ -35,7 +35,7 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/tools/export_toolkit.py` | Exports the pinned ps3recomp v0.19.0 commit with `git archive` and applies `installer/port/patches/*.patch` |
 | `installer/port/jsp/`, `installer/port/patches/` | The current port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
 | `installer/port/test/` | Scripted pad routes for testing the installed current-tree game without a controller (see "Test routes" below) |
-| `installer/tools/installer_art.py` | Draws the wizard images and icons at build time (needs Pillow and the IBM Plex Mono Bold font file); nothing generated is committed |
+| `installer/tools/installer_art.py` | Draws the wizard images and icons at build time in the site's menu look, with the helpers of `tools/site/repo_art.py` and the palette `data/theme.json` (needs Pillow, no font file); nothing generated is committed |
 | `installer/tools/ex_logo_art.py` | Draws `ex_logo_A.rgba`, the "EX" that toolkit patch 0006 puts in place of the "+" in the title logo, from polygons (our own art, needs Pillow and numpy); `assemble_payload.py` runs it and `firstrun.py` places the file next to `JStarsRecomp.exe`. `JSP_EX_LOGO=0` in the settings file keeps the "+" |
 | `installer/tools/installer_music.py`, `installer/music/` | Renders the six opt-in music tracks (formulas, credits and sources in `tracks.tsv`) to WAV files at build time with plain Python; the wizard's "Enable Music?" box (bottom left, off by default, silent installs never play) loops one at random. Credits and licence in `NOTICE.md` |
 | `installer/tools/rpcs3_locate.py`, `installer/tools/test_rpcs3_locate.py` | A shared, read-only helper that finds the folders, game, update, fonts, saves and decrypted `EBOOT.elf` of an RPCS3 install, vendored unchanged (see `NOTICE.md`), with its own test |
@@ -78,15 +78,15 @@ create the save, or use the EU file's first five events as a prefix (not tried o
 
 You need: Git, Python 3 with Pillow and numpy (`python -m pip install pillow numpy`), Inno Setup 6.7 or newer (`ISCC.exe`), internet access
 for the toolchain download, the 64-bit embeddable Python package from python.org (3.13 was used), and
-`IBMPlexMono-Bold.ttf` and `FiraSans-HeavyItalic.ttf` (Fira Sans 4.301 from github.com/bBoxType/FiraSans; both SIL OFL 1.1;
-the workflow's pinned URLs and SHA-256 are `PLEX_*` and `FIRA_*` in `.github/workflows/installer.yml`). No Visual Studio and no separate C compiler: the launcher is compiled with the
+`FiraSans-HeavyItalic.ttf` (Fira Sans 4.301 from github.com/bBoxType/FiraSans, SIL OFL 1.1;
+the workflow's pinned URL and SHA-256 are `FIRA_*` in `.github/workflows/installer.yml`). No Visual Studio and no separate C compiler: the launcher is compiled with the
 downloaded llvm-mingw.
 
 ```
 git clone --recurse-submodules https://github.com/Tsamiuy/jsp-vs-ex.git
 cd jsp-vs-ex
 mkdir build\installer\fonts
-rem put IBMPlexMono-Bold.ttf and FiraSans-HeavyItalic.ttf in build\installer\fonts
+rem put FiraSans-HeavyItalic.ttf in build\installer\fonts
 rem unpack the embeddable Python into build\installer\toolchain-cache\python (python.exe directly inside)
 python installer\tools\fetch_toolchain.py
 python installer\tools\installer_art.py
