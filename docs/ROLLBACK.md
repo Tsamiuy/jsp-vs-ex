@@ -224,6 +224,11 @@ the page says which method is on and what this session runs against what is save
   removing it before `main()` is enough; the thread registry's TLS callback still reads `JSP_ROLLBACK` at process attach,
   before any decision, and turns the registry on (bookkeeping only) even for a refused start.
 - The Rollback choice is in every build of the port (the target always defines `JSP_ROLLBACK_BUILD`), release builds included.
+- Both players need the same release. The two games compare a build id before the match and refuse a different one;
+  the id comes from the release content (version, game region, glue sources and the patched toolkit's sources,
+  `installer/port/jsp/jsp_build_id.cmake`), so two
+  PCs that each built the same release agree. Before 0.5.1 it came from the compile time, so two installs refused each
+  other. CMake prints it at configure ("Rollback build id"); the game logs it in the `[net] rollback opt-in` line.
 - Not covered: the page has not been run in the game and there is no screenshot of it (layout is from the code: rows at
   pitch 40, 188 + 40 i; the longest new strings are 38 characters at scale 1.0 and were checked by the host test); the
   start decision and the refusal are host-tested and the wiring is compile-checked, not run in a game; hostnames in the join

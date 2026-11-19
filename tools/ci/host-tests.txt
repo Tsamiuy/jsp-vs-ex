@@ -24,6 +24,7 @@ posix   | tools/ci/test_release_tag.py
 posix   | installer/tools/online_settings_test.sh
 posix   | installer/tools/port_menu_test.sh
 posix   | installer/tools/net_online_test.sh
+posix   | installer/tools/build_id_test.py {scratch}
 posix   | installer/tools/net_repsn_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/settings_test.sh
