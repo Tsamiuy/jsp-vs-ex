@@ -16,6 +16,9 @@ int main()
     int32_t t2 = 4, v2 = 4, l2 = 3;
     CHECK(!six_rows(&t2, &v2, &l2) && t2 == 4);      // another layout: untouched
     CHECK(row_of(5, 0) == kPortRow && row_of(7, 2) == 5);
+    // JSP_PORT_MENU: on unless it starts with '0'
+    CHECK(port_menu_on(nullptr) && port_menu_on("") && port_menu_on("1") && port_menu_on("yes"));
+    CHECK(!port_menu_on("0") && !port_menu_on("00"));
 
     // closed: Cross outside the sixth row is the game's
     Menu m;

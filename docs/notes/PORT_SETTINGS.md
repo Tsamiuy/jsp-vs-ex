@@ -1,8 +1,8 @@
-# Port Settings page (opt-in)
+# Port Settings page
 
-ENHANCEMENT, off by default. `JSP_PORT_MENU=1` gives the Options list a sixth row, "Port Settings". Cross on it opens a page drawn by
-the port over the game (Up/Down select, Cross opens, Circle goes back). Its pages: Display, Graphics and Controls (the launcher's settings, below), Online (below), and a list of what stays launcher-only. To get the row
-without the launcher's window, put the line `JSP_PORT_MENU=1` in `play_settings.txt` (every line of that file becomes an environment variable for the game; the settings window keeps lines it does not own). US 1.00 build only: the hooks sit at fixed addresses of that code,
+ENHANCEMENT, on by default (until 0.5.1 it was off unless `JSP_PORT_MENU=1`). The Options list gets a sixth row, "Port Settings"; `JSP_PORT_MENU=0` turns it off. Cross on it opens a page drawn by
+the port over the game (Up/Down select, Cross opens, Circle goes back). Its pages: Display, Graphics and Controls (the launcher's settings, below), Online (below), and a list of what stays launcher-only. To remove the row,
+put the line `JSP_PORT_MENU=0` in `play_settings.txt` (every line of that file becomes an environment variable for the game; the settings window keeps lines it does not own). A US install set up with 0.5.1 or earlier already has the lifted row-count switch (see "The lift" below), so after an update the page needs no new lift; the update's changed port sources rebuild the exe as any update does. US 1.00 build only: the hooks sit at fixed addresses of that code,
 and the glue refuses to start on another build (it reads the instruction it needs to find).
 
 ## What it is made of
@@ -74,10 +74,10 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 - Host tests: `bash installer/tools/settings_test.sh` (above), `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/net_online_test.sh` (the Online page's Netcode choice: rows, save order, validation, the rollback start decision), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
   (canvas, rectangles, text, dirty rectangles; run against the exported and patched toolkit), a series export of all patches in order
   (`installer/tools/export_toolkit.py`), and syntax-only compiles of the backend, `jsp_port_menu.cpp`, `jsp_online.cpp` and `stubs.cpp`.
-- In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows): with `JSP_PORT_MENU=1` a
+- In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows; before the page was on by default): with `JSP_PORT_MENU=1` a
   scripted pad run opened Options > Port Settings > Online, set Method, Server and Online name with the picker, saved and closed;
   `repsn.ini` then held the new values with its other lines, comment and CRLF kept, `community.ini` stayed off and no temporary
-  file was left. Without `JSP_PORT_MENU` the Options list showed its five rows and no file was written. The first run of a fresh
+  file was left. With the page off the Options list showed its five rows and no file was written. The first run of a fresh
   build (no shader cache yet) reached the menu too late for the scripted route; the second run passed.
 
 ## Player order (ENHANCEMENT, toolkit patch 7908)
@@ -87,8 +87,8 @@ and each pad (or the keyboard) takes the next free player, player 1 to 4, with i
 game. While join runs the game keeps the layout it had before (the old slot order, or the previous player order), so a fight goes on and
 only the pads that are joining are held back; the new order takes over in one step when join ends. Join ends when every connected pad has
 pressed, when four players are taken, or when player 1 presses Start (that Start is swallowed too). A pad that is still holding a button when
-join starts, or is plugged in holding one, stays neutral until it was released. The same join can be started without the page, and without
-`JSP_PORT_MENU`, by holding **Select + L3 + R3** on a pad for 2 seconds (the chord needs both sticks pressed in, which the game's own
+join starts, or is plugged in holding one, stays neutral until it was released. The same join can be started without the page, also with the page off
+(`JSP_PORT_MENU=0`), by holding **Select + L3 + R3** on a pad for 2 seconds (the chord needs both sticks pressed in, which the game's own
 controls do not use as far as the notes say; the game's use of Select was not found in the notes, so a collision there is not excluded).
 `PAD_JOIN=0` (a line in `play_settings.txt`, like the other switches) turns the chord and the row off. Until one of the two is used nothing
 changes: slot order, `INPUT_MODE`, `PAD_PAD_P2` as before. After a join a pad that is unplugged frees its player and a pad that is plugged in

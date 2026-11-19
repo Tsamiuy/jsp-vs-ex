@@ -1,6 +1,6 @@
 // jsp_port_menu.cpp -- in-game "Port Settings" page.
 //
-// ENHANCEMENT: the whole file. Off unless JSP_PORT_MENU=1, and only for the US 1.00 build (the hooks sit at fixed addresses of that code; the
+// ENHANCEMENT: the whole file. On by default (JSP_PORT_MENU=0 turns it off), and only for the US 1.00 build (the hooks sit at fixed addresses of that code; the
 // check below refuses any other build). Needs toolkit patches 2516-2518 (overlay API, label mask: jsp_overlay_api.h) and 6501 (pad hooks
 // g_cellpad_filter, g_cellpad_rstick_filter), and a lift made with installer/port/jsp/lift_insn_patches.json (the Options row count, below).
 // Adapted from the maintainers' development tree; the Online page text comes from jsp_online_describe (jsp_online.cpp).
@@ -28,7 +28,8 @@
 // The game's own row count: @0x001E6E98 sets the count r25 from the menu id (id 8: `li r25,5` at 0x001E71C0) and then hides the parts of every
 // row >= count at each update (loop 0x001E6FC4) and passes the count on to the label binder. The lifter's --insn-patches option (firstrun.py
 // passes lift_insn_patches.json for the US build) emits at 0x001E71C0 `if (g_port_menu_six_rows) li r25,6 else li r25,5`, so the game's loop
-// shows row 5 and the binder gets 6 labels itself. The switch is set below (JSP_PORT_MENU=1) before the guest runs.
+// shows row 5 and the binder gets 6 labels itself. The switch is set below (unless JSP_PORT_MENU=0) before the guest runs. The lift
+// carries the patch for every US build whatever JSP_PORT_MENU says (firstrun.py does not read it), so the switch alone decides at start.
 //
 // Pressure: patch 6501's filter changes buttons and sticks only, and runs before cellPadGetData fills the pressure words (only when
 // the game turned PRESS_ON on). Those words then come from the host pad's own pressure values and are not blanked while the page is
@@ -43,7 +44,7 @@
 //   - the idle timers of the main menu are untouched by the pad filter because the swallowed report is "no input"
 //     exactly like an idle player; if the demo starts behind the page it needs the activity counter (not done).
 //   - the port's "Exit Game" option (jsp_game.cpp) shares the Options panel; its test reads the Options cursor counted from the bottom
-//     (0x008E63FC == 0), which may now be the Port Settings row. Not checked: needs a run with both on.
+//     (0x008E63FC == 0), which may now be the Port Settings row. Not checked: needs a run with both on (both are on by default now).
 
 #include <cstdint>
 #include <cstring>
@@ -136,6 +137,8 @@ inline bool six_rows(int32_t* total, int32_t* visible, int32_t* last)
 }
 constexpr int kPortRow = 5;
 inline int row_of(int32_t cursor, int32_t top) { return cursor - top; }   // func_001C0C88
+// JSP_PORT_MENU: unset or empty = on (the default); a value starting with '0' = off; anything else = on.
+inline bool port_menu_on(const char* v) { return !(v && v[0] == '0'); }
 
 // The page's state machine; no guest memory, no drawing: everything the pad does.
 struct Menu {
@@ -573,7 +576,7 @@ struct Menu {
 
 #ifndef JSP_PORT_MENU_TEST
 // The lifter's --insn-patches guard (lift_insn_patches.json): the lifted code reads this switch at 0x001E71C0 (see the top of the file).
-// Defined always, so a lift made with the patch links even when JSP_PORT_MENU is off.
+// Defined always, so a lift made with the patch links even when the page is off (JSP_PORT_MENU=0).
 extern "C" { int g_port_menu_six_rows = 0; }
 
 #ifdef _WIN32
@@ -590,7 +593,7 @@ typedef void (*fn_t)(ppu_context*);
 
 bool port_menu_env()
 {
-    static const bool on = [] { const char* e = std::getenv("JSP_PORT_MENU"); return e && *e && e[0] != '0'; }();
+    static const bool on = jpm::port_menu_on(std::getenv("JSP_PORT_MENU"));
     return on;
 }
 
@@ -1145,6 +1148,7 @@ extern "C" void jsp_register_port_menu_overrides(void)
     g_menu.io = &g_settings_io;   // the Display, Graphics, Controls and Launcher-only pages
     if (const char* ed = std::getenv("JSP_PORT_MENU_EDIT")) if (ed[0] == '0') { g_menu.be = nullptr; g_menu.io = nullptr; }
     install_pad_filter();
+    // The log keeps its old wording ("JSP_PORT_MENU set": run checkers match it); it now also means the default (no JSP_PORT_MENU).
     std::fprintf(stderr, "[portmenu] JSP_PORT_MENU set: Options gets a sixth row (hooks 0x%08X, 0x%08X), pad filter on, label mask %d\n",
                  k_build_options, k_panel_update, mask);
 }
