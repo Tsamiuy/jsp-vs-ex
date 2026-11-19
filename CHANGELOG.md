@@ -2,18 +2,20 @@
 
 All notable changes are listed here, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `X.Y.Z` (the number in `installer/VERSION`).
-0.1.0 to 0.5.0 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
+0.1.0 to 0.5.1 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
 
 ## [Unreleased]
+
+## [0.5.1] - 2026-11-19
 
 ### Added
 
 - Choose the netcode in the game, not yet tried in a running game (Port Settings, `JSP_PORT_MENU=1`, Online page): a Netcode row with Off, Delay (the game's own online) or Rollback (experimental, direct IP: Role, Port or Host address). Only one can be on; saving applies on the next start; a hand-edited pair with both on is refused and neither runs. Host-tested only.
-- Rollback over a re-psn server instead of a typed address, **not yet run against a real re-psn server or across real routers** (experimental, opt-in; Online page: Netcode = Rollback, Connection = re-psn; toolkit patch 7918 brings in the re-psn v0.8.0 client): one player creates a room, the other joins it, the two PCs punch a direct path and use the server's relay only if allowed. Host-tested against a fake server only.
+- Rollback over a re-psn server instead of a typed address, **tested on one PC only, not yet across real routers** (experimental, opt-in; Online page: Netcode = Rollback, Connection = re-psn; toolkit patch 7918 brings in the re-psn v0.8.0 client): one player creates a room, the other joins it, the two PCs punch a direct path and use the server's relay only if allowed. Host-tested against a fake server; two copies on one PC through a local re-psn v0.8.0 server created and joined a room, took the direct path and stayed in sync for 2,017 ticks with a simulated 30 ms delay. The relay path has not run.
 
 ### Fixed
 
-- Rollback between two PCs: the build id the two games compare now comes from the release content (version, game region, glue sources and the patched toolkit's sources), not from the compile time. The installer builds the game on each PC, so two installs of the same release refused each other as "a different game build". Host-tested (same content in two folders and a CR-LF copy give one id; a changed glue or toolkit source, version or region gives another; a changed source re-runs the configure step, so an update in place gets the new id); not yet tried on two PCs.
+- Rollback between two PCs: the build id the two games compare now comes from the release content (version, game region, glue sources and the patched toolkit's sources), not from the compile time. The installer builds the game on each PC, so two installs of the same release refused each other as "a different game build". Host-tested (same content in two folders and a CR-LF copy give one id; a changed glue or toolkit source, version or region gives another; a changed source re-runs the configure step, so an update in place gets the new id); not yet tried on two PCs. A 0.5.1 game refuses a 0.5.0 one as a different build.
 
 ## [0.5.0] - 2026-11-18
 
