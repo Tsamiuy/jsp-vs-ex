@@ -229,12 +229,12 @@ inline Notice notice_text(Refusal r, int src = SRC_REPSN_INI)
         else if (src == SRC_REPSN_INI) put("repsn.ini has enabled=1 (the game's own online).", "Set enabled=0 in repsn.ini to use rollback (keep server= and name=).");
         else put("the game's own online (PS3_NET_ONLINE) is on too.", "Turn the game's own online off to use rollback. Only one online method can be on.");
         break;
-    case Refusal::RepsnNoRole: put("JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join.", "Add the line to play_settings.txt, or pick a Role in Port Settings > Online."); break;
-    case Refusal::BadListen: put("JSP_ROLLBACK_LISTEN is not a port from 1 to 65535.", "Fix the line in play_settings.txt, or set the Port in Port Settings > Online."); break;
-    case Refusal::RoleKeys: put("set exactly one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).", "Fix play_settings.txt, or pick a Role in Port Settings > Online."); break;
-    case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Fix the line in play_settings.txt, or set the Host address in Port Settings > Online."); break;
+    case Refusal::RepsnNoRole: put("JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join.", "Add JSP_ROLLBACK_ROLE=host or join to play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::BadListen: put("JSP_ROLLBACK_LISTEN is not a port from 1 to 65535.", "Set JSP_ROLLBACK_LISTEN=36200 (any free port) in play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::RoleKeys: put("set exactly one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).", "Keep only one of the two lines in play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Set JSP_ROLLBACK_JOIN=IP:PORT of the host in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::NotWired: put("this build cannot reach re-psn rooms.", "Use a direct IP connection (JSP_ROLLBACK_LISTEN or JSP_ROLLBACK_JOIN)."); break;
-    case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set both in repsn.ini (keep enabled=0 for rollback), or on Port Settings > Online."); break;
+    case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set server= and name= in repsn.ini (keep enabled=0 for rollback), or Port Settings > Online."); break;
     case Refusal::RepsnLongName: put("the online name in repsn.ini is longer than 16 characters.", "Use a shorter name= in repsn.ini."); break;
     case Refusal::NoSocket: put("the UDP port could not be opened.", "Close the program that uses it, or pick another JSP_ROLLBACK_LISTEN port."); break;
     default: break;

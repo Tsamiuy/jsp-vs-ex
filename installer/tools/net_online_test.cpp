@@ -296,6 +296,21 @@ int main()
       CHECK(notice_text(Refusal::RepsnNoIdentity).line1.find("server=") != std::string::npos && notice_text(Refusal::RepsnNoIdentity).line2.find("enabled=0") != std::string::npos);
       CHECK(notice_text(Refusal::RepsnLongName).line1.find("16") != std::string::npos);
       CHECK(notice_text(Refusal::NoSocket).line2.find("JSP_ROLLBACK_LISTEN") != std::string::npos);
+      // the fix line names the file change first; the Port Settings page (off unless JSP_PORT_MENU=1 before it is on by default) only as "or Port Settings > Online"
+      for (Refusal r : { Refusal::RepsnNoRole, Refusal::BadListen, Refusal::RoleKeys, Refusal::BadJoin, Refusal::RepsnNoIdentity }) {
+          const std::string l2 = notice_text(r).line2;
+          const char* file = r == Refusal::RepsnNoIdentity ? "repsn.ini" : "play_settings.txt";
+          const size_t f = l2.find(file), ps = l2.find(", or Port Settings > Online.");
+          CHECK(f != std::string::npos && ps != std::string::npos && f < ps && ps + 28 == l2.size());
+      }
+      CHECK(notice_text(Refusal::RepsnNoRole).line2.find("JSP_ROLLBACK_ROLE=host or join") != std::string::npos);
+      CHECK(notice_text(Refusal::BadJoin).line2.find("JSP_ROLLBACK_JOIN=IP:PORT") != std::string::npos);
+      for (int c = 1; c < static_cast<int>(Refusal::Count); ++c)
+          for (int src : { SRC_OTHER, SRC_REPSN_INI, SRC_PSNR_FLAG, SRC_ENVIRONMENT }) {
+              const Notice n = notice_text(static_cast<Refusal>(c), src);
+              const size_t at = (n.line1 + "|" + n.line2).find("Port Settings");
+              CHECK(at == std::string::npos || (n.line1 + "|" + n.line2).find("or Port Settings > Online") == at - 3);
+          }
       // the visibility rule: only while the top list is up, for kNoticeMs after it came up
       CHECK(notice_visible(true, true, 1000, 1000) && notice_visible(true, true, 1000, 1000 + kNoticeMs - 1));
       CHECK(!notice_visible(true, true, 1000, 1000 + kNoticeMs) && !notice_visible(true, false, 1000, 1001) && !notice_visible(false, true, 1000, 1001));

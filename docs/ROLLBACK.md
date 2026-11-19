@@ -415,7 +415,7 @@ The first line says what is wrong, the second how to fix it, for example:
 > Rollback is off: repsn.ini has enabled=1 (the game's own online).
 > Set enabled=0 in repsn.ini to use rollback (keep server= and name=).
 
-The same reasons are in the log (`[net] REFUSED: ...` or a `[net] ...: off` line). When both methods were on, the game's
+The same reasons are in the log (`[net] REFUSED: ...` or a `[net] ...: off` line in `game\run\play_stderr.txt`); on the EU build, which has no notice, the log is the only place. When both methods were on, the game's
 own online is off for that session too, so Online Battle cannot connect either. Other reasons the notice names: no
 `JSP_ROLLBACK_ROLE` with `JSP_ROLLBACK_VIA=repsn`; a `JSP_ROLLBACK_LISTEN` that is not a port from 1 to 65535; not exactly
 one of `JSP_ROLLBACK_LISTEN` and `JSP_ROLLBACK_JOIN` for direct IP; a `JSP_ROLLBACK_JOIN` that is not IP:port; no valid
