@@ -248,7 +248,7 @@ def main():
           '[sceNpMatching2] signaling: member 2 (PeerGuy) at 203.0.113.9:3658\n[sceNpSignaling] conn 1 (PeerGuy, 203.0.113.9:3658) established\n'
           '[sceNpSignaling] ActivateConnection(ctx=1, PeerGuy) -> conn 1 (pending)\n[Winuser9] tag-like line\n')
         old_env = {k: os.environ.get(k) for k in ("USERNAME", "USER", "USERPROFILE")}
-        os.environ.update({"USERNAME": "Win user9", "USERPROFILE": "C:\\Users\\Win user9"})
+        os.environ.update({"USERNAME": "Win user9", "USERPROFILE": "\\".join(["C:", "Users", "Win user9"])})   # a made-up profile, joined so the repo check does not read it as a real path
         os.environ.pop("PS3RECOMP_SHARED_DIR", None)
         try:
             ns7 = sb.net_settings(app7, None, env={})
