@@ -164,7 +164,7 @@ flowchart LR
 | 3. Snapshot prototype (route A) | Done for correctness. The first run missed the heap and did not match. With the heap saved, the game was restored 60 ticks back and replayed them, and every per-tick state hash matched the first pass. Saving the full 144 MB takes 15 ms and restoring it 23 ms, more than one 33 ms tick together, so copying everything each tick is too slow. Over those 60 ticks, 1,634 of 35,278 memory pages changed. |
 | 4. Shipping snapshot | In the build, experimental: each tick saves only the memory pages written since the last save (Windows write watch) into a ring of the last 12 ticks |
 | 5. Local loopback | Passed twice, on two successive development builds: two copies of the game on one PC, with 30 ms ± 10 ms of simulated network delay and a warm pipeline cache, played a Free Battle to tick 3329. The 3,299 compared ticks had equal state hashes on both copies, with 139 and 136 rollbacks and no desync. The second run compared 2,843 ticks, all equal, with 115 and 119 rollbacks |
-| 6. Two PCs | Opt-in for testing ([section 5](#5-try-it-experimental-direct-ip-rollback)); not tested on two PCs yet |
+| 6. Two PCs | Opt-in for testing ([section 5](#5-try-it-experimental-direct-ip-rollback)). One match has run on two PCs on one home network, meeting through a room on a re-psn server, with no desync (see [Tested so far](#tested-so-far)); a typed IP address has not been tried on two PCs |
 | 7 | Not started |
 
 What does not change: rollback play stays opt-in. The port connects only when you choose online play, and only to the
@@ -257,8 +257,8 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
 
 - Free Battle only, one player per PC (two players on two PCs). The session layer handles up to four players on two PCs,
   but the game side is not wired for it yet.
-- Not tested on two PCs yet. Two copies on one PC have passed two Free Battle runs with rollbacks and no desync (see step 5
-  above).
+- Barely tested on two PCs: one match on one home network, through a re-psn room (see [Tested so far](#tested-so-far)).
+  Two copies on one PC have passed two Free Battle runs with rollbacks and no desync (see step 5 above).
 - A warm pipeline cache is recommended: on a first launch, building the graphics pipelines can take seconds per frame,
   which stalls the session. Play an offline fight first on each PC.
 - Workaround to replace: the snapshot waits for the game's frame threads to pause before each save; if they have not
@@ -270,7 +270,7 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
   server before each save; it has not recurred in the runs above.
 - When a match ends early (disconnect, desync, F9), the fight continues offline; there is no return to the menu for both.
 - The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it and the one of the launch before, and its `facts.txt` sums up the `[net]` lines (started or refused, path, synchronized, rollback and desync counts, the last status line of the [status badge](#rollback-status-badge)) before the size cap shortens the log.
-- Rollback over re-psn exists but has not been run against a real server or across real routers (see its section below); direct IP is the tested path.
+- Rollback over re-psn has run once against a real server, on one home network; it has not been tried across real routers, and the relay has not been used yet (see its section below).
 
 ### Rollback status badge
 
@@ -303,12 +303,39 @@ of the original HUD size; it was not checked against every stage, a smaller HUD 
 the port closes the overlay layer during the match, the badge is drawn again within a quarter of a second; a part that draws
 its own page on that layer while a match runs would lose it when the badge text changes (none is known to do so during a fight).
 
-### Rollback over re-psn (experimental, not yet run against a real server)
+### Rollback over re-psn (experimental)
 
 Instead of typing an address, the two players can meet in a room on a re-psn server (the same server and online name as the
-game's own online, `repsn.ini`; see `docs/ONLINE.md`). **This has not been run against a real re-psn server, and the
-connection has not been tried across real routers (NATs).** What has run: host tests against a fake server that speaks the
-server's documented wire format (below). Treat it as untested until a report says otherwise.
+game's own online, `repsn.ini`; see `docs/ONLINE.md`). **It has run once against a real re-psn server, with two PCs on one
+home network (see [Tested so far](#tested-so-far)). It has not been tried across real routers (NATs), and the relay has not
+been used yet.** Host tests also run it against a fake server that speaks the server's documented wire format (below).
+
+**Start both games within about 30 seconds.** Each game gives up meeting the other one 30 seconds after it starts looking
+(once it has finished starting up). The host must be in its room before the other player looks for it:
+start the host's game first, then the joining player's game soon after, so that both are looking at the same time. If one
+side gives up, close both games and start again.
+
+**What the two "ended" lines mean** (shown on screen and in the log, after `rendezvous failed:`):
+
+| Line | What happened | What to do |
+|---|---|---|
+| `re-psn: timed out waiting for the other player` | 30 seconds passed and the two games did not meet: the other player did not join in time, or the connection between the two did not come up | Start both games again, closer together |
+| `re-psn: no rollback room for this build` | The joining game looked for a room and found none from the same release with rollback: the host's game had not created its room yet, had already given up, or runs a different release | Start the host first, then join within 30 seconds; check that both have the same release |
+
+**One home network:** the two games try a direct link first. Only if no direct link comes up within 4 seconds is the
+server's relay used (and only when Allow relay is Yes and the server offers it). On one home network the direct link normally
+comes up well within that time, so the match runs direct even with the relay allowed; the path shown at the start of the match says which.
+
+#### Tested so far
+
+- One match on two PCs on one home network, through a room on a real re-psn server: the games met, the path was direct
+  (the relay was allowed but not needed), and 1,500 ticks compared between the two PCs had equal state hashes, with no
+  desync (97 and 37 rollbacks).
+- It ran with test-harness settings, not as a player would play: scripted inputs, input delay 0, the fixed seed.
+- The match ran slowly, at about 4 ticks a second instead of 30, with long pauses of the game. The cause is not known yet.
+  That PC's graphics card was busy with other work at the time, but that has not been shown to be the cause.
+- A first attempt failed because the two games were started too far apart (see the 30 seconds above).
+- Not tried yet: across real routers, the relay, a typed IP address on two PCs, a match played by hand.
 
 - Turn it on: Port Settings -> Online -> Netcode = Rollback -> Connection = re-psn, Role = Host (creates a room) or Join (joins the
   oldest matching room), Allow relay Yes or No, Save, restart. The server and online name must already be set in `repsn.ini`
@@ -331,15 +358,15 @@ server's documented wire format (below). Treat it as untested until a report say
   `JSP_ROLLBACK_LISTEN`, if set, must be a port from 1 to 65535, or the start is refused.
 - The client is the re-psn v0.8.0 C client, which replaces the vendored copy in the toolkit (toolkit patch 7918). The
   callers in the runtime keep their function signatures (compared by declaration text); the game's own Online Battle goes
-  through the same client, and that has not been run with it either.
+  through the same client; the rollback runs above did not exercise that path.
 - Tests (no game, no GPU, native Linux, loopback only): `bash installer/tools/net_repsn_test.sh TOOLKIT_DIR` runs the
   rendezvous with a fake transport (room flag and record, roles, punch, relay only when allowed and offered, forged or
   mismatched members ignored) and the real transport over the C client against a fake server (HELLO, CREATE / SEARCH /
   JOIN / LEAVE ROOM and their pushes, UDP probe and relay, room ids above 2^32, request bodies compared with bytes written
   out by hand from the protocol's field tables, control and forged relay datagrams never reaching the session).
-- Not covered: a real re-psn server, real NATs (hole punching and relay), the connect timing on slow DNS, more than two
-  players, a room list to choose from (the oldest matching room is joined), the page and the "direct / relay" line in a
-  running game.
+- Not covered: real NATs (hole punching and relay; one match against a real server on one home network has run, see
+  [Tested so far](#tested-so-far)), the connect timing on slow DNS, more than two players, a room list to choose from (the
+  oldest matching room is joined), the page and the "direct / relay" line in a running game.
 
 **Always on, even with rollback off.** None of this changes what the game does; it is listed so nothing is hidden:
 

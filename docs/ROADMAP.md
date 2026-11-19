@@ -62,7 +62,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
   to try it: `installer/README.md`, "Online Battle"): in a test of two copies on one PC, both reached a Friendly Match
   room and played into the fight. Play testers report online matches on their Windows PCs since 0.1.0 (no logs yet); the EU build, two real PCs with different settings or versions, and the Impossible mode online are not tried
 - 🔧 **Online matches with rollback netcode** (experimental, opt-in; how to try it: [ROLLBACK.md, section 5](ROLLBACK.md#5-try-it-experimental-direct-ip-rollback)):
-  a Free Battle fight between two PCs connected by IP address, one player per PC, tested only as two copies on one PC so far, and no complete match has run yet.
+  a Free Battle fight between two PCs connected by IP address, one player per PC, tested as two copies on one PC and in one fight between two PCs on one home network (test-harness settings; slow, cause not known yet); no complete match has run yet.
   Then 2v2, and 3v3 if the engine allows it (see section 3); lobbies over re-psn ([details](FEATURES.md#online-rollback))
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
 - 📋 Lobbies, matchmaking, ranked ([details](FEATURES.md#lobbies-ranked))
