@@ -41,14 +41,14 @@ If an antivirus removed a file of the game (for example `game\jsp.exe`, and the 
 | Log | Place |
 |---|---|
 | Setup and build steps | `logs\firstrun-<time>.log` and the `build` step logs |
-| Launcher and game | `game\run\launcher_log.txt`, `play_stdout.txt`, `play_stderr.txt` |
+| Launcher and game | `game\run\launcher_log.txt`, `play_stdout.txt`, `play_stderr.txt` (`play_stderr.prev.txt` is the launch before) |
 | Settings | `play_settings.txt` (install folder, or `%APPDATA%\JSP Fan Revival\`) |
 
 ## Support bundle
 
 Click **Make a support bundle (JSP Fan Revival)** in the Start menu. For the portable zip, double-click `support-bundle.cmd`.
 
-It writes `jsp-support-<time>.zip` on the Desktop, with the logs and settings as text, with your user profile folder replaced. Its `facts.txt` also names your CPU, graphics card and driver, each monitor with its size and refresh rate, the monitor the game is on and how the game shows its frames; that tells us whether a frame-rate drop comes from a 60 Hz monitor. It never holds the EBOOT, disc files or saves. It sends nothing anywhere. Open the zip and look before you attach it.
+It writes `jsp-support-<time>.zip` on the Desktop, with the logs and settings as text, with your user profile folder replaced. Its `facts.txt` also names your CPU, graphics card and driver, each monitor with its size and refresh rate, the monitor the game is on and how the game shows its frames; that tells us whether a frame-rate drop comes from a 60 Hz monitor. It also says which online mode is chosen (Off, Delay or Rollback) and, for the last two starts, whether a rollback match started, was refused (and why), synchronized or desynced. The online server, your and other players' online names, your Windows user name and IPv4 addresses are replaced by placeholders wherever the bundle knows them (from your settings files and the game's online log lines); a name or address it cannot know, such as one given only on the command line, may still be there. It never holds the EBOOT, disc files or saves. It sends nothing anywhere. Open the zip and look before you attach it.
 
 Details: [installer/README.md, "Support bundle"](../installer/README.md#support-bundle).
 

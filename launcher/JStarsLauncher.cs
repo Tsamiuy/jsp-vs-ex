@@ -1896,7 +1896,7 @@ namespace JStarsLauncher
                 Status("Starting the game...");
                 game = Process.Start(psi);
                 Thread o = Pump(game.StandardOutput.BaseStream, Path.Combine(runDir, "play_stdout.txt"));
-                Thread e = Pump(game.StandardError.BaseStream, Path.Combine(runDir, "play_stderr.txt"));
+                Thread e = Pump(game.StandardError.BaseStream, KeepPrevious(Path.Combine(runDir, "play_stderr.txt")));
                 Status("Game running (disc on " + drive + ":). Close the game window or press Exit to stop.");
                 // Once the game's window is up the launcher hides; this thread stays to
                 // clean up (boost off, unmount) and then ends the launcher.
@@ -1950,6 +1950,23 @@ namespace JStarsLauncher
                     });
                 } catch { }
             }
+        }
+
+        // ENHANCEMENT: the previous launch's log becomes NAME.prev.txt (one kept) before this launch rewrites NAME.txt, so a relaunch after a
+        // freeze or a failed online match keeps the evidence; the support bundle takes both (installer/tools/support_bundle.py). Returns file.
+        static string KeepPrevious(string file)
+        {
+            try
+            {
+                if (File.Exists(file))
+                {
+                    string prev = Path.Combine(Path.GetDirectoryName(file), Path.GetFileNameWithoutExtension(file) + ".prev" + Path.GetExtension(file));
+                    if (File.Exists(prev)) File.Delete(prev);
+                    File.Move(file, prev);
+                }
+            }
+            catch { }   // a locked or read-only file: this launch still writes NAME.txt (FileMode.Create), only the copy is lost
+            return file;
         }
 
         static Thread Pump(Stream from, string file)
