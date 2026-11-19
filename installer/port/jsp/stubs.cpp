@@ -38,7 +38,7 @@ extern "C" void jsp_register_hle_overrides(void);         /* jsp_hle.cpp */
 extern "C" void jsp_register_autopilot_overrides(void);   /* jsp_autopilot.cpp (test only) */
 extern "C" void jsp_register_game_overrides(void);        /* jsp_game.cpp */
 extern "C" void jsp_register_unlock_overrides(void);      /* jsp_unlock.cpp */
-extern "C" void jsp_register_port_menu_overrides(void);   /* jsp_port_menu.cpp (ENHANCEMENT, off unless JSP_PORT_MENU=1) */
+extern "C" void jsp_register_port_menu_overrides(void);   /* jsp_port_menu.cpp (ENHANCEMENT, on by default, JSP_PORT_MENU=0 turns it off) */
 extern "C" void jsp_rollback_register_overrides(void);    /* jsp_rollback.cpp (EXPERIMENTAL rollback netcode, off unless JSP_ROLLBACK=1) */
 
 /* Context handlers registered here precede the runtime's (ppu_hle_init runs after this). */
@@ -51,7 +51,7 @@ extern "C" void ps3_load_prx_modules(void)
     jsp_register_autopilot_overrides();
     jsp_register_game_overrides();
     jsp_register_unlock_overrides();   /* ENHANCEMENT, off unless JSP_UNLOCK_ALL=1 */
-    jsp_register_port_menu_overrides(); /* ENHANCEMENT, off unless JSP_PORT_MENU=1; after jsp_register_game_overrides: it chains behind the pad filters set there */
+    jsp_register_port_menu_overrides(); /* ENHANCEMENT, on by default, JSP_PORT_MENU=0 turns it off; after jsp_register_game_overrides: it chains behind the pad filters set there */
     jsp_rollback_register_overrides();  /* after the registrations above: the fight tick hash the rollback session reads (JSP_ROLLBACK=1 only) */
 }
 

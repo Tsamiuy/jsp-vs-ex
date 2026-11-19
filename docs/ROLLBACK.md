@@ -185,7 +185,7 @@ This is for testers. Expect rough edges, and report what you see (with the suppo
 Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice is also in the game's own menu: see
 "Choose it in the game" below.
 
-**Choose it in the game.** Port Settings (`JSP_PORT_MENU=1`, Options, last row) -> Online. The first row is **Netcode**
+**Choose it in the game.** Port Settings (Options, the top row, above Control Settings; on by default, `JSP_PORT_MENU=0` hides it) -> Online. The first row is **Netcode**
 (Left/Right):
 
 | Netcode | What it is | Rows under it |

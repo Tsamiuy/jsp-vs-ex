@@ -710,7 +710,7 @@ def step_lift(c):
         return False
     jobs_args = ["--toc", TOC, "-j"]   # --toc goes before the job count; the pair is spliced in front of it
     if insn_patches(c):
-        jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # JSP_PORT_MENU=1: the Options row count (see jsp_port_menu.cpp)
+        jobs_args = ["--insn-patches", str(insn_patches(c)), *jobs_args]   # the Port Settings row (on unless JSP_PORT_MENU=0): the Options row count (see jsp_port_menu.cpp)
     if lod_hook_plan(c)["enabled"]:
         jobs_args = ["--fn-hooks", str(merged_fn_hooks(c, an)), *jobs_args]   # the LOD hooks and the game hooks (Impossible AI)
     ok, t2 = run("lift: ppu_lifter", [*c.py, c.tools / "ppu_lifter.py", e, "--functions", funcs,
@@ -869,7 +869,7 @@ def step_place(c):
     shutil.copy2(c.eboot, game / "EBOOT.elf")   # the player's own decrypted file, copied into the player's own install
     if (c.root / "ex_logo_A.rgba").is_file():   # the "EX" in the title logo (toolkit patch 0006; JSP_EX_LOGO=0 turns it off)
         shutil.copy2(c.root / "ex_logo_A.rgba", game / "ex_logo_A.rgba")
-    for n in PORT_MENU_ART:   # the in-game Port Settings page (JSP_PORT_MENU=1; toolkit patches 2516-2518) reads these next to the exe
+    for n in PORT_MENU_ART:   # the in-game Port Settings page (on unless JSP_PORT_MENU=0; toolkit patches 2516-2518) reads these next to the exe
         if (c.root / n).is_file():
             shutil.copy2(c.root / n, game / n)
     inc = ffmpeg_include(c.root)

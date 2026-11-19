@@ -1,8 +1,8 @@
-# Port Settings page (opt-in)
+# Port Settings page
 
-ENHANCEMENT, off by default. `JSP_PORT_MENU=1` gives the Options list a sixth row, "Port Settings". Cross on it opens a page drawn by
-the port over the game (Up/Down select, Cross opens, Circle goes back). Its pages: Display, Graphics and Controls (the launcher's settings, below), Online (below), and a list of what stays launcher-only. To get the row
-without the launcher's window, put the line `JSP_PORT_MENU=1` in `play_settings.txt` (every line of that file becomes an environment variable for the game; the settings window keeps lines it does not own). US 1.00 build only: the hooks sit at fixed addresses of that code,
+ENHANCEMENT, on by default (until 0.5.1 it was off unless `JSP_PORT_MENU=1`). The Options list gets a sixth row, "Port Settings", drawn at the top of the list above Control Settings (the game draws the list bottom-up: row 0 Cross-Save at the bottom, the new row 5 on top, as a run under Proton showed); `JSP_PORT_MENU=0` turns it off. Cross on it opens a page drawn by
+the port over the game (Up/Down select, Cross opens, Circle goes back). Its pages: Display, Graphics and Controls (the launcher's settings, below), Online (below), and a list of what stays launcher-only. To remove the row,
+put the line `JSP_PORT_MENU=0` in `play_settings.txt` (every line of that file becomes an environment variable for the game; the settings window keeps lines it does not own). A US install set up with 0.5.1 or earlier already has the lifted row-count switch (see "The lift" below), so after an update the page needs no new lift; the update's changed port sources rebuild the exe as any update does. US 1.00 build only: the hooks sit at fixed addresses of that code,
 and the glue refuses to start on another build (it reads the instruction it needs to find).
 
 ## What it is made of
@@ -74,10 +74,10 @@ Overlay text is drawn in two passes per string (every rim, then every body; tool
 - Host tests: `bash installer/tools/settings_test.sh` (above), `bash installer/tools/port_menu_test.sh` (page state: pad edges, release, swallow flag, the editable page and picker against a fake backend), `bash installer/tools/net_online_test.sh` (the Online page's Netcode choice: rows, save order, validation, the rollback start decision), `bash installer/tools/online_settings_test.sh` (reader and the writer: round trip, other lines kept, refusals), `bash installer/tools/overlay_font_test.sh` (no body pixel of any of 258 sample letter pairs is covered), `installer/tools/port_overlay_test.c`
   (canvas, rectangles, text, dirty rectangles; run against the exported and patched toolkit), a series export of all patches in order
   (`installer/tools/export_toolkit.py`), and syntax-only compiles of the backend, `jsp_port_menu.cpp`, `jsp_online.cpp` and `stubs.cpp`.
-- In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows): with `JSP_PORT_MENU=1` a
+- In game (this tree, built with the player's setup steps, US disc, Proton on Linux; not yet on Windows; before the page was on by default): with `JSP_PORT_MENU=1` a
   scripted pad run opened Options > Port Settings > Online, set Method, Server and Online name with the picker, saved and closed;
   `repsn.ini` then held the new values with its other lines, comment and CRLF kept, `community.ini` stayed off and no temporary
-  file was left. Without `JSP_PORT_MENU` the Options list showed its five rows and no file was written. The first run of a fresh
+  file was left. With the page off the Options list showed its five rows and no file was written. The first run of a fresh
   build (no shader cache yet) reached the menu too late for the scripted route; the second run passed.
 
 ## Player order (ENHANCEMENT, toolkit patch 7908)
@@ -87,8 +87,8 @@ and each pad (or the keyboard) takes the next free player, player 1 to 4, with i
 game. While join runs the game keeps the layout it had before (the old slot order, or the previous player order), so a fight goes on and
 only the pads that are joining are held back; the new order takes over in one step when join ends. Join ends when every connected pad has
 pressed, when four players are taken, or when player 1 presses Start (that Start is swallowed too). A pad that is still holding a button when
-join starts, or is plugged in holding one, stays neutral until it was released. The same join can be started without the page, and without
-`JSP_PORT_MENU`, by holding **Select + L3 + R3** on a pad for 2 seconds (the chord needs both sticks pressed in, which the game's own
+join starts, or is plugged in holding one, stays neutral until it was released. The same join can be started without the page, also with the page off
+(`JSP_PORT_MENU=0`), by holding **Select + L3 + R3** on a pad for 2 seconds (the chord needs both sticks pressed in, which the game's own
 controls do not use as far as the notes say; the game's use of Select was not found in the notes, so a collision there is not excluded).
 `PAD_JOIN=0` (a line in `play_settings.txt`, like the other switches) turns the chord and the row off. Until one of the two is used nothing
 changes: slot order, `INPUT_MODE`, `PAD_PAD_P2` as before. After a join a pad that is unplugged frees its player and a pad that is plugged in
@@ -122,7 +122,7 @@ least certain parts.
 - The settings pages are not built or run yet (host test and syntax checks only): open each page, change one live and one next-start setting, rebind a key, close, and start again to see the saved values arrive.
 - Live input rebinding would need a generation counter in toolkit patch 6500 (its key, button and mode tables are read once).
 - Build the v19 tree with the feature and run the page (open it from the Options list, both sub-pages, edit and save, close it, check the menu keeps working, and that the written `repsn.ini` is read back at the next start).
-- The port's "Exit Game" option shares the Options list and tests the cursor from the bottom; check both options with the sixth row present.
+- The port's "Exit Game" option shares the Options list (it takes over Cross-Save, the bottom row) and opens its box only when the Options cursor word 0x008E63FC reads 0 and the menu state word 0x0095654C reads 5. ASSUMPTION: both still read that way with the sixth row present (0x008E63FC 0 only on Cross-Save, never on Port Settings; 0x0095654C 5 on the six-row list and while the Port Settings page is open over it). Neither has been read in a run with both options on; check both options with the sixth row present.
 - The overlay is drawn before 2508's and 2509's pictures, so those land on top (a page open with the FPS counter or the time-limit stamp).
 - The sixth row's parts after the game's own per-update loop with the instruction patch (the earlier tree needed the patch to keep them shown).
 - Pressure-capable pads: the game's menu reading pressure words behind the page.

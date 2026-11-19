@@ -208,7 +208,7 @@ def main(argv=None):
         print("ex_logo_art failed (it needs Pillow and numpy):\n" + r.stdout + r.stderr, file=sys.stderr)
         return 1
     print(r.stdout.strip())
-    # the art of the in-game Port Settings page (toolkit patches 2516-2518, JSP_PORT_MENU=1): the two menu labels and the glyph atlas,
+    # the art of the in-game Port Settings page (toolkit patches 2516-2518; on by default, JSP_PORT_MENU=0 turns it off): the two menu labels and the glyph atlas,
     # drawn here from Fira Sans Heavy Italic (SIL OFL 1.1; the font file is not in the repository, see menu_label_art.py)
     for tool in ("menu_label_art.py", "menu_font_art.py"):
         r = subprocess.run([sys.executable, "-I", str(ROOT / "installer/tools" / tool), str(out)], capture_output=True, text=True)

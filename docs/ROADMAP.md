@@ -30,7 +30,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 - 🔧 "EX" in place of the "+" in the title logo, matching the port's name (optional, `JSP_EX_LOGO=0` keeps the "+"; merged; seen on the title screen in a Windows 11 test, the smaller pre-scaled copy of the logo is not yet confirmed) ([details](FEATURES.md#ex-logo))
 - 📋 Split-screen layout, brightness and glare, DLSS (parked in the notes) ([details](FEATURES.md#split-screen-layout), [more](FEATURES.md#brightness-glare), [more](FEATURES.md#dlss))
 - 🔧 Add to Steam from the installer (merged; not yet tried with a real Steam) ([details](FEATURES.md#steam-shortcut))
-- 🔧 The launcher's settings editable in the game, on the Port Settings page: Display, Graphics and Controls are in (opt-in); the rest are not moved yet ([details](FEATURES.md#ingame-settings))
+- 🔧 The launcher's settings editable in the game, on the Port Settings page: Display, Graphics and Controls are in (on by default); the rest are not moved yet ([details](FEATURES.md#ingame-settings))
 - 📋 Wide and ultrawide screens (16:10, 21:9, 32:9) without stretching ([details](FEATURES.md#wide-screens))
 - 📋 VR through OpenXR: first a virtual screen, later 3D fights (research) ([details](FEATURES.md#vr))
 
