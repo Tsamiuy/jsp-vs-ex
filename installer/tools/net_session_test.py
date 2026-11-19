@@ -42,7 +42,9 @@ def run(exe, host_args, client_args, tmp, deadline_s=DEADLINE_S):
         h.port_or_eof.wait(left())
         port = h.port()
         if port is None:
-            problems.append("host printed no PORT line" + (f" and exited ({h.p.poll()})" if h.p.poll() is not None else f" within the {deadline_s} s deadline"))
+            bare = next((l.strip() for l in h.lines if l.startswith("PORT ")), None)
+            problems.append(f"host printed a PORT line without a port number: {bare!r}" if bare is not None else
+                            "host printed no PORT line" + (f" and exited ({h.p.poll()})" if h.p.poll() is not None else f" within the {deadline_s} s deadline"))
         else:
             procs["client"] = Proc([exe, "--role", "client", "--peer", f"127.0.0.1:{port}", "--out", str(tmp / "c.log")] + client_args)
         for who, pr in procs.items():
@@ -81,9 +83,13 @@ def num(s, k, default=None):
 
 def logs(tmp):
     def rd(p):
-        t = p.read_text().split() if p.exists() else []   # a process that died early writes no log: the checks then report too few ticks
+        t = p.read_text().split() if p.exists() else []   # a missing log reads as empty here; check() fails every kind that compares logs on it (LOG_KINDS)
         return {int(t[i]): t[i + 1] for i in range(0, len(t), 2)}
     return rd(tmp / "h.log"), rd(tmp / "c.log")
+
+
+# The kinds whose checks compare the two tick logs: each needs both logs with ticks in them, or a hash comparison over nothing would pass.
+LOG_KINDS = ("agree", "agree_rb", "agree_paced", "busy_ok", "cheat", "leave")
 
 
 def agree(tmp, upto):
@@ -147,6 +153,9 @@ def once_per_handle(s, who, remotes, kinds=("connected",)):
 
 def check(kind, hs, cs, hr, cr, tmp, T):
     f = []
+    if kind in LOG_KINDS:
+        f += [f"{who}: tick log {log} missing or empty (each process writes it at the end of its run; the hash checks need both)"
+              for who, log, d in zip(("host", "client"), ("h.log", "c.log"), logs(tmp)) if not d]
     if kind in ("agree", "agree_rb", "agree_paced", "busy_ok"):
         for who, s in (("host", hs), ("client", cs)): f += once_per_handle(s, who, 2)
     if kind in ("agree", "agree_rb", "agree_paced"):
