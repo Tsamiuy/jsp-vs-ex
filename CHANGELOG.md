@@ -1,10 +1,6 @@
 # Changelog
 
-All notable changes are listed here, newest first. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `X.Y.Z` (the number in `installer/VERSION`).
-0.1.0 to 0.5.1 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
-
-Each version starts with **For players**: a few plain lines about what changed in the game and the installer, grouped as New, Changed and Fixed. They are the release notes. The technical entries below it (Added, Changed, Fixed) are the full record for people who work on the project.
+What changed in each version, newest first. Each version has two parts: **For players** is the release notes in plain words, and **Technical changes** is the full record. Versions are `X.Y.Z` (`installer/VERSION`); 0.1.0 to 0.5.1 are pre-releases, and the first full release will be 1.0.0. The technical part follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). How to write an entry, with a template: `CONTRIBUTING.md`.
 
 ## [Unreleased]
 
@@ -12,29 +8,32 @@ Each version starts with **For players**: a few plain lines about what changed i
 
 **Changed**
 
-- New look for the project page, the fan site and the installer pictures, and a new icon (a star with a J) for the setup, the launcher and the settings window. The installer pictures and the settings window header have not been tried on Windows yet.
-- The Discord invite link on the project page is the new one.
+- **New look.** The project page, the fan site and the installer pictures have a fighting-game menu style, and the setup, the launcher and the settings window have a new icon: a star with a J. The installer pictures and the settings window header are not tried on Windows yet.
+- The Discord invite on the project page is the new one.
 
 **Fixed**
 
-- **Build again** in the settings window now rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
+- **Build again** in the settings window rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
 - The fan site's tables keep their words whole, and its menu is one straight list with no second row of buttons.
 
-### Changed
+### Technical changes
 
-- Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; a version without that heading prints its whole section. The technical entries stay as the full record; 0.1.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
-- CI: the host-tests job's package step gives up on a mirror request after 30 s without data (3 retries), treats a failed index update as an error, tries the apt part a second time and has its own 8-minute limit, so a mirror problem fails that step by name instead of leaving the tests without time.
-- CI: a new `changes` job lists the files a pull request touches; when they are all among `CHANGELOG.md`, `CONTRIBUTING.md`, `AGENTS.md`, `KNOWN_ISSUES.md`, `CONTRIBUTORS.md` and `SECURITY.md`, the slow jobs (`launcher`, `host-tests`, `patches`, `host-tests-windows`, `port-compile`) are skipped, so a pull request that only changes those files no longer waits for the package mirror and the Windows runners. `checks` always runs; pushes to `main` and every other change run everything (so does any change to the workflow itself, and a failed or missing answer from the `changes` job). README, `NOTICE.md`, `docs/` and the site files are not in the list, because the site build and tests read them. `tools/ci/repo_checks.py` now also fails when a tracked text file has a Discord invite other than the one in `data/nav.json`, so that check no longer depends on the slow jobs.
-- Fan site (`tools/site/site.py`): the button row under the title is gone (the menu's sections cover those pages; the links no section has, the download page and the changelog, are a short Links list under the menu, the source stays in the footer, and `check_site.py` still finds every `data/nav.json` link on both pages); the menu scrolls inside itself when the window is shorter than it; the menu items no longer step to the right one by one; text breaks only where a word does not fit (`overflow-wrap: break-word` instead of `anywhere`, which split table words letter by letter), and table headings stay on one line.
-- Host tests: the two-process rollback session test now bounds every wait by its scenario deadline; a process that does not exit fails that scenario by name with both outputs' tails instead of blocking the test run (a new host test checks this with fake processes).
+#### Added
 
-### Added
+- **Fan site, README and installer art:** a new look in the style of a fighting-game main menu, drawn by the project (no game art), around the ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header). The README has menu buttons and palette badges; the site is walked like a menu (Up/Down, Enter, Esc, a game pad or a tap) and has a no-script plain page; there is a new social preview image; one palette file (`data/theme.json`) drives all of it (`tools/site/`); the new Discord invite (https://discord.gg/D2eTEnCK62) is used everywhere. Tested: `tools/site/test_site.py` (the committed images match a fresh render) and both pages in a headless browser, light and dark, at 1280 px and phone width. Not tested: the installer images and the settings window header on Windows. (#210)
 
-- A new look for the README, the fan site, the installer images and the social preview, drawn in the style of a fighting-game main menu (our own drawings, no game art) around the project's ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header; the installer images and the settings window header are not yet tried on Windows): menu buttons and palette badges in the README, a site you walk like a menu (Up/Down, Enter, Esc, a game pad or a tap) with a no-script plain page, one palette file (`data/theme.json`) for all of it (`tools/site/`), and the new Discord invite (https://discord.gg/D2eTEnCK62) everywhere.
+#### Changed
 
-### Fixed
+- **Releases:** the release notes are the `### For players` part of each version, grouped under bold **New**, **Changed** and **Fixed** labels; `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries, and `tools/release.py bump` refuses an Unreleased section without it. A version without that heading prints its whole section. The technical entries stay as the full record; 0.1.0 to 0.5.1 got player notes written afterwards, and `CONTRIBUTING.md` explains where each kind of line goes. Tested: `tools/test_release.py`. (#213, #214, #216)
+- **CI:** the host-tests package step gives up on a mirror request after 30 s without data (3 retries), treats a failed index update as an error, tries the apt part twice and has its own 8-minute limit, so a mirror problem fails that step by name instead of leaving the tests without time. Tested: the step script with stand-ins for `apt-get` that fail chosen calls; on a runner, the limit fired once as intended. (#215)
+- **CI:** a new `changes` job lists the files a pull request touches; when they are all among `CHANGELOG.md`, `CONTRIBUTING.md`, `AGENTS.md`, `KNOWN_ISSUES.md`, `CONTRIBUTORS.md` and `SECURITY.md`, the slow jobs (`launcher`, `host-tests`, `patches`, `host-tests-windows`, `port-compile`) are skipped, so a pull request that only changes those files no longer waits for the package mirror and the Windows runners. `checks` always runs; pushes to `main` and every other change run everything (so does any change to the workflow itself, and a failed or missing answer from the `changes` job). README, `NOTICE.md`, `docs/` and the site files are not in the list, because the site build and tests read them. `tools/ci/repo_checks.py` now also fails when a tracked text file has a Discord invite other than the one in `data/nav.json`, so that check no longer depends on the slow jobs. (#218)
+- **Fan site:** no button row under the title: the menu's sections cover those pages, the links no section has (the download page and the changelog) are a short Links list under the menu, the source link stays in the footer, and `check_site.py` still finds every `data/nav.json` link on both pages. The menu items line up, and the menu scrolls inside itself on a short window. Text breaks only where a word does not fit (`overflow-wrap: break-word` instead of `anywhere`, which split table words letter by letter), and table headings stay on one line. Tested: every section in headless Chromium at 320, 390, 1280, 1440 and 1500 px. (#217)
+- **Host tests:** the two-process rollback session test bounds every wait by its scenario deadline; a process that does not exit fails that scenario by name with both outputs' tails instead of blocking the test run. Tested: a new host test with fake processes that hang, exit early or print a bad port. (#212)
+- **Docs:** each version of this changelog has two parts with their own headings, **For players** (the release notes) and **Technical changes** (the full record, with Added, Changed and Fixed as smaller headings), so the technical groups no longer look like a second set of the player labels. Each technical line starts with its area in bold and ends with how it was tested and its pull request; `CONTRIBUTING.md` has a template for one version. Released versions are unchanged. Tested: `tools/release.py --check`, `notes` and `bump` on a copy, and `tools/test_release.py`.
 
-- Build again now redoes a step whose files were removed after a build (an antivirus removing `game\jsp.exe` left the launcher saying "The game program is missing" while Build again skipped every step); the log names the missing file, and a changed settings window source rebuilds the settings window. Host-tested only.
+#### Fixed
+
+- **First run:** Build again redoes a step whose files were removed after a build (an antivirus removing `game\jsp.exe` left the launcher saying "The game program is missing" while Build again skipped every step). The log names the missing file, and a changed settings window source rebuilds the settings window. Tested: host tests only. (#211)
 
 ## [0.5.1] - 2026-11-19
 

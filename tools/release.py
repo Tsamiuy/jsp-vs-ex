@@ -16,8 +16,9 @@
 
 Release notes are for the people who install the game, not for the people who work on the project. Each version's CHANGELOG
 section may start with "### For players": a few plain-language lines saying what a feature is, where to find it and what it
-does, with no toolkit patch numbers, setting names or CI and docs changes. The technical entries (### Added, Changed, Fixed)
-stay below it as the full record. A change that players can see adds one line to each; any other change adds only a technical one.
+does, with no toolkit patch numbers, setting names or CI and docs changes. The technical entries ("### Technical changes", or
+### Added, Changed, Fixed in older versions) stay below it as the full record. A change that players can see adds one
+line to each; any other change adds only a technical one.
 
 installer/VERSION is the single source (the installer and the portable zip read it). The two CMake projects are copied to
 and built on the player's PC, so they cannot read that file: each keeps a literal VERSION in its project() call, which
