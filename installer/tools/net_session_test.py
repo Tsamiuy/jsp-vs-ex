@@ -1,20 +1,72 @@
 #!/usr/bin/env python3
 """Two-process rollback session tests (no game, no GPU): starts net_session_test as host and client over localhost UDP and checks them.
-    python3 installer/tools/net_session_test.py --exe PATH [--only NAME] [--ticks N]
+    python3 installer/tools/net_session_test.py --exe PATH [--only NAME] [--ticks N] [--deadline S]
 Scenarios and what each must show are in SCENARIOS below; exit 1 on any failure. Build: installer/tools/net_session_test.sh (which also runs it).
-The exe may also be the MinGW build when run where Windows programs run (not done by default)."""
-import argparse, pathlib, re, subprocess, sys, tempfile
+The exe may also be the MinGW build when run where Windows programs run (not done by default).
+Every wait is bounded by the scenario's deadline (--deadline, 120 s from the host's start, both processes together): a process still running then is killed and the
+scenario FAILS as hung, naming who hung and printing both outputs' tails (installer/tools/net_session_driver_test.py tests this with fake processes)."""
+import argparse, pathlib, re, subprocess, sys, tempfile, threading, time
+
+# Each process bounds itself (rendezvous and handshake 15 s, the main loop --max-ms, 90 s by default, all from its start); the deadline is that plus a margin.
+DEADLINE_S = 120
 
 
+class Proc:
+    """One net_session_test process; a thread reads its output (stdout and stderr) so no read can block the driver."""
+    def __init__(self, argv):
+        self.p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+        self.lines, self.port_or_eof = [], threading.Event()
+        self.t = threading.Thread(target=self._read, daemon=True)
+        self.t.start()
 
-def run(exe, host_args, client_args, tmp, timeout=120):
-    h = subprocess.Popen([exe, "--role", "host", "--out", str(tmp / "h.log")] + host_args, stdout=subprocess.PIPE, text=True)
-    port = h.stdout.readline().split()[1]
-    c = subprocess.Popen([exe, "--role", "client", "--peer", f"127.0.0.1:{port}", "--out", str(tmp / "c.log")] + client_args,
-                         stdout=subprocess.PIPE, text=True)
-    co, _ = c.communicate(timeout=timeout)
-    ho = h.stdout.read(); h.wait(timeout=timeout)
-    return h.returncode, ho, c.returncode, co
+    def _read(self):
+        for line in self.p.stdout:
+            self.lines.append(line)
+            if line.startswith("PORT "): self.port_or_eof.set()
+        self.port_or_eof.set()
+
+    def port(self):
+        return next((l.split()[1] for l in self.lines if l.startswith("PORT ") and len(l.split()) > 1), None)
+
+    def out(self):
+        return "".join(self.lines)
+
+
+def run(exe, host_args, client_args, tmp, deadline_s=DEADLINE_S):
+    """Returns (host rc, host output, client rc, client output, problems); problems names a process that did not exit by the deadline (then killed)."""
+    end = time.monotonic() + deadline_s
+    left = lambda: max(0.0, end - time.monotonic())
+    procs, problems = {}, []
+    try:
+        h = procs["host"] = Proc([exe, "--role", "host", "--out", str(tmp / "h.log")] + host_args)
+        h.port_or_eof.wait(left())
+        port = h.port()
+        if port is None:
+            problems.append("host printed no PORT line" + (f" and exited ({h.p.poll()})" if h.p.poll() is not None else f" within the {deadline_s} s deadline"))
+        else:
+            procs["client"] = Proc([exe, "--role", "client", "--peer", f"127.0.0.1:{port}", "--out", str(tmp / "c.log")] + client_args)
+        for who, pr in procs.items():
+            try: pr.p.wait(timeout=left())
+            except subprocess.TimeoutExpired: problems.append(f"hung: the {who} was still running at the {deadline_s} s scenario deadline (killed)")
+    finally:
+        for pr in procs.values():
+            if pr.p.poll() is None: pr.p.kill()
+            pr.p.wait()
+            pr.t.join(10)
+    h, c = procs.get("host"), procs.get("client")
+    return (h.p.returncode if h else None, h.out() if h else "", c.p.returncode if c else None, c.out() if c else "", problems)
+
+
+def tails(tmp, ho, co, n=8):
+    """Both processes' output tails and their tick logs' tails (for a hung or broken scenario)."""
+    out = []
+    for who, text, log in (("host", ho, "h.log"), ("client", co, "c.log")):
+        out.append(f"{who} output (last {n} lines):")
+        out += ["  " + l for l in text.splitlines()[-n:]] or ["  (none)"]
+        p = tmp / log
+        out.append(f"{who} {log} (last {n} lines): " + ("" if p.exists() else "(not written: written at the end of a run)"))
+        if p.exists(): out += ["  " + l for l in p.read_text(errors="replace").splitlines()[-n:]]
+    return out
 
 
 def summary(out):
@@ -29,10 +81,7 @@ def num(s, k, default=None):
 
 def logs(tmp):
     def rd(p):
-        d = {}
-        for l in p.read_text().split():
-            pass
-        t = p.read_text().split()
+        t = p.read_text().split() if p.exists() else []   # a process that died early writes no log: the checks then report too few ticks
         return {int(t[i]): t[i + 1] for i in range(0, len(t), 2)}
     return rd(tmp / "h.log"), rd(tmp / "c.log")
 
@@ -165,6 +214,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", required=True, help="the net_session_test binary (net_session_test.sh builds it and passes it here)")
     ap.add_argument("--only"); ap.add_argument("--ticks", type=int, default=600)
+    ap.add_argument("--deadline", type=float, default=DEADLINE_S, help="seconds per scenario, both processes together (default %(default)s)")
     a = ap.parse_args()
     fails = 0
     for name, (ha, ca, kind) in SCENARIOS.items():
@@ -172,15 +222,19 @@ def main():
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td)
             ex = ["--ticks", str(a.ticks), "--seed", "5"]
-            hr, ho, cr, co = run(a.exe, ha + ex, ca + ex, tmp)
+            t0 = time.monotonic()
+            hr, ho, cr, co, problems = run(a.exe, ha + ex, ca + ex, tmp, a.deadline)
             hs, cs = summary(ho), summary(co)
-            fl = check(kind, hs, cs, hr, cr, tmp, a.ticks)
-            print(f"{'PASS' if not fl else 'FAIL'} {name}")
+            fl = problems or check(kind, hs, cs, hr, cr, tmp, a.ticks)
+            print(f"{'PASS' if not fl else 'FAIL'} {name} ({time.monotonic() - t0:.1f} s)", flush=True)
             for s in (hs, cs): print("   ", s[:330])
             for x in fl: print("   !", x)
+            if problems:
+                for x in tails(tmp, ho, co): print("   |", x)
             fails += bool(fl)
     print("RESULT", "FAIL" if fails else "ok", f"({fails} failed)")
     return 1 if fails else 0
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())
