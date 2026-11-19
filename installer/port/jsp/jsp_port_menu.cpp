@@ -43,8 +43,12 @@
 //   - fl_sele_6 / fl_ok_6 and the sixth label part exist and show for total 6 (one panel reused, frames 1..6).
 //   - the idle timers of the main menu are untouched by the pad filter because the swallowed report is "no input"
 //     exactly like an idle player; if the demo starts behind the page it needs the activity counter (not done).
-//   - the port's "Exit Game" option (jsp_game.cpp) shares the Options panel; its test reads the Options cursor counted from the bottom
-//     (0x008E63FC == 0), which may now be the Port Settings row. Not checked: needs a run with both on (both are on by default now).
+//   - the port's "Exit Game" option (jsp_game.cpp, exit_option_on_entry) shares the Options panel (it takes over Cross-Save, row 0, drawn at
+//     the bottom; Port Settings is row 5, drawn at the top). It opens its box on Cross/Start only when two words of the game read as they did
+//     on the five-row list: the Options cursor counted from the bottom (0x008E63FC == 0) and the menu state (0x0095654C == 5, the Options
+//     list; 9 = the Cross-Save submenu). ASSUMPTION: with six rows 0x008E63FC is still 0 only on Cross-Save (never on the Port Settings row)
+//     and 0x0095654C still reads 5 on the six-row list and while this page is open over it (the game sees no input then). Its filter runs
+//     before this one on the raw report (g_prev_filter). Not checked: needs a run with both on (both are on by default now).
 
 #include <cstdint>
 #include <cstring>
@@ -1148,8 +1152,10 @@ extern "C" void jsp_register_port_menu_overrides(void)
     g_menu.io = &g_settings_io;   // the Display, Graphics, Controls and Launcher-only pages
     if (const char* ed = std::getenv("JSP_PORT_MENU_EDIT")) if (ed[0] == '0') { g_menu.be = nullptr; g_menu.io = nullptr; }
     install_pad_filter();
-    // The log keeps its old wording ("JSP_PORT_MENU set": run checkers match it); it now also means the default (no JSP_PORT_MENU).
-    std::fprintf(stderr, "[portmenu] JSP_PORT_MENU set: Options gets a sixth row (hooks 0x%08X, 0x%08X), pad filter on, label mask %d\n",
-                 k_build_options, k_panel_update, mask);
+    // The line names where the setting came from: "unset (default on)" or the value it was set to. It starts with "JSP_PORT_MENU setting"
+    // (run checkers match the prefix "JSP_PORT_MENU set").
+    const char* pm = std::getenv("JSP_PORT_MENU");
+    std::fprintf(stderr, "[portmenu] JSP_PORT_MENU setting: %s%s%s: Options gets a sixth row (hooks 0x%08X, 0x%08X), pad filter on, label mask %d\n",
+                 pm ? "set to \"" : "unset (default on)", pm ? pm : "", pm ? "\"" : "", k_build_options, k_panel_update, mask);
 }
 #endif

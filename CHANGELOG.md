@@ -15,7 +15,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 - **New look.** The project page, the fan site and the installer pictures have a fighting-game menu style, and the setup, the launcher and the settings window have a new icon: a star with a J. The installer pictures and the settings window header are not tried on Windows yet.
 - The Discord invite on the project page is the new one.
 - **Rollback over a re-psn room has played its first match on two PCs** on one home network, with no desync. Start both games within about 30 seconds of each other (the host first); `docs/ROLLBACK.md` explains the two "timed out" and "no room" messages. The match ran slowly, and why is not known yet.
-- **Port Settings is on by default.** Options now has a sixth row, Port Settings, without any setting, so the Online page where you choose Off, Delay or Rollback is easy to find (US version of the game only). The Netcode row was opened and switched to Rollback in a running game; saving it and playing a match from it are not tried yet.
+- **Port Settings is on by default.** Options now has a sixth row, Port Settings, at the top of the list, without any setting, so the Online page where you choose Off, Delay or Rollback is easy to find (US version of the game only). The Netcode row was opened and switched to Rollback in a running game; saving it and playing a match from it are not tried yet.
 
 **Fixed**
 

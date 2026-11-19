@@ -1,6 +1,6 @@
 # Port Settings page
 
-ENHANCEMENT, on by default (until 0.5.1 it was off unless `JSP_PORT_MENU=1`). The Options list gets a sixth row, "Port Settings"; `JSP_PORT_MENU=0` turns it off. Cross on it opens a page drawn by
+ENHANCEMENT, on by default (until 0.5.1 it was off unless `JSP_PORT_MENU=1`). The Options list gets a sixth row, "Port Settings", drawn at the top of the list above Control Settings (the game draws the list bottom-up: row 0 Cross-Save at the bottom, the new row 5 on top, as a run under Proton showed); `JSP_PORT_MENU=0` turns it off. Cross on it opens a page drawn by
 the port over the game (Up/Down select, Cross opens, Circle goes back). Its pages: Display, Graphics and Controls (the launcher's settings, below), Online (below), and a list of what stays launcher-only. To remove the row,
 put the line `JSP_PORT_MENU=0` in `play_settings.txt` (every line of that file becomes an environment variable for the game; the settings window keeps lines it does not own). A US install set up with 0.5.1 or earlier already has the lifted row-count switch (see "The lift" below), so after an update the page needs no new lift; the update's changed port sources rebuild the exe as any update does. US 1.00 build only: the hooks sit at fixed addresses of that code,
 and the glue refuses to start on another build (it reads the instruction it needs to find).
@@ -122,7 +122,7 @@ least certain parts.
 - The settings pages are not built or run yet (host test and syntax checks only): open each page, change one live and one next-start setting, rebind a key, close, and start again to see the saved values arrive.
 - Live input rebinding would need a generation counter in toolkit patch 6500 (its key, button and mode tables are read once).
 - Build the v19 tree with the feature and run the page (open it from the Options list, both sub-pages, edit and save, close it, check the menu keeps working, and that the written `repsn.ini` is read back at the next start).
-- The port's "Exit Game" option shares the Options list and tests the cursor from the bottom; check both options with the sixth row present.
+- The port's "Exit Game" option shares the Options list (it takes over Cross-Save, the bottom row) and opens its box only when the Options cursor word 0x008E63FC reads 0 and the menu state word 0x0095654C reads 5. ASSUMPTION: both still read that way with the sixth row present (0x008E63FC 0 only on Cross-Save, never on Port Settings; 0x0095654C 5 on the six-row list and while the Port Settings page is open over it). Neither has been read in a run with both options on; check both options with the sixth row present.
 - The overlay is drawn before 2508's and 2509's pictures, so those land on top (a page open with the FPS counter or the time-limit stamp).
 - The sixth row's parts after the game's own per-update loop with the instruction patch (the earlier tree needed the patch to keep them shown).
 - Pressure-capable pads: the game's menu reading pressure words behind the page.
