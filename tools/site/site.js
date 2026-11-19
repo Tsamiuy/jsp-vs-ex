@@ -1,7 +1,7 @@
 /* J-Stars Victory VS-EX fan site: optional enhancement. The page is complete without it (and plain.html needs no
    script at all). Same origin, no network calls, no storage, no analytics. tools/site/site.py inlines this file into
    index.html; the page's Content-Security-Policy allows that one inline script by its sha256 only.
-   What it does: shows one section at a time like the game's main menu (the highlight bar follows Up/Down, a game pad's
+   What it does: shows one section at a time like a fighting-game main menu (the highlight bar follows Up/Down, a game pad's
    d-pad or a tap; Enter or A opens the section, Esc or B goes back to the menu) and puts the item's one-line
    description in the caption band.
    Carried from Qwark's Awakening's tools/release/site.js, itself from Project Helghast's site.js (same author, MIT):

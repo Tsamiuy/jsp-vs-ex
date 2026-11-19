@@ -38,7 +38,7 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 NO_RULE_OK = {"sec"}   # .sec is styled through html.js .sec and .sec + .sec; listed so a rename is noticed
-DISCORD_RE = re.compile(r"https?://(?:www\.)?discord\.(?:gg|com/invite)/[A-Za-z0-9-]+")
+DISCORD_RE = re.compile(r"https?://(?:www\.)?discord(?:app)?\.(?:gg|com/invite)/[A-Za-z0-9-]+")
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 

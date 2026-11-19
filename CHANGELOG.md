@@ -6,11 +6,14 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A new look for the README, the fan site, the installer images and the social preview, drawn in the style of a fighting-game main menu (our own drawings, no game art) around the project's ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header; the installer images and the settings window header are not yet tried on Windows): menu buttons and palette badges in the README, a site you walk like a menu (Up/Down, Enter, Esc, a game pad or a tap) with a no-script plain page, one palette file (`data/theme.json`) for all of it (`tools/site/`), and the new Discord invite (https://discord.gg/D2eTEnCK62) everywhere.
+
 ## [0.5.1] - 2026-11-19
 
 ### Added
 
-- A new look for the README, the fan site, the installer images and the social preview, drawn in the style of a fighting-game main menu (our own drawings, no game art) around the project's ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header): menu buttons and palette badges in the README, a site you walk like a menu (Up/Down, Enter, Esc, a game pad or a tap) with a no-script plain page, one palette file (`data/theme.json`) for all of it (`tools/site/`), and the new Discord invite (https://discord.gg/D2eTEnCK62) everywhere.
 - Choose the netcode in the game, not yet tried in a running game (Port Settings, `JSP_PORT_MENU=1`, Online page): a Netcode row with Off, Delay (the game's own online) or Rollback (experimental, direct IP: Role, Port or Host address). Only one can be on; saving applies on the next start; a hand-edited pair with both on is refused and neither runs. Host-tested only.
 - Rollback over a re-psn server instead of a typed address, **tested on one PC only, not yet across real routers** (experimental, opt-in; Online page: Netcode = Rollback, Connection = re-psn; toolkit patch 7918 brings in the re-psn v0.8.0 client): one player creates a room, the other joins it, the two PCs punch a direct path and use the server's relay only if allowed. Host-tested against a fake server; two copies on one PC through a local re-psn v0.8.0 server created and joined a room, took the direct path and stayed in sync for 2,017 ticks with a simulated 30 ms delay. The relay path has not run.
 
