@@ -36,8 +36,9 @@ The version number lives in `installer/VERSION`; the two CMake `project(... VERS
 built on the player's PC and cannot read a file outside themselves), and `CHANGELOG.md` has the notes. Add a line under
 `## [Unreleased]` in `CHANGELOG.md` for each change, in the right place: new features go under `### Added`, changed
 behaviour and docs under `### Changed`, fixes under `### Fixed`. Those technical lines are the full record. If a player
-can see the change, also add one plain line under `### For players` at the top of Unreleased: what it is, where to find
-it and what it does, in one or two sentences, with no toolkit patch numbers or setting names. The release notes (the
+can see the change, also add one plain line under `### For players` at the top of Unreleased, below the bold label that fits (**New** for
+a new feature, **Changed** for a change, **Fixed** for a fix; add the label when it is not there yet): what it is, where
+to find it and what it does, in one or two sentences, with no toolkit patch numbers or setting names. The release notes (the
 release page and the Discord post) are only that part, so a release needs it (`tools/release.py bump` refuses an
 Unreleased section without it). A change that players cannot see (CI, docs, tests, internals) adds only the technical line.
 `python3 tools/release.py --check` (also run by CI) reports any version that disagrees. To release, either way:

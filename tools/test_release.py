@@ -136,6 +136,11 @@ def main():
         expect(code == 0 and out.startswith("- Plain line.") and "Technical line" not in out, "notes: the player part only")
         expect("blob/v0.2.0/CHANGELOG.md" in out, "notes: link to the full changelog of that tag")
         expect("For players" not in out, "notes: no heading inside the notes")
+        log3 = log2.replace("- Plain line.", "**New**\n\n- Plain line.\n\n**Fixed**\n\n- A fix.")
+        d = repo("0.2.0", log=log3)
+        out = run("--root", str(d), "notes", "0.2.0")[1]
+        expect(out.startswith("**New**") and "**Fixed**\n\n- A fix." in out and "Technical line" not in out,
+               "notes: bold New/Fixed labels stay inside the player part")
         expect(run("--root", str(d), "notes", "0.1.0")[1].strip() == "- First.", "notes: old section without a player part")
         d = repo("0.2.0", log=log2.replace("- Plain line.", ""))
         expect("Technical line" in run("--root", str(d), "notes", "0.2.0")[1], "notes: an empty player part falls back")
