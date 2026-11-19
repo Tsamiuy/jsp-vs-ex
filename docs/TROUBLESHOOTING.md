@@ -34,6 +34,8 @@ Contents: [Setup stops](#setup-stops) · [Black screen](#black-screen) · [Contr
 
 The setup program and the game are not code-signed. See [Check your download](INSTALL.md#check-your-download).
 
+If an antivirus removed a file of the game (for example `game\jsp.exe`, and the launcher says "The game program is missing"), run Build again: it redoes only the step that made the missing file, and its log names that file.
+
 ## Where the logs are
 
 | Log | Place |

@@ -15,13 +15,22 @@ Each version starts with **For players**: a few plain lines about what changed i
 - New look for the project page, the fan site and the installer pictures, and a new icon (a star with a J) for the setup, the launcher and the settings window. The installer pictures and the settings window header have not been tried on Windows yet.
 - The Discord invite link on the project page is the new one.
 
+**Fixed**
+
+- **Build again** in the settings window now rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
+
 ### Changed
 
 - Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; a version without that heading prints its whole section. The technical entries stay as the full record; 0.1.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
+- CI: the host-tests job's package step gives up on a mirror request after 30 s without data (3 retries), treats a failed index update as an error, tries the apt part a second time and has its own 8-minute limit, so a mirror problem fails that step by name instead of leaving the tests without time.
 
 ### Added
 
 - A new look for the README, the fan site, the installer images and the social preview, drawn in the style of a fighting-game main menu (our own drawings, no game art) around the project's ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header; the installer images and the settings window header are not yet tried on Windows): menu buttons and palette badges in the README, a site you walk like a menu (Up/Down, Enter, Esc, a game pad or a tap) with a no-script plain page, one palette file (`data/theme.json`) for all of it (`tools/site/`), and the new Discord invite (https://discord.gg/D2eTEnCK62) everywhere.
+
+### Fixed
+
+- Build again now redoes a step whose files were removed after a build (an antivirus removing `game\jsp.exe` left the launcher saying "The game program is missing" while Build again skipped every step); the log names the missing file, and a changed settings window source rebuilds the settings window. Host-tested only.
 
 ## [0.5.1] - 2026-11-19
 
