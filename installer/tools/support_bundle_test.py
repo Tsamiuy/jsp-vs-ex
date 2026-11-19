@@ -286,6 +286,74 @@ def main():
         check(sb.net_scrub("[Bobby] hello\n[net] x\n", {"Bobby": "<online name>", "net": "<online name>"}) == "[<online name>] hello\n[net] x\n",
               "tags: only the program's own tags are kept")
 
+        # third review: CRLF logs, names that are words of the log lines, commented-out and earlier values, brackets, apostrophes, file names
+        S1 = {"Me1": "<online name>"}
+        crlf = [
+            ("[sceNpMatching2] room 1: PeerGuy joined as member 2\r\n", "[sceNpMatching2] room 1: <online name> joined as member 2\r\n"),
+            ("[sceNpMatching2] room 1: PeerGuy left\r\n", "[sceNpMatching2] room 1: <online name> left\r\n"),
+            ("[sceNpMatching2] signaling: member 2 (PeerGuy) at 203.0.113.9:3658\r\n", "[sceNpMatching2] signaling: member 2 (<online name>) at <IPv4>:3658\r\n"),
+            ("[sceNpSignaling] conn 1 (PeerGuy, 203.0.113.9:3658) established\r\n", "[sceNpSignaling] conn 1 (<online name>, <IPv4>:3658) established\r\n"),
+            ("[sceNpSignaling] ActivateConnection(ctx=1, PeerGuy) -> conn 1 (pending)\r\n", "[sceNpSignaling] ActivateConnection(ctx=1, <online name>) -> conn 1 (pending)\r\n"),
+            ("[net] re-psn: creating a room on srv.example.org:36100 as Bob Smith (relay allowed), local UDP port 4000\r\n",
+             "[net] re-psn: creating a room on <server> as <online name> (relay allowed), local UDP port 4000\r\n"),
+            ("[net] re-psn: the online name 'O'Brien the Great' is longer than 16 characters (repsn.ini name=): off\r\n",
+             "[net] re-psn: the online name '<online name>' is longer than 16 characters (repsn.ini name=): off\r\n"),
+            ("[net] rendezvous: peer.example.org:7000 via re-psn, path direct, room 3\r\n", "[net] rendezvous: <peer address> via re-psn, path direct, room 3\r\n"),
+            ('[psnr] player "Bob X"\r\n', "[psnr] player <online name>\r\n"),
+            ('[psnr] "Bob "X" is not a valid online ID (3-16 letters, digits, - or _, starting with a letter)\r\n',
+             "[psnr] <online name> is not a valid online ID (3-16 letters, digits, - or _, starting with a letter)\r\n"),
+            ('[psnr] connected to [2001:db8::1]:36100 as "Me 1" (NPWR1_00), user 2, seen from 198.51.100.8, p2p port 3658\r\n',
+             "[psnr] connected to <server>:36100 as <online name> (NPWR1_00), user 2, seen from <IPv4>, p2p port 3658\r\n"),
+            ('[psnr] srv.example.org:36100: another player there is already "Me 1" -- pick another with --username. NP stays offline\r\n',
+             "[psnr] <server>:36100: another player there is already <online name> -- pick another with --username. NP stays offline\r\n"),
+            ("[psnr] could not reach 2001:db8::1:36100 -- NP stays offline\r\n", "[psnr] could not reach <server>:36100 -- NP stays offline\r\n"),
+            ('[sceNp] GetOnlineId(user=0) -> "Me 1"\r\n', "[sceNp] GetOnlineId(user=0) -> <online name>\r\n"),
+            ('[sceNp] Init(poolSize=1, username="Me 1")\r\n', "[sceNp] Init(poolSize=1, username=<online name>)\r\n"),
+            ("[online] re-psn enabled: server srv.example.org:36100\r\n", "[online] re-psn enabled: server <server>\r\n"),
+            ("[online] online id Me1\r\n", "[online] online id <online name>\r\n"),
+            ('server = "srv.example.org"\r\n', "server = <set>\r\n"),
+            ("#PSNR_SERVER=Old.Server.net\r\n", "#PSNR_SERVER=<set>\r\n"),
+            ("; server = old.example\r\n", "; server = <set>\r\n"),
+        ]
+        for raw, want in crlf:
+            got = sb.net_scrub(raw, S1)
+            check(got == want, f"rule with CRLF: {raw.strip()[:60]!r} -> {got!r}")
+            check(sb.net_scrub(raw.replace("\r\n", "\n"), S1) == want.replace("\r\n", "\n"), f"rule with LF: {raw.strip()[:60]!r}")
+        peer = ("[sceNpMatching2] room 1: PeerGuy joined as member 2\r\n[sceNpMatching2] room 1: PeerGuy left\r\n"
+                "[sceNpSignaling] conn 1 (PeerGuy, 203.0.113.9:3658) established\r\n[sceNpMatching2] signaling: member 2 (PeerGuy) at 203.0.113.9:3658\r\n")
+        for word in ("member", "room", "left", "conn", "signaling", "User"):
+            sc9 = sb.net_scrub(peer, {word: "<online name>"})
+            check("PeerGuy" not in sc9 and "203.0.113.9" not in sc9, f"a secret {word!r} that is a word of the lines does not keep the peer's name")
+        sec9 = sb.net_secrets({"play": {"PS3_NP_ONLINE_ID": "Other1"}, "play_raw": [("PSNR_SERVER", "Old.Server.net"), ("PS3_NP_ONLINE_ID", "RealName"),
+                                                                                  ("PS3_NP_ONLINE_ID", "Real Name!")], "ini": {},
+                               "ini_raw": {"repsn": {"server": ["old.example"], "name": ["Gone1", "Bob Z"]}}}, env={})
+        for v in ("Old.Server.net", "RealName", "Real Name!", "RealName", "old.example", "Gone1", "BobZ", "Other1"):
+            check(v in sec9, f"secrets: {v!r} (commented out, earlier, or cleaned as np_psnr does)")
+        app9 = t / "app9"
+        w(app9 / "VERSION.txt", "x\n")
+        w(app9 / "settings_here.txt", "")
+        w(app9 / "play_settings.txt", "#PSNR_SERVER=Old.Server.net\n# PS3_NP_ONLINE_ID=RealName\nPS3_NP_ONLINE_ID=Earlier1\nPS3_NP_ONLINE_ID=Later1\n"
+          "PS3RECOMP_SHARED_DIR=@APP@/shared\n")
+        w(app9 / "shared/repsn.ini", "[repsn]\n; server=retired.example\nenabled=1\nserver=srv.example.org\nname=Bobby\n")
+        w(app9 / "Bobby-p2.txt", "notes of Old.Server.net and RealName and Earlier1 and retired.example\n")
+        w(app9 / "game/run/play_stdout.txt", "[sceNpMatching2] room 1: PeerGuy left\r\n[Bobby] x\r\n")
+        zp9 = sb.make(app9, out, None, None)
+        z9 = zipfile.ZipFile(zp9)
+        n9 = z9.namelist()
+        all9 = "\n".join(n9) + b"".join(z9.read(n) for n in n9).decode()
+        z9.close()
+        for bad in ("Old.Server.net", "RealName", "Earlier1", "Later1", "retired.example", "srv.example.org", "Bobby", "PeerGuy"):
+            check(bad not in all9, f"third review: {bad!r} appears nowhere in the zip, file names included")
+        check("(online name)-p2.txt" in n9, "file names: a private value in a user file's name becomes a legal placeholder")
+        check(sb.net_scrub("chat from [Bob] here\n[Bob] x\n[net] y\n", {"[Bob]": "<online name>", "net": "<online name>"})
+              == "chat from <online name> here\n<online name> x\n[net] y\n", "tags: a secret written in brackets is replaced; [net] stays")
+        d10 = t / "ini10"
+        w(d10 / "repsn.ini", "[repsn]\nenabled=1\nname=" + "x" * 600 + "\nserver=a.example\n")
+        into10, raw10 = {}, {}
+        sb.read_online_ini(d10 / "repsn.ini", into10, "repsn", raw10)
+        check(into10 == {"repsn": {"enabled": "1", "server": "a.example:36100"}} and raw10["repsn"]["name"] == ["x" * 600],
+              "ini: a line over 512 bytes is rejected and the section stays, its value still a secret")
+
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")
     print("FAILED: " + "; ".join(FAILS) if FAILS else "all passed")

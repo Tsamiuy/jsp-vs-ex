@@ -6,12 +6,18 @@ Run by the payload's bundled Python (the Start-menu entry "Make a support bundle
 Writes jsp-support-YYYYmmdd-HHMMSS.zip to DIR (default: the Desktop, else the install folder) and prints its path.
 Stdlib only. Contacts no server: the zip is only made, never sent; the tester attaches it by hand.
 
-What goes in (text only: .log .txt .ini .cmd), every file through firstrun.scrub (the user's profile folder becomes %USERPROFILE%) and net_scrub
-(placeholders replace: wherever they appear, the server and join addresses and online names found in play_settings.txt, repsn.ini and
-community.ini, and the login name (USERNAME / USER, the profile folder's last part, also as the runtime cleans it into an online name);
-the address and name fields of the known log lines ([online], [net], [psnr], [sceNp], [sceNpMatching2], [sceNpSignaling]: this player's
-and other players' online names, the server) and of the settings keys; every IPv4 address but loopback. Known limit: a name or host
-name that is in none of those files and in no known line format stays as written):
+What goes in (text only: .log .txt .ini .cmd), every file and file name through firstrun.scrub (the user's profile folder becomes
+%USERPROFILE%) and net_scrub, which puts placeholders in for:
+  - the address and name fields of the known log lines ([online], [net], [psnr], [sceNp], [sceNpMatching2], [sceNpSignaling]: this
+    player's and other players' online names, the server, the peer's address) and the values of the settings keys server, name, address,
+    PSNR_SERVER, PS3_NP_ONLINE_ID and JSP_ROLLBACK_JOIN, also on lines commented out with '#' or ';' (LF or CRLF line ends);
+  - wherever else they appear: every value of those keys in play_settings.txt, repsn.ini and community.ini (also earlier lines of a key and
+    commented-out lines; names also as the runtime cleans them), and the login name (USERNAME / USER and the profile folder's last part,
+    as written and cleaned: the runtime makes it the online name when none is set);
+  - every IPv4 address except loopback (127.x) and 0.0.0.0.
+  Known limits: a name or host name that is in none of those settings files and in no known line format stays as written (for example a
+  server given only on the game's command line, or an IPv6 address); the settings are read from the files the launcher uses by default,
+  not from a file given to jsp-launcher.exe with --settings; a common word used as a name is replaced wherever it stands as a word.
   logs\\*.log, build\\**\\*.log (step logs), game\\run\\*.txt (play_stderr.prev.txt is the launch before the last one), the *.log, *.txt, *.ini and *.cmd files of the install folder
   (play_settings.txt, jsp-install.ini, build-again.cmd, paths.txt, VERSION.txt, tree.txt when present), the settings file in
   %APPDATA%\\JSP Fan Revival, and the newest two Inno Setup logs in %TEMP% that mention this app. Plus facts.txt.
@@ -436,6 +442,21 @@ def read_kv(path, app=None):
     return out
 
 
+def read_kv_all(path):
+    """Every KEY=VALUE of a settings file for the secrets, also earlier lines of a key and lines commented out with '#' or ';':
+    [(KEY upper, value)]. Not what the game sees (read_kv is): what must stay out of the zip."""
+    out = []
+    try:
+        text = pathlib.Path(path).read_bytes()[:1000000].decode("utf-8-sig", "replace")
+    except OSError:
+        return out
+    for line in text.split("\n"):
+        k, eq, v = line.strip().lstrip("#;").partition("=")
+        if eq and k.strip():
+            out.append((k.strip().upper(), v.strip()))
+    return out
+
+
 def _valid_hostport(s):   # jsp_online.cpp valid_hostport: host[:port], port 1..65535, host of letters, digits, '.', '-', '_'
     host, c, port = s.partition(":")
     if c and not (port.isascii() and port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
@@ -455,10 +476,11 @@ _INI_KEYS = {"repsn": {"enabled": lambda v: v in ("0", "1"), "server": _valid_ho
 
 def read_online_ini(path, into, kind, raw=None):
     """repsn.ini (kind 'repsn') / community.ini (kind 'community') into `into` ({section lower: {key lower: value}}) as jsp_online.cpp's parse()
-    reads them: a UTF-8 BOM is skipped, a line over 512 bytes is rejected, a '[' line without ']' ends the section, only the sections of that
-    file kind (and preset labels it accepts), only the keys it knows with valid values (later files win per key). Known limits: the
-    64 KB file cap is applied by cutting, not by refusing the file as jsp_online.cpp does. `raw` gets every key=value of the file, in any
-    section or none, valid or not (the values net_secrets() must keep out of the zip)."""
+    reads them: a UTF-8 BOM is skipped, a line over 512 bytes is rejected (the section stays), a '[' line without ']' ends the section,
+    only the sections of that file kind (and preset labels it accepts), only the keys it knows with valid values (later files win per key).
+    Known limit: the 64 KB file cap is applied by cutting, not by refusing the file as jsp_online.cpp does. `raw` gets every key=value of the
+    file, in any section or none, valid or not, also on lines commented out with ';' or '#' ({section: {key: [values]}}: the values
+    net_secrets() must keep out of the zip)."""
     try:
         text = pathlib.Path(path).read_bytes()[:65536].decode("utf-8-sig", "replace")
     except OSError:
@@ -467,18 +489,28 @@ def read_online_ini(path, into, kind, raw=None):
     for line in text.split("\n"):
         too_long = len(line.encode("utf-8")) > 512
         line = line.strip()
-        if not line or line[0] in ";#":
+        if not line:
             continue
+        if line[0] in ";#":
+            k, eq, v = line.lstrip(";#").partition("=")
+            if eq and raw is not None:
+                raw.setdefault(sec.lower(), {}).setdefault(k.strip().lower(), []).append(v.strip())
+            continue
+        if too_long:
+            k, eq, v = line.partition("=")
+            if eq and raw is not None:
+                raw.setdefault(sec.lower(), {}).setdefault(k.strip().lower(), []).append(v.strip())
+            continue                                             # rejected; the section stays (jsp_online.cpp kMaxLine)
         if line.startswith("["):
-            sec = line[1:-1].strip() if line.endswith("]") and not too_long else ""
+            sec = line[1:-1].strip() if line.endswith("]") else ""
             continue
         k, eq, v = line.partition("=")
         if not eq:
             continue
         k, v, ls = k.strip().lower(), v.strip(), sec.lower()
         if raw is not None:
-            raw.setdefault(ls, {})[k] = v
-        if too_long or not sec:
+            raw.setdefault(ls, {}).setdefault(k, []).append(v)
+        if not sec:
             continue
         label = sec[7:].strip() if ls.startswith("preset ") else ""
         group = ls if ls == kind else "preset" if kind == "community" and label and len(label) <= 32 and \
@@ -504,7 +536,7 @@ def net_settings(app, appdata=None, env=None):
     sd = kv["PS3RECOMP_SHARED_DIR"] if "PS3RECOMP_SHARED_DIR" in kv else env.get("PS3RECOMP_SHARED_DIR")
     shared = pathlib.Path(sd) if sd else app / "shared" if portable else pathlib.Path(appdata) / "PS3Recomp" if appdata else None
     game_dir = app if portable or user is None else user
-    s = {"play": kv, "ini": {}, "ini_raw": {}, "read": []}
+    s = {"play": kv, "play_raw": read_kv_all(play) if play.is_file() else [], "ini": {}, "ini_raw": {}, "read": []}
     if play.is_file():
         s["read"].append("play_settings.txt (" + ("install folder" if play == local else "user data folder") + ")")
     for d, n, kind, where in ((shared, "repsn.ini", "repsn", "shared folder"), (shared, "community.ini", "community", "shared folder"),
@@ -600,7 +632,7 @@ def net_secrets(s, env=None):
     and the login name (USERNAME / USER and the profile folder's last part, as written and as np_psnr.c cleans it: the runtime uses it as the
     online name when none is set)."""
     env = os.environ if env is None else env
-    p = {k.lstrip("\ufeff"): v for k, v in s["play"].items()}   # a BOM on the first line hides the key from the game, not from us
+    pairs = [(k.lstrip("\ufeff").upper(), v) for k, v in s["play"].items()] + list(s.get("play_raw", []))   # a BOM hides a key from the game, not from us
     ini = s.get("ini_raw", s["ini"])
     out = {}
 
@@ -612,13 +644,22 @@ def net_secrets(s, env=None):
                 host = v.rsplit(":", 1)[0] if v.count(":") == 1 else v
                 if len(host) >= 3:
                     out.setdefault(host, what)
-    add(p.get("JSP_ROLLBACK_JOIN"), "<join address>", True)
-    add(p.get("PSNR_SERVER"), "<server>", True)
-    add(p.get("PS3_NP_ONLINE_ID"), "<online name>")
+    def name(v):
+        add(v, "<online name>")
+        add(_clean_online_id(v or ""), "<online name>")   # as np_psnr.c cleans a name before it uses it
+    for k, v in pairs:
+        if k == "JSP_ROLLBACK_JOIN":
+            add(v, "<join address>", True)
+        elif k == "PSNR_SERVER":
+            add(v, "<server>", True)
+        elif k == "PS3_NP_ONLINE_ID":
+            name(v)
     for sec, kv in ini.items():
-        add(kv.get("server"), "<server>", True)
-        add(kv.get("address"), "<server>", True)
-        add(kv.get("name"), "<online name>")
+        vals = lambda key: kv.get(key) if isinstance(kv.get(key), list) else [kv.get(key)]
+        for v in vals("server") + vals("address"):
+            add(v, "<server>", True)
+        for v in vals("name"):
+            name(v)
     prof = env.get("USERPROFILE") or ""
     for v in (env.get("USERNAME"), env.get("USER"), re.split(r"[\\/]", prof.rstrip("\\/"))[-1] if prof else None):
         add(v, "<user name>")
@@ -628,24 +669,25 @@ def net_secrets(s, env=None):
 
 _IPV4 = re.compile(r"(?<![\d.])((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(?![\d]|\.\d)")
 _NET_RULES = (   # always applied, also when the settings files were not found
-    (re.compile(r"(?im)^(\s*(?:server|name|address|JSP_ROLLBACK_JOIN|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)[^\s#;][^\r\n#;]*"), r"\1<set>"),
+    (re.compile(r"(?im)^(\s*[#;]?\s*(?:server|name|address|JSP_ROLLBACK_JOIN|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)[^\s#;][^\r\n#;]*"), r"\1<set>"),
     (re.compile(r"(\[online\] re-psn enabled: server )\S+"), r"\1<server>"),
     (re.compile(r"(\[online\] online id )\S+"), r"\1<online name>"),
     (re.compile(r"(\[online\] --psnr )\S+"), r"\1<server>"),
     # jsp_net_game.cpp: the name may hold anything up to the fixed tail; without the tail the rest of the line is the name
-    (re.compile(r"(?m)(\[net\] re-psn: (?:creating|joining) a room on )\S+( as )[^\r\n]*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)$"),
+    (re.compile(r"(?m)(\[net\] re-psn: (?:creating|joining) a room on )\S+( as )[^\r\n]*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)(?=\r?$)"),
      r"\1<server>\2<online name>\3"),
     (re.compile(r"(\[net\] re-psn: (?:creating|joining) a room on )(?!<server> as <online name> \(relay)\S+( as )[^\r\n]*"), r"\1<server>\2<online name>"),
-    (re.compile(r"(the online name ')[^'\r\n]*(')"), r"\1<online name>\2"),
+    (re.compile(r"(the online name ')[^\r\n]*(' is longer than 16 characters)"), r"\1<online name>\2"),
+    (re.compile(r"(\[net\] rendezvous: )\S+"), r"\1<peer address>"),
     # the toolkit's NP lines (libs/network): this player's and other players' online names, the server
     (re.compile(r"(\[psnr\] player )\"[^\"\r\n]*\""), r"\1<online name>"),
-    (re.compile(r"(\[psnr\] )\"[^\"\r\n]*\"( is not a valid online ID)"), r"\1<online name>\2"),
-    (re.compile(r"(\[psnr\] connected to )[^\s:]+(:\d+ as )\"[^\"\r\n]*\""), r"\1<server>\2<online name>"),
-    (re.compile(r"(\[psnr\] )[^\s:]+(:\d+: another player there is already )\"[^\"\r\n]*\""), r"\1<server>\2<online name>"),
-    (re.compile(r"(\[psnr\] could not reach )[^\s:]+"), r"\1<server>"),
+    (re.compile(r"(\[psnr\] )\"[^\r\n]*\"( is not a valid online ID)"), r"\1<online name>\2"),
+    (re.compile(r"(\[psnr\] connected to )\S+?(:\d+ as )\"[^\r\n]*\"( \()"), r"\1<server>\2<online name>\3"),
+    (re.compile(r"(\[psnr\] )\S+?(:\d+: another player there is already )\"[^\r\n]*\"( -- pick another)"), r"\1<server>\2<online name>\3"),
+    (re.compile(r"(\[psnr\] could not reach )\S+(:\d+ -- )"), r"\1<server>\2"),
     (re.compile(r"(\[sceNp\] (?:GetNpId|GetOnlineId|GetOnlineName|GetUserProfile)\(user=-?\d+\) -> )\"[^\"\r\n]*\""), r"\1<online name>"),
     (re.compile(r"(\[sceNp\] Init\(poolSize=\d+, username=)\"[^\"\r\n]*\""), r"\1<online name>"),
-    (re.compile(r"(?m)(\[sceNpMatching2\] room \d+: )[^\r\n]*?( joined as member \d+| left)$"), r"\1<online name>\2"),
+    (re.compile(r"(?m)(\[sceNpMatching2\] room \d+: )[^\r\n]*?( joined as member \d+| left)(?=\r?$)"), r"\1<online name>\2"),
     (re.compile(r"(\[sceNpMatching2\] signaling: member \d+ \()[^\r\n]*?(\) at )"), r"\1<online name>\2"),
     (re.compile(r"(\[sceNpSignaling\] conn \d+ \()[^,\r\n]*(, )"), r"\1<online name>\2"),
     (re.compile(r"(\[sceNpSignaling\] ActivateConnection\(ctx=\d+, )[^)\r\n]*(\))"), r"\1<online name>\2"),
@@ -656,14 +698,22 @@ _LINE_TAG = (r"(?m:^\s*\[(?:net|online|psnr|repsn|community|install|portmenu|ver
              r"sceNp[A-Za-z0-9]*|cell[A-Z][A-Za-z0-9]*)\])")
 
 
+_PLACEHOLDER = r"<(?:set|server|online name|join address|user name|peer address|IPv4)>"
+
+
 def net_scrub(text, secrets=None):
-    """Takes the private netcode values out of a file's text: the values in `secrets` (net_secrets), the address and name fields of the
-    known log lines and settings keys, and every IPv4 address except loopback and 0.0.0.0 (a port after it stays)."""
-    for v in sorted(secrets or {}, key=len, reverse=True):
-        pat = re.compile(_LINE_TAG + "|(?<![A-Za-z0-9_])" + re.escape(v) + r"(?![A-Za-z0-9_])", re.IGNORECASE)
-        text = pat.sub(lambda m, r=secrets[v]: m.group(0) if m.group(0).lstrip().startswith("[") and m.group(0).rstrip().endswith("]") else r, text)
+    """Takes the private netcode values out of a file's text: first the address and name fields of the known log lines and settings keys
+    (so a name that is also a word of those lines, "member" or "room", cannot break them), then the values in `secrets` (net_secrets)
+    wherever they stand except inside the program's own line tags and the placeholders, then every IPv4 address except loopback (127.x)
+    and 0.0.0.0 (a port after it stays)."""
     for pat, rep in _NET_RULES:
         text = pat.sub(rep, text)
+    keep = re.compile(_LINE_TAG + "|" + _PLACEHOLDER)
+    for v in sorted(secrets or {}, key=len, reverse=True):
+        b1 = "(?<![A-Za-z0-9_])" if (v[:1].isalnum() or v[:1] == "_") else ""
+        b2 = "(?![A-Za-z0-9_])" if (v[-1:].isalnum() or v[-1:] == "_") else ""
+        pat = re.compile(_LINE_TAG + "|" + _PLACEHOLDER + "|" + b1 + re.escape(v) + b2, re.IGNORECASE)
+        text = pat.sub(lambda m, r=secrets[v]: m.group(0) if keep.fullmatch(m.group(0).strip()) or keep.fullmatch(m.group(0)) else r, text)
     return _IPV4.sub(lambda m: m.group(1) if m.group(1).startswith("127.") or m.group(1) == "0.0.0.0" else "<IPv4>", text)
 
 
@@ -816,6 +866,17 @@ def desktop():
     return str(d) if d.is_dir() else ""
 
 
+_FIXED_PARTS = {"game", "run", "logs", "build", "appdata", "setup-logs"}
+
+
+def zip_name(name, secrets=None):
+    """A file's name in the zip without private values (a user file such as "Bobby-p2.txt"): each part but the bundle's own folders through
+    firstrun.scrub and net_scrub, with the placeholders' angle brackets made legal in a Windows file name."""
+    parts = name.split("/")
+    out = [x if x in _FIXED_PARTS else net_scrub(firstrun.scrub(x), secrets).replace("<", "(").replace(">", ")") for x in parts]
+    return "/".join(out)
+
+
 def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
     """Builds the zip; -> its path. out None: the Desktop, else app."""
     app = pathlib.Path(app)
@@ -824,11 +885,14 @@ def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
     secrets = net_secrets(ns)
     blobs = {}
     net_logs = None
-    for name, p in entries.items():
+    for name0, p in entries.items():
         try:
             raw = read_raw(p)
         except OSError:
             continue                                             # unreadable or gone: skipped like an absent file
+        name = zip_name(name0, secrets)
+        while name in blobs:                                     # two names that scrub to the same one
+            name = name.rsplit(".", 1)[0] + "-1." + name.rsplit(".", 1)[-1] if "." in name else name + "-1"
         if "[net] " in raw:
             net_logs = net_logs or {}
             net_logs[name] = raw                                 # the [net] summary reads the raw text (net_scrub could change its words)
