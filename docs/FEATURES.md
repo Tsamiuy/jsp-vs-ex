@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 16 available, 11 in progress, 16 planned.
+Port features: 16 available, 12 in progress, 16 planned.
 
 ## 1. What the port adds
 
@@ -67,6 +67,7 @@ Port features: 16 available, 11 in progress, 16 planned.
 |---|---|---|---|---|
 | <a id="online-settings"></a>Online settings files | The game reads repsn.ini and community.ini at startup (re-psn server, online name, peer port); both methods on is refused and a community server keeps it offline until a client exists. Host-tested; not yet run in the game | in progress | opt-in | [ONLINE.md](ONLINE.md) |
 | <a id="online-rollback"></a>Online matches with rollback netcode | Experimental and off by default: a Free Battle fight between two PCs connected by IP address, one player per PC; tested only as two copies on one PC so far, and no complete match has run yet. Then 2v2, lobbies and re-psn | in progress | opt-in | JSP_ROLLBACK=1; [ROLLBACK.md](ROLLBACK.md#5-try-it-experimental-direct-ip-rollback) |
+| <a id="rollback-badge"></a>Rollback status badge | ENHANCEMENT (display only, opt-in, off by default): while a rollback match runs, one small line in the top-left corner, above the fight HUD: Rollback, the path (direct or relay), the input delay and the length of the last rollback in game ticks, updated up to four times a second. The game log gets the same values every 30 s and when the match ends, and the support bundle shows the last of them | in progress | opt-in | JSP_ROLLBACK_BADGE=1 in play_settings.txt (no launcher box or in-game row yet). Text, values and layout have a host test (installer/tools/net_badge_test.sh) and the bundle's summary is tested; never seen on screen in a game run yet. [ROLLBACK.md](ROLLBACK.md#rollback-status-badge) |
 | <a id="spectating"></a>Spectating | The host opens the lobby to watchers; each watcher's camera changes only what they see | planned | opt-in |  |
 | <a id="lobbies-ranked"></a>Lobbies, matchmaking, ranked | Lobbies, matchmaking and a ranked mode with one fixed rule set | planned | opt-in |  |
 | <a id="online-training"></a>Online Training | Training for up to 4 players online | planned | opt-in |  |

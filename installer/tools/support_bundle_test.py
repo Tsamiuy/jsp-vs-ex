@@ -131,16 +131,17 @@ def main():
         app3, ad3 = t / "app3", t / "appdata3"
         srv, nm, peer = "play.example.org", "rivalfan", "203.0.113.7"
         w(app3 / "VERSION.txt", "0.5.1-test\n")
-        w(ad3 / sb.APPDIR / "play_settings.txt", "JSP_ROLLBACK=1\nJSP_ROLLBACK_VIA=repsn\nJSP_ROLLBACK_ROLE=host\nJSP_ROLLBACK_RELAY=1  # relay\n")
+        w(ad3 / sb.APPDIR / "play_settings.txt", "JSP_ROLLBACK=1\nJSP_ROLLBACK_VIA=repsn\nJSP_ROLLBACK_ROLE=host\nJSP_ROLLBACK_RELAY=1  # relay\nJSP_ROLLBACK_BADGE=1\n")
         w(ad3 / "PS3Recomp/repsn.ini", f"[repsn]\nenabled = 0\nserver = {srv}:36100\nname = {nm}\n")
         head = ("[net] env decision: rollback start (static constructors arrived: EnvInit first, online boot last)\n"
                 f"[net] re-psn: creating a room on {srv}:36100 as {nm} (relay allowed), local UDP port 3659\n"
-                "[net] rollback opt-in: host, build 1a2b3c4d, hooks installed\n"
+                "[net] rollback opt-in: host, build 1a2b3c4d, hooks installed\n[net] status badge: on\n"
                 f"[net] rendezvous: {peer}:3659 via re-psn, path relay, room 7\n"
                 "[net] re-psn path: relay\n[net] gekko session synchronized\n")
         ticks = "".join(f"[net] commit tick={i} hash=0000abcd raw=0000abcd\n" for i in range(12000))
         rb = "[net] rollback to tick={} (longest game-thread stretch without a session call since the last rollback: 4 ms, keepalive polls so far: 0)\n"
-        tail = (rb.format(5) + rb.format(9) + rb.format(11) +
+        tail = (rb.format(5) + "[net] status: path relay, delay 2f, last rollback 3f, largest 6f, rollbacks 1\n" + rb.format(9) + rb.format(11) +
+                "[net] status: path relay, delay 2f, last rollback 2f, largest 6f, rollbacks 3\n" +
                 "[net] DESYNC at tick 40 (stepper tick numbering, session-relative; add the base 3): local=00000001 remote=00000002\n"
                 "[net] ended: Opponent disconnected\nloopback 127.0.0.1:36100 stays\n")
         w(app3 / "game/run/play_stderr.txt", head + ticks + tail)
@@ -159,6 +160,10 @@ def main():
         check("re-psn server: set   online name: set   rollback join address: not set" in f3, "net facts: server and name only as set / not set")
         check("rollback started: yes (host)" in f3 and "path: relay" in f3 and "session synchronized: yes" in f3, "net facts: started, path, synchronized survive the cut")
         check("rollbacks: 3   desync lines: 1" in f3 and "session ended: Opponent disconnected" in f3, "net facts: rollback and desync counts, the end reason")
+        check("rollback status badge (JSP_ROLLBACK_BADGE): on" in f3, "net facts: the badge key from play_settings.txt")
+        check("last status line: path relay, delay 2f, last rollback 2f, largest 6f, rollbacks 3   status badge: on" in f3,
+              "net facts: the last status line (path, delay, last and largest rollback) and the badge survive the cut")
+        check("[net] status: " not in f3.split("key [net] lines of")[1], "net facts: status lines are not repeated among the key lines")
         check("env decision: rollback start (static constructors arrived: EnvInit first, online boot last)" in f3 and "[net] rollback opt-in: host, build 1a2b3c4d" in f3 and "commit tick=" not in f3, "net facts: key lines kept, per-tick lines left out")
         prev = f3.split("play_stderr.prev.txt (the launch before):")[1]
         check("refused: JSP_ROLLBACK=1 and the game's own online" in prev and "rollback started: no" in prev, "net facts: the previous launch's refusal and its reason")
@@ -167,6 +172,15 @@ def main():
         check("<server>" in all3 and "<online name>" in all3 and "[net] rendezvous: <peer address> via re-psn, path relay, room 7" in f3 and "127.0.0.1:36100 stays" in all3, "net: placeholders in the files, loopback kept")
         S = lambda play, ini=None: "\n".join(sb.net_mode({"play": play, "ini": ini or {}, "read": []}))
         check("mode: Off" in S({}), "net mode: nothing set is Off")
+        check("rollback status badge (JSP_ROLLBACK_BADGE): off" in S({}) and "badge (JSP_ROLLBACK_BADGE): off" in S({"JSP_ROLLBACK_BADGE": "0"})
+              and "badge (JSP_ROLLBACK_BADGE): on" in S({"JSP_ROLLBACK_BADGE": "yes"}), "net mode: the badge key, off unless non-zero (as jpnb::key_on)")
+        nb = "\n".join(sb.net_log_lines({"game/run/play_stderr.txt": "[net] rollback opt-in: client, build 1a2b3c4d, hooks installed\n[net] status badge: off\n"
+                                            "[net] status: path direct, delay -, last rollback -, largest -, rollbacks 0\n"
+                                            "[net] status: path 198.51.100.4, delay 2f, last rollback 1f, largest 1f, rollbacks 1\n"}))
+        check("last status line: path direct, delay -, last rollback -, largest -, rollbacks 0   status badge: off" in nb and "198.51.100.4" not in nb,
+              "net logs: only the exact status line counts; a line with an address in it is neither summed up nor printed")
+        check("last status line: not in the logs   status badge: not in the logs" in "\n".join(sb.net_log_lines({"game/run/play_stderr.txt": "[net] gekko session synchronized\n"})),
+              "net logs: an older game without the status line says so")
         dj = S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_JOIN": "198.51.100.4:7000"})
         check("mode: Rollback direct join" in dj and "join address: set" in dj and "198.51.100.4" not in dj, "net mode: direct join, address only as set")
         check("mode: Rollback direct host" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: direct host")
@@ -218,6 +232,7 @@ def main():
             check("mode: Rollback re-psn host, relay allowed: yes" in mode4, f"name {word!r}: the mode line is intact")
             check("rollback started: yes (host)" in logs4 and "path: relay" in logs4 and "session synchronized: yes" in logs4
                   and "rollbacks: 3   desync lines: 1" in logs4 and "session ended: Opponent disconnected" in logs4, f"name {word!r}: the summary is intact")
+            check("last status line: path relay, delay 2f, last rollback 2f, largest 6f, rollbacks 3   status badge: on" in logs4, f"name {word!r}: the status line is intact")
             check("[net] rollback opt-in: host, build 1a2b3c4d, hooks installed" in logs4 and "[net] re-psn path: relay" in logs4
                   and "[net] re-psn: creating a room on <server> as <online name> (relay allowed)" in logs4, f"name {word!r}: the key lines are intact")
             check("[net] rendezvous failed: <online name> said no" in logs4 and "srv.example" not in logs4, f"name {word!r}: an unknown line still loses the name")
