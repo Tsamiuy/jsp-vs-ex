@@ -420,7 +420,7 @@ own online is off for that session too, so Online Battle cannot connect either. 
 `JSP_ROLLBACK_ROLE` with `JSP_ROLLBACK_VIA=repsn`; a `JSP_ROLLBACK_LISTEN` that is not a port from 1 to 65535; not exactly
 one of `JSP_ROLLBACK_LISTEN` and `JSP_ROLLBACK_JOIN` for direct IP; a `JSP_ROLLBACK_JOIN` that is not IP:port; no valid
 `server` or `name` in `repsn.ini`; an online name longer than 16 characters; a UDP port that could not be opened. The
-texts are host-tested (`installer/tools/net_online_test.sh`); the notice itself has not been seen in a running game yet.
+texts are host-tested (`installer/tools/net_online_test.sh`); the notice was seen in one Proton run on US 1.00 with the both-on refusal (shown on the main menu, gone in Options, back after leaving it); other reasons and the EU build were not run.
 
 **Always on, even with rollback off.** None of this changes what the game does; it is listed so nothing is hidden:
 
