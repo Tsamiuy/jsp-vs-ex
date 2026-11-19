@@ -28,6 +28,7 @@ posix   | installer/tools/port_menu_test.sh
 posix   | installer/tools/net_online_test.sh
 posix   | installer/tools/build_id_test.py {scratch}
 posix   | installer/tools/net_repsn_test.sh {toolkit} {scratch}
+posix   | installer/tools/np_dialogs_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py

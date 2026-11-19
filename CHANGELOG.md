@@ -15,6 +15,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 - **Build again** in the settings window rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
 - The fan site's tables keep their words whole, and its menu is one straight list with no second row of buttons.
+- **Online menus:** sending a room invitation, opening the invitations you received or viewing a player's profile left the game on "Communicating..." for good. These screens should now back out right away, as if you had pressed back, since the PC version has no system window to show them; this has not been tried in a game yet.
 
 ### Technical changes
 
@@ -35,6 +36,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 #### Fixed
 
+- **Online:** sending a room invitation, opening received invitations and viewing a player's profile left the game on "Communicating..." for good: the game waits for the system dialog's result, and the toolkit did not export those three calls, so no result ever came. Toolkit patch 6018 closes each dialog at once as if the player had backed out (there is still no system dialog to show) and reports it through the game's handler on its next sysutil callback poll, and adding players to the recent-players history now reports its result as well. Tested: the new host test `installer/tools/np_dialogs_test.sh` (the toolkit's `test_np_basic_dialogs.c`, gcc and clang) and a MinGW compile of the changed file. Not tested: a game run, so that the menus come back is not confirmed yet; closing the received-invitation list this way also makes the game clear one of its own flags whose meaning is not known, which that run checks.
 - **First run:** Build again redoes a step whose files were removed after a build (an antivirus removing `game\jsp.exe` left the launcher saying "The game program is missing" while Build again skipped every step). The log names the missing file, and a changed settings window source rebuilds the settings window. Tested: host tests only. (#211)
 
 ## [0.5.1] - 2026-11-19
