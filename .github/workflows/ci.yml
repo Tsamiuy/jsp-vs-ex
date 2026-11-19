@@ -98,16 +98,23 @@ jobs:
         with:
           python-version: '3.13'
 
-      # A slow or failing package mirror once used 16 and 18 minutes of this job's 20, so the tests were cancelled
-      # with no sign of the cause. Each request now gives up after 30 s and is retried 3 times, and the step has its
-      # own limit, so a mirror problem fails here, named, and the tests get their time.
+      # A slow or failing package mirror used 16 to 18 minutes of this job's 20 on three runs, so the tests ran out of
+      # time or did not run, with no sign of the cause. apt now gives up on a request after 30 s without data (3
+      # retries), a failed index update is an error instead of leaving stale lists, the whole apt part is tried a
+      # second time, and the step has a limit of its own: a mirror problem fails this step by name.
       - name: Host test dependencies (Pillow, numpy, Mono and SDL2)
         timeout-minutes: 8
         run: |
           python3 -m pip install --disable-pip-version-check pillow==12.3.0 numpy==2.5.3
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
-          sudo apt-get $APT update -qq
-          sudo apt-get $APT install -y --no-install-recommends mono-mcs mono-runtime libsdl2-dev
+          for try in 1 2; do
+            if sudo apt-get $APT -o APT::Update::Error-Mode=any update -qq &&
+               sudo apt-get $APT install -y --no-install-recommends mono-mcs mono-runtime libsdl2-dev; then
+              exit 0
+            fi
+            echo "::warning::package mirror problem (attempt $try of 2)"
+          done
+          exit 1
 
       - name: Fira Sans file (pinned download)
         run: |
