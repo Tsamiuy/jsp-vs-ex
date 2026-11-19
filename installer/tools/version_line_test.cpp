@@ -32,10 +32,25 @@ int main()
     CHECK(!top_menu(false, true, 0, 0, 4, 0) && !top_menu(true, false, 0, 0, 4, 0) && !top_menu(true, true, 3, 0, 4, 0));   // scene gone / stale
     for (int s = 1; s <= 5; s++) CHECK(!top_menu(true, true, 0, s, 4, 0));                                 // a sub-menu panel is up
     CHECK(!top_menu(true, true, 0, 0, -1, 0));                                                            // no flow object
-    for (int st = 0; st <= 9; st++) if (st != 4) CHECK(!top_menu(true, true, 0, 0, st, 0));              // request / leave / next scene
+    for (int st = 0; st <= 9; st++) if (st != 4 && st != 7) CHECK(!top_menu(true, true, 0, 0, st, 0));   // request / done / end / next scene
+    CHECK(top_menu(true, true, 0, 0, 7, 0));                                                              // top list again after a submenu
+    for (int st = -1; st <= 10; st++) CHECK(flow_running(st) == (st == 4 || st == 7));
     for (int m = 1; m <= 9; m++) CHECK(!top_menu(true, true, 0, 0, 4, m));
     CHECK(!top_menu(true, true, 0, -1, 2, 0) && !top_menu(true, true, 0, 0, 2, 0));                       // st=2 title -> menu transition
     CHECK(!top_menu(true, true, 0, 2, 6, 5) && !top_menu(true, true, 0, 3, 7, 5) && !top_menu(true, true, 0, 0, 7, 5)); // leaving into Options
+
+    {   // the flow object's state machine as decoded (jsp_version_line.h): request func_00154A3C, per-frame func_00154804 then func_00154E74
+        // (child not done while a menu is up). Route: title -> top list, Options (id 3, mode 5), Circle back (id 0, mode 0), Options again, back.
+        struct Flow { int st = 2, id = -1;
+            void request(int r) { if (st == 2) { st = 3; id = r; } else if (st >= 3 && st <= 9 && r != id) { st = 6; id = r; } }   // @0x00154A3C
+            void frame() { if (st == 6) st = 7; else if (st == 8) st = 9; else if (st == 3) st = 4; } } f;           // @0x00154804
+        auto up = [&](int mode) { return top_menu(true, true, 0, 0, f.st, mode); };
+        f.request(0); CHECK(!up(0)); f.frame(); CHECK(f.st == 4 && up(0));              // first top list: state 4 (measured)
+        for (int round = 0; round < 2; round++) {
+            f.request(3); CHECK(!up(5)); f.frame(); CHECK(f.st == 7 && !up(5));            // Options: mode 5 hides it
+            f.request(0); CHECK(f.st == 6 && !up(0)); f.frame(); CHECK(f.st == 7 && up(0));   // back on the top list: shown again
+        }
+    }
 
     // placement in the legend bar (geometry measured on a main-menu screenshot, see jsp_version_line.h). Advance widths at scale 1 from
     // menu_font.jmf: "J-Stars Victory VS-EX 0.1.0" 375.9375, "... 10.10.10" 424.875, "... 0.1.0-rc1" 432.125; a 24-char version of widest

@@ -866,7 +866,8 @@ void draw_page();
 bool g_joining = false;
 int g_join_next = 0;   // the player (1-4) the next press takes
 
-// Flow object S (@0x009535F0 -> +0x30 state) and the menu-mode global (0x0095653C +0x10 mode): the idle Main Menu is state 4 with mode 0.
+// Flow object S (@0x009535F0 -> +0x30 state) and the menu-mode global (0x0095653C +0x10 mode): the idle top list is state 4 (first time)
+// or 7 (after a submenu) with mode 0 (jpv::flow_running).
 constexpr uint32_t k_flow_ptr = 0x009535F0, k_mode_g = 0x0095653C;
 int flow_state() { const uint32_t s = vm_read32(k_flow_ptr); return s ? (int)vm_read32(s + 0x30) : -1; }
 
@@ -878,6 +879,14 @@ void ver_refresh()
     const bool alive = g_obj && g_obj_vt && vm_read32(g_obj) == g_obj_vt;
     const int fs = flow_state(), mode = (int)vm_read32(k_mode_g + 0x10);
     const bool vis = jpv::top_menu(alive, g_ver_seen, now - g_ver_flip, g_ver_state, fs, mode) && g_menu.page == jpm::CLOSED;
+    {   // every change of a rule input (not the flip count), so a run shows which one keeps the top list off
+        static int l_alive = -2, l_state = -2, l_fs = -2, l_mode = -2, l_lines = 0;   // at most 1000 lines per run (log size only)
+        if (((int)alive != l_alive || g_ver_state != l_state || fs != l_fs || mode != l_mode) && l_lines < 1000) {
+            l_lines++;
+            std::fprintf(stderr, "[version] inputs: alive %d, panel state %d, flow state %d, mode %d, page %d (flip %u)\n", (int)alive, g_ver_state, fs, mode, (int)g_menu.page, now);
+            l_alive = (int)alive; l_state = g_ver_state; l_fs = fs; l_mode = mode;
+        }
+    }
     if (g_net_watch) {   // the notice: re-read and re-armed each time the top list comes up, dropped after jpno::kNoticeMs
         const uint64_t t = mono_ms();
         if (vis && !g_ver_vis) {
@@ -889,6 +898,7 @@ void ver_refresh()
         if (nv != g_note_vis) {
             g_note_vis = nv;
             if (nv) std::fprintf(stderr, "[net] notice on the top menu: %s / %s\n", g_note.line1.c_str(), g_note.line2.c_str());
+            else std::fprintf(stderr, "[net] notice hidden after %llu ms (top list %s, flip %u)\n", (unsigned long long)(t - g_note_since), vis ? "up" : "gone", now);
             if (vis == g_ver_vis) { draw_page(); return; }   // only the notice changed
         }
     }
@@ -1074,6 +1084,7 @@ void on_build_options(ppu_context* c)
     if (g_obj != obj) std::fprintf(stderr, "[portmenu] main-menu object 0x%08X (was 0x%08X)\n", obj, g_obj);
     g_obj = obj; g_obj_vt = vm_read32(obj); g_dead_logged = false;
     g_ver_seen = false; g_ver_vis = false;   // a new menu object: the panel must be seen again before the line shows
+    if (top_items()) std::fprintf(stderr, "[version] menu object built 0x%08X (flip %u)\n", obj, (unsigned)cellGcm_flip_request_count());
     if (!port_menu_env()) return;            // the hook also runs for the version line alone
     if (jpm::six_rows(&total, &vis, &last)) {
         vm_write32(obj + k_cursor, (uint32_t)total); vm_write32(obj + k_cursor + 8, (uint32_t)vis); vm_write32(obj + k_cursor + 0x10, (uint32_t)last);
