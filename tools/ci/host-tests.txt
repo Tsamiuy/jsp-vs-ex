@@ -51,6 +51,7 @@ posix   | installer/tools/net_session_test.sh {scratch}
 posix   | installer/tools/net_session_driver_test.py
 posix   | installer/tools/stepper_test.sh
 posix   | installer/tools/snapshot_ring_test.sh
+posix   | installer/tools/mods_overlay_test.sh
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
 exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py
@@ -71,4 +72,5 @@ exclude | installer/tools/net_session_test.cpp | compiled by net_session_test.sh
 exclude | installer/tools/net_session_test.py | the two-process driver net_session_test.sh runs (its deadline handling: net_session_driver_test.py)
 exclude | installer/tools/stepper_test.cpp | compiled and run by stepper_test.sh
 exclude | installer/tools/snapshot_ring_test.cpp | compiled and run by snapshot_ring_test.sh
+exclude | installer/tools/mods_overlay_test.cpp | compiled and run by mods_overlay_test.sh
 exclude | docs/archive/jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner
