@@ -18,11 +18,13 @@ Each version starts with **For players**: a few plain lines about what changed i
 **Fixed**
 
 - **Build again** in the settings window now rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
+- The fan site's tables keep their words whole, and its menu is one straight list with no second row of buttons.
 
 ### Changed
 
 - Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; versions before 0.2.0 print their whole section. The technical entries stay as the full record; 0.2.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
 - CI: the host-tests job's package step gives up on a mirror request after 30 s without data (3 retries), treats a failed index update as an error, tries the apt part a second time and has its own 8-minute limit, so a mirror problem fails that step by name instead of leaving the tests without time.
+- Fan site (`tools/site/site.py`): the button row under the title is gone (the menu's sections cover those pages; the links no section has, the download page and the changelog, are a short Links list under the menu, the source stays in the footer, and `check_site.py` still finds every `data/nav.json` link on both pages); the menu scrolls inside itself when the window is shorter than it; the menu items no longer step to the right one by one; text breaks only where a word does not fit (`overflow-wrap: break-word` instead of `anywhere`, which split table words letter by letter), and table headings stay on one line.
 
 ### Added
 
