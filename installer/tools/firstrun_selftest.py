@@ -132,12 +132,23 @@ def units():
         __import__("shutil").copy2(pathlib.Path(firstrun.__file__).resolve().parents[1] / "port/jsp" / filename,
                                   root / "port" / filename)
     firstrun.verify_lod_hooks = lambda c: False
+    # the files each stub step leaves: the declared outputs of the real step, plus optional ones place copies when present
+    stub_out = {"lift": ("build/recompiled/ppu_recomp.h", "build/recompiled/ppu_recomp_000.cpp", "build/recompiled/ppu_recomp_001.cpp"),
+                "spu": ("build/spu/spu_workloads.c", "build/spu/job00/spu_recomp.c", "build/spu/job01/spu_recomp.c"),
+                "build": ("build/port/jsp.exe",),
+                "place": ("game/jsp.exe", "game/EBOOT.elf", "paths.txt", "game/ex_logo_A.rgba",
+                          *(f"game/{n}" for n in firstrun.PORT_MENU_ART), "game/avcodec-61.dll", "jsp-settings.exe")}
+    skip_out = set()   # files a stub step "forgets" to leave (a step that reports success without its output)
     for st in ("lift", "spu", "build", "place"):
         def fn(c, st=st):
             ran.append(st)
             if st == "build":
                 (c.build / "port").mkdir(parents=True, exist_ok=True)
                 (c.build / "port" / "CMakeCache.txt").write_text("x")
+            for rel in stub_out[st]:
+                if rel not in skip_out:
+                    (c.root / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (c.root / rel).write_text(st)
             return True
         setattr(firstrun, "step_" + st, fn)
     # main() looks the step functions up when it runs, so rebuild the dict by patching names it reads
@@ -185,6 +196,57 @@ def units():
     check("old plain marker is stale", ran == ["lift"] and "old plain marker" in out, str(ran))
     rc, out = go(extra=["--force", "spu"])
     check("--force redoes one step", ran == ["spu"], str(ran))
+    # a finished build whose files were removed afterwards (an antivirus, a clean-up tool): the step that leaves the file runs again,
+    # only that one, and the log names the file; the launcher's "game program is missing, run Build again" must not loop
+    rc, out = go()
+    check("outputs: a finished build skips every step", rc == 0 and ran == [], str(ran))
+    for st, files in stub_out.items():
+        for rel in files:
+            (root / rel).unlink()
+            rc, out = go()
+            check(f"outputs: {rel} removed: only {st} reruns and the log names the file", rc == 0 and ran == [st]
+                  and f"[{st}] running: output missing: {rel}" in out, str(ran))
+            rc, out = go()
+            check(f"outputs: {rel} back: nothing reruns", rc == 0 and ran == [] and (root / rel).is_file(), str(ran))
+    (root / "game/other.dll").write_text("x")   # a DLL place does not copy: not one of its outputs, removing it reruns nothing
+    rc, out = go(extra=["--force", "place"])
+    (root / "game/other.dll").unlink()
+    rc, out = go()
+    check("outputs: a DLL place does not copy is not listed", rc == 0 and ran == [], str(ran))
+    for d, st in (("build/recompiled", "lift"), ("build/spu", "spu"), ("game", "place")):
+        __import__("shutil").rmtree(root / d)
+        rc, out = go()
+        check(f"outputs: {d}/ removed: only {st} reruns", rc == 0 and ran == [st] and "output missing" in out, str(ran))
+    # a marker written before outputs were listed: the required files still count, nothing reruns while they are there
+    import json
+    mk = root / "build/markers/place.done"
+    fp = json.loads(mk.read_text()[len(firstrun.MARKER_TAG):])
+    fp.pop(firstrun.OUTPUTS_KEY)
+    mk.write_text(firstrun.MARKER_TAG + json.dumps(fp) + "\n")
+    rc, out = go()
+    check("outputs: marker without a file list, files there: skipped", rc == 0 and ran == [], str(ran))
+    mk.write_text(firstrun.MARKER_TAG + json.dumps(fp) + "\n")
+    (root / "game/jsp.exe").unlink()
+    rc, out = go()
+    check("outputs: marker without a file list, game/jsp.exe removed: place reruns", ran == ["place"] and "output missing: game/jsp.exe" in out, str(ran))
+    # a step that says it worked but left no exe fails at once instead of running again on every start
+    (root / "build/port/jsp.exe").unlink()
+    skip_out.add("build/port/jsp.exe")
+    rc, out = go()
+    check("outputs: a step that leaves no output fails and names the file", rc == 1 and ran == ["build"]
+          and "finished without build/port/jsp.exe" in out and "RESULT: failed, step build" in out, str(ran))
+    skip_out.clear()
+    rc, out = go()
+    check("outputs: the next run redoes it", rc == 0 and ran == ["build"], str(ran))
+    # the settings window's source is an input of place: an update that changes it rebuilds the window
+    (root / "tools" / "jsp-settings.cs").write_text("class A {}")
+    rc, out = go()
+    check("settings source added: only place reruns", ran == ["place"] and "input changed: settings_source" in out, str(ran))
+    (root / "tools" / "jsp-settings.cs").write_text("class B {}")
+    rc, out = go()
+    check("settings source changed: only place reruns", ran == ["place"] and "input changed: settings_source" in out, str(ran))
+    rc, out = go()
+    check("settings source unchanged: nothing reruns", ran == [], str(ran))
     # moved install folder
     moved = tmp / "moved"
     __import__("shutil").copytree(root, moved)

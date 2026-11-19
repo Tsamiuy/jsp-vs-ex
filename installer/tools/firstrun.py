@@ -9,8 +9,9 @@ llvm-mingw with CMake and Ninja (toolchain/, hash-pinned in installer/tools/tool
     python firstrun.py --root APP --disc DISC_FOLDER --eboot EBOOT.elf [--devflash DIR] --hdd0 DIR [--log FILE | --logdir DIR]
                        [--until checks|lift|spu|build|all] [--toolchain DIR] [--jobs N] [--force STEP]
 
-Steps (each leaves build/markers/<step>.done holding a fingerprint of its inputs; a re-run skips a finished step whose inputs are
-unchanged and says which input changed otherwise; a marker in the old plain format counts as stale):
+Steps (each leaves build/markers/<step>.done holding a fingerprint of its inputs and the list of files it left; a re-run skips a
+finished step whose inputs are unchanged and whose files are all still there, and says which input changed or which file is missing
+otherwise; a marker in the old plain format counts as stale):
   checks  preflight, one line per check: "OK code ...", "WARN code ..." or "FAIL code ..." (codes in PREFLIGHT below)
   lift    PPU: ppu_loader.py, ppu_lifter.py  -> build/analysis, build/recompiled   (the SETUP.md pipeline; the v18 tree adds find_functions.py)
   spu     the 18 JOBCRT jobs embedded in the EBOOT -> build/spu (lift_jobs.py: scan, wrap, lift, spu_workloads.c)
@@ -70,6 +71,7 @@ CODE_END = PROFILE["code_end"]
 EXE = PROFILE["exe"]
 TOC = "0x8d3888"          # r2 of the lifted code (both regions); the v18 lifter takes it as --toc
 INSN_PATCHES = "lift_insn_patches.json"   # in the port folder: instruction patches the v0.19 lifter emits behind a switch (US 1.00 code only)
+FFMPEG_DLL_FAMILIES = ("avcodec", "avutil", "swresample")   # the movie decoder DLLs place copies (ffmpeg_dll_names)
 PORT_MENU_ART = ("menu_training_off.rgba", "menu_training_on.rgba", "menu_port_settings_off.rgba", "menu_port_settings_on.rgba", "menu_font.jmf")
 TREE_EXE = {"v18": "jsp.exe"}   # the only tree; the v15 tree (exe EXE) is no longer built, see tag legacy-v15
 # ======================================================================================================================
@@ -488,6 +490,7 @@ def digest(d):
 
 
 MARKER_TAG = "fp1 "     # a marker is "fp1 " + JSON of the step's inputs; anything else is an old plain marker and counts as stale
+OUTPUTS_KEY = "_outputs"   # in the marker's JSON: the files the step left (paths relative to the install folder), not an input
 
 
 def payload_tree(root):
@@ -542,8 +545,34 @@ class Ctx:
                     "toolkit": self.cached("toolkit", lambda: tree_hash(self.root / "ps3recomp")),
                     "toolchain": self.cached("tc", self.toolchain_id), "install_folder": str(self.root).lower(),
                     "ffmpeg": self.cached("ffmpeg", lambda: tree_hash(self.root / "ffmpeg") if (self.root / "ffmpeg").is_dir() else "")}
+        cs = self.root / "tools" / "jsp-settings.cs"   # the settings window place builds: a changed source rebuilds it
         return {"build": digest(self.inputs("build")), "disc": str(self.a.disc), "hdd0": str(self.a.hdd0), "devflash": str(self.a.devflash),
-                "rpcs3": str(getattr(self.a, "rpcs3", ""))}
+                "rpcs3": str(getattr(self.a, "rpcs3", "")), "settings_source": sha(cs) if cs.is_file() else "absent"}
+
+    def outputs(self, step):
+        """(required, optional) glob patterns, relative to the install folder, of the files a finished step leaves. Each required
+        pattern must match a file; every file either kind matched when the step finished is listed in its marker and must still be
+        there (an antivirus or a clean-up tool can remove game/jsp.exe or the lifted sources after a build)."""
+        if step == "lift":
+            return ["build/recompiled/ppu_recomp.h", "build/recompiled/ppu_recomp_*.cpp"], []
+        if step == "spu":
+            return ["build/spu/spu_workloads.c", "build/spu/*/spu_recomp.c"], []
+        if step == "build":
+            return [f"build/port/{self.exe}"], []
+        return ([f"game/{self.exe}", "game/EBOOT.elf", "paths.txt"],
+                ["game/ex_logo_A.rgba", *(f"game/{n}" for n in PORT_MENU_ART),
+                 *(f"game/{d}-*.dll" for d in FFMPEG_DLL_FAMILIES), "jsp-settings.exe"])
+
+    def output_files(self, step):
+        """The files the step's patterns match now, sorted, relative to the install folder with '/'."""
+        req, opt = self.outputs(step)
+        return sorted({f.relative_to(self.root).as_posix() for pat in req + opt for f in self.root.glob(pat) if f.is_file()})
+
+    def missing_outputs(self, step, listed=None):
+        """The required patterns that match no file, then the listed files (from the marker) that are gone."""
+        req, _ = self.outputs(step)
+        miss = [pat for pat in req if not any(f.is_file() for f in self.root.glob(pat))]
+        return miss + [f for f in (listed or []) if f not in miss and not (self.root / f).is_file()]
 
     def marker(self, step):
         return self.build / "markers" / f"{step}.done"
@@ -562,10 +591,14 @@ class Ctx:
             old = json.loads(t[len(MARKER_TAG):])
         except ValueError:
             return "unreadable marker"
+        listed = old.pop(OUTPUTS_KEY, None)   # absent in a marker written before outputs were listed: the required patterns still count
         new = self.inputs(step)
         diff = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
         if diff:
             return "input changed: " + ", ".join(diff)
+        miss = self.missing_outputs(step, listed if isinstance(listed, list) else None)
+        if miss:
+            return "output missing: " + ", ".join(miss[:5]) + (f" and {len(miss) - 5} more" if len(miss) > 5 else "")
         if step == "lift":
             try:
                 verify_lod_hooks(self)
@@ -575,7 +608,7 @@ class Ctx:
 
     def mark(self, step):
         self.marker(step).parent.mkdir(parents=True, exist_ok=True)
-        self.marker(step).write_text(MARKER_TAG + json.dumps(self.inputs(step), sort_keys=True) + "\n")
+        self.marker(step).write_text(MARKER_TAG + json.dumps({**self.inputs(step), OUTPUTS_KEY: self.output_files(step)}, sort_keys=True) + "\n")
 
 
 def reset_if_moved(c):
@@ -1067,6 +1100,11 @@ def main(argv=None, ask=input):
             # the objects the last build left (the portable zip dates every file 1980-01-01), so ninja would keep the old code.
             shutil.rmtree(c.build / "port", ignore_errors=True)
         if not fns[s](c):
+            say(f"RESULT: failed, step {s} stopped; see {c.build}")
+            return 1
+        miss = c.missing_outputs(s)   # a step that reports success without its files would otherwise run again on every start
+        if miss:
+            say(f"[{s}] finished without {', '.join(miss)}")
             say(f"RESULT: failed, step {s} stopped; see {c.build}")
             return 1
         c.mark(s)
