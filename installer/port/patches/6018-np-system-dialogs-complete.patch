@@ -9,10 +9,16 @@ cellSysutilCheckCallback, as if the player had backed out: the basic handler get
 (SEND_INVITATION_RESULT 13, SEND_MESSAGE_RESULT 12, RECV_INVITATION_RESULT 14, RECV_CUSTOM_DATA_RESULT 20, ...) with retCode
 SCE_NP_BASIC_ERROR_CANCEL, and the profile handler gets SCE_NP_PROFILE_ERROR_CANCEL. Calls without NP, without a registered handler
 or with bad arguments return the error and queue nothing. sceNpBasicRegisterContextSensitiveHandler now stores its handler (J-Stars
-registers only that one), and sceNpBasicAddPlayersHistoryAsync reports ADD_PLAYERS_HISTORY_RESULT (retCode 0) with a fresh request id,
-which J-Stars also waits for. ASSUMPTION: a dialog backed out of reports CANCEL and the handler runs from cellSysutilCheckCallback;
-J-Stars only tests retCode against 0 and ignores the profile result. Event and error numbers of the SDK (as listed in RPCS3's
-sceNp.h, read for the numbers only). Test: libs/network/tests/test_np_basic_dialogs.c (installer/tools/np_dialogs_test.sh).
+registers only that one). sceNpBasicAddPlayersHistoryAsync, which J-Stars calls, now also reports ADD_PLAYERS_HISTORY_RESULT (retCode 0)
+with a fresh request id, for completeness: J-Stars sets a busy bit after the call and clears it when that event arrives, and one of its
+functions can poll the bit, but that a menu waits on it is not shown (that function is reached only through the function table).
+ASSUMPTION: a dialog backed out of reports CANCEL and the handler runs from cellSysutilCheckCallback.
+What J-Stars does with the CANCEL it now always gets (read from the binary, not run): SEND_INVITATION_RESULT (13) stores 0 in a result word (1 on
+success) and clears its dialog flag; RECV_INVITATION_RESULT (14) with retCode != 0, which is every completion this patch gives, also clears bit
+0x100 of a word of a global game object (@0x00453B10..0x00453B38) before it clears its dialog flag (what that bit stands for is not
+known: RISK for the first run, see that the menu and any received-invitation state are right after the invitation list closes); the
+profile result is ignored. Event and error numbers of the SDK (as listed in RPCS3's sceNp.h, read for the numbers only).
+Test: libs/network/tests/test_np_basic_dialogs.c (installer/tools/np_dialogs_test.sh).
 
 diff --git a/libs/network/sceNpBasic.c b/libs/network/sceNpBasic.c
 index 301c40f..ea50e85 100644
@@ -111,10 +117,10 @@ index 301c40f..ea50e85 100644
 -/* Players met online, and the context-sensitive (XMB) handler: nothing is
 - * recorded, the history is empty, the handler is accepted and never fires. */
 +/* Players met online: nothing is recorded and the history is empty. The add
-+ * still completes: ADD_PLAYERS_HISTORY_RESULT (retCode 0, as the call's own
-+ * CELL_OK says) goes to the basic handler. J-Stars marks the add busy after the
-+ * call (@0x00456DD4) and only that event clears it (@0x00453B58); its net step
-+ * func_00471C50 waits on the flag (@0x00471D48). */
++ * still completes, for completeness: ADD_PLAYERS_HISTORY_RESULT (retCode 0, as
++ * the call's CELL_OK says) goes to the basic handler. J-Stars sets a busy bit after
++ * the call (@0x00456DD4) that this event clears (@0x00453B58) and 0x00471C50 can
++ * poll (@0x00471D48); that a menu waits on that poll is not shown. */
  s32 sceNpBasicGetPlayersHistoryEntryCount(u32 options, u32* count)
  {
      (void)options;
@@ -151,8 +157,8 @@ index 301c40f..ea50e85 100644
 + * J-Stars stayed on "Communicating..." after Invite or a profile.
 + * ASSUMPTION: a dialog the player backs out of ends with the result event
 + * carrying SCE_NP_BASIC_ERROR_CANCEL (the profile dialog: its handler gets
-+ * SCE_NP_PROFILE_ERROR_CANCEL). J-Stars only tests retCode against 0
-+ * (@0x00453AE4, @0x00453B10) and ignores the profile result (@0x00454870).
++ * SCE_NP_PROFILE_ERROR_CANCEL). J-Stars tests retCode against 0 (@0x00453AE4,
++ * @0x00453B10: != 0 also clears bit 0x100 of a global's word) and ignores the profile result (@0x00454870).
 + * -----------------------------------------------------------------------*/
 +
 +/* (const SceNpBasicMessageDetails* msg, sys_memory_container_t containerId).
