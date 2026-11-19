@@ -133,17 +133,18 @@ def main():
         w(app3 / "VERSION.txt", "0.5.1-test\n")
         w(ad3 / sb.APPDIR / "play_settings.txt", "JSP_ROLLBACK=1\nJSP_ROLLBACK_VIA=repsn\nJSP_ROLLBACK_ROLE=host\nJSP_ROLLBACK_RELAY=1  # relay\n")
         w(ad3 / "PS3Recomp/repsn.ini", f"[repsn]\nenabled = 0\nserver = {srv}:36100\nname = {nm}\n")
-        head = ("[net] env decision: rollback go (static constructors arrived: online first, net last)\n"
+        head = ("[net] env decision: rollback start (static constructors arrived: EnvInit first, online boot last)\n"
                 f"[net] re-psn: creating a room on {srv}:36100 as {nm} (relay allowed), local UDP port 3659\n"
                 "[net] rollback opt-in: host, build 1a2b3c4d, hooks installed\n"
                 f"[net] rendezvous: {peer}:3659 via re-psn, path relay, room 7\n"
                 "[net] re-psn path: relay\n[net] gekko session synchronized\n")
         ticks = "".join(f"[net] commit tick={i} hash=0000abcd raw=0000abcd\n" for i in range(12000))
-        tail = ("[net] rollback to tick=5 (x)\n[net] rollback to tick=9 (x)\n[net] rollback to tick=11 (x)\n"
-                "[net] DESYNC at tick 40 (stepper tick numbering, session-relative; add the base 3): local=1 remote=2\n"
-                "[net] ended: the other player left\nloopback 127.0.0.1:36100 stays\n")
+        rb = "[net] rollback to tick={} (longest game-thread stretch without a session call since the last rollback: 4 ms, keepalive polls so far: 0)\n"
+        tail = (rb.format(5) + rb.format(9) + rb.format(11) +
+                "[net] DESYNC at tick 40 (stepper tick numbering, session-relative; add the base 3): local=00000001 remote=00000002\n"
+                "[net] ended: Opponent disconnected\nloopback 127.0.0.1:36100 stays\n")
         w(app3 / "game/run/play_stderr.txt", head + ticks + tail)
-        w(app3 / "game/run/play_stderr.prev.txt", "[net] env decision: refused\n[net] REFUSED: JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs\n")
+        w(app3 / "game/run/play_stderr.prev.txt", "[net] env decision: REFUSED (static constructors arrived: online boot first, EnvInit last)\n[net] REFUSED: JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs\n")
         w(app3 / "game/run/play_stdout.txt", f"[online] re-psn enabled: server {srv}:36100\n[online] online id {nm}\n[D3D12] adapter: Test GPU (VRAM 8 MB)\n")
         zp3 = sb.make(app3, out, ad3, None, cap=200000)
         z3 = zipfile.ZipFile(zp3)
@@ -157,25 +158,74 @@ def main():
         check("mode: Rollback re-psn host, relay allowed: yes" in f3, "net facts: the mode from play_settings.txt")
         check("re-psn server: set   online name: set   rollback join address: not set" in f3, "net facts: server and name only as set / not set")
         check("rollback started: yes (host)" in f3 and "path: relay" in f3 and "session synchronized: yes" in f3, "net facts: started, path, synchronized survive the cut")
-        check("rollbacks: 3   desync lines: 1" in f3 and "session ended: the other player left" in f3, "net facts: rollback and desync counts, the end reason")
-        check("env decision: rollback go" in f3 and "[net] rollback opt-in: host, build 1a2b3c4d" in f3 and "commit tick=" not in f3, "net facts: key lines kept, per-tick lines left out")
+        check("rollbacks: 3   desync lines: 1" in f3 and "session ended: Opponent disconnected" in f3, "net facts: rollback and desync counts, the end reason")
+        check("env decision: rollback start (static constructors arrived: EnvInit first, online boot last)" in f3 and "[net] rollback opt-in: host, build 1a2b3c4d" in f3 and "commit tick=" not in f3, "net facts: key lines kept, per-tick lines left out")
         prev = f3.split("play_stderr.prev.txt (the launch before):")[1]
         check("refused: JSP_ROLLBACK=1 and the game's own online" in prev and "rollback started: no" in prev, "net facts: the previous launch's refusal and its reason")
         for bad in (srv, nm, peer):
             check(bad not in all3, f"net: {bad!r} appears nowhere in the zip")
-        check("<server>" in all3 and "<online name>" in all3 and "<IPv4>:3659" in all3 and "127.0.0.1:36100 stays" in all3, "net: placeholders in the files, loopback kept")
+        check("<server>" in all3 and "<online name>" in all3 and "[net] rendezvous: <peer address> via re-psn, path relay, room 7" in f3 and "127.0.0.1:36100 stays" in all3, "net: placeholders in the files, loopback kept")
         S = lambda play, ini=None: "\n".join(sb.net_mode({"play": play, "ini": ini or {}, "read": []}))
         check("mode: Off" in S({}), "net mode: nothing set is Off")
         dj = S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_JOIN": "198.51.100.4:7000"})
         check("mode: Rollback direct join" in dj and "join address: set" in dj and "198.51.100.4" not in dj, "net mode: direct join, address only as set")
         check("mode: Rollback direct host" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: direct host")
-        check("mode: Rollback direct (not exactly one" in S({"JSP_ROLLBACK": "1"}), "net mode: no role key is refused")
+        check("mode: Rollback direct refused: not exactly one" in S({"JSP_ROLLBACK": "1"}), "net mode: no role key is refused")
         check("mode: Off" in S({"JSP_ROLLBACK": "0", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: JSP_ROLLBACK=0 is off")
         rep_on = {"repsn": {"enabled": "1", "server": "x.example:1", "name": "abc"}}
         check("mode: Delay (re-psn)" in S({}, rep_on), "net mode: Delay over re-psn")
         check("both enabled" in S({}, {**rep_on, "community": {"enabled": "1"}}), "net mode: re-psn and community both on")
-        check("mode: Delay (community" in S({}, {"community": {"enabled": "1"}}), "net mode: Delay over a community server")
-        check("the game refuses both" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}, rep_on), "net mode: rollback and Delay both on are refused")
+        check("mode: Off (community server enabled: no client yet" in S({}, {"community": {"enabled": "1"}}), "net mode: a community server keeps the game offline")
+        check("mode: Rollback refused: PS3_NET_ONLINE is set too" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}, rep_on), "net mode: rollback and Delay both on are refused")
+        # jsp_online.cpp: PSNR_SERVER in the environment wins over the files and does not set PS3_NET_ONLINE; resolve_env refuses only on PS3_NET_ONLINE
+        ps = S({"PSNR_SERVER": "h.example:36100"}, rep_on)
+        check("mode: Off: PSNR_SERVER is set in play_settings.txt without PS3_NET_ONLINE" in ps, "net mode: PSNR_SERVER alone is no Delay (and the files are not used)")
+        check("mode: Rollback direct host" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000", "PSNR_SERVER": "h.example"}, rep_on),
+              "net mode: rollback with PSNR_SERVER but no PS3_NET_ONLINE starts (the files were not used)")
+        check("mode: Delay (re-psn, server from PSNR_SERVER" in S({"PSNR_SERVER": "h.example", "PS3_NET_ONLINE": "1"}), "net mode: both variables by hand are Delay")
+        check("mode: Rollback refused: PS3_NET_ONLINE" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000", "PS3_NET_ONLINE": "0"}), "net mode: PS3_NET_ONLINE refuses rollback at any value")
+        check("mode: Rollback direct refused: JSP_ROLLBACK_JOIN is not IP:PORT" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_JOIN": "h.example:7000"}), "net mode: the join address must be IP:PORT")
+        check("mode: Rollback re-psn refused: JSP_ROLLBACK_ROLE" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "RePSN"}), "net mode: re-psn needs a role")
+        check("mode: Off (re-psn enabled but no valid server" in S({}, {"repsn": {"enabled": "1"}}), "net mode: re-psn without a server stays offline")
+
+        # play_settings.txt as the launcher reads it: '#' only at the start of a line, @APP@, PS3RECOMP_SHARED_DIR from the file wins
+        app5, ad5, env_sd = t / "app5", t / "appdata5", t / "env_shared"
+        w(app5 / "play_settings.txt", "# c\n;c\nPS3RECOMP_SHARED_DIR=@APP@/myshared  \nJSP_ROLLBACK=1\nJSP_ROLLBACK_LISTEN=7000\nX=a#b\n")
+        w(app5 / "myshared/repsn.ini", "[repsn]\nenabled=1\nserver=file.example\nname=zed99\n")
+        w(env_sd / "repsn.ini", "[repsn]\nenabled=0\n")
+        ns5 = sb.net_settings(app5, ad5, env={"PS3RECOMP_SHARED_DIR": str(env_sd)})
+        check(ns5["play"].get("X") == "a#b" and "# c" not in ns5["play"], "settings: a '#' inside a value stays, as the launcher passes it")
+        check("repsn.ini (shared folder)" in ns5["read"] and ns5["ini"]["repsn"]["server"] == "file.example:36100",
+              "settings: PS3RECOMP_SHARED_DIR from play_settings.txt (with @APP@) wins over the process environment")
+        check("mode: Rollback refused: PS3_NET_ONLINE is set too" in "\n".join(sb.net_mode(ns5)), "net mode: the shared folder named in play_settings.txt decides")
+        ns6 = sb.net_settings(app5, ad5, env={})
+        check(ns6["ini"]["repsn"]["enabled"] == "1", "settings: without the variable in the environment the file's folder is used too")
+
+        # an online name that is a word of the [net] lines: the summary comes from the raw lines and never prints the name
+        for word in ("net", "host", "relay"):
+            app4 = t / f"app4{word}"
+            w(app4 / "VERSION.txt", "0.5.1-test\n")
+            w(app4 / "play_settings.txt", "JSP_ROLLBACK=1\nJSP_ROLLBACK_VIA=repsn\nJSP_ROLLBACK_ROLE=host\nJSP_ROLLBACK_RELAY=1\n")
+            w(app4 / "settings_here.txt", "")
+            w(app4 / "shared/repsn.ini", f"[repsn]\nenabled=0\nserver=srv.example\nname={word}\n")
+            w(app4 / "game/run/play_stderr.txt", head.replace(srv + ":36100", "srv.example:36100").replace(nm, word) + tail +
+              f"[net] rendezvous failed: {word} said no\n")
+            ns4 = sb.net_settings(app4, None, env={"PS3RECOMP_SHARED_DIR": str(app4 / "shared")})
+            sec4 = sb.net_secrets(ns4)
+            check(sec4.get(word) == "<online name>", f"name {word!r}: is a secret")
+            raw4 = {"game/run/play_stderr.txt": (app4 / "game/run/play_stderr.txt").read_text()}
+            mode4, logs4 = "\n".join(sb.net_mode(ns4)), "\n".join(sb.net_log_lines(raw4, sec4))
+            check("mode: Rollback re-psn host, relay allowed: yes" in mode4, f"name {word!r}: the mode line is intact")
+            check("rollback started: yes (host)" in logs4 and "path: relay" in logs4 and "session synchronized: yes" in logs4
+                  and "rollbacks: 3   desync lines: 1" in logs4 and "session ended: Opponent disconnected" in logs4, f"name {word!r}: the summary is intact")
+            check("[net] rollback opt-in: host, build 1a2b3c4d, hooks installed" in logs4 and "[net] re-psn path: relay" in logs4
+                  and "[net] re-psn: creating a room on <server> as <online name> (relay allowed)" in logs4, f"name {word!r}: the key lines are intact")
+            check("[net] rendezvous failed: <online name> said no" in logs4 and "srv.example" not in logs4, f"name {word!r}: an unknown line still loses the name")
+            f4 = sb.facts(app4, {}, [], 0, [], ["facts.txt"], {"mode": sb.net_mode(ns4), "logs": sb.net_log_lines(raw4, sec4), "secrets": sec4})
+            check("Netcode in the logs" in f4 and "rollback started: yes (host)" in f4 and "path: relay" in f4 and "\n\nfiles in this zip:" in f4,
+                  f"name {word!r}: facts.txt keeps the section's words")
+            sc4 = sb.net_scrub(f"[net] re-psn: creating a room on srv.example:36100 as {word} (relay allowed), local UDP port 1\n[online] x\n", sec4)
+            check(sc4.startswith("[net] ") and "[online] x" in sc4 and "srv.example" not in sc4, f"name {word!r}: file scrub keeps the log tags")
         check(sb.net_log_lines({"a.log": b"x\n"})[0].startswith("  not in the logs"), "net logs: no [net] lines says not in the logs")
         sc = sb.net_scrub("server = h.example:1\nJSP_ROLLBACK_JOIN=198.51.100.4:7000\nname=abc # c\nSDK 10.0.19041.0\n")
         check("h.example" not in sc and "198.51.100.4" not in sc and "abc" not in sc and "10.0.19041.0" in sc, "net scrub: key lines without the settings, version numbers kept")

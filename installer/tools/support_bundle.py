@@ -13,9 +13,9 @@ What goes in (text only: .log .txt .ini .cmd), every file through firstrun.scrub
   %APPDATA%\\JSP Fan Revival, and the newest two Inno Setup logs in %TEMP% that mention this app. Plus facts.txt.
 facts.txt: version, Windows, CPU count and model, AVX2, RAM, free space, the game exe, step markers, the GPU (from the game's log) and
 each display adapter's driver version (read from the registry, never changed), and each display (monitor name, size, refresh rate, which one
-the game window is on when the game is running; no serial numbers), and a Netcode section: the mode the settings files choose (Off, Delay over
-re-psn or a community server, Rollback direct or over re-psn with host / join and the relay choice; server, join address and online name
-only as "set" / "not set") and, per launch, what the game's [net] lines say (rollback started, refused and why, path, session synchronized,
+the game window is on when the game is running; no serial numbers), and a Netcode section: the mode the settings files choose, decided as the
+game decides it (Off, Delay over re-psn, Rollback direct or over re-psn with host / join and the relay choice, or the refusal and why; server,
+join address and online name only as "set" / "not set") and, per launch, what the game's [net] lines say (rollback started, refused and why, path, session synchronized,
 rollback and desync counts, the key lines), read before the size cap cuts anything.
 What never goes in: the EBOOT, disc files, saves (hdd0, .sav), lift output (.c/.h), shader caches, binaries, environment dumps.
 A total cap (CAP_BYTES, uncompressed) applies: over it, the oldest lines of the largest logs go first and facts.txt says what was cut
@@ -122,10 +122,14 @@ def collect(app, appdata=None, temp=None):
     return entries, refused, not_text
 
 
+def read_raw(path):
+    """File text through firstrun.scrub (the profile folder) only: the netcode summary reads this, never the zip."""
+    return firstrun.scrub(pathlib.Path(path).read_bytes().decode("utf-8", "replace"))
+
+
 def read_scrubbed(path, secrets=None):
     """File text through firstrun.scrub (the profile folder) and net_scrub (server and join addresses, online names), as UTF-8 bytes."""
-    t = pathlib.Path(path).read_bytes().decode("utf-8", "replace")
-    return net_scrub(firstrun.scrub(t), secrets).encode("utf-8")
+    return net_scrub(read_raw(path), secrets).encode("utf-8")
 
 
 def cut_oldest(data, drop):
@@ -406,23 +410,47 @@ NET_LOG_ORDER = ("game/run/play_stderr.txt", "game/run/play_stderr.prev.txt")   
 NET_KEY_LINES = 30
 
 
-def read_kv(path):
-    """KEY=VALUE lines of a settings file (play_settings.txt: '#' starts a comment, the last line of a key wins, as the launcher reads it)."""
+def read_kv(path, app=None):
+    """KEY=VALUE lines of play_settings.txt exactly as jsp-launcher.exe's load_env (installer/launcher/launcher.c) turns them into the game's
+    environment: a line starting with '#' or ';' or without '=' is skipped, the key is the text before the first '=' as it stands, trailing
+    CR, LF and spaces leave the value, a value starting with @APP@ gets the install folder instead of the token, the last line of a key wins."""
     out = {}
     try:
         text = pathlib.Path(path).read_bytes()[:1000000].decode("utf-8", "replace")
     except OSError:
         return out
-    for line in text.splitlines():
-        line = line.split("#", 1)[0]
+    for line in text.split("\n"):
         k, eq, v = line.partition("=")
-        if eq and k.strip():
-            out[k.strip()] = v.strip()
+        if not eq or line[:1] in ("#", ";") or not k:
+            continue
+        v = v.rstrip("\r\n ")
+        if app is not None and v.startswith("@APP@"):
+            v = str(app) + v[5:]
+        out[k] = v
     return out
 
 
-def read_online_ini(path, into):
-    """repsn.ini / community.ini sections into `into` ({section lower: {key lower: value}}), later files winning per key, as jsp_online.cpp reads them."""
+def _valid_hostport(s):   # jsp_online.cpp valid_hostport: host[:port], port 1..65535, host of letters, digits, '.', '-', '_'
+    host, c, port = s.partition(":")
+    if c and not (port.isascii() and port.isdigit() and len(port) <= 5 and 1 <= int(port) <= 65535):
+        return False
+    return 0 < len(host) <= 253 and all(ch.isascii() and (ch.isalnum() or ch in ".-_") for ch in host)
+
+
+def _valid_name(n):       # jsp_online.cpp valid_name: 3-16 of A-Za-z0-9_- starting with a letter
+    return 3 <= len(n) <= 16 and n.isascii() and n[0].isalpha() and all(ch.isalnum() or ch in "_-" for ch in n)
+
+
+# the keys jsp_online.cpp's parse() takes per section kind, with its checks (a line that fails one is rejected: the earlier value stays)
+_INI_KEYS = {"repsn": {"enabled": lambda v: v in ("0", "1"), "server": _valid_hostport, "name": _valid_name},
+             "community": {"enabled": lambda v: v in ("0", "1"), "active": lambda v: True},
+             "preset": {"address": _valid_hostport, "name": _valid_name}}
+
+
+def read_online_ini(path, into, kind, raw=None):
+    """repsn.ini (kind 'repsn') / community.ini (kind 'community') into `into` ({section lower: {key lower: value}}) as jsp_online.cpp's parse()
+    reads them: only the sections of that file kind, only the keys it knows with valid values (later files win per key). `raw` gets every
+    key=value of every section, valid or not (the values net_secrets() must keep out of the zip)."""
     try:
         text = pathlib.Path(path).read_bytes()[:65536].decode("utf-8", "replace")
     except OSError:
@@ -433,31 +461,42 @@ def read_online_ini(path, into):
         if not line or line[0] in ";#":
             continue
         if line.startswith("[") and line.endswith("]"):
-            sec = line[1:-1].strip().lower()
+            sec = line[1:-1].strip()
             continue
         k, eq, v = line.partition("=")
-        if eq and sec:
-            into.setdefault(sec, {})[k.strip().lower()] = v.strip()
+        if not eq or not sec:
+            continue
+        k, v, ls = k.strip().lower(), v.strip(), sec.lower()
+        if raw is not None:
+            raw.setdefault(ls, {})[k] = v
+        group = ls if ls == kind else "preset" if kind == "community" and ls.startswith("preset ") else None
+        check = _INI_KEYS.get(group or "", {}).get(k)
+        if check is not None and check(v):
+            into.setdefault(ls if group != "preset" else "preset " + sec[7:].strip(), {})[k] = \
+                (v + ":36100" if ":" not in v else v) if k in ("server", "address") else v   # with_port()
     return True
 
 
 def net_settings(app, appdata=None, env=None):
-    """The files the game and the launcher read for the netcode: {'play': {...}, 'ini': {section: {...}}, 'read': [where each was found]}.
-    Same places as the launcher (InstalledSettingsFile, OnlineIni.SharedDir) and jsp_online.cpp (shared folder first, then the game's own repsn.ini)."""
+    """The files the game and the launcher read for the netcode: {'play': {...}, 'ini': {section: {...}}, 'ini_raw': {...}, 'read': [where
+    each was found]}. Same places as the launcher (InstalledSettingsFile, OnlineIni.SharedDir) and jsp_online.cpp (shared folder first, then
+    the game's own repsn.ini). PS3RECOMP_SHARED_DIR: a play_settings.txt line wins (the launcher sets it for the game), else this process's."""
     app = pathlib.Path(app)
     env = os.environ if env is None else env
     portable = firstrun.is_portable(app)
     local = app / "play_settings.txt"
     user = pathlib.Path(appdata) / APPDIR if appdata else None
     play = local if (portable or local.is_file() or (app / "settings_here.txt").is_file() or user is None) else user / "play_settings.txt"
-    shared = pathlib.Path(env["PS3RECOMP_SHARED_DIR"]) if env.get("PS3RECOMP_SHARED_DIR") else \
-        app / "shared" if portable else pathlib.Path(appdata) / "PS3Recomp" if appdata else None
+    kv = read_kv(play, app) if play.is_file() else {}
+    sd = kv["PS3RECOMP_SHARED_DIR"] if "PS3RECOMP_SHARED_DIR" in kv else env.get("PS3RECOMP_SHARED_DIR")
+    shared = pathlib.Path(sd) if sd else app / "shared" if portable else pathlib.Path(appdata) / "PS3Recomp" if appdata else None
     game_dir = app if portable or user is None else user
-    s = {"play": read_kv(play) if play.is_file() else {}, "ini": {}, "read": []}
+    s = {"play": kv, "ini": {}, "ini_raw": {}, "read": []}
     if play.is_file():
         s["read"].append("play_settings.txt (" + ("install folder" if play == local else "user data folder") + ")")
-    for d, n, where in ((shared, "repsn.ini", "shared folder"), (shared, "community.ini", "shared folder"), (game_dir, "repsn.ini", "game folder")):
-        if d is not None and read_online_ini(d / n, s["ini"]):
+    for d, n, kind, where in ((shared, "repsn.ini", "repsn", "shared folder"), (shared, "community.ini", "community", "shared folder"),
+                              (game_dir, "repsn.ini", "repsn", "game folder")):
+        if d is not None and read_online_ini(d / n, s["ini"], kind, s["ini_raw"]):
             s["read"].append(f"{n} ({where})")
     return s
 
@@ -466,38 +505,71 @@ def _flag(v):
     return bool(v) and v[0] != "0"   # jpno::flag_on
 
 
+def _valid_port(p):       # jpno::valid_port
+    return 0 < len(p) <= 5 and p.isascii() and p.isdigit() and 1 <= int(p) <= 65535
+
+
+def _valid_join(s):       # jpno::valid_join: a.b.c.d:port
+    ip, c, port = s.rpartition(":")
+    if not c or not _valid_port(port):
+        return False
+    parts = ip.split(".")
+    return len(parts) == 4 and all(0 < len(o) <= 3 and o.isascii() and o.isdigit() and int(o) <= 255 for o in parts)
+
+
 def net_mode(s):
-    """The facts.txt lines for the chosen netcode (pure). Mirrors jpno::resolve_env and jsp_online.cpp: rollback and the game's own online
-    (Delay) both on is refused, neither runs."""
+    """The facts.txt lines for the chosen netcode (pure). Mirrors, in this order, jsp_online.cpp's boot (which sets PS3_NET_ONLINE and
+    PSNR_SERVER from the files unless PSNR_SERVER is already set), the runtime's test for the game's own online (np_psnr_enabled: PS3_NET_ONLINE
+    and PSNR_SERVER both present) and jpno::resolve_env (JSP_ROLLBACK on while PS3_NET_ONLINE is present, to any value: refused, neither runs;
+    then the role keys). The keys in play_settings.txt are the game's environment (the launcher passes every line on)."""
     p, ini = s["play"], s["ini"]
     rep, com = ini.get("repsn", {}), ini.get("community", {})
     rep_en, com_en = rep.get("enabled") == "1", com.get("enabled") == "1"
-    by_vars = "PS3_NET_ONLINE" in p or bool(p.get("PSNR_SERVER"))   # set by hand in play_settings.txt: the launcher passes them on
-    if rep_en and com_en:
-        delay = "Delay: re-psn and community both enabled (the game refuses online play)"
+    env_server = bool(p.get("PSNR_SERVER"))                  # has(): set and not empty
+    files_online = False
+    if env_server:
+        why = "PSNR_SERVER is set in play_settings.txt: it wins and the settings files are not used"
+    elif rep_en and com_en:
+        why = "re-psn and community both enabled: the game refuses its own online"
     elif com_en:
-        delay = "Delay (community server; no client yet, the game stays offline)"
+        why = "community server enabled: no client yet, the game stays offline"
     elif rep_en and rep.get("server"):
-        delay = "Delay (re-psn)"
-    elif by_vars:
-        delay = "Delay (re-psn, from variables in play_settings.txt)"
+        why, files_online = "re-psn", True                   # jsp_online.cpp sets PS3_NET_ONLINE=1 and PSNR_SERVER
     elif rep_en:
-        delay = "Delay (re-psn enabled but no server set: the game stays offline)"
+        why = "re-psn enabled but no valid server set: the game stays offline"
     else:
-        delay = ""
-    delay_on = by_vars or (rep_en and bool(rep.get("server")) and not com_en)
+        why = ""
+    net_online = "PS3_NET_ONLINE" in p or files_online      # present, whatever the value (the runtime's and resolve_env's test)
+    if net_online and (env_server or files_online):
+        delay = "Delay (re-psn" + (", server from PSNR_SERVER in play_settings.txt" if env_server else "") + ")"
+    elif net_online:
+        delay = "Off: PS3_NET_ONLINE is set in play_settings.txt but no server is (" + (why or "no re-psn server") + ")"
+    elif env_server:
+        delay = "Off: PSNR_SERVER is set in play_settings.txt without PS3_NET_ONLINE (the game's own online needs both; the settings files are not used)"
+    else:
+        delay = "Off" + (f" ({why})" if why else "")
     if _flag(p.get("JSP_ROLLBACK", "")):
-        if p.get("JSP_ROLLBACK_VIA", "").lower() == "repsn":
-            role = p.get("JSP_ROLLBACK_ROLE", "").lower()
-            mode = "Rollback re-psn " + (role if role in ("host", "join") else "(no valid role: the game refuses it)")
-            mode += ", relay allowed: " + ("yes" if _flag(p.get("JSP_ROLLBACK_RELAY", "")) else "no")
+        listen, join = p.get("JSP_ROLLBACK_LISTEN", ""), p.get("JSP_ROLLBACK_JOIN", "")
+        role = p.get("JSP_ROLLBACK_ROLE", "").lower()
+        if net_online:
+            mode = "Rollback refused: PS3_NET_ONLINE is set too (the game's own online), so neither runs"
+        elif p.get("JSP_ROLLBACK_VIA", "").lower() == "repsn":
+            if role not in ("host", "join"):
+                mode = "Rollback re-psn refused: JSP_ROLLBACK_ROLE is not host or join"
+            elif listen and not _valid_port(listen):
+                mode = "Rollback re-psn refused: JSP_ROLLBACK_LISTEN is not a port from 1 to 65535"
+            else:
+                mode = f"Rollback re-psn {role}, relay allowed: " + ("yes" if _flag(p.get("JSP_ROLLBACK_RELAY", "")) else "no")
+        elif bool(listen) == bool(join):
+            mode = "Rollback direct refused: not exactly one of JSP_ROLLBACK_LISTEN (host) / JSP_ROLLBACK_JOIN (join)"
+        elif listen and not _valid_port(listen):
+            mode = "Rollback direct refused: JSP_ROLLBACK_LISTEN is not a port from 1 to 65535"
+        elif join and not _valid_join(join):
+            mode = "Rollback direct refused: JSP_ROLLBACK_JOIN is not IP:PORT"
         else:
-            hl, hj = bool(p.get("JSP_ROLLBACK_LISTEN")), bool(p.get("JSP_ROLLBACK_JOIN"))
-            mode = "Rollback direct " + ("host" if hl and not hj else "join" if hj and not hl else "(not exactly one of host / join: the game refuses it)")
-        if delay_on:
-            mode += "; the game's own online is on too: the game refuses both"
+            mode = "Rollback direct " + ("host" if listen else "join")
     else:
-        mode = delay or "Off"
+        mode = delay
     server = bool(rep.get("server") or p.get("PSNR_SERVER"))
     name = bool(rep.get("name") or p.get("PS3_NP_ONLINE_ID"))
     st = lambda b: "set" if b else "not set"
@@ -508,7 +580,7 @@ def net_mode(s):
 
 def net_secrets(s):
     """{value: placeholder} of the private values in the settings files: server and join addresses (whole and host part), online names."""
-    p, ini = s["play"], s["ini"]
+    p, ini = s["play"], s.get("ini_raw", s["ini"])
     out = {}
 
     def add(v, what, address=False):
@@ -538,24 +610,79 @@ _NET_RULES = (   # always applied, also when the settings files were not found
     (re.compile(r"(\[net\] re-psn: (?:creating|joining) a room on )\S+( as )\S+"), r"\1<server>\2<online name>"),
     (re.compile(r"(the online name ')[^'\r\n]*(')"), r"\1<online name>\2"),
 )
+# A log tag or an ini section header at the start of a line ("[net]", "[online]", "[repsn]"): program words, never a private value, so a
+# name or server that happens to read "net" or "online" does not turn every tag into a placeholder.
+_LINE_TAG = r"(?m:^\s*\[[A-Za-z0-9_-]+\])"
 
 
 def net_scrub(text, secrets=None):
     """Takes the private netcode values out of a file's text: the values in `secrets` (net_secrets), the address and name fields of the
     known log lines and settings keys, and every IPv4 address except loopback and 0.0.0.0 (a port after it stays)."""
     for v in sorted(secrets or {}, key=len, reverse=True):
-        text = re.sub(r"(?<![A-Za-z0-9_])" + re.escape(v) + r"(?![A-Za-z0-9_])", secrets[v], text, flags=re.IGNORECASE)
+        pat = re.compile(_LINE_TAG + "|(?<![A-Za-z0-9_])" + re.escape(v) + r"(?![A-Za-z0-9_])", re.IGNORECASE)
+        text = pat.sub(lambda m, r=secrets[v]: m.group(0) if m.group(0).lstrip().startswith("[") and m.group(0).rstrip().endswith("]") else r, text)
     for pat, rep in _NET_RULES:
         text = pat.sub(rep, text)
     return _IPV4.sub(lambda m: m.group(1) if m.group(1).startswith("127.") or m.group(1) == "0.0.0.0" else "<IPv4>", text)
 
 
-def net_log_lines(blobs):
-    """The facts.txt lines for what the game's [net] lines say (pure). Run on the logs before the size cap cuts anything."""
+# The [net] lines of jsp_net_game.cpp, by their format strings. PUBLIC: every field is a program word or a number, so the line is printed as the
+# game wrote it (a secret is never matched against it: an online name "host" or "relay" must not change "rollback opt-in: host"). PRIVATE:
+# lines with an address or a name; the field is replaced by its placeholder. Any other [net] line: net_scrub() of the text after the tag.
+_RESOLVE_WHY = (   # jpno::resolve_env's refusal reasons (jsp_net_online.h)
+    "JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs",
+    "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off",
+    "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off",
+    "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off",
+    "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off",
+    "JSP_ROLLBACK_JOIN is not IP:PORT: rollback off",
+)
+_NET_PUBLIC = re.compile("|".join([
+    r"env decision: (?:rollback start|REFUSED|rollback not requested) \(static constructors arrived: (?:EnvInit|online boot) first, (?:EnvInit|online boot) last\)",
+    "REFUSED: (?:" + "|".join(re.escape(w) for w in _RESOLVE_WHY) + ")",
+    r"rollback opt-in: (?:host|client), build [0-9a-f]{8}, hooks installed",
+    r"re-psn path: (?:direct|relay|punching|-)",
+    r"handshake state -> -?\d+ \((?:host|client)\)",
+    r"commit tick=\d+ hash=[0-9a-f]{8} raw=[0-9a-f]{8}",
+    r"rollback to tick=\d+ \(longest game-thread stretch without a session call since the last rollback: \d+ ms, keepalive polls so far: \d+\)",
+    r"DESYNC at tick \d+ \(stepper tick numbering, session-relative; add the base \d+\): local=[0-9a-f]{8} remote=[0-9a-f]{8}",
+    r"gekko session synchronized",
+    r"session started: base tick \d+ slots \d+ of \d+",
+    r"phase: armed \(settings agreed, waiting for the first fight tick\)",
+    r"startup evidence available: starting the rendezvous",
+    r"re-psn: no server / online name in repsn\.ini \(set them on the Online page under Delay\): off",
+    r"JSP_ROLLBACK_JOIN is not IP:PORT: off",
+    r"ended: (?:Opponent disconnected|Match ended|Desync detected: match ended)",
+]))
+_NET_PRIVATE = (
+    (re.compile(r"(re-psn: (?:creating|joining) a room on )\S+( as )\S+( \(relay (?:allowed|not allowed)\), local UDP port \d+)"), r"\1<server>\2<online name>\3"),
+    (re.compile(r"(re-psn: the online name ').*(' is longer than 16 characters \(repsn\.ini name=\): off)"), r"\1<online name>\2"),
+    (re.compile(r"(listening/joining: )(?!host,).*(, local UDP port \d+)"), r"\1<join address>\2"),
+    (re.compile(r"(rendezvous: )\S+((?: via re-psn, path (?:direct|relay|punching|-), room \d+)?)"), r"\1<peer address>\2"),
+)
+
+
+def net_line_safe(line, secrets=None):
+    """One raw '[net] ...' line as facts.txt may print it (see _NET_PUBLIC / _NET_PRIVATE)."""
+    rest = line[6:]
+    if _NET_PUBLIC.fullmatch(rest):
+        return line
+    for pat, rep in _NET_PRIVATE:
+        if pat.fullmatch(rest):
+            return "[net] " + pat.sub(rep, rest)
+    return "[net] " + net_scrub(rest, secrets)
+
+
+def net_log_lines(blobs, secrets=None):
+    """The facts.txt lines for what the game's [net] lines say (pure). `blobs`: the logs' RAW text (str or bytes; only firstrun.scrub applied),
+    before the size cap and before net_scrub: the summary is computed from every line as the game wrote it, and each line passes
+    net_line_safe() before anything is read from it, so no server, join address or online name is printed."""
     names = [n for n in NET_LOG_ORDER if n in blobs] + sorted(n for n in blobs if n not in NET_LOG_ORDER)
     out, key = [], None
     for name in names:
-        lines = [ln.strip() for ln in blobs[name].decode("utf-8", "replace").splitlines() if ln.lstrip().startswith("[net] ")]
+        b = blobs[name]
+        text = b.decode("utf-8", "replace") if isinstance(b, bytes) else b
+        lines = [net_line_safe(ln.strip(), secrets) for ln in text.splitlines() if ln.lstrip().startswith("[net] ")]
         if not lines:
             continue
         label = {NET_LOG_ORDER[0]: " (the last launch)", NET_LOG_ORDER[1]: " (the launch before)"}.get(name, "")
@@ -618,18 +745,21 @@ def facts(app, blobs, refused, not_text, cuts, names, net=None):
     L += display_lines(displays(), game_display(exe_name))
     L.append(f"present mode: {present_mode(blobs)}")
     net = net or {}
-    L.append("Netcode (from the settings files; the server, the join address and the online names are never written here, only set / not set):")
-    L += net.get("mode") or net_mode(net_settings(app))
-    L.append("Netcode in the logs (read before the size cap cut anything):")
-    L += net.get("logs") or net_log_lines(blobs)
-    L.append("")
+    head = net_scrub(firstrun.scrub("\n".join(L) + "\n"), net.get("secrets"))
+    # The Netcode section is made safe line by line (net_mode prints program words only, net_log_lines passes every [net] line through
+    # net_line_safe): the secrets are not matched against it again, so an online name such as "host" or "relay" cannot change its words.
+    N = ["Netcode (from the settings files; the server, the join address and the online names are never written here, only set / not set):"]
+    N += net.get("mode") or net_mode(net_settings(app))
+    N.append("Netcode in the logs (read before the size cap cut anything):")
+    N += net.get("logs") or net_log_lines(blobs, net.get("secrets"))
+    L = ["", ""]
     L.append("files in this zip:")
     L += [f"  {n}" for n in names]
     L.append("")
     L.append("shortened: " + ("; ".join(cuts) if cuts else "nothing"))
     L.append("refused (never read): " + ("; ".join(f"{n} ({w})" for n, w in refused[:40]) if refused else "nothing"))
     L.append(f"skipped as not text (binaries, lift output, caches): {not_text} files")
-    return net_scrub(firstrun.scrub("\n".join(L) + "\n"), net.get("secrets"))
+    return head + firstrun.scrub("\n".join(N)) + net_scrub(firstrun.scrub("\n".join(L) + "\n"), net.get("secrets"))
 
 
 def desktop():
@@ -651,12 +781,18 @@ def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
     ns = net_settings(app, appdata)
     secrets = net_secrets(ns)
     blobs = {}
+    net_logs = None
     for name, p in entries.items():
         try:
-            blobs[name] = read_scrubbed(p, secrets)
+            raw = read_raw(p)
         except OSError:
-            pass                                                 # unreadable or gone: skipped like an absent file
-    net = {"mode": net_mode(ns), "logs": net_log_lines(blobs), "secrets": secrets}   # before trim(): the [net] summary sees every line
+            continue                                             # unreadable or gone: skipped like an absent file
+        if "[net] " in raw:
+            net_logs = net_logs or {}
+            net_logs[name] = raw                                 # the [net] summary reads the raw text (net_scrub could change its words)
+        blobs[name] = net_scrub(raw, secrets).encode("utf-8")
+    net = {"mode": net_mode(ns), "logs": net_log_lines(net_logs or {}, secrets), "secrets": secrets}   # before trim(): the summary sees every line
+    net_logs = None
     cuts = trim(blobs, cap - 30000)                              # room for facts.txt
     names = sorted(list(blobs) + ["facts.txt"])
     f = facts(app, blobs, refused, not_text, cuts, names, net).encode("utf-8")
