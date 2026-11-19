@@ -70,8 +70,10 @@ Limits:
 - **Name refused:** use 3 to 16 letters, digits, `-` or `_`, starting with a letter, and not a name another player
   already uses on that server.
 - **Rollback (experimental) over re-psn ends with `re-psn: timed out waiting for the other player` or
-  `re-psn: no rollback room for this build`:** the two games did not meet in time. Each gives up 30 seconds after it starts
-  looking, so start the host's game first and the other one within about 30 seconds. See
+  `re-psn: no rollback room for this build`:** the two games did not meet. The first message means a game
+  gave up 30 seconds after it started looking. The second means the joining game searched once and found no room from
+  this release with rollback, and it fails at once, not after 30 seconds. Start the host's game first and the other one
+  within about 30 seconds. See
   [ROLLBACK.md, Rollback over re-psn](ROLLBACK.md#rollback-over-re-psn-experimental).
 
 ## Where the settings live

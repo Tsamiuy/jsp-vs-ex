@@ -358,7 +358,7 @@ comes up well within that time, so the match runs direct even with the relay all
   `JSP_ROLLBACK_LISTEN`, if set, must be a port from 1 to 65535, or the start is refused.
 - The client is the re-psn v0.8.0 C client, which replaces the vendored copy in the toolkit (toolkit patch 7918). The
   callers in the runtime keep their function signatures (compared by declaration text); the game's own Online Battle goes
-  through the same client, and that has not been run with it either.
+  through the same client; the rollback runs above did not exercise that path.
 - Tests (no game, no GPU, native Linux, loopback only): `bash installer/tools/net_repsn_test.sh TOOLKIT_DIR` runs the
   rendezvous with a fake transport (room flag and record, roles, punch, relay only when allowed and offered, forged or
   mismatched members ignored) and the real transport over the C client against a fake server (HELLO, CREATE / SEARCH /
