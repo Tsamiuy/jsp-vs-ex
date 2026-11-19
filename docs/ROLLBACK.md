@@ -182,7 +182,52 @@ This is for testers. Expect rough edges, and report what you see (with the suppo
 | Host | `JSP_ROLLBACK=1` and `JSP_ROLLBACK_LISTEN=36200` (any free UDP port) |
 | Client | `JSP_ROLLBACK=1` and `JSP_ROLLBACK_JOIN=<host IP>:36200` |
 
-Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. There are no menu entries for it yet.
+Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice is also in the game's own menu: see
+"Choose it in the game" below.
+
+**Choose it in the game.** Port Settings (`JSP_PORT_MENU=1`, Options, last row) -> Online. The first row is **Netcode**
+(Left/Right):
+
+| Netcode | What it is | Rows under it |
+|---|---|---|
+| Off | no online play | none |
+| Delay (the game's own online) | the game's own netcode over re-psn or a community server (`repsn.ini` / `community.ini`, as before) | Method (re-psn / Community server), Server, Online name, Community preset |
+| Rollback (experimental) | the rollback path of this section, direct IP, two players | Role (Host / Join), Port (host) or Host address (join) |
+
+Cross on Port, Host address, Server or Online name opens the pad letter picker the page already had. **Save (applies on
+the next start)** writes the choice; Discard changes reads the files again; Circle leaves without saving. Under the rows
+the page says which method is on and what this session runs against what is saved.
+
+- One method at a time. Netcode is one choice, so the page never turns both on. Save writes the method that is going off
+  first (Rollback: the online files, then `play_settings.txt`; Delay or Off: `play_settings.txt`, then the online files),
+  so a failed or interrupted save never leaves both on.
+- Rollback is stored in `play_settings.txt`: `JSP_ROLLBACK=1` plus `JSP_ROLLBACK_LISTEN=PORT` (host) or
+  `JSP_ROLLBACK_JOIN=IP:PORT` (join). Turning it off writes `JSP_ROLLBACK=0` when the file already has the line or the
+  environment holds `JSP_ROLLBACK` (the launcher's file line wins over an inherited variable, so a removed line could leave
+  it on); otherwise the line stays absent. `0` is off for every reader. The remembered port or address stays (inert without
+  `JSP_ROLLBACK=1`); other lines of the file are kept. The launcher turns every line into an environment variable before
+  the game starts, so a variable set by hand does the same.
+- Next start, always. The snapshot defaults are set before `main()` and the hooks are installed once at start-up, and the
+  online files are read before `main()`; the page shows "This session: X. Saved: Y. Restart to apply." when they differ.
+- A hand-edited pair (a non-zero `JSP_ROLLBACK` and the game's own online both on) is refused before `main()` by one decision
+  (`jpno::resolve_env` in `jsp_net_online.h`, taken once both static constructors have run: the rollback one and the online
+  boot of `jsp_online.cpp`, whose order is unspecified, so the last to arrive decides; the log line
+  `[net] env decision: ...` shows the order). A refusal sets none of the rollback defaults, sets `JSP_ROLLBACK=0` and
+  `JSP_NET_REFUSED=1` (for the pair it also removes `PS3_NET_ONLINE`), so neither runs: the game's own online needs
+  `PS3_NET_ONLINE` in every gate (`np_psnr_enabled`, the net-control state, the host socket registration), so `PSNR_SERVER`
+  and the other online keys stay inert without it. The page then shows "This session: refused" and, for the saved pair, Off
+  with a message: it never picks for the player. Because the original value is gone after a refusal, saving Off or Delay
+  while `JSP_NET_REFUSED` is set writes `JSP_ROLLBACK=0` even with no line in the file, so the next start is not refused
+  again. The same decision refuses Rollback alone when there is not exactly one valid role key (it also sets
+  `JSP_NET_REFUSED`). "Online on" is the runtime's own test: any value of `PS3_NET_ONLINE`, even `0`.
+- ASSUMPTION: the runtime reads `PS3_NET_ONLINE` lazily (after `main()`) and nothing in the jsp exe sets it later, so
+  removing it before `main()` is enough; the thread registry's TLS callback still reads `JSP_ROLLBACK` at process attach,
+  before any decision, and turns the registry on (bookkeeping only) even for a refused start.
+- The Rollback choice is in every build of the port (the target always defines `JSP_ROLLBACK_BUILD`), release builds included.
+- Not covered: the page has not been run in the game and there is no screenshot of it (layout is from the code: rows at
+  pitch 40, 188 + 40 i; the longest new strings are 38 characters at scale 1.0 and were checked by the host test); the
+  start decision and the refusal are host-tested and the wiring is compile-checked, not run in a game; hostnames in the join
+  address are not accepted (IPv4 only, like the direct-IP join).
 
 **Network:** the host receives on that one UDP port. On a home network that just works; over the internet the host must
 forward the UDP port on the router (and allow it in the firewall). The client needs no open port. There is no relay and no
@@ -234,7 +279,8 @@ lobby yet, and re-psn matchmaking does not start rollback matches yet.
 - 7917: one call, one address compare, one counter increment and one NULL check per RSX store, row or word run into guest
   memory, and one counter increment per FIFO drain pass.
 - The port: one call and one relaxed atomic load per frame-clock pass (about every 4 ms), a NULL check per setting read,
-  a `getenv` on an F9 binding and at static initialisation; the thread registry's TLS callback (two environment reads at
+  a `getenv` on an F9 binding and at static initialisation (the start decision reads the rollback keys and `PS3_NET_ONLINE`
+  there once and sets nothing when `JSP_ROLLBACK` is off); the thread registry's TLS callback (two environment reads at
   process start, then one relaxed load and a return on every thread start and exit); a 64 KiB static ring for the RSX
   write log.
 

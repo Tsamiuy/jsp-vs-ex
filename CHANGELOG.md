@@ -6,6 +6,10 @@ All notable changes are listed here, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Choose the netcode in the game, not yet tried in a running game (Port Settings, `JSP_PORT_MENU=1`, Online page): a Netcode row with Off, Delay (the game's own online) or Rollback (experimental, direct IP: Role, Port or Host address). Only one can be on; saving applies on the next start; a hand-edited pair with both on is refused and neither runs. Host-tested only.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

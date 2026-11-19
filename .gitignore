@@ -176,6 +176,8 @@ __pycache__/
 !/installer/tools/net_m2_link_test.cpp
 !/installer/tools/net_session_test.cpp
 !/installer/tools/net_session_test.sh
+!/installer/tools/net_online_test.cpp
+!/installer/tools/net_online_test.sh
 !/installer/tools/stepper_test.cpp
 !/installer/tools/stepper_test.sh
 !/installer/tools/snapshot_ring_test.cpp
