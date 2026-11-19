@@ -13,6 +13,43 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Tells the slow jobs below whether this pull request needs them. A pull request that only changes the plain text
+  # files listed in TEXT_ONLY (no README, NOTICE.md or docs/ folder: the site build and tests read them) skips them; a
+  # skipped job counts as passed. Pushes to main and any other change run everything, and so does a failed or missing
+  # answer from this job (the slow jobs test `!= 'false'`, with !cancelled() so a failed `changes` does not skip them).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      heavy: ${{ steps.diff.outputs.heavy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Does this change need the slow jobs?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          TEXT_ONLY: CHANGELOG.md CONTRIBUTING.md AGENTS.md KNOWN_ISSUES.md CONTRIBUTORS.md SECURITY.md
+        run: |
+          heavy=true
+          if [ "$EVENT" = pull_request ]; then
+            heavy=false; n=0
+            while IFS= read -r -d '' f; do
+              n=$((n+1)); echo "changed: $f"
+              text=false
+              for t in $TEXT_ONLY; do [ "$f" = "$t" ] && text=true; done
+              $text || heavy=true
+            done < <(git diff -z --name-only "$BASE...$HEAD")
+            [ "$n" -gt 0 ] || heavy=true
+          fi
+          echo "heavy=$heavy" >> "$GITHUB_OUTPUT"
+          echo "slow jobs needed: $heavy"
+
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -60,6 +97,8 @@ jobs:
           if ($bad) { exit 1 }
 
   launcher:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -82,6 +121,8 @@ jobs:
   # The host tests (no game data, no GPU) are listed once in tools/ci/host-tests.txt and run by tools/ci/run_host_tests.py:
   # one named result per test. A test file in git that is neither listed nor excluded there fails the coverage step.
   host-tests:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -134,6 +175,8 @@ jobs:
   # The patch series are what every player's build depends on: a hunk that no longer applies would only show up when a
   # release is built. Same tool as the installer build (export_toolkit.py: git archive of the pin, git apply only).
   patches:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -159,6 +202,8 @@ jobs:
   # Python tests whose path and quoting handling differs there, run as the installer build runs them: core.autocrlf false
   # and a python3 on PATH.
   host-tests-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 25
     env:
@@ -198,6 +243,8 @@ jobs:
   # The port's own sources against the patched toolkit, with the compiler the installer bundles. Syntax only: the lifted game code
   # and the runtime library link are made on the player's PC from their EBOOT, so a full build and link are not possible here.
   port-compile:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 20
     env:
