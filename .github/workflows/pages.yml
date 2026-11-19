@@ -1,8 +1,10 @@
 name: pages
 
-# Builds the fan page from README.md and NOTICE.md and publishes it with GitHub Pages.
+# Builds the fan site (tools/site/site.py: the menu page index.html, the no-script plain.html, their stylesheets and the
+# art they use from assets/) from README.md, docs/features.tsv, NOTICE.md and data/, checks it with
+# tools/site/check_site.py, and publishes it with GitHub Pages.
 # Run by hand (Actions > pages > Run workflow) once Settings > Pages > Source is set to GitHub Actions.
-# On pushes that change README.md, NOTICE.md or the generator, the build job always runs (it checks the page); the
+# On pushes that change the sources or the generator, the build job always runs (it checks the page); the
 # deploy job runs on a push only when the repository variable PAGES_ENABLED is "true" (Settings > Secrets and
 # variables > Actions > Variables), because without Pages the deploy fails and a workflow cannot read whether Pages is on.
 on:
@@ -12,6 +14,10 @@ on:
     paths:
       - README.md
       - NOTICE.md
+      - docs/features.tsv
+      - installer/VERSION
+      - data/**
+      - assets/**
       - tools/site/**
       - .github/workflows/pages.yml
 
@@ -31,7 +37,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and check the page
-        run: python3 -I tools/site/site.py --src . --out _site --check
+        run: |
+          set -euo pipefail
+          python3 -I tools/site/site.py --src . --out _site --check
+          test -s _site/index.html
+          test -s _site/style.css
+          test -s _site/plain.html
+          test -s _site/plain.css
+          test -s _site/assets/divider-stripe.png
+          test -s _site/assets/social-preview.png
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
           path: _site
@@ -42,8 +56,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pages: write
-      id-token: write
+      pages: write      # deploy-pages publishes the site
+      id-token: write   # deploy-pages verifies the artifact's origin
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

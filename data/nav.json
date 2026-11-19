@@ -1,0 +1,15 @@
+{
+  "about": "The README's menu buttons and the site's link buttons, in order (3 per row in the README). tools/site/repo_art.py draws assets/nav/<id>.png from it, tools/site/badges.py writes the README block, tools/site/site.py renders the same links as buttons and tools/site/check_site.py checks that every one is on both pages. href is the README target; repo-relative paths become GitHub links on the site.",
+  "buttons": [
+    {"id": "download", "label": "Download", "href": "https://github.com/Tsamiuy/jsp-vs-ex/releases", "primary": true},
+    {"id": "install", "label": "Installing", "href": "docs/INSTALL.md"},
+    {"id": "features", "label": "Features", "href": "docs/FEATURES.md"},
+    {"id": "changelog", "label": "Changelog", "href": "CHANGELOG.md"},
+    {"id": "known-issues", "label": "Known issues", "href": "KNOWN_ISSUES.md"},
+    {"id": "troubleshooting", "label": "Troubleshooting", "href": "docs/TROUBLESHOOTING.md"},
+    {"id": "report", "label": "Report an issue", "href": "https://github.com/Tsamiuy/jsp-vs-ex/issues/new/choose"},
+    {"id": "building", "label": "Building", "href": "docs/BUILDING.md"},
+    {"id": "contributing", "label": "Contributing", "href": "CONTRIBUTING.md"}
+  ],
+  "wide": {"id": "discord", "label": "Join the Discord", "href": "https://discord.gg/W8fMT78Q7k"}
+}

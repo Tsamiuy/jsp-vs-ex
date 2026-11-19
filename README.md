@@ -1,31 +1,54 @@
-<p align="center"><img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS-EX, Fan Revival. White ASCII art on black: a star with a 3D J inside on the left; on the right the title J-Stars Victory, the letters VS-EX and Fan Revival; below them: unofficial fan project, no game files included, you need your own copy."></p>
+<div align="center">
 
-<h1 align="center">J-Stars Victory VS-EX, Fan Revival</h1>
+<img src="assets/banner-2x.png" width="100%" alt="J-Stars Victory VS-EX, Fan Revival. A dark slanted panel on a white speed-line burst between red and white striped bars: a gold star with a white J, the title J-Stars Victory VS-EX and Fan Revival on a yellow-to-orange bar; below: unofficial fan port, no game files included, bring your own copy.">
 
-<p align="center"><b>J-Stars Victory VS+ running natively on Windows: the game's own code, recompiled to x64 on your PC from your own copy.</b></p>
+<h1>J-Stars Victory VS-EX, Fan Revival</h1>
 
-<p align="center">
-<a href="https://github.com/Tsamiuy/jsp-vs-ex/releases"><img src="https://img.shields.io/github/v/release/Tsamiuy/jsp-vs-ex?include_prereleases&style=flat-square&labelColor=000000&color=333333" alt="latest release"></a>
-<a href="https://github.com/Tsamiuy/jsp-vs-ex/releases"><img src="https://img.shields.io/github/downloads/Tsamiuy/jsp-vs-ex/total?style=flat-square&labelColor=000000&color=333333" alt="downloads"></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/licence-MIT-333333?labelColor=000000&style=flat-square" alt="licence: MIT"></a>
-<a href="https://github.com/Tsamiuy/jsp-vs-ex/commits/main"><img src="https://img.shields.io/github/last-commit/Tsamiuy/jsp-vs-ex?style=flat-square&labelColor=000000&color=333333" alt="last commit"></a>
-<a href="https://github.com/Tsamiuy/jsp-vs-ex/issues"><img src="https://img.shields.io/github/issues/Tsamiuy/jsp-vs-ex?style=flat-square&labelColor=000000&color=333333" alt="issues"></a>
-</p>
+<b>J-Stars Victory VS+ running natively on Windows: the game's own code, recompiled to x64 on your PC from your own copy.</b>
 
-<p align="center">
-<a href="https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml"><img src="https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-<img src="https://img.shields.io/badge/platform-Windows%20x64-333333?labelColor=000000&style=flat-square" alt="platform: Windows x64">
-<a href="#status"><img src="https://img.shields.io/badge/status-work%20in%20progress-333333?labelColor=000000&style=flat-square" alt="status: work in progress"></a>
-<a href="https://deepwiki.com/Tsamiuy/jsp-vs-ex"><img src="https://img.shields.io/badge/docs-DeepWiki-333333?labelColor=000000&style=flat-square" alt="docs: DeepWiki"></a>
-</p>
+<br><br>
 
-<p align="center"><b><a href="https://github.com/Tsamiuy/jsp-vs-ex/releases">Download</a></b> · <b><a href="docs/INSTALL.md">Installing</a></b> · <b><a href="docs/FEATURES.md">Features</a></b> · <b><a href="docs/TROUBLESHOOTING.md">Troubleshooting</a></b> · <b><a href="https://github.com/Tsamiuy/jsp-vs-ex/issues/new/choose">Report an issue</a></b> · <b><a href="docs/BUILDING.md">Building</a></b> · <b><a href="CONTRIBUTING.md">Contributing</a></b></p>
+<!-- badges:start -->
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/releases"><img src="https://img.shields.io/github/v/release/Tsamiuy/jsp-vs-ex?include_prereleases&label=release&style=flat-square&labelColor=0E0E10&color=D3121F" alt="latest release"></a>
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/releases"><img src="https://img.shields.io/github/downloads/Tsamiuy/jsp-vs-ex/total?label=downloads&style=flat-square&labelColor=0E0E10&color=D3121F" alt="downloads"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/licence-MIT-FF8C12?style=flat-square&labelColor=0E0E10" alt="licence: MIT"></a>
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/commits/main"><img src="https://img.shields.io/github/last-commit/Tsamiuy/jsp-vs-ex?label=last%20commit&style=flat-square&labelColor=0E0E10&color=D3121F" alt="last commit"></a>
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/issues"><img src="https://img.shields.io/github/issues/Tsamiuy/jsp-vs-ex?label=issues&style=flat-square&labelColor=0E0E10&color=D3121F" alt="issues"></a>
+<br>
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Tsamiuy/jsp-vs-ex/ci.yml?branch=main&label=CI&style=flat-square&labelColor=0E0E10&color=FF8C12" alt="CI"></a>
+<a href="#download-and-play"><img src="https://img.shields.io/badge/platform-Windows%20x64-FF8C12?style=flat-square&labelColor=0E0E10" alt="platform: Windows x64"></a>
+<a href="#status"><img src="https://img.shields.io/badge/status-work%20in%20progress-FF8C12?style=flat-square&labelColor=0E0E10" alt="status: work in progress"></a>
+<a href="https://deepwiki.com/Tsamiuy/jsp-vs-ex"><img src="https://img.shields.io/badge/docs-DeepWiki-FF8C12?style=flat-square&labelColor=0E0E10" alt="docs: DeepWiki"></a>
+<a href="https://discord.gg/W8fMT78Q7k"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white&style=flat-square&labelColor=0E0E10" alt="Discord"></a>
+<!-- badges:end -->
 
----
+<br>
+
+<!-- nav:start -->
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/releases"><img src="assets/nav/download.png" alt="Download" width="250"></a>
+<a href="docs/INSTALL.md"><img src="assets/nav/install.png" alt="Installing" width="250"></a>
+<a href="docs/FEATURES.md"><img src="assets/nav/features.png" alt="Features" width="250"></a>
+
+<a href="CHANGELOG.md"><img src="assets/nav/changelog.png" alt="Changelog" width="250"></a>
+<a href="KNOWN_ISSUES.md"><img src="assets/nav/known-issues.png" alt="Known issues" width="250"></a>
+<a href="docs/TROUBLESHOOTING.md"><img src="assets/nav/troubleshooting.png" alt="Troubleshooting" width="250"></a>
+
+<a href="https://github.com/Tsamiuy/jsp-vs-ex/issues/new/choose"><img src="assets/nav/report.png" alt="Report an issue" width="250"></a>
+<a href="docs/BUILDING.md"><img src="assets/nav/building.png" alt="Building" width="250"></a>
+<a href="CONTRIBUTING.md"><img src="assets/nav/contributing.png" alt="Contributing" width="250"></a>
+
+<a href="https://discord.gg/W8fMT78Q7k"><img src="assets/nav/discord-wide.png" alt="Join the Discord" width="758"></a>
+
+<sub><a href="#status">Status</a> · <a href="#download-and-play">What you need</a> · <a href="#what-goes-online-and-where-your-data-goes">Online and your data</a> · <a href="#settings-and-controllers">Settings and controllers</a> · <a href="#how-it-works">How it works</a> · <a href="#roadmap">Roadmap</a> · <a href="#how-ai-was-used">How AI was used</a> · <a href="#licence-and-disclaimer">Licence</a> · <a href="#related-projects-and-credits">Credits</a> · <a href="https://tsamiuy.github.io/jsp-vs-ex/">Fan site</a></sub>
+<!-- nav:end -->
+
+</div>
+
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 J-Stars Victory VS-EX is an unofficial fan port of J-Stars Victory VS+ (PS3) to Windows x64. **Bring your own game:** this repository holds no game code, no game assets and no firmware (no ISO, EBOOT, recompiled game code, captures or screenshots). You need your own copy of the game (US BLUS31519 or EU BLES02136) and its decrypted EBOOT, from your own copy, see RPCS3 and its documentation. Please do not post game files in issues or pull requests.
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Status
 
@@ -45,7 +68,7 @@ J-Stars Victory VS-EX is an unofficial fan port of J-Stars Victory VS+ (PS3) to 
 
 The default tree has had fewer tests than the v15 tree and has known problems: see [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9). Play testers' reports are in KNOWN_ISSUES.md. A dated table, refreshed 2026-10-30 and mostly for the v15 tree, is in [docs/notes/STATUS.md](docs/notes/STATUS.md).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Download and play
 
@@ -84,13 +107,13 @@ Setup checks your inputs before the long build and refuses with a code:
 
 The full list is in [docs/INSTALL.md](docs/INSTALL.md#what-setup-refuses). If the build itself stops, click **Build again** in the Start menu to resume it.
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## What goes online and where your data goes
 
 Nothing goes online unless you turn Online Battle on. There is no update check, no crash report and no telemetry. The support bundle is a file on your Desktop that you attach yourself. Saves stay in `%APPDATA%\JSP Fan Revival\hdd0` (a portable install: `hdd0` in the install folder). Details: [installer/README.md](installer/README.md).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## What makes it different
 
@@ -105,7 +128,7 @@ Nothing goes online unless you turn Online Battle on. There is no update check, 
 | Coming soon: online matches with rollback netcode, spectating and lobbies | [Roadmap, section 4](docs/ROADMAP.md) |
 | Coming soon: more match options and Training options | [Roadmap, section 3](docs/ROADMAP.md) |
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Settings and controllers
 
@@ -118,13 +141,13 @@ Nothing goes online unless you turn Online Battle on. There is no update check, 
 
 See [Features: Input](docs/FEATURES.md#input-modes), [PlayStation pads](docs/FEATURES.md#dualsense) and [Features: Wide screens](docs/FEATURES.md#wide-screens). Saves, updating and uninstalling: [docs/INSTALL.md](docs/INSTALL.md#saves).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Known issues
 
 Heavy fights can drop to about 20 frames per second. The Training freeze after Return to character select and two online freezes are open. The default build needs a CPU with AVX2. The full list, with the build each affects and a workaround where there is one, is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Status is tracked in [issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Troubleshooting and reporting bugs
 
@@ -139,37 +162,37 @@ More symptoms and the log places: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING
 
 To report a bug, click **Make a support bundle (JSP Fan Revival)** in the Start menu (portable zip: double-click `support-bundle.cmd`). It writes `jsp-support-<time>.zip` on the Desktop. It holds logs and settings as text, never the EBOOT, disc files or saves, and it sends nothing anywhere. Attach it to a [new issue](https://github.com/Tsamiuy/jsp-vs-ex/issues/new/choose) and say which graphics card and CPU you have. The forms are: bug report, performance report, play-test report, feature request, and feedback or question. Never attach game files.
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Building
 
 Players build the game with the installer. For a hand build, the checks and the tree layout, see [docs/BUILDING.md](docs/BUILDING.md), [docs/LAYOUT.md](docs/LAYOUT.md) and [installer/README.md](installer/README.md).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## How it works
 
 The installer lifts the game's PowerPC and SPU code from your `EBOOT.elf` to C. It compiles that with a bundled compiler and links it against the ps3recomp runtime. The runtime provides the PS3 system libraries and draws through Direct3D 12. Details: [installer/README.md](installer/README.md) and [docs/LAYOUT.md](docs/LAYOUT.md).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Roadmap
 
 Close the open problems of the v19 tree ([issue #9](https://github.com/Tsamiuy/jsp-vs-ex/issues/9)), then online rollback, more match options and Linux through Proton. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Contributing
 
 Pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Only `main` is used. Rules for AI coding agents are in [AGENTS.md](AGENTS.md). Community: [Discord server](https://discord.gg/W8fMT78Q7k) (unofficial fan work; this project has its own forum there). [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/W8fMT78Q7k)
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## How AI was used
 
 Developed with AI agent assistance under the maintainers' direction.
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Licence and disclaimer
 
@@ -177,7 +200,7 @@ The port's own code, tools and documentation are MIT, see [LICENSE](LICENSE). Se
 
 Unofficial fan project. Not affiliated with, authorized or endorsed by the game's publisher, developer or rights holders. Trademarks belong to their owners. **You need your own copy of the game.**
 
----
+<p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
 ## Related projects and credits
 

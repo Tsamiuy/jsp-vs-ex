@@ -1,0 +1,54 @@
+{
+  "about": "The one palette of J-Stars Victory VS-EX: the fan site (tools/site/site.py), the README badges (tools/site/badges.py), the banner, social preview, logo mark and dividers (tools/site/repo_art.py) and the installer wizard images and icons (installer/tools/installer_art.py). Our own colours for a menu look drawn from scratch: speed-line burst, red and white stripe frame, slanted dark panels, a yellow-to-orange highlight. Hex values only; every pair in 'pairs' is checked for contrast by tools/site/check_site.py.",
+  "colors": {
+    "ink": "#0E0E10",
+    "panel": "#1B1B1F",
+    "panel_edge": "#2C2C33",
+    "caption": "#121214",
+    "text": "#F5F5F2",
+    "muted": "#C3C3C8",
+    "link": "#FFCE3A",
+    "code_bg": "#2A2A30",
+    "stripe_red": "#D3121F",
+    "stripe_white": "#FFFFFF",
+    "title_top": "#FFE65A",
+    "title_bottom": "#FF7A0A",
+    "glow_yellow": "#FFD21E",
+    "glow_orange": "#FF8C12",
+    "key_bg": "#F5F5F2",
+    "key_text": "#0E0E10",
+    "warn": "#FF8C12"
+  },
+  "modes": {
+    "light": {"burst_base": "#F4F4F2", "burst_ray": "#DEDEDB", "burst_line": "#C9C9C5", "page_text": "#0E0E10", "page_link": "#A00D17"},
+    "dark":  {"burst_base": "#3A3A42", "burst_ray": "#2E2E35", "burst_line": "#46464F", "page_text": "#F5F5F2", "page_link": "#FFCE3A"}
+  },
+  "pairs": [
+    ["text", "panel", 4.5],
+    ["muted", "panel", 4.5],
+    ["link", "panel", 4.5],
+    ["text", "code_bg", 4.5],
+    ["link", "code_bg", 4.5],
+    ["text", "caption", 4.5],
+    ["muted", "caption", 4.5],
+    ["link", "caption", 4.5],
+    ["key_text", "key_bg", 4.5],
+    ["text", "ink", 4.5],
+    ["text", "stripe_red", 4.5],
+    ["ink", "glow_yellow", 4.5],
+    ["light.page_text", "light.burst_base", 4.5],
+    ["light.page_link", "light.burst_base", 4.5],
+    ["light.page_text", "light.burst_ray", 4.5],
+    ["light.page_link", "light.burst_ray", 4.5],
+    ["dark.page_text", "dark.burst_base", 4.5],
+    ["dark.page_link", "dark.burst_base", 4.5],
+    ["dark.page_text", "dark.burst_ray", 4.5],
+    ["dark.page_link", "dark.burst_ray", 4.5]
+  ],
+  "badges": {"label": "ink", "value": "stripe_red", "accent": "glow_orange"},
+  "fonts": {
+    "heavy": "\"Arial Black\", \"Segoe UI Black\", \"Helvetica Neue\", \"Liberation Sans\", Arial, sans-serif",
+    "body": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Liberation Sans\", Arial, sans-serif",
+    "mono": "ui-monospace, \"Cascadia Mono\", Consolas, \"Liberation Mono\", Menlo, monospace"
+  }
+}

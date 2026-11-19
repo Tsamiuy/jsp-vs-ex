@@ -21,7 +21,10 @@ BANNED_EXT = {".iso", ".elf", ".self", ".sprx", ".prx", ".pup", ".pkg", ".rap", 
               ".pam", ".png", ".jpg", ".bmp", ".dds", ".wav", ".zip", ".7z", ".bin", ".bundle", ".hlsl",
               ".dll", ".exe", ".pdb", ".lib", ".obj", ".log"}
 # Our own generated art, allowed by exact path (also allowed in .gitignore). Nothing from the game.
-ART_ALLOW = {"assets/banner-2x.png", "assets/social-preview.png", "assets/logo-mark-512.png"}
+# All of it is drawn by tools/site/repo_art.py, which --check renders again and compares.
+ART_ALLOW = {"assets/banner-2x.png", "assets/social-preview.png", "assets/logo-mark-512.png", "assets/divider-stripe.png",
+             "assets/divider-glow.png"}
+ART_ALLOW_RE = re.compile(r"assets/nav/[a-z0-9-]+\.png")   # the README's menu buttons (data/nav.json)
 # Third-party SMAA 1x files (MIT, github.com/iryoku/smaa), kept byte for byte with their licence headers, which carry the
 # authors' e-mail addresses (the licence asks us to keep them) and include a shader source with a banned extension. They
 # reach the repository only inside toolkit patch 2511, so that patch is allowed by its exact path.
@@ -54,7 +57,8 @@ def check_files(problems):
             continue
         low = path.lower()
         ext = low[low.rfind("."):] if "." in low.rsplit("/", 1)[-1] else ""
-        if (ext in BANNED_EXT and path not in ART_ALLOW and path not in SMAA_ALLOW) or BANNED_NAMES.search(path):
+        if (ext in BANNED_EXT and path not in ART_ALLOW and not ART_ALLOW_RE.fullmatch(path)
+             and path not in SMAA_ALLOW) or BANNED_NAMES.search(path):
             problems.append(f"{path}: game, build or binary file type")
             continue
         data = open(path, "rb").read()

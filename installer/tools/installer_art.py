@@ -1,42 +1,40 @@
 #!/usr/bin/env python3
-"""Installer artwork for J-Stars Victory VS-EX: Fan Revival, in the fan site's NFO look.
+"""Installer artwork for J-Stars Victory VS-EX: Fan Revival, in the fan site's menu look.
 
-Image sizes per Inno DPI, own ICO writer, --check by bytes (layout adapted from the installer of Project Pyrrhus, undecuple's Killzone 2 port).
-Everything comes from tools/site/ascii_logo.py's cells
-(the compact banner star with the J) drawn in IBM Plex Mono Bold (SIL OFL 1.1; the font file is not in the repository: put
-IBMPlexMono-Bold.ttf in build/installer/fonts/) and the site palette (red band at the top, black base,
-yellow star, orange J, off-white text). No game logo or art. Needs Pillow (`pip install pillow`).
+Image sizes per Inno DPI, own ICO writer, --check by bytes (layout adapted from the installer of Project Pyrrhus,
+undecuple's Killzone 2 port). The drawing helpers and the palette are the repository art's (tools/site/repo_art.py,
+data/theme.json): a speed-line burst, red and white stripe frames, a slanted dark panel, the gold star with the J, the
+title in our own polygon letters (tools/site/wordmark.py), "Fan Revival" on the yellow-to-orange bar. No font file, no
+game logo or art. Needs Pillow (`pip install pillow`).
 
     python installer/tools/installer_art.py            # write build/installer/art/*
     python installer/tools/installer_art.py --check    # render again, exit 1 when a file is missing or differs
     python installer/tools/installer_art.py --preview  # also build/installer/art/preview.png (contact sheet, not shipped)
+    python installer/tools/installer_art.py --out DIR  # write elsewhere
 
 Outputs: wizard-{100,125,150,200}.bmp (Welcome/Finish panel), header-{...}.bmp (small top-right image), and
-jsp-setup.ico, jsp-launcher.ico, jsp-uninstall.ico (16/24/32/48/64 as 32-bit DIB, 256 as PNG). The icons at 48 px and up
-is the star+J as glyph art at 256 px only (a 22-column glyph star was mush at 48 and 64 px, judged by eye);
-from 16 to 64 px a pixel drawing of the same star+J shape.
+jsp-setup.ico, jsp-launcher.ico, jsp-uninstall.ico (16/24/32/48/64 as 32-bit DIB, 256 as PNG): the star with the J;
+its outline is drawn thicker below 48 px so the shape still reads.
 Images are generated at release time, never committed (tools/ci/repo_checks.py bans .png/.jpg/.bmp/.ico in git).
-Deterministic: same script + font + Pillow = same bytes.
+Deterministic: same script + Pillow = same bytes.
 ASSUMPTION: Inno 6's documented image sizes per DPI (WizardImageFile / WizardSmallImageFile help topics), checked by
 compiling the installer.
 """
 import argparse
+import importlib.util
 import io
-import math
 import pathlib
 import struct
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools" / "site"))
-import ascii_logo  # noqa: E402
+_sp = importlib.util.spec_from_file_location("repo_art", ROOT / "tools" / "site" / "repo_art.py")
+art = importlib.util.module_from_spec(_sp)
+_sp.loader.exec_module(art)
 
 OUT = ROOT / "build" / "installer" / "art"
-FONT = ROOT / "build" / "installer" / "fonts" / "IBMPlexMono-Bold.ttf"
-# The site palette
-RED, YELLOW, BLACK, PAPER, ORANGE = (0x90, 0, 0), (0xFF, 0xEA, 0x2E), (0, 0, 0), (0xF6, 0xF0, 0xED), (0xFF, 0x8C, 0x19)
+C, LIGHT = art.C, art.LIGHT
 DARK = (0x2B, 0x2B, 0x2B)   # Inno 6.7 "modern dark" page colour, sampled from the wizard
-TAGCOL = {"s": YELLOW, "j": ORANGE, "v": PAPER, "1": ORANGE, "2": PAPER}
 WIZARD = {100: (164, 314), 125: (192, 386), 150: (246, 459), 200: (328, 604)}
 HEADER = {100: (55, 55), 125: (64, 68), 150: (83, 80), 200: (110, 106)}
 ICON_SIZES = (16, 24, 32, 48, 64, 256)
@@ -44,107 +42,65 @@ ICONS = ("setup", "launcher", "uninstall")
 SS = 4           # supersampling: draw at 4x, scale down once
 
 
-def star_cells():
-    """The site logo's star with the 3D J :
-    ascii_logo's mirrored star rows with only the J put in, so the star stays whole where the logo lays VS-EX over it."""
-    rows = [l.ljust(30) + ascii_logo._mirror(l.ljust(30)) for l in ascii_logo._L]
-    ch = [list(r) for r in rows]
-    tg = [["s" if c != " " else " " for c in r] for r in ch]
-    for j, l in enumerate(ascii_logo._J):
-        for i, c in enumerate(l):
-            if c != "@":
-                ch[6 + j][22 + i] = c
-                tg[6 + j][22 + i] = "j"
-    return [list(zip(r, t)) for r, t in zip(ch, tg)]
-
-
-def font(px):
-    from PIL import ImageFont
-    return ImageFont.truetype(str(FONT), max(1, int(px)), layout_engine=ImageFont.Layout.BASIC)
-
-
-def draw_cells(d, cells, x, y, cw, rh, fpx, colors=TAGCOL, stroke=0):
-    """Draw rows of (char, tag) on a fixed grid: cell width cw, row height rh. stroke thickens the glyphs (small icons)."""
-    f = font(fpx)
-    for j, row in enumerate(cells):
-        for i, (c, t) in enumerate(row):
-            if c != " ":
-                col = colors.get(t, PAPER)
-                d.text((x + i * cw, y + j * rh), c, font=f, fill=col, stroke_width=int(stroke), stroke_fill=col)
-
-
-def text_lines(d, lines, x, y, cw, rh, fpx, fill):
-    f = font(fpx)
-    for j, s in enumerate(lines):
-        d.text((x, y + j * rh), s, font=f, fill=fill)
-
-
-def new(w, h, bg=DARK):
-    from PIL import Image
-    return Image.new("RGB", (w * SS, h * SS), bg)
-
-
-def down(img, w, h):
-    from PIL import Image
-    return img.resize((w, h), Image.LANCZOS)
-
-
 # ---------------------------------------------------------------------------------------------------- wizard images
-def star_block(d, x, y, width, stroke=0):
-    """Draw star_cells() scaled to width; returns its height."""
-    cells = star_cells()
-    cw = width / len(cells[0])
-    rh = cw / 0.6 * 1.18
-    draw_cells(d, cells, x, y, cw, rh, cw / 0.6, stroke=stroke)
-    return rh * len(cells)
-
-
 def wizard(dpi):
-    """Side image: the star with the 3D J, the title and the notice on the dark page colour (no subtitle band)."""
+    """Side image: burst, stripe frames, a slanted dark panel with the star, the title and Fan Revival."""
+    from PIL import Image, ImageDraw
     w, h = WIZARD[dpi]
-    s = SS * w / 164.0
-    im = new(w, h)
-    from PIL import ImageDraw
+    s = SS * min(w / 164.0, h / 314.0)     # one scale for the 164x314 design; the other sizes differ a little in shape
+    W, H = w * SS, h * SS
+    ox, oy = (W - 164 * s) / 2, (H - 314 * s) / 2
+    im = Image.new("RGB", (W, H))
+    art.burst(im, int(W * 0.5), int(H * 0.36), LIGHT["burst_base"], LIGHT["burst_ray"], LIGHT["burst_line"], n=40)
     d = ImageDraw.Draw(im)
-    y = 24 * s
-    y += star_block(d, 6 * s, y, (164 - 12) * s, stroke=0.25 * s) + 18 * s
-    text_lines(d, ["J-STARS", "VICTORY", "VS-EX"], 10 * s, y, 0, 23 * s, 21 * s, PAPER)
-    text_lines(d, ["unofficial fan", "project. No game", "files included.", "Bring your own", "copy of the game."],
-               10 * s, y + 84 * s, 0, 12.5 * s, 11 * s, ORANGE)
-    return down(im, w, h)
+    fh = int(16 * s)
+    art.stripes(im, 0, fh, SS, period=34 * s / SS, gap=5 * s / SS)
+    art.stripes(im, H - fh, fh, SS, flip=True, period=34 * s / SS, gap=5 * s / SS)
+
+    def X(v):
+        return ox + v * s
+
+    def Y(v):
+        return oy + v * s
+    art.slanted(d, X(12), Y(112), W - 2 * s, Y(258), 8 * s, C["ink"])
+    art.slanted(d, X(6), Y(106), W - 8 * s, Y(252), 8 * s, C["panel"])
+    art.mark(im, W / 2, Y(66), 40 * s, 3 * s)
+    art.word(im, "J-STARS", 15 * s, X(18), Y(120), C["text"], 1.6 * s)
+    art.word(im, "VICTORY", 15 * s, X(18), Y(141), C["text"], 1.6 * s)
+    art.word(im, "VS-EX", 31 * s, X(16), Y(166), (C["title_top"], C["title_bottom"]), 2.4 * s)
+    art.glow_bar(im, 0, Y(210), W - 4 * s, Y(236), fade=0.12)
+    art.word(im, "FAN REVIVAL", 13 * s, X(22), Y(216), C["text"], 1.6 * s)
+    art.word(im, "BRING YOUR", 10 * s, X(20), Y(266), C["ink"], 0)
+    art.word(im, "OWN COPY", 10 * s, X(20), Y(280), C["ink"], 0)
+    return im.resize((w, h), Image.LANCZOS)
 
 
 def header(dpi):
-    w, h = HEADER[dpi]
-    im = icon_glyph(max(w, h))
     from PIL import Image
-    bg = Image.new("RGB", im.size, DARK)
-    bg.paste(im, (0, 0), im)
-    return bg.crop((0, 0, w, h))
+    w, h = HEADER[dpi]
+    n = max(w, h)
+    ic = icon_image(n)
+    bg = Image.new("RGB", (w, h), DARK)
+    bg.paste(ic, ((w - n) // 2, (h - n) // 2), ic)
+    return bg
 
 
 # --------------------------------------------------------------------------------------------------------- icons
-def icon_glyph(n):
-    """The star with the 3D J as glyph art at every size (the icon stays the ASCII star), on a
-    transparent background. Below 128 px the glyph strokes are thickened so the star's lines still land on pixels."""
-    from PIL import Image, ImageDraw
-    S = max(n, 64) * SS * 4
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    m = 0.02 * S
-    cells = star_cells()
-    hgt = (S - 2 * m) / len(cells[0]) / 0.6 * 1.18 * len(cells)
-    stroke = (S / n) * (0.12 if n >= 128 else 0.3 if n >= 48 else 0.22)
-    star_block(d, m, (S - hgt) / 2, S - 2 * m, stroke=stroke)
-    return im.resize((n, n), Image.LANCZOS)
-
-
 def icon_image(n):
-    return icon_glyph(n)
+    """The star with the J on a transparent background; the outline is thicker at small sizes."""
+    from PIL import Image
+    S = max(n, 64) * SS * 2
+    im = Image.new("RGB", (S, S), C["ink"])
+    rel = 0.035 if n >= 48 else 0.06
+    art.mark(im, S / 2, S * 0.535, S * (0.5 - rel - 0.01) / 1.0, S * rel)
+    # alpha: the star with its outline
+    m = art._outline_mask((S, S), art.star_polys(S / 2, S * 0.535, S * (0.5 - rel - 0.01)), S * rel)
+    out = im.convert("RGBA")
+    out.putalpha(m)
+    return out.resize((n, n), Image.LANCZOS)
 
 
 def ico_bytes(sizes=ICON_SIZES):
-    from PIL import Image
     entries, blobs, off = [], [], 6 + 16 * len(sizes)
     for n in sizes:
         im = icon_image(n).convert("RGBA")
@@ -203,25 +159,24 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--preview", action="store_true")
+    ap.add_argument("--out", default=str(OUT))
     a = ap.parse_args()
-    if not FONT.is_file():
-        print(f"font {FONT} missing (put IBM Plex Mono Bold there; SIL OFL 1.1)", file=sys.stderr)
-        return 2
+    out = pathlib.Path(a.out)
     files, again = render_all(), render_all()
     if files != again:
         print("not deterministic: two renders differ", file=sys.stderr)
         return 1
     if a.check:
-        bad = [n for n, b in files.items() if not (OUT / n).is_file() or (OUT / n).read_bytes() != b]
+        bad = [n for n, b in files.items() if not (out / n).is_file() or (out / n).read_bytes() != b]
         print("installer_art: " + (f"{len(bad)} file(s) missing or changed: {' '.join(bad)}" if bad else
                                     f"{len(files)} files match"))
         return 1 if bad else 0
-    OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     for n, b in files.items():
-        (OUT / n).write_bytes(b)
+        (out / n).write_bytes(b)
     if a.preview:
-        preview(OUT / "preview.png")
-    print(f"installer_art: wrote {len(files)} files to {OUT}")
+        preview(out / "preview.png")
+    print(f"installer_art: wrote {len(files)} files to {out}")
     return 0
 
 
