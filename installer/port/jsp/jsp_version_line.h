@@ -99,16 +99,28 @@ inline Lines choose(const Inputs& in)
     return out;
 }
 
+// The flow object S ([0x009535F0], vtable 0x87AD28) has handed its current request to its child scene and the child runs it. Decoded from
+// the lifted code: the request API func_00154A3C @0x00154A3C moves state 2 (idle) -> 3, or any state 3..9 -> 6 when the id differs from +0x34;
+// the per-frame half func_00154804 @0x00154804 moves 3 -> 4 (child vt+0x20) and 6 -> 7 (child vt+0x3C), 8 -> 9; func_00154E74 @0x00154E74
+// polls the child (vt+0x28, via func_001547A8) in states 4 and 7 only and moves to 5 when it reports done. So 4 and 7 are the same phase:
+// 4 after the first request, 7 after every later one. The Main Menu reaches 4 the first time (MEASURED, run ver-probe-1); Options asks for
+// id 3 (func_001DF598, call at 0x001DFE94: 4 -> 6 -> 7, mode 5) and Circle back to the top list asks for id 0 (func_001DE100: mode 0 stored at 0x001DE6E4, then
+// func_00154A3C(S, 0) at 0x001DE7A8: 7 -> 6 -> 7; MEASURED, run rbnotice-bothon-4: flow 6 then 7 with mode 0 at the return, panel state 0
+// five flips later). Requiring 4 alone kept the line and the notice off
+// after any submenu.
+inline bool flow_running(int flow_state) { return flow_state == 4 || flow_state == 7; }
+
 // The main menu's top list is up: the main-menu object is alive, the panel (sub-menu list, same object class for every sub-menu)
 // has been updated within the last two flips (a dead scene stops updating it) and was closed (state 0) at its last update.
 // Panel states (re-notes-data-logo R5): 0 closed, 1 open requested, 2 opening, 3 active, 4 close requested, 5 closing.
 // MEASURED in a Proton run of the development tree (JSP_VERSION_PROBE): the idle Main Menu is flow state S+0x30 == 4 (S=[0x009535F0])
 // with menu mode [0x0095653C+0x10] == 0. State 1/2 is the title -> menu transition (panel -1, not the menu), 6/7 with mode 5 is the menu
-// leaving into Options. flow_state is -1 when S is 0. Without this rule the panel object stays alive and closed while the menu leaves, and
-// the line stayed up. The line hides on the first flip either value changes.
+// leaving into Options. flow_state is -1 when S is 0. Without the flow and mode rule the panel object stays alive and closed while the menu
+// leaves, and the line stayed up. The line hides on the first flip either value changes. After a submenu the top list runs at flow state 7
+// (flow_running above), told apart from the submenu by the mode word (5 for Options, back to 0 on the return).
 inline bool top_menu(bool obj_alive, bool panel_seen, uint32_t flips_since_update, int panel_state, int flow_state, int menu_mode)
 {
-    return obj_alive && panel_seen && flips_since_update <= 2 && panel_state == 0 && flow_state == 4 && menu_mode == 0;
+    return obj_alive && panel_seen && flips_since_update <= 2 && panel_state == 0 && flow_running(flow_state) && menu_mode == 0;
 }
 
 }  // namespace jpv

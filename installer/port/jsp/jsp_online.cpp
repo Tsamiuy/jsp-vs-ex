@@ -633,6 +633,17 @@ extern "C" int jsp_online_repsn_identity(char* server, int sn, char* name, int n
     return 1;
 }
 
+/* ENHANCEMENT (display only): where the game's own online came from at start, for the refused-rollback notice (jpno::OnlineSource in jsp_net_online.h):
+ * 0 none or unknown (PS3_NET_ONLINE set some other way), 1 repsn.ini enabled=1, 2 the --psnr flag, 3 PSNR_SERVER in the environment. */
+extern "C" int jsp_online_source(void)
+{
+    const jsp_online::View& v = jsp_online::g_view;
+    if (!v.valid || !v.online) return 0;
+    if (!strcmp(v.via, "--psnr flag")) return 2;
+    if (!strcmp(v.via, "environment")) return 3;
+    return v.rep_enabled ? 1 : 0;
+}
+
 /* ENHANCEMENT (in-game netcode option): the Netcode row of the page drives the method directly and asks whether the working copy can be saved. */
 extern "C" int jsp_online_edit_method(void)   /* 0 off, 1 re-psn, 2 community (the working copy) */
 {

@@ -265,6 +265,56 @@ int main()
       env.clear(); env["JSP_ROLLBACK"] = "1"; env["JSP_ROLLBACK_VIA"] = "repsn"; env["JSP_ROLLBACK_ROLE"] = "join"; env["PS3_NET_ONLINE"] = "1";
       CHECK(resolve_env(get, set, &own, &why) == Boot::Refused && !get("PS3_NET_ONLINE") && why.find("both on") != std::string::npos);   // rollback over re-psn is not the game's own Delay: one method at a time still holds
     }
+    // ENHANCEMENT (display only): the refused-rollback notice. resolve_env reports a code for every refusal; every code has a two-line text that starts the same way
+    // and names the fix; ASCII only (the overlay font); the real case (repsn.ini enabled=1 with a re-psn rollback host) names repsn.ini and enabled=0.
+    { std::map<std::string, std::string> env; std::vector<std::string> own; std::string why; Refusal code = Refusal::Count;
+      auto get = [&](const char* k) -> const char* { auto it = env.find(k); return it == env.end() ? nullptr : it->second.c_str(); };
+      auto set = [&](const char* k, const char* v) { if (v && *v) env[k] = v; else env.erase(k); };
+      auto run = [&](std::map<std::string, std::string> e) { env = e; own.clear(); code = Refusal::Count; return resolve_env(get, set, &own, &why, &code); };
+      CHECK(run({}) == Boot::NotRequested && code == Refusal::None);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "36200" } }) == Boot::Go && code == Refusal::None);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "host" }, { "PS3_NET_ONLINE", "1" } }) == Boot::Refused && code == Refusal::BothOn);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" } }) == Boot::Refused && code == Refusal::RepsnNoRole);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "join" }, { "JSP_ROLLBACK_LISTEN", "0" } }) == Boot::Refused && code == Refusal::BadListen);
+      CHECK(run({ { "JSP_ROLLBACK", "1" } }) == Boot::Refused && code == Refusal::RoleKeys);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "1" }, { "JSP_ROLLBACK_JOIN", "192.0.2.10:36200" } }) == Boot::Refused && code == Refusal::RoleKeys);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "99999" } }) == Boot::Refused && code == Refusal::BadListen);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_JOIN", "host:1" } }) == Boot::Refused && code == Refusal::BadJoin);
+      env = { { "JSP_ROLLBACK", "1" } }; CHECK(resolve_env(get, set, &own, &why) == Boot::Refused && std::string(get("JSP_ROLLBACK")) == "0");   // the code pointer stays optional
+      CHECK(!notice_text(Refusal::None).any() && !notice_text(Refusal::Count).any() && !notice_text(static_cast<Refusal>(99)).any());
+      for (int c = 1; c < static_cast<int>(Refusal::Count); ++c)
+          for (int src : { SRC_OTHER, SRC_REPSN_INI, SRC_PSNR_FLAG, SRC_ENVIRONMENT }) {
+              const Notice n = notice_text(static_cast<Refusal>(c), src);
+              CHECK(n.any() && n.line1.rfind("Rollback is off: ", 0) == 0 && !n.line2.empty() && n.line1.size() <= 100 && n.line2.size() <= 100);
+              for (char ch : n.line1 + n.line2) CHECK(ch >= 0x20 && ch <= 0x7E);
+          }
+      const Notice real = notice_text(Refusal::BothOn, SRC_REPSN_INI);
+      CHECK(real.line1 == "Rollback is off: repsn.ini has enabled=1 (the game's own online)." && real.line2.find("Set enabled=0 in repsn.ini") == 0);
+      CHECK(notice_text(Refusal::BothOn, SRC_PSNR_FLAG).line1.find("--psnr") != std::string::npos);
+      CHECK(notice_text(Refusal::BothOn, SRC_ENVIRONMENT).line1.find("PSNR_SERVER") != std::string::npos);
+      CHECK(notice_text(Refusal::BothOn, SRC_OTHER).line1.find("PS3_NET_ONLINE") != std::string::npos);
+      CHECK(notice_text(Refusal::RepsnNoIdentity).line1.find("server=") != std::string::npos && notice_text(Refusal::RepsnNoIdentity).line2.find("enabled=0") != std::string::npos);
+      CHECK(notice_text(Refusal::RepsnLongName).line1.find("16") != std::string::npos);
+      CHECK(notice_text(Refusal::NoSocket).line2.find("JSP_ROLLBACK_LISTEN") != std::string::npos);
+      // the fix line names the file change first; the Port Settings page (off unless JSP_PORT_MENU=1 before it is on by default) only as "or Port Settings > Online"
+      for (Refusal r : { Refusal::RepsnNoRole, Refusal::BadListen, Refusal::RoleKeys, Refusal::BadJoin, Refusal::RepsnNoIdentity }) {
+          const std::string l2 = notice_text(r).line2;
+          const char* file = r == Refusal::RepsnNoIdentity ? "repsn.ini" : "play_settings.txt";
+          const size_t f = l2.find(file), ps = l2.find(", or Port Settings > Online.");
+          CHECK(f != std::string::npos && ps != std::string::npos && f < ps && ps + 28 == l2.size());
+      }
+      CHECK(notice_text(Refusal::RepsnNoRole).line2.find("JSP_ROLLBACK_ROLE=host or join") != std::string::npos);
+      CHECK(notice_text(Refusal::BadJoin).line2.find("JSP_ROLLBACK_JOIN=IP:PORT") != std::string::npos);
+      for (int c = 1; c < static_cast<int>(Refusal::Count); ++c)
+          for (int src : { SRC_OTHER, SRC_REPSN_INI, SRC_PSNR_FLAG, SRC_ENVIRONMENT }) {
+              const Notice n = notice_text(static_cast<Refusal>(c), src);
+              const size_t at = (n.line1 + "|" + n.line2).find("Port Settings");
+              CHECK(at == std::string::npos || (n.line1 + "|" + n.line2).find("or Port Settings > Online") == at - 3);
+          }
+      // the visibility rule: only while the top list is up, for kNoticeMs after it came up
+      CHECK(notice_visible(true, true, 1000, 1000) && notice_visible(true, true, 1000, 1000 + kNoticeMs - 1));
+      CHECK(!notice_visible(true, true, 1000, 1000 + kNoticeMs) && !notice_visible(true, false, 1000, 1001) && !notice_visible(false, true, 1000, 1001));
+    }
     // the page: Connection and Relay toggles, saved to the file; re-psn needs a server and a name
     { Fake fk3; FakeIO io3; Menu m; m.be = &fk3; m.io = &io3; m.enter_online(); press(m, BTN_RIGHT); press(m, BTN_RIGHT); CHECK(m.nc == NC_ROLLBACK);
       press(m, BTN_DOWN); CHECK(m.orow() == R_CONN); press(m, BTN_RIGHT); CHECK(m.rb.repsn && m.orows() == V({ R_NETCODE, R_CONN, R_ROLE, R_RELAY, R_SAVE, R_DISCARD }));

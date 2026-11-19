@@ -23,6 +23,7 @@
 #ifndef JSP_ROLLBACK_BUILD
 extern "C" void jsp_net_game_install(void) {}
 extern "C" void jsp_net_env_part(int) {}
+extern "C" int jsp_net_notice(char*, int, char*, int) { return 0; }
 #else
 
 #include <atomic>
@@ -50,6 +51,7 @@ extern "C" void jsp_net_env_part(int) {}
 
 extern "C" {
 int jsp_online_repsn_identity(char* server, int sn, char* name, int nn, char* comm, int cn, int* report_rtt);   // jsp_online.cpp: repsn.ini even with enabled=0
+int jsp_online_source(void);   // jsp_online.cpp: where the game's own online came from (jpno::OnlineSource)
 extern int (*jsp_session_text_hook)(const char* key, char* out, int n);   // jsp_settings.cpp
 int jsp_setting_get(const char* key, char* out, int n);
 void jsp_setting_changed(void);   // jsp_settings.cpp: bumps jsp_setting_gen so the cached readers re-read
@@ -99,12 +101,17 @@ std::vector<std::string> g_own_env;   // names this module set itself: they must
 // exe sets it later (np_psnr_setup only sets it from a --psnr argument, which the runtime's own boot_main handles, not this exe).
 // Remaining: jsp_thread_registry.cpp's TLS callback reads JSP_ROLLBACK at process attach, before any decision, and enables the thread registry (bookkeeping only).
 jpno::Rendezvous g_rv;                // constant-initialized (no constructor): safe to use from another translation unit's static constructor
+// ENHANCEMENT (display only, default on): why rollback did not start, for the on-screen notice (jsp_net_notice below; jsp_port_menu.cpp draws it on the main menu's top list).
+// Plain atomics (constant-initialized): decide_env may run from another translation unit's static constructor, before this file's dynamic initializers.
+std::atomic<int> g_refusal{0}, g_refusal_src{0};
+void note_off(jpno::Refusal r) { g_refusal_src.store(jsp_online_source()); g_refusal.store(static_cast<int>(r)); }
 void decide_env()
 {
-    std::string why;
+    std::string why; jpno::Refusal code = jpno::Refusal::None;
     const jpno::Boot r = jpno::resolve_env([](const char* k) { return std::getenv(k); },
                                            [](const char* k, const char* v) { _putenv_s(k, v ? v : ""); },   // "" removes the variable on Windows
-                                           &g_own_env, &why);
+                                           &g_own_env, &why, &code);
+    if (r == jpno::Boot::Refused) note_off(code);
     std::fprintf(stderr, "[net] env decision: %s (static constructors arrived: %s first, %s last)\n",
                  r == jpno::Boot::Go ? "rollback start" : r == jpno::Boot::Refused ? "REFUSED" : "rollback not requested",
                  g_rv.order[0] == 1 ? "EnvInit" : "online boot", g_rv.order[1] == 1 ? "EnvInit" : "online boot");
@@ -593,9 +600,9 @@ extern "C" void jsp_net_game_install(void)
         repsn_relay = jsp_setting_get(jpno::kKeyRelay, relay, sizeof relay) && jpno::flag_on(relay);
         char srv[160] = {}, nm[64] = {}, cid[24] = {}; int rep_rtt = 0;
         if (!jsp_online_repsn_identity(srv, sizeof srv, nm, sizeof nm, cid, sizeof cid, &rep_rtt) || !parse_server(srv, rid.host, rid.port) || !nm[0]) {
-            std::fprintf(stderr, "[net] re-psn: no server / online name in repsn.ini (set them on the Online page under Delay): off\n"); return;
+            std::fprintf(stderr, "[net] re-psn: no server / online name in repsn.ini (set them on the Online page under Delay): off\n"); note_off(jpno::Refusal::RepsnNoIdentity); return;
         }
-        if (std::strlen(nm) > 16) { std::fprintf(stderr, "[net] re-psn: the online name '%s' is longer than 16 characters (repsn.ini name=): off\n", nm); return; }
+        if (std::strlen(nm) > 16) { std::fprintf(stderr, "[net] re-psn: the online name '%s' is longer than 16 characters (repsn.ini name=): off\n", nm); note_off(jpno::Refusal::RepsnLongName); return; }
         rid.name = nm; if (cid[0]) rid.comm_id = cid; rid.report_rtt = rep_rtt != 0;
         g.host = repsn_host;
         g.listen_port = have_listen ? (uint16_t)std::atoi(b) : 0;   // a fixed UDP port is optional (firewalls); 0 = any
@@ -603,9 +610,9 @@ extern "C" void jsp_net_game_install(void)
         if (have_listen == have_join) { std::fprintf(stderr, "[net] BUG: the start decision (jpno::resolve_env) let JSP_ROLLBACK=1 through without exactly one role key: off\n"); return; }   // unreachable: refused before main()
         g.host = have_listen;
         if (g.host) g.listen_port = (uint16_t)std::atoi(b);
-        else if (!parse_endpoint(j, g.join)) { std::fprintf(stderr, "[net] JSP_ROLLBACK_JOIN is not IP:PORT: off\n"); return; }
+        else if (!parse_endpoint(j, g.join)) { std::fprintf(stderr, "[net] JSP_ROLLBACK_JOIN is not IP:PORT: off\n"); note_off(jpno::Refusal::BadJoin); return; }
     }
-    if (!g.mux.open(g.host ? g.listen_port : (via_repsn ? g.listen_port : 0), &err)) { std::fprintf(stderr, "[net] cannot open the UDP socket: %s: off\n", err.c_str()); return; }
+    if (!g.mux.open(g.host ? g.listen_port : (via_repsn ? g.listen_port : 0), &err)) { std::fprintf(stderr, "[net] cannot open the UDP socket: %s: off\n", err.c_str()); note_off(jpno::Refusal::NoSocket); return; }
     // F9 is the cancel key: a VK 0x78 binding (settings pages save PAD_KEY_* as 0x78 / decimal) is dropped from the environment the pad layer reads.
     for (char** e = environ; e && *e; ++e) {
         if (std::strncmp(*e, "PAD_KEY_", 8) != 0) continue;
@@ -653,5 +660,17 @@ extern "C" void jsp_net_game_install(void)
 
 // Called by jsp_online.cpp's boot when the online files and --psnr have been applied; EnvInit reports through the same rendezvous.
 extern "C" void jsp_net_env_part(int part) { g_rv.arrive(part, decide_env); }
+
+// ENHANCEMENT (display only): the two lines of the refused-rollback notice (jpno::notice_text), for jsp_port_menu.cpp. 1 = there is one, 0 = rollback was not refused
+// (not requested, or it started). Any thread; the code is written before main() or by jsp_net_game_install, before the menu exists.
+extern "C" int jsp_net_notice(char* line1, int n1, char* line2, int n2)
+{
+    const int c = g_refusal.load();
+    if (c <= 0 || c >= static_cast<int>(jpno::Refusal::Count)) return 0;
+    const jpno::Notice t = jpno::notice_text(static_cast<jpno::Refusal>(c), g_refusal_src.load());
+    if (!t.any()) return 0;
+    std::snprintf(line1, (size_t)n1, "%s", t.line1.c_str()); std::snprintf(line2, (size_t)n2, "%s", t.line2.c_str());
+    return 1;
+}
 
 #endif  // JSP_ROLLBACK_BUILD
