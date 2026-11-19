@@ -71,6 +71,7 @@ CODE_END = PROFILE["code_end"]
 EXE = PROFILE["exe"]
 TOC = "0x8d3888"          # r2 of the lifted code (both regions); the v18 lifter takes it as --toc
 INSN_PATCHES = "lift_insn_patches.json"   # in the port folder: instruction patches the v0.19 lifter emits behind a switch (US 1.00 code only)
+FFMPEG_DLL_FAMILIES = ("avcodec", "avutil", "swresample")   # the movie decoder DLLs place copies (ffmpeg_dll_names)
 PORT_MENU_ART = ("menu_training_off.rgba", "menu_training_on.rgba", "menu_port_settings_off.rgba", "menu_port_settings_on.rgba", "menu_font.jmf")
 TREE_EXE = {"v18": "jsp.exe"}   # the only tree; the v15 tree (exe EXE) is no longer built, see tag legacy-v15
 # ======================================================================================================================
@@ -559,7 +560,8 @@ class Ctx:
         if step == "build":
             return [f"build/port/{self.exe}"], []
         return ([f"game/{self.exe}", "game/EBOOT.elf", "paths.txt"],
-                ["game/ex_logo_A.rgba", *(f"game/{n}" for n in PORT_MENU_ART), "game/*.dll", "jsp-settings.exe"])
+                ["game/ex_logo_A.rgba", *(f"game/{n}" for n in PORT_MENU_ART),
+                 *(f"game/{d}-*.dll" for d in FFMPEG_DLL_FAMILIES), "jsp-settings.exe"])
 
     def output_files(self, step):
         """The files the step's patterns match now, sorted, relative to the install folder with '/'."""

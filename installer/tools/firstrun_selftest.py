@@ -136,7 +136,8 @@ def units():
     stub_out = {"lift": ("build/recompiled/ppu_recomp.h", "build/recompiled/ppu_recomp_000.cpp", "build/recompiled/ppu_recomp_001.cpp"),
                 "spu": ("build/spu/spu_workloads.c", "build/spu/job00/spu_recomp.c", "build/spu/job01/spu_recomp.c"),
                 "build": ("build/port/jsp.exe",),
-                "place": ("game/jsp.exe", "game/EBOOT.elf", "paths.txt", "game/ex_logo_A.rgba", "jsp-settings.exe")}
+                "place": ("game/jsp.exe", "game/EBOOT.elf", "paths.txt", "game/ex_logo_A.rgba",
+                          *(f"game/{n}" for n in firstrun.PORT_MENU_ART), "game/avcodec-61.dll", "jsp-settings.exe")}
     skip_out = set()   # files a stub step "forgets" to leave (a step that reports success without its output)
     for st in ("lift", "spu", "build", "place"):
         def fn(c, st=st):
@@ -207,6 +208,11 @@ def units():
                   and f"[{st}] running: output missing: {rel}" in out, str(ran))
             rc, out = go()
             check(f"outputs: {rel} back: nothing reruns", rc == 0 and ran == [] and (root / rel).is_file(), str(ran))
+    (root / "game/other.dll").write_text("x")   # a DLL place does not copy: not one of its outputs, removing it reruns nothing
+    rc, out = go(extra=["--force", "place"])
+    (root / "game/other.dll").unlink()
+    rc, out = go()
+    check("outputs: a DLL place does not copy is not listed", rc == 0 and ran == [], str(ran))
     for d, st in (("build/recompiled", "lift"), ("build/spu", "spu"), ("game", "place")):
         __import__("shutil").rmtree(root / d)
         rc, out = go()
