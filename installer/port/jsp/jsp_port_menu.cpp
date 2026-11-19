@@ -89,6 +89,8 @@ extern "C" int jsp_online_edit_method(void);                      // ENHANCEMENT
 extern "C" void jsp_online_edit_set_method(int m);
 extern "C" int jsp_online_edit_check(char* why, int n);            // 0 the working copy can be saved, 1 not (reason in why)
 extern "C" void jsp_setting_set_live(const char* key, const char* value);        // jsp_settings.cpp
+extern "C" int jsp_net_notice(char* line1, int n1, char* line2, int n2);          // jsp_net_game.cpp: the refused-rollback notice (1 = there is one)
+#include <chrono>
 namespace jps { std::string io_path(); bool io_load(std::string& text, std::string& note); bool io_save(const std::string& text, std::string& err); }
 #endif
 
@@ -848,6 +850,16 @@ bool g_ver_seen = false;                // the panel update has run at least onc
 uint32_t g_ver_flip = 0;                // flip count at the last panel update
 int g_ver_state = -1;                   // panel state at the last panel update
 
+// ENHANCEMENT (display only, default on): the refused-rollback notice (jpno::notice_text, jsp_net_game.cpp jsp_net_notice) on the same top list as the version line.
+// A refused start sets JSP_ROLLBACK=0 before main(), so the rollback module installs nothing and has no frame of its own to draw on; the top list is where the player
+// picks Online Battle / Free Battle, and the overlay layer is this file's to share. Shown for jpno::kNoticeMs each time the top list comes up.
+bool g_net_watch = false;               // set at install: JSP_ROLLBACK or JSP_NET_REFUSED is on, so a notice may exist (read lazily: jsp_net_game_install may decide later)
+jpno::Notice g_note;                    // the text, read when the top list comes up
+bool g_note_vis = false;
+uint64_t g_note_since = 0;              // ms: the top list last came up
+uint64_t mono_ms() { return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+bool top_items() { return g_ver.any() || g_net_watch; }
+
 void draw_page();
 
 // ENHANCEMENT (toolkit patch 7908): the player-order join. g_joining / g_join_next come from the toolkit's notifier (g_mu held).
@@ -861,11 +873,25 @@ int flow_state() { const uint32_t s = vm_read32(k_flow_ptr); return s ? (int)vm_
 // Caller holds g_mu. Re-evaluates visibility; redraws on a change (the page is closed whenever the top list is up).
 void ver_refresh()
 {
-    if (!g_ver.any()) return;
+    if (!top_items()) return;
     const uint32_t now = (uint32_t)cellGcm_flip_request_count();
     const bool alive = g_obj && g_obj_vt && vm_read32(g_obj) == g_obj_vt;
     const int fs = flow_state(), mode = (int)vm_read32(k_mode_g + 0x10);
     const bool vis = jpv::top_menu(alive, g_ver_seen, now - g_ver_flip, g_ver_state, fs, mode) && g_menu.page == jpm::CLOSED;
+    if (g_net_watch) {   // the notice: re-read and re-armed each time the top list comes up, dropped after jpno::kNoticeMs
+        const uint64_t t = mono_ms();
+        if (vis && !g_ver_vis) {
+            char l1[200] = "", l2[200] = "";
+            g_note = jsp_net_notice(l1, sizeof l1, l2, sizeof l2) ? jpno::Notice{ l1, l2 } : jpno::Notice{};
+            g_note_since = t;
+        }
+        const bool nv = jpno::notice_visible(g_note.any(), vis, g_note_since, t);
+        if (nv != g_note_vis) {
+            g_note_vis = nv;
+            if (nv) std::fprintf(stderr, "[net] notice on the top menu: %s / %s\n", g_note.line1.c_str(), g_note.line2.c_str());
+            if (vis == g_ver_vis) { draw_page(); return; }   // only the notice changed
+        }
+    }
     if (vis == g_ver_vis) return;
     g_ver_vis = vis;
     std::fprintf(stderr, "[version] top menu %s: obj 0x%08X alive %d, panel state %d, flips since panel update %u, flow state %d, mode %d (flip %u)\n", vis ? "up, line drawn" : "gone, line cleared",
@@ -875,10 +901,20 @@ void ver_refresh()
 
 void ver_draw()
 {
+    if (!g_ver.any() && !g_note_vis) { if (g_drawn) { jsp_overlay_close(); g_drawn = false; } return; }
     if (!jsp_overlay_begin(1280, 720)) return;
     const uint32_t white = JSP_RGBA(255, 255, 255, 255);
-    const float w1 = jsp_overlay_text_width(g_ver.line1.c_str(), jpv::kScale1);
+    const float w1 = g_ver.any() ? jsp_overlay_text_width(g_ver.line1.c_str(), jpv::kScale1) : 0;
     if (w1 > 0) jsp_overlay_text_style(jpv::kRight - w1, jpv::kY1, g_ver.line1.c_str(), jpv::kScale1, white, 0);
+    if (g_note_vis) {   // a dark band at the top of the 1280x720 layout space, both lines scaled down to fit 1200 px; the game's colours (white text with black rim, gold rule)
+        const float w = jsp_overlay_text_width(g_note.line1.c_str(), 1.0f), w2 = jsp_overlay_text_width(g_note.line2.c_str(), 1.0f);
+        const float wm = w > w2 ? w : w2;
+        const float sc = wm > 0 && wm * 0.75f > 1180.0f ? 1180.0f / wm : 0.75f;
+        jsp_overlay_fill_rect(20, 20, 1240, 92, JSP_RGBA(16, 20, 40, 225));
+        jsp_overlay_fill_rect(20, 108, 1240, 4, JSP_RGBA(240, 190, 30, 255));
+        jsp_overlay_text_style(40, 34, g_note.line1.c_str(), sc, white, 0);
+        jsp_overlay_text_style(40, 70, g_note.line2.c_str(), sc, white, 0);
+    }
     jsp_overlay_end();
     g_drawn = true;
 }
@@ -1059,7 +1095,7 @@ void on_panel_update(ppu_context* c)
 {
     const uint32_t obj = (uint32_t)c->gpr[3];
     g_orig_update(c);
-    if (g_ver.any()) {   // panel state and time of this update, for the version line
+    if (top_items()) {   // panel state and time of this update, for the version line and the net notice
         std::lock_guard<std::mutex> lk(g_mu);
         g_ver_seen = true; g_ver_flip = (uint32_t)cellGcm_flip_request_count(); g_ver_state = (int)vm_read32(obj + k_panel_state);
         ver_refresh();
@@ -1110,6 +1146,8 @@ void load_version_line()
 #endif
     g_ver = jpv::choose(in);
     if (!g_ver.any()) std::fprintf(stderr, "[version] no version line (no release.txt, no JSP_PORT_VERSION, JSP_VERSION_LINE=%s)\n", in.switch_env ? in.switch_env : "unset");
+    // the net notice may exist: rollback was asked for (it can still stop in jsp_net_game_install, after this) or refused before main() (JSP_ROLLBACK is 0 then)
+    g_net_watch = jpno::flag_on(std::getenv(jpno::kKeyOn)) || jpno::flag_on(std::getenv(jpno::kKeyRefused));
 }
 
 bool install(uint32_t addr, fn_t wrapper, fn_t* orig)
@@ -1130,9 +1168,9 @@ extern "C" void jsp_register_port_menu_overrides(void)
 {
     load_version_line();
     g_pad_join_notify = jsp_pad_join_notify;   // the join text does not depend on the Port Settings page or the US build
-    if (!port_menu_env() && !g_ver.any()) return;
+    if (!port_menu_env() && !top_items()) return;
     if (vm_read32(k_row_count_insn) != 0x3B200005u) {   // the hooks' addresses are those of the US 1.00 code only
-        std::fprintf(stderr, "[portmenu] JSP_PORT_MENU or a version line is set, but this is not the US 1.00 build (0x%08X holds 0x%08X): the page and the line stay off\n", k_row_count_insn, vm_read32(k_row_count_insn));
+        std::fprintf(stderr, "[portmenu] JSP_PORT_MENU, a version line or a rollback notice is set, but this is not the US 1.00 build (0x%08X holds 0x%08X): the page, the line and the notice stay off (the [net] log lines remain)\n", k_row_count_insn, vm_read32(k_row_count_insn));
         return;
     }
     const bool a = install(k_build_options, on_build_options, &g_orig_build);
@@ -1140,7 +1178,7 @@ extern "C" void jsp_register_port_menu_overrides(void)
     if (!a || !b) return;
     if (!port_menu_env()) {   // the version line alone: only the pad hook (a once-per-read tick), no Port Settings behaviour
         install_pad_filter();
-        std::fprintf(stderr, "[version] line \"%s\" (hooks 0x%08X, 0x%08X, pad tick)\n", g_ver.line1.c_str(),
+        std::fprintf(stderr, "[version] line \"%s\"%s (hooks 0x%08X, 0x%08X, pad tick)\n", g_ver.line1.c_str(), g_net_watch ? ", rollback notice watch" : "",
                      k_build_options, k_panel_update);
         return;
     }

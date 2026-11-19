@@ -57,6 +57,14 @@ Limits:
 - The launcher sends one small broadcast and shows only what answers; it does not connect to anything until you start
   the game.
 
+## Rollback over re-psn (experimental)
+
+The same re-psn server can also arrange a match for the port's experimental rollback netcode instead of the game's own
+online. The two are separate methods and only one can be on: for rollback, `repsn.ini` keeps the server and your online
+name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The full recipe is in
+[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Port Settings > Online
+(`JSP_PORT_MENU=1`) writes the same files.
+
 ## If it does not work
 
 - **Online Battle says: You have been signed out of "PSN". You cannot play online battles.** Online is off: no settings were found, or they were refused (the log says which). Check that the Online tab shows re-psn and
@@ -67,6 +75,10 @@ Limits:
 - **The room is found but the battle does not start, or freezes:** the direct link between two players failed. Ask the
   host to start the server with `-relay`, or open UDP for the game on both PCs. The game's default peer port is 3658,
   and two copies on one PC need different ports (see below).
+- **The top of the main menu says "Rollback is off: repsn.ini has enabled=1 (the game's own online)."** Rollback and the
+  game's own online were both on, so neither runs and nothing can connect. For rollback, set `enabled = 0` in `repsn.ini`
+  (keep `server` and `name`); for the game's own online, remove `JSP_ROLLBACK=1` from `play_settings.txt` (or set it to 0).
+  The other "Rollback is off" texts are listed in [ROLLBACK.md](ROLLBACK.md#if-rollback-does-not-start).
 - **Name refused:** use 3 to 16 letters, digits, `-` or `_`, starting with a letter, and not a name another player
   already uses on that server.
 - **Rollback (experimental) over re-psn ends with `re-psn: timed out waiting for the other player` or

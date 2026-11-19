@@ -14,6 +14,7 @@
 #define JSP_NET_ONLINE_H
 
 #include "jsp_settings.h"
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -196,6 +197,59 @@ static const KV kDefaults[] = {
 };
 enum class Boot { NotRequested, Go, Refused };
 
+// ENHANCEMENT (display only, default on): why a rollback start did not happen, for the on-screen notice (jsp_port_menu.cpp draws it on the main menu's top list).
+// The first block is decided by resolve_env before main(); the second by jsp_net_game_install after the lifted table is registered (its ": off" log lines).
+enum class Refusal : int {
+    None = 0,
+    BothOn,           // JSP_ROLLBACK=1 and the game's own online (PS3_NET_ONLINE) both on: neither runs
+    RepsnNoRole,      // JSP_ROLLBACK_VIA=repsn without JSP_ROLLBACK_ROLE=host or join
+    BadListen,        // JSP_ROLLBACK_LISTEN is not a port from 1 to 65535
+    RoleKeys,         // direct IP: not exactly one of JSP_ROLLBACK_LISTEN / JSP_ROLLBACK_JOIN
+    BadJoin,          // JSP_ROLLBACK_JOIN is not IP:PORT
+    NotWired,         // a build without the re-psn transport
+    RepsnNoIdentity,  // over re-psn: repsn.ini has no valid server= or name=
+    RepsnLongName,    // over re-psn: the online name is longer than 16 characters
+    NoSocket,         // the UDP socket could not be opened
+    Count
+};
+// Where the game's own online came from (jsp_online.cpp's start-up reading), for the BothOn text.
+enum OnlineSource : int { SRC_OTHER = 0, SRC_REPSN_INI = 1, SRC_PSNR_FLAG = 2, SRC_ENVIRONMENT = 3 };
+
+struct Notice { std::string line1, line2; bool any() const { return !line1.empty(); } };
+
+// The player-facing text: what is wrong (line 1) and the fix (line 2). ASCII only (the overlay font). Empty for None or an unknown code.
+inline Notice notice_text(Refusal r, int src = SRC_REPSN_INI)
+{
+    Notice n;
+    auto put = [&](const char* a, const char* b) { n.line1 = std::string("Rollback is off: ") + a; n.line2 = b; };
+    switch (r) {
+    case Refusal::BothOn:
+        if (src == SRC_PSNR_FLAG) put("the --psnr launch option turns on the game's own online.", "Remove --psnr to use rollback. Only one online method can be on.");
+        else if (src == SRC_ENVIRONMENT) put("PSNR_SERVER is set (the game's own online).", "Remove PSNR_SERVER to use rollback. Only one online method can be on.");
+        else if (src == SRC_REPSN_INI) put("repsn.ini has enabled=1 (the game's own online).", "Set enabled=0 in repsn.ini to use rollback (keep server= and name=).");
+        else put("the game's own online (PS3_NET_ONLINE) is on too.", "Turn the game's own online off to use rollback. Only one online method can be on.");
+        break;
+    case Refusal::RepsnNoRole: put("JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join.", "Add the line to play_settings.txt, or pick a Role in Port Settings > Online."); break;
+    case Refusal::BadListen: put("JSP_ROLLBACK_LISTEN is not a port from 1 to 65535.", "Fix the line in play_settings.txt, or set the Port in Port Settings > Online."); break;
+    case Refusal::RoleKeys: put("set exactly one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).", "Fix play_settings.txt, or pick a Role in Port Settings > Online."); break;
+    case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Fix the line in play_settings.txt, or set the Host address in Port Settings > Online."); break;
+    case Refusal::NotWired: put("this build cannot reach re-psn rooms.", "Use a direct IP connection (JSP_ROLLBACK_LISTEN or JSP_ROLLBACK_JOIN)."); break;
+    case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set both in repsn.ini (keep enabled=0 for rollback), or on Port Settings > Online."); break;
+    case Refusal::RepsnLongName: put("the online name in repsn.ini is longer than 16 characters.", "Use a shorter name= in repsn.ini."); break;
+    case Refusal::NoSocket: put("the UDP port could not be opened.", "Close the program that uses it, or pick another JSP_ROLLBACK_LISTEN port."); break;
+    default: break;
+    }
+    return n;
+}
+
+// How long the notice stays each time the main menu's top list comes up (it comes back the next time the top list is up).
+static constexpr uint64_t kNoticeMs = 15000;
+// Shown: the top list is up and it came up less than kNoticeMs ago. up_since_ms = when the top list last came up.
+inline bool notice_visible(bool have_notice, bool top_up, uint64_t up_since_ms, uint64_t now_ms)
+{
+    return have_notice && top_up && now_ms - up_since_ms < kNoticeMs;
+}
+
 // ONE place decides whether a rollback start happens, and it runs after the online files were applied (so PS3_NET_ONLINE is final):
 //   - JSP_ROLLBACK off: nothing.
 //   - the game's own online on (PS3_NET_ONLINE set to anything, the runtime's test) too: REFUSED, neither runs (one multiplayer method at a time):
@@ -204,10 +258,13 @@ enum class Boot { NotRequested, Go, Refused };
 //   - else Go: the defaults above are set, `own` collects the names this call set.
 // Get: const char*(const char*); Set: void(const char* key, const char* value or nullptr = remove).
 template <class Get, class Set>
-Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* why)
+Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* why, Refusal* code = nullptr)
 {
+    if (code) *code = Refusal::None;
     if (!flag_on(get(kKeyOn))) return Boot::NotRequested;
-    auto refuse = [&](bool conflict, const char* w) {
+    auto refuse = [&](Refusal c, const char* w) {
+        const bool conflict = c == Refusal::BothOn;
+        if (code) *code = c;
         if (why) *why = w;
         set(kKeyOn, "0");
         set(kKeyRefused, "1");   // every refusal: JSP_ROLLBACK is 0 for this process now, so the page needs this to know the file or launcher still holds a non-zero value
@@ -215,19 +272,19 @@ Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* w
         return Boot::Refused;
     };
     if (get("PS3_NET_ONLINE") != nullptr)
-        return refuse(true, "JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs");
+        return refuse(Refusal::BothOn, "JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs");
     const char* l = get(kKeyListen); const char* j = get(kKeyJoin);
     const bool hl = l && *l, hj = j && *j;
     const char* via = get(kKeyVia);
     if (via && jps::ieq(via, "repsn")) {
         const char* role = get(kKeyRole);
-        if (!role || !(jps::ieq(role, "host") || jps::ieq(role, "join"))) return refuse(false, "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off");
-        if (hl && !valid_port(l)) return refuse(false, "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off");   // optional over re-psn (0 = any port when absent)
-        if (!kRepsnWired) return refuse(false, "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off");
+        if (!role || !(jps::ieq(role, "host") || jps::ieq(role, "join"))) return refuse(Refusal::RepsnNoRole, "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off");
+        if (hl && !valid_port(l)) return refuse(Refusal::BadListen, "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off");   // optional over re-psn (0 = any port when absent)
+        if (!kRepsnWired) return refuse(Refusal::NotWired, "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off");
         goto defaults;
     }
-    if (hl == hj) return refuse(false, "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off");
-    if (hl ? !valid_port(l) : !valid_join(j)) return refuse(false, hl ? "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off" : "JSP_ROLLBACK_JOIN is not IP:PORT: rollback off");
+    if (hl == hj) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off");
+    if (hl ? !valid_port(l) : !valid_join(j)) return refuse(hl ? Refusal::BadListen : Refusal::BadJoin, hl ? "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off" : "JSP_ROLLBACK_JOIN is not IP:PORT: rollback off");
 defaults:
     for (const KV& e : kDefaults) {
         const char* c = get(e.k);

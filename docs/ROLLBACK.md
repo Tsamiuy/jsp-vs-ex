@@ -220,6 +220,7 @@ the page says which method is on and what this session runs against what is save
   while `JSP_NET_REFUSED` is set writes `JSP_ROLLBACK=0` even with no line in the file, so the next start is not refused
   again. The same decision refuses Rollback alone when there is not exactly one valid role key (it also sets
   `JSP_NET_REFUSED`). "Online on" is the runtime's own test: any value of `PS3_NET_ONLINE`, even `0`.
+- A refused start is shown on screen, not only in the log: see "If rollback does not start" below.
 - ASSUMPTION: the runtime reads `PS3_NET_ONLINE` lazily (after `main()`) and nothing in the jsp exe sets it later, so
   removing it before `main()` is enough; the thread registry's TLS callback still reads `JSP_ROLLBACK` at process attach,
   before any decision, and turns the registry on (bookkeeping only) even for a refused start.
@@ -337,6 +338,7 @@ comes up well within that time, so the match runs direct even with the relay all
 - A first attempt failed because the two games were started too far apart (see the 30 seconds above).
 - Not tried yet: across real routers, the relay, a typed IP address on two PCs, a match played by hand.
 
+- Set it up by hand, or check what the page wrote: see "Set up rollback over re-psn" just below.
 - Turn it on: Port Settings -> Online -> Netcode = Rollback -> Connection = re-psn, Role = Host (creates a room) or Join (joins the
   oldest matching room), Allow relay Yes or No, Save, restart. The server and online name must already be set in `repsn.ini`
   (set them under Delay first; they are kept). By hand: `play_settings.txt` lines `JSP_ROLLBACK=1`, `JSP_ROLLBACK_VIA=repsn`,
@@ -367,6 +369,58 @@ comes up well within that time, so the match runs direct even with the relay all
 - Not covered: real NATs (hole punching and relay; one match against a real server on one home network has run, see
   [Tested so far](#tested-so-far)), the connect timing on slow DNS, more than two players, a room list to choose from (the
   oldest matching room is joined), the page and the "direct / relay" line in a running game.
+
+#### Set up rollback over re-psn
+
+Both players do this, with the same server. Rollback over re-psn uses the server and online name from `repsn.ini`, but
+the game's own online in that file must stay **off** (`enabled = 0`): `enabled = 1` turns on the game's own online
+(Delay), only one online method can be on at a time, and a start with both on is refused, so neither runs.
+
+1. `repsn.ini` holds the server and your online name, with `enabled = 0`:
+
+   ```ini
+   [repsn]
+   enabled = 0
+   server = your.server.example:36100
+   name = yourname
+   ```
+
+   It is in `<install folder>\shared\repsn.ini` for a portable install, else in `%APPDATA%\PS3Recomp\repsn.ini`
+   (`PS3RECOMP_SHARED_DIR` picks another folder). A second `repsn.ini` in the game folder (`<install folder>` for a
+   portable install, else `%APPDATA%\JSP Fan Revival\`) can override these keys, so it must not say `enabled = 1` either.
+   The easy way: in the launcher's **Online** tab choose re-psn, fill in Server and Online name and save, then choose
+   **Off** and save again; Off writes `enabled = 0` and keeps a valid server and name. Choosing re-psn there again (or
+   pressing Start Game with re-psn chosen) writes `enabled = 1` and rollback is refused at the next start.
+2. `play_settings.txt` (in the install folder, or `%APPDATA%\JSP Fan Revival\`) gets these lines:
+
+   ```
+   JSP_ROLLBACK=1
+   JSP_ROLLBACK_VIA=repsn
+   JSP_ROLLBACK_ROLE=host
+   JSP_ROLLBACK_RELAY=0
+   ```
+
+   One player uses `JSP_ROLLBACK_ROLE=host` (creates the room), the other `JSP_ROLLBACK_ROLE=join`. `JSP_ROLLBACK_RELAY=1`
+   allows the server's relay when a direct link fails (the server must offer it). Leave out `JSP_ROLLBACK_LISTEN` unless a
+   firewall needs a fixed UDP port.
+3. Start the game. Port Settings > Online (`JSP_PORT_MENU=1`) writes the same two files: Netcode = Rollback, Connection =
+   re-psn and Save write the `play_settings.txt` lines and `enabled = 0` in `repsn.ini`.
+
+#### If rollback does not start
+
+When rollback was asked for but cannot start, the main menu shows why at the top of the screen for 15 seconds, each time
+the menu's top list comes up (ENHANCEMENT, display only, on by default; it needs the US 1.00 build, like Port Settings).
+The first line says what is wrong, the second how to fix it, for example:
+
+> Rollback is off: repsn.ini has enabled=1 (the game's own online).
+> Set enabled=0 in repsn.ini to use rollback (keep server= and name=).
+
+The same reasons are in the log (`[net] REFUSED: ...` or a `[net] ...: off` line). When both methods were on, the game's
+own online is off for that session too, so Online Battle cannot connect either. Other reasons the notice names: no
+`JSP_ROLLBACK_ROLE` with `JSP_ROLLBACK_VIA=repsn`; a `JSP_ROLLBACK_LISTEN` that is not a port from 1 to 65535; not exactly
+one of `JSP_ROLLBACK_LISTEN` and `JSP_ROLLBACK_JOIN` for direct IP; a `JSP_ROLLBACK_JOIN` that is not IP:port; no valid
+`server` or `name` in `repsn.ini`; an online name longer than 16 characters; a UDP port that could not be opened. The
+texts are host-tested (`installer/tools/net_online_test.sh`); the notice itself has not been seen in a running game yet.
 
 **Always on, even with rollback off.** None of this changes what the game does; it is listed so nothing is hidden:
 
