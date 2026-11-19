@@ -199,11 +199,20 @@ jobs:
                        sed -n 's/^ *\([^ :(]*\)\(:[a-z0-9]*\)\{0,1\} *(= *\([^)]*\)).*/\1 \3/p')
             done
           }
+          # A requested name can be a virtual package (on ubuntu-26.04 mono-mcs is provided by mono-devel), so it is
+          # present when an installed package has that name or provides it.
+          present() {
+            dpkg-query -W -f='${db:Status-Status} ${Package}, ${Provides}\n' 2>/dev/null | awk -v n="$1" '
+              $1 == "installed" { sub(/^installed /, ""); gsub(/ *\([^)]*\)/, ""); k = split($0, a, / *, */)
+                                  for (i = 1; i <= k; i++) { sub(/:.*/, "", a[i]); if (a[i] == n) f = 1 } }
+              END { exit !f }'
+          }
+          all_present() { for p in $PACKAGES; do present "$p" || { echo "$p is not installed"; return 1; }; done; }
           tried=false
           if compgen -G "$DEBS/*.deb" >/dev/null; then
             if fits; then
               tried=true
-              if sudo dpkg -i --refuse-downgrade "$DEBS"/*.deb && dpkg -s $PACKAGES >/dev/null; then
+              if sudo dpkg -i --refuse-downgrade "$DEBS"/*.deb && all_present; then
                 echo "installed from the package cache"
                 [ "$EXACT_HIT" = true ] || echo "save=true" >> "$GITHUB_OUTPUT"
                 exit 0
