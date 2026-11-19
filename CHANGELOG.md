@@ -15,6 +15,10 @@ Each version starts with **For players**: a few plain lines about what changed i
 - New look for the project page, the fan site and the installer pictures, and a new icon (a star with a J) for the setup, the launcher and the settings window. The installer pictures and the settings window header have not been tried on Windows yet.
 - The Discord invite link on the project page is the new one.
 
+**Fixed**
+
+- **Build again** in the settings window now rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
+
 ### Changed
 
 - Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; versions before 0.2.0 print their whole section. The technical entries stay as the full record; 0.2.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
