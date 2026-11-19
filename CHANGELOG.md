@@ -18,6 +18,7 @@ Each version starts with **For players**: a few plain lines about what changed i
 ### Changed
 
 - Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does, grouped under bold **New**, **Changed** and **Fixed** labels), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; versions before 0.2.0 print their whole section. The technical entries stay as the full record; 0.2.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
+- CI: the host-tests job's package step gives up on a mirror request after 30 s without data (3 retries), treats a failed index update as an error, tries the apt part a second time and has its own 8-minute limit, so a mirror problem fails that step by name instead of leaving the tests without time.
 
 ### Added
 
