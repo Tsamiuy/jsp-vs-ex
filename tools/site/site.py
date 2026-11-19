@@ -253,29 +253,31 @@ def site_href(h):
     return LINKS.fix(h)
 
 
-def buttons_html(nav, plain_page):
+def buttons_html(nav):
+    """The plain page's link list: every data/nav.json link and the source, as simple buttons."""
     items = [(b["label"], site_href(b["href"]), b.get("primary", False)) for b in nav["buttons"]]
     w = nav["wide"]
     items.append((w["label"], site_href(w["href"]), False))
     items.append(("Source code", REPO, False))
-    cls = "pbtn" if plain_page else "btn"
+    cls = "pbtn"
     return (f'<ul class="{cls}s">' + "".join(
         f'<li><a class="{cls}{" primary" if p else ""}" href="{html.escape(h)}"><span>{html.escape(l)}</span></a></li>'
         for l, h, p in items) + "</ul>")
 
 
 def extra_links_html(d):
-    """The project links of data/nav.json that no section already links to (the changelog, the issue form, the
-    Discord, the source), as a short list under the menu items: the sections cover the rest, so the page has no
-    separate button row. The arrow keys move through the sections only (site.js reads "ol a")."""
+    """The project links of data/nav.json that no section already links to (today the download page and the
+    changelog), as a short list under the menu items: the sections cover the rest, so the page has no separate button
+    row, and the footer links the source. The arrow keys move through the sections only (site.js reads "ol a")."""
     nav = d["nav"]
-    items = [(b["label"], site_href(b["href"])) for b in nav["buttons"] + [nav["wide"]]] + [("Source code", REPO)]
+    items = [(b["label"], site_href(b["href"]), b.get("primary", False)) for b in nav["buttons"] + [nav["wide"]]]
     body = "\n".join(s["body"] for s in d["sections"])
-    left = [(l, h) for l, h in items if f'href="{html.escape(h)}"' not in body]
+    left = [(l, h, p) for l, h, p in items if f'href="{html.escape(h)}"' not in body]
     if not left:
         return ""
     return ('<p class="menu-sub">Links</p><ul class="ext">' + "".join(
-        f'<li><a href="{html.escape(h)}">{html.escape(l)}</a></li>' for l, h in left) + "</ul>")
+        f'<li><a{" class=\"primary\"" if p else ""} href="{html.escape(h)}">{html.escape(l)}</a></li>'
+        for l, h, p in left) + "</ul>")
 
 
 def mark_html():
@@ -365,14 +367,14 @@ def build_plain(d):
     return (head(f"{NAME}: plain page", "plain.css", csp, True) +
             '<body>\n<p><img class="rule" src="assets/divider-stripe.png" width="900" height="22" alt=""></p>\n'
             f'<header><h1>{NAME}, Fan Revival</h1>\n<p>{html.escape(d["tagline"])}</p>\n'
-            f'<nav aria-label="Project links">{buttons_html(d["nav"], True)}</nav>\n'
+            f'<nav aria-label="Project links">{buttons_html(d["nav"])}</nav>\n'
             '<p><a href="index.html">Menu page</a> (the same content, one section at a time)</p>\n'
             f'<nav aria-label="Sections"><ol class="toc">{toc}</ol></nav></header>\n<main>\n{body}\n</main>\n'
             f'<footer>{legal_html()}<p>Version {html.escape(d["version"])}. <a href="{REPO}">Source code on GitHub</a></p>'
             '</footer>\n</body>\n</html>\n')
 
 
-def build_css(t, nsec):
+def build_css(t):
     rays = _rays(56)
     stops, shift = [], -rays[0][0]
     for i, (a0, a1) in enumerate(rays):
@@ -439,7 +441,8 @@ a { color: var(--link); }
 /* the stage: menu on the left, the open section on the right */
 .stage { max-width: 1240px; margin: 26px auto 0; padding: 0 16px; display: grid; grid-template-columns: 320px minmax(0, 1fr);
   gap: 22px; align-items: start; }
-.menu { position: sticky; top: 12px; padding: 16px 0 20px; background: var(--panel);
+.menu { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; scrollbar-width: thin;
+  scrollbar-color: var(--glow-orange) var(--panel); padding: 16px 0 20px; background: var(--panel);
   clip-path: polygon(0 0, 100% 0, calc(100% - 34px) 100%, 0 100%); }
 .menu-head { margin: 0 0 10px; padding: 0 18px; font: italic 900 1.7rem/1.1 var(--heavy); color: var(--title-bottom);
   background: linear-gradient(var(--title-top), var(--title-bottom)); -webkit-background-clip: text; background-clip: text;
@@ -455,6 +458,7 @@ a { color: var(--link); }
   color: var(--title-top); }
 .menu .ext { list-style: none; margin: 0; padding: 0; }
 .menu .ext a { font-size: .95rem; padding: 2px 18px 2px 22px; }
+.menu .ext a.primary { color: var(--title-top); }
 .menu .ext a::after { content: " \2197"; font-style: normal; -webkit-text-stroke: 0; color: var(--muted); }
 .panel { position: relative; background: var(--panel); color: var(--text); padding: 22px 30px 28px 38px;
   clip-path: polygon(22px 0, 100% 0, 100% 100%, 0 100%); box-shadow: inset 0 4px 0 var(--glow-orange); min-height: 420px; outline: none; }
@@ -503,7 +507,7 @@ html.js .sec + .sec { margin-top: 0; padding-top: 0; border-top: 0; }
 
 @media (max-width: 860px) {
   .stage { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .menu { position: static; clip-path: polygon(0 0, 100% 0, calc(100% - 18px) 100%, 0 100%); }
+  .menu { position: static; max-height: none; overflow-y: visible; clip-path: polygon(0 0, 100% 0, calc(100% - 18px) 100%, 0 100%); }
   .menu ol { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .menu a { font-size: 1rem; padding: 6px 12px; }
   .menu a.on { font-size: 1rem; }
@@ -573,7 +577,7 @@ def build(src, out):
     (out / "assets").mkdir(parents=True)
     (out / "index.html").write_text(build_index(d, js), encoding="utf-8", newline="\n")
     (out / "plain.html").write_text(build_plain(d), encoding="utf-8", newline="\n")
-    (out / "style.css").write_text(build_css(t, len(d["sections"])), encoding="utf-8", newline="\n")
+    (out / "style.css").write_text(build_css(t), encoding="utf-8", newline="\n")
     (out / "plain.css").write_text(plain_css(t), encoding="utf-8", newline="\n")
     (out / ".nojekyll").write_text("", encoding="utf-8")
     for f in ASSET_FILES:
