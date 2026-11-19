@@ -269,7 +269,7 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
 - An earlier freeze after a rollback (an SPU job running across the saved tick) is now avoided by waiting for the job
   server before each save; it has not recurred in the runs above.
 - When a match ends early (disconnect, desync, F9), the fight continues offline; there is no return to the menu for both.
-- The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it.
+- The log grows quickly while a match runs (per-tick lines for checking); a support bundle includes it and the one of the launch before, and its `facts.txt` sums up the `[net]` lines (started or refused, path, synchronized, rollback and desync counts) before the size cap shortens the log.
 - Rollback over re-psn exists but has not been run against a real server or across real routers (see its section below); direct IP is the tested path.
 
 ### Rollback over re-psn (experimental, not yet run against a real server)

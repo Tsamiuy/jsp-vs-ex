@@ -28,7 +28,7 @@
  * Reads <exe folder>\paths.txt (KEY=VALUE lines written by firstrun.py: PS3_VFS_ROOT, PS3_HDD0_ROOT, PS3_DEV_FLASH, PS3_TITLE,
  * PS3_VERBOSE, EXE, ELF), then the settings file chosen above (KEY=VALUE, e.g. RES_SCALE=3, FULLSCREEN=1; the
  * names play.ps1 uses), puts them in the environment and starts game\<EXE> game\<ELF> with game\run as the working folder,
- * stdout/stderr to game\run\play_stdout.txt and play_stderr.txt. Plain Win32, no network.
+ * stdout/stderr to game\run\play_stdout.txt and play_stderr.txt (the last play_stderr.txt is kept as play_stderr.prev.txt). Plain Win32, no network.
  * Values may start with @APP@ (a path inside the install folder, the portable zip's case): this exe's folder replaces it.
  * Build: x86_64-w64-mingw32-gcc (or the bundled llvm-mingw's ...-clang) -O2 -mwindows -s -o jsp-launcher.exe launcher.c
  * (installer\README.md). */
@@ -252,6 +252,10 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     snprintf(path, sizeof path, "%s\\play_stdout.txt", run);
     out = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     snprintf(path, sizeof path, "%s\\play_stderr.txt", run);
+    /* ENHANCEMENT: the previous launch's stderr (the game's [net] lines, a freeze's last lines) becomes play_stderr.prev.txt, one kept, so a
+       relaunch does not erase it; the support bundle takes both. A failed move (no file yet, or locked) only loses that copy. */
+    snprintf(bfile, sizeof bfile, "%s\\play_stderr.prev.txt", run);
+    MoveFileExA(path, bfile, MOVEFILE_REPLACE_EXISTING);
     err = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;

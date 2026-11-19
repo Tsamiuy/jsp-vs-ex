@@ -126,6 +126,60 @@ def main():
         check(z2.read("VERSION.txt") == b"0.18.0-test\n", "small files are untouched by the cap")
         z2.close()
 
+        # the netcode: the mode from the settings files, the [net] summary read before the cap, private values out of every file
+        os.environ.pop("PS3RECOMP_SHARED_DIR", None)
+        app3, ad3 = t / "app3", t / "appdata3"
+        srv, nm, peer = "play.example.org", "rivalfan", "203.0.113.7"
+        w(app3 / "VERSION.txt", "0.5.1-test\n")
+        w(ad3 / sb.APPDIR / "play_settings.txt", "JSP_ROLLBACK=1\nJSP_ROLLBACK_VIA=repsn\nJSP_ROLLBACK_ROLE=host\nJSP_ROLLBACK_RELAY=1  # relay\n")
+        w(ad3 / "PS3Recomp/repsn.ini", f"[repsn]\nenabled = 0\nserver = {srv}:36100\nname = {nm}\n")
+        head = ("[net] env decision: rollback go (static constructors arrived: online first, net last)\n"
+                f"[net] re-psn: creating a room on {srv}:36100 as {nm} (relay allowed), local UDP port 3659\n"
+                "[net] rollback opt-in: host, build 1a2b3c4d, hooks installed\n"
+                f"[net] rendezvous: {peer}:3659 via re-psn, path relay, room 7\n"
+                "[net] re-psn path: relay\n[net] gekko session synchronized\n")
+        ticks = "".join(f"[net] commit tick={i} hash=0000abcd raw=0000abcd\n" for i in range(12000))
+        tail = ("[net] rollback to tick=5 (x)\n[net] rollback to tick=9 (x)\n[net] rollback to tick=11 (x)\n"
+                "[net] DESYNC at tick 40 (stepper tick numbering, session-relative; add the base 3): local=1 remote=2\n"
+                "[net] ended: the other player left\nloopback 127.0.0.1:36100 stays\n")
+        w(app3 / "game/run/play_stderr.txt", head + ticks + tail)
+        w(app3 / "game/run/play_stderr.prev.txt", "[net] env decision: refused\n[net] REFUSED: JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs\n")
+        w(app3 / "game/run/play_stdout.txt", f"[online] re-psn enabled: server {srv}:36100\n[online] online id {nm}\n[D3D12] adapter: Test GPU (VRAM 8 MB)\n")
+        zp3 = sb.make(app3, out, ad3, None, cap=200000)
+        z3 = zipfile.ZipFile(zp3)
+        n3 = set(z3.namelist())
+        check({"game/run/play_stderr.txt", "game/run/play_stderr.prev.txt", "appdata/play_settings.txt"} <= n3, "net: both launches' stderr and the settings file are in the zip")
+        err3 = z3.read("game/run/play_stderr.txt").decode()
+        f3 = z3.read("facts.txt").decode()
+        all3 = b"".join(z3.read(n) for n in n3).decode()
+        z3.close()
+        check(err3.startswith("[support_bundle: the oldest ") and "rollback opt-in" not in err3, "net: the cap cut the start of play_stderr.txt (the test's premise)")
+        check("mode: Rollback re-psn host, relay allowed: yes" in f3, "net facts: the mode from play_settings.txt")
+        check("re-psn server: set   online name: set   rollback join address: not set" in f3, "net facts: server and name only as set / not set")
+        check("rollback started: yes (host)" in f3 and "path: relay" in f3 and "session synchronized: yes" in f3, "net facts: started, path, synchronized survive the cut")
+        check("rollbacks: 3   desync lines: 1" in f3 and "session ended: the other player left" in f3, "net facts: rollback and desync counts, the end reason")
+        check("env decision: rollback go" in f3 and "[net] rollback opt-in: host, build 1a2b3c4d" in f3 and "commit tick=" not in f3, "net facts: key lines kept, per-tick lines left out")
+        prev = f3.split("play_stderr.prev.txt (the launch before):")[1]
+        check("refused: JSP_ROLLBACK=1 and the game's own online" in prev and "rollback started: no" in prev, "net facts: the previous launch's refusal and its reason")
+        for bad in (srv, nm, peer):
+            check(bad not in all3, f"net: {bad!r} appears nowhere in the zip")
+        check("<server>" in all3 and "<online name>" in all3 and "<IPv4>:3659" in all3 and "127.0.0.1:36100 stays" in all3, "net: placeholders in the files, loopback kept")
+        S = lambda play, ini=None: "\n".join(sb.net_mode({"play": play, "ini": ini or {}, "read": []}))
+        check("mode: Off" in S({}), "net mode: nothing set is Off")
+        dj = S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_JOIN": "198.51.100.4:7000"})
+        check("mode: Rollback direct join" in dj and "join address: set" in dj and "198.51.100.4" not in dj, "net mode: direct join, address only as set")
+        check("mode: Rollback direct host" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: direct host")
+        check("mode: Rollback direct (not exactly one" in S({"JSP_ROLLBACK": "1"}), "net mode: no role key is refused")
+        check("mode: Off" in S({"JSP_ROLLBACK": "0", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: JSP_ROLLBACK=0 is off")
+        rep_on = {"repsn": {"enabled": "1", "server": "x.example:1", "name": "abc"}}
+        check("mode: Delay (re-psn)" in S({}, rep_on), "net mode: Delay over re-psn")
+        check("both enabled" in S({}, {**rep_on, "community": {"enabled": "1"}}), "net mode: re-psn and community both on")
+        check("mode: Delay (community" in S({}, {"community": {"enabled": "1"}}), "net mode: Delay over a community server")
+        check("the game refuses both" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}, rep_on), "net mode: rollback and Delay both on are refused")
+        check(sb.net_log_lines({"a.log": b"x\n"})[0].startswith("  not in the logs"), "net logs: no [net] lines says not in the logs")
+        sc = sb.net_scrub("server = h.example:1\nJSP_ROLLBACK_JOIN=198.51.100.4:7000\nname=abc # c\nSDK 10.0.19041.0\n")
+        check("h.example" not in sc and "198.51.100.4" not in sc and "abc" not in sc and "10.0.19041.0" in sc, "net scrub: key lines without the settings, version numbers kept")
+
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")
     print("FAILED: " + "; ".join(FAILS) if FAILS else "all passed")

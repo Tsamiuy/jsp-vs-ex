@@ -25,7 +25,7 @@ Start Game: save settings, run `tools\boost\boost_on.bat` (hidden), mount the IS
 (`Mount-DiskImage` in a hidden PowerShell; reuses an already-mounted disc and then does not unmount it),
 start `jstars\port\build\JStarsRecomp.exe "jstars\EBOOT.elf"` in `jstars\run` with the same environment
 as play.ps1 (PS3_VFS_ROOT, PS3_HDD0_ROOT, PS3_DEV_FLASH, PS3_TITLE, PS3_VERBOSE=0, plus every KEY=VALUE
-line of play_settings.txt), stdout/stderr to `run\play_stdout.txt` / `run\play_stderr.txt`. When the game
+line of play_settings.txt), stdout/stderr to `run\play_stdout.txt` / `run\play_stderr.txt` (the launcher first renames the last `play_stderr.txt` to `play_stderr.prev.txt`, one kept). When the game
 exits: `boost_off.bat` (if "Turn CPU boost off again" is ticked, default on), unmount, window comes back.
 Exit or closing the launcher while the game runs: asks, then posts WM_CLOSE to the game's windows (same
 as clicking its X: the D3D12 window sets window_closed). Only if the game is still alive after 20 s it
