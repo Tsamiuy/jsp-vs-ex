@@ -34,14 +34,50 @@ marker for its status; `python3 tools/features.py --check` (also run by CI) repo
 
 The version number lives in `installer/VERSION`; the two CMake `project(... VERSION ...)` lines follow it (those folders are
 built on the player's PC and cannot read a file outside themselves), and `CHANGELOG.md` has the notes. Add a line under
-`## [Unreleased]` in `CHANGELOG.md` for each change, in the right place: new features go under `### Added`, changed
-behaviour and docs under `### Changed`, fixes under `### Fixed`. Those technical lines are the full record. If a player
-can see the change, also add one plain line under `### For players` at the top of Unreleased, below the bold label that fits (**New** for
-a new feature, **Changed** for a change, **Fixed** for a fix; add the label when it is not there yet): what it is, where
-to find it and what it does, in one or two sentences, with no toolkit patch numbers or setting names. The release notes (the
-release page and the Discord post) are only that part, so a release needs it (`tools/release.py bump` refuses an
-Unreleased section without it). A change that players cannot see (CI, docs, tests, internals) adds only the technical line.
-`python3 tools/release.py --check` (also run by CI) reports any version that disagrees. To release, either way:
+`## [Unreleased]` in `CHANGELOG.md` for each change. Each version has two parts. **For players** comes first and is
+the release notes (the release page and the Discord post). If a player can see the change, add one plain line there under
+the bold label that fits, **New**, **Changed** or **Fixed**, saying what it is, where to find it and what it does in one
+or two sentences, with no toolkit patch numbers or setting names. A release needs that part (`tools/release.py bump`
+refuses an Unreleased section without it). **Technical changes** is the full record: every change adds one line there
+under `#### Added`, `#### Changed` or `#### Fixed`, starting with the area in bold, then what changed, how it was tested
+and what was not, and the pull request number. A change that players cannot see (CI, docs, tests, internals) adds only
+the technical line. Write each entry on one line, without hard wrapping: the player part is copied into the release page
+and the Discord post as it is. Leave out a label with no lines. The layout of one version:
+
+```markdown
+## [X.Y.Z] - YYYY-MM-DD
+
+### For players
+
+**New**
+
+- **Short name of the feature.** What it does and where to find it, in one or two plain sentences. Not tried on Windows yet.
+
+**Changed**
+
+- ...
+
+**Fixed**
+
+- What was wrong for the player, and what happens now.
+
+### Technical changes
+
+#### Added
+
+- **Area:** what was added, in one sentence. Details, settings and patch numbers. Tested: how. Not tested: what. (#123)
+
+#### Changed
+
+- **Area:** ...
+
+#### Fixed
+
+- **Area:** what was wrong and what fixed it. Tested: how. Not tested: what. (#123)
+```
+
+Areas: Game, Rollback, Online, Graphics, Sound, Controls, Settings window, Launcher, Setup, First run, Fan site, Docs, CI,
+Releases. `python3 tools/release.py --check` (also run by CI) reports any version that disagrees. To release, either way:
 
 - On GitHub: run the `prepare-release` workflow (Actions tab) with the new version (`X.Y.Z`, or `major`, `minor`, `patch`).
   It opens a `release/vX.Y.Z` pull request whose body is the notes. CI does not start on a pull request opened by a
