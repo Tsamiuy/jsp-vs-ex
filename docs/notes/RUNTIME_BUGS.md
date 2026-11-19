@@ -15,10 +15,6 @@ All found while porting J-Stars against commit `0fe7dbf5` (v0.15.0). Worth repor
 
 3. `g_ppu_fs_last_read_ms` export (time of last cellFsRead) for the port's DataCheck guard.
 
-4. (v0.19.0 series, patch 6017) `g_ps3_fs_vfile_ops` (`include/ps3emu/fs_vfile.h`), NULL by default: a title port may serve a
-   read-only cellFsOpen through a virtual view (Read, Lseek, Fstat and AioRead see the provider's bytes and size; Close releases it).
-   The mods framework uses it to override entries of the CPK archives without writing to them. Test: `installer/tools/fs_vfile_test.sh`.
-
 ## Edited in `ps3recomp-src\libs\video\cellGcmSys.c` (local, uncommitted)
 
 4. **FIFO `RET` with no `CALL` outstanding jumped to IO 0** → walker circles forever. Now skipped.

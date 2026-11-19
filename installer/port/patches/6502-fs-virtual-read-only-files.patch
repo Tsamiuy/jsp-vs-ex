@@ -1,4 +1,4 @@
-Patch 6017: a title port may serve a read-only cellFs file through a virtual view (g_ps3_fs_vfile_ops, NULL by default).
+Patch 6502: a title port may serve a read-only cellFs file through a virtual view (g_ps3_fs_vfile_ops, NULL by default).
 
 New header include/ps3emu/fs_vfile.h: a provider with open, size, read and close. cellFsOpen offers each read-only open (no O_TRUNC)
 to the provider after the host file is open; when it claims the path, the fd keeps its real host FILE* (the fd table, Write, Fsync and
@@ -6,7 +6,7 @@ the logs work as before) and Read, Lseek, Fstat and AioRead go through the provi
 fd's stream lock, held for a virtual fd even with FS_STREAM_LOCK=0), SEEK_END and Fstat use the virtual size, and a read is clamped to
 the virtual size before the provider is asked, so a read that crosses the end returns the short count. AioRead reads the virtual bytes
 and does not move the position. Close releases the view; a re-open is a new view. cellFsSdataOpen never serves a virtual file and logs
-one line when the provider would have claimed its path. An fd keeps the ops it was opened with until it is closed. With the pointer
+one line when the provider would have claimed its path; cellFsStat by path and directory listings still report the host size. An fd keeps the ops it was opened with until it is closed. With the pointer
 NULL: one atomic load per open and one per Read/Lseek/Fstat/Close/AioRead, nothing else changes (the existing test_fs_* pass unchanged).
 Use in J-Stars: mods override entries inside the game's CPK archives without writing to them (the provider serves the original bytes,
 a TOC with the overridden rows rewritten, and the mod data appended); J-Stars bounds its reads by the Fstat size, so the virtual size
@@ -15,10 +15,10 @@ Test: runtime/ppu/tests/test_fs_vfile.cpp (tools/test_ppu_fs_vfile.py; installer
 
 diff --git a/include/ps3emu/fs_vfile.h b/include/ps3emu/fs_vfile.h
 new file mode 100644
-index 0000000..3172cdc
+index 0000000..e52e142
 --- /dev/null
 +++ b/include/ps3emu/fs_vfile.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,63 @@
 +/*
 + * ps3recomp - virtual read-only files for cellFs (runtime/ppu/ppu_fs.cpp).
 + *
@@ -49,6 +49,10 @@ index 0000000..3172cdc
 + *  - close(vf): the guest closed the fd. Called once per successful open.
 + * All four may be called from any guest thread; calls for one fd are serialised
 + * by its stream lock, calls for different fds are not.
++ *
++ * Not virtual: cellFsStat (by path) and directory listings (cellFsReaddir,
++ * cellFsGetDirectoryEntries) still report the host file's size, and
++ * cellFsSdataOpen fds always read the host file.
 + */
 +#ifndef PS3EMU_FS_VFILE_H
 +#define PS3EMU_FS_VFILE_H
@@ -79,14 +83,14 @@ index 0000000..3172cdc
 +
 +#endif /* PS3EMU_FS_VFILE_H */
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index 15d8840..a602c5c 100644
+index 15d8840..7ce9338 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
 @@ -106,6 +106,8 @@ static int fs_stream_lock_on(void)
  struct FsStreamGuard {
      FILE* f;
      explicit FsStreamGuard(FILE* fp) : f(fs_stream_lock_on() ? fp : nullptr) { if (f) FS_LOCKF(f); }
-+    /* always = true: held even with FS_STREAM_LOCK=0 (patch 6017: it guards a virtual fd's own position too) */
++    /* always = true: held even with FS_STREAM_LOCK=0 (patch 6502: it guards a virtual fd's own position too) */
 +    FsStreamGuard(FILE* fp, bool always) : f((always || fs_stream_lock_on()) ? fp : nullptr) { if (f) FS_LOCKF(f); }
      ~FsStreamGuard() { if (f) FS_UNLOCKF(f); }
  };
@@ -95,7 +99,7 @@ index 15d8840..a602c5c 100644
  #include "../platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
  #include "ps3emu/log_first.h"
  #include "ps3emu/ps3_env_once.h"   /* ps3_env_once: each switch looked up once */
-+#include "ps3emu/fs_vfile.h"       /* patch 6017: g_ps3_fs_vfile_ops */
++#include "ps3emu/fs_vfile.h"       /* patch 6502: g_ps3_fs_vfile_ops */
  
  /* Host root that the PS3 mount points map into (dir containing PS3_GAME). */
  extern "C" const char* ppu_vfs_root = ".";
@@ -103,7 +107,7 @@ index 15d8840..a602c5c 100644
      return fd >= 0 && fd < FS_MAX ? __atomic_load_n(&g_dirs[fd], __ATOMIC_ACQUIRE) : nullptr;
  }
  
-+/* Patch 6017: virtual read-only files (ps3emu/fs_vfile.h). A port provider may claim a read-only open; that fd keeps
++/* Patch 6502: virtual read-only files (ps3emu/fs_vfile.h). A port provider may claim a read-only open; that fd keeps
 + * its real host FILE* (so every other handler and the fd table work as before), and Read, Lseek, Fstat and AioRead go
 + * through the provider with the guest's position kept here (g_fd_vpos, under the fd's stream lock). NULL by default. */
 +extern "C" { const ps3_fs_vfile_ops* volatile g_ps3_fs_vfile_ops = nullptr; }
@@ -134,7 +138,7 @@ index 15d8840..a602c5c 100644
      }
      int fd = fd_alloc_file(f);
      if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EMFILE; return; }
-+    /* Patch 6017: a read-only open may be claimed by the port's virtual-file provider (ps3emu/fs_vfile.h). */
++    /* Patch 6502: a read-only open may be claimed by the port's virtual-file provider (ps3emu/fs_vfile.h). */
 +    ps3_fs_vfile* vf = nullptr;
 +    if (acc == CELL_FS_O_RDONLY && !(flags & CELL_FS_O_TRUNC)) {
 +        if (const ps3_fs_vfile_ops* vops = fs_vfile_provider()) {
@@ -165,7 +169,7 @@ index 15d8840..a602c5c 100644
          fprintf(stderr, "[fs] SdataOpen FAIL '%s' -> '%s'\n", gpath, hpath);
          ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
      }
-+    /* Patch 6017: SdataOpen fds are never virtual. Say so when the provider would have claimed this path. */
++    /* Patch 6502: SdataOpen fds are never virtual. Say so when the provider would have claimed this path. */
 +    if (const ps3_fs_vfile_ops* vops = fs_vfile_provider()) {
 +        if (ps3_fs_vfile* vf = vops->open(gpath, hpath)) {
 +            vops->close(vf);
@@ -186,7 +190,7 @@ index 15d8840..a602c5c 100644
          f = g_files[fd];
          if (f) {
              if (g_fd_usm[fd] && ps3_env_once("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
-+            v = fd_vfile(fd);   /* patch 6017 */
++            v = fd_vfile(fd);   /* patch 6502 */
 +            __atomic_store_n(&g_fd_vf[fd], (ps3_fs_vfile*)nullptr, __ATOMIC_RELEASE);
 +            __atomic_store_n(&g_fd_vops[fd], (const ps3_fs_vfile_ops*)nullptr, __ATOMIC_RELEASE);
              __atomic_store_n(&g_files[fd], (FILE*)nullptr, __ATOMIC_RELEASE);
@@ -204,7 +208,7 @@ index 15d8840..a602c5c 100644
      uint64_t raw_nbytes = ctx->gpr[5];
 -    FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
 -    long fpos_before = ftell(f);
-+    const FsVfile v = fd_vfile(fd);   /* patch 6017: a virtual fd keeps its position in g_fd_vpos */
++    const FsVfile v = fd_vfile(fd);   /* patch 6502: a virtual fd keeps its position in g_fd_vpos */
 +    FsStreamGuard fs_guard(f, v.vf != nullptr);   /* FS_STREAM_LOCK; always held for a virtual fd */
 +    long fpos_before = v.vf ? (long)g_fd_vpos[fd] : ftell(f);
      if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
@@ -230,7 +234,7 @@ index 15d8840..a602c5c 100644
       * so the old position is put back explicitly. */
      if (wh > CELL_FS_SEEK_END) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EINVAL; return; }
      int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
-+    /* Patch 6017: a virtual fd seeks in g_fd_vpos, SEEK_END from the provider's size; same rules (before the start =
++    /* Patch 6502: a virtual fd seeks in g_fd_vpos, SEEK_END from the provider's size; same rules (before the start =
 +     * EINVAL and the offset stays, past the end is allowed). */
 +    if (const FsVfile v = fd_vfile(fd); v.vf) {
 +        FsStreamGuard vguard(f, true);
@@ -248,23 +252,24 @@ index 15d8840..a602c5c 100644
      FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
      const int64_t before = FS_TELL64(f);
      if (FS_SEEK64(f, off, worigin) != 0) {
-@@ -756,7 +839,9 @@ static void cellFsFstat(ppu_context* ctx)
+@@ -756,7 +839,10 @@ static void cellFsFstat(ppu_context* ctx)
      if (ps3_env_once("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
          fprintf(stderr, "[fs] fstat fd=%d  (by %s)\n", fd, w); }
      int64_t cur, sz;
 -    { FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
 +    if (const FsVfile v = fd_vfile(fd); v.vf) {
-+        sz = (int64_t)v.ops->size(v.vf);   /* patch 6017: the virtual size (a title may bound its reads by it) */
++        FsStreamGuard vguard(f, true);   /* as Read and Lseek: a Close's fclose waits for it */
++        sz = (int64_t)v.ops->size(v.vf);   /* patch 6502: the virtual size (a title may bound its reads by it) */
 +    } else { FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
        cur = FS_TELL64(f);
        FS_SEEK64(f, 0, SEEK_END);
        sz = FS_TELL64(f);
-@@ -1059,10 +1144,18 @@ static void cellFsAioRead(ppu_context* ctx)
+@@ -1059,10 +1145,18 @@ static void cellFsAioRead(ppu_context* ctx)
           * wherever the AIO stopped. Hold the stream lock across seek, read
           * and the seek back (stdio's own calls take the same lock). */
          HOST_LOCKFILE(f);
 +        if (const FsVfile v = fd_vfile(fd); v.vf) {
-+            /* patch 6017: absolute read of the virtual file, clamped to its size; g_fd_vpos is not moved */
++            /* patch 6502: absolute read of the virtual file, clamped to its size; g_fd_vpos is not moved */
 +            const uint64_t vsize = v.ops->size(v.vf);
 +            const uint64_t want = offset >= vsize ? 0 : (size < vsize - offset ? size : vsize - offset);
 +            n = want ? v.ops->read(v.vf, f, offset, vm_base + buf, (size_t)want) : 0;
