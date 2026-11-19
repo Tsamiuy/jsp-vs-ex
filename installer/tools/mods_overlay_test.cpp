@@ -308,6 +308,36 @@ static void test_helpers()
     CHECK(!jmods::JsonParser("{\"a\":1,}").parse(j, err));
     CHECK(!jmods::JsonParser("{\"a\":1} // c").parse(j, err));
     CHECK(jmods::JsonParser("{\"a\":[1,\"x\\u00e9\",true,null]}").parse(j, err) && j.get("a")->arr[1].s == "x\xC3\xA9");
+
+    // Windows-unsafe names: device names in any part, any case, with or without an extension; trailing '.' or ' '; <>"|?*:
+    for (const char* bad : { "files/CON", "files/con", "files/Prn.pak", "files/aux", "files/nul.pak", "files/NUL.tar.gz", "files/nul .txt",
+                             "COM1/x.pak", "files/com9", "files/COM0.bin", "files/lpt1", "files/LpT9.pak", "files/LPT0", "files/conin$",
+                             "files/CONOUT$.x", "files/COM\xC2\xB9", "files/x.", "files/x ", "x./y", "files/a<b", "files/a>b", "files/a\"b",
+                             "files/a|b", "files/a?b", "files/a*b", "files/a:b" }) {
+        const bool rejected = !jmods::valid_rel_path(bad);
+        if (!rejected) std::printf("FAIL valid_rel_path accepted '%s'\n", bad);
+        CHECK(rejected);
+    }
+    for (const char* ok : { "files/CONSOLE.pak", "files/com10", "files/lpt", "files/nul_x.pak", "files/a.b.c", "files/aux1x", "files/.hidden",
+                            "game/logo/logo_US_v.pak", "files/CON_x" }) {
+        const bool accepted = jmods::valid_rel_path(ok);
+        if (!accepted) std::printf("FAIL valid_rel_path refused '%s'\n", ok);
+        CHECK(accepted);
+    }
+
+    // RFC 8259 numbers: no leading zeros, no malformed forms; integers stay integers.
+    for (const char* bad : { "[01]", "[-01]", "[00]", "[1.2.3]", "[1.]", "[.5]", "[1e]", "[1e+]", "[1.2.3e-]", "[12-3]", "[-]", "[+1]", "[1e5e5]",
+                             "[0x10]", "[1 2]" }) {
+        const bool rejected = !jmods::JsonParser(bad).parse(j, err);
+        if (!rejected) std::printf("FAIL JSON accepted %s\n", bad);
+        CHECK(rejected);
+    }
+    CHECK(jmods::JsonParser("[0, -0, 7, -12, 1.5, -0.25e+3, 2E-2, 123456789012345678]").parse(j, err) && j.arr.size() == 8 &&
+          j.arr[0].type == jmods::Json::Int && j.arr[2].i == 7 && j.arr[3].i == -12 && j.arr[4].type == jmods::Json::Num &&
+          j.arr[5].type == jmods::Json::Num && j.arr[7].type == jmods::Json::Int);
+    // one leading UTF-8 BOM is skipped, a second is an error
+    CHECK(jmods::JsonParser("\xEF\xBB\xBF{\"a\": 1}").parse(j, err) && j.get("a") && j.get("a")->i == 1);
+    CHECK(!jmods::JsonParser("\xEF\xBB\xBF\xEF\xBB\xBF{}").parse(j, err));
 }
 
 static void test_plan_and_reads(MemIo& io, const SynthCpk& game)
@@ -508,6 +538,20 @@ static void test_refusals(MemIo& io)
     // An interface refusal stops parsing early, so the class is unknown: gameplay, online refused.
     const jmods::ModSet u = jmods::load_mod_set(io, "unkif\ngood\n", opts());
     CHECK(mod(u, "unkif")->gameplay && u.digest_kind == jmods::DigestKind::Refused);
+    // A mod.json saved with a UTF-8 BOM loads (and, being cosmetic, does not refuse online).
+    {
+        const std::string m = "\xEF\xBB\xBF" + manifest("bom", file_ovr("game/logo/logo_a.pak", "files/a.pak", good));
+        add_mod(io, "bom", m);
+        io.mods["bom/files/a.pak"] = good;
+        const jmods::ModSet b = jmods::load_mod_set(io, "bom\n", opts());
+        CHECK(mod(b, "bom")->loaded && mod(b, "bom")->applied && b.digest_kind == jmods::DigestKind::None);
+    }
+    // A file path naming a Windows device refuses the mod.
+    add_mod(io, "device", manifest("device", file_ovr("game/logo/logo_a.pak", "files/nul.pak", good)));
+    {
+        const jmods::ModSet d = jmods::load_mod_set(io, "device\n", opts());
+        CHECK(!mod(d, "device")->loaded && mod(d, "device")->reason.find("bad \"file\" path") != std::string::npos);
+    }
     // Empty list: stock.
     const jmods::ModSet e = jmods::load_mod_set(io, "# nothing\n", opts());
     CHECK(e.mods.empty() && e.plans.empty() && e.digest_kind == jmods::DigestKind::None && has_log(e, "0 enabled"));

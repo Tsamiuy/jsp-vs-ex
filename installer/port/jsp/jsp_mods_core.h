@@ -90,7 +90,23 @@ inline bool valid_id(const std::string& s)
     for (char c : s) if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
     return true;
 }
-// A relative '/' path that cannot leave its folder: no leading or trailing '/', no empty, '.' or '..' part, no '\\' or ':'.
+// A Windows device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, also with the superscript digits 1-3, CONIN$, CONOUT$), any case, with or
+// without an extension: Windows opens the device, not a file, for such a path part.
+inline bool windows_device_name(const std::string& part)
+{
+    std::string b = part.substr(0, part.find('.'));
+    while (!b.empty() && b.back() == ' ') b.pop_back();   // "nul .txt" is the device too
+    for (auto& c : b) if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
+    if (b == "CON" || b == "PRN" || b == "AUX" || b == "NUL" || b == "CONIN$" || b == "CONOUT$") return true;
+    if (b.size() >= 4 && (b.compare(0, 3, "COM") == 0 || b.compare(0, 3, "LPT") == 0)) {
+        const std::string d = b.substr(3);
+        if (d.size() == 1 && d[0] >= '0' && d[0] <= '9') return true;
+        if (d == "\xC2\xB9" || d == "\xC2\xB2" || d == "\xC2\xB3") return true;
+    }
+    return false;
+}
+// A relative '/' path that cannot leave its folder and names a plain file on Windows too: no leading or trailing '/', no empty, '.' or
+// '..' part, no control character or any of \ : < > " | ? *, no part ending in '.' or ' ' (Windows drops those), no device name.
 inline bool valid_rel_path(const std::string& p)
 {
     if (p.empty() || p.size() > 255 || p.front() == '/' || p.back() == '/') return false;
@@ -100,7 +116,9 @@ inline bool valid_rel_path(const std::string& p)
         if (e == std::string::npos) e = p.size();
         const std::string part = p.substr(s, e - s);
         if (part.empty() || part == "." || part == "..") return false;
-        for (unsigned char c : part) if (c < 0x20 || c == '\\' || c == ':' || c == 0x7F) return false;
+        if (part.back() == '.' || part.back() == ' ' || windows_device_name(part)) return false;
+        for (unsigned char c : part)
+            if (c < 0x20 || c == 0x7F || strchr("\\:<>\"|?*", c)) return false;
         s = e + 1;
     }
     return true;
@@ -167,7 +185,7 @@ inline std::vector<ListEntry> parse_mods_list(const std::string& text, std::vect
     return out;
 }
 
-// ---- a small strict JSON reader (objects, arrays, strings, integers, true/false/null) ----------------------------------------------
+// ---- a small strict JSON reader (RFC 8259 grammar; objects, arrays, strings, integers, true/false/null) -------------------------------------------
 struct Json {
     enum Type { Null, Bool, Int, Num, Str, Arr, Obj } type = Null;
     bool b = false;
@@ -191,6 +209,7 @@ public:
         out = Json();
         p_ = 0;
         err_.clear();
+        if (t_.compare(0, 3, "\xEF\xBB\xBF") == 0) p_ = 3;   // one leading UTF-8 BOM (Windows editors write it)
         ws();
         if (!value(out, 0)) { err = err_.empty() ? fmt("bad JSON at byte %llu", (unsigned long long)p_) : err_; return false; }
         ws();
@@ -300,14 +319,22 @@ private:
         if (lit("false")) { v.type = Json::Bool; v.b = false; return true; }
         if (lit("null")) { v.type = Json::Null; return true; }
         if (c == '-' || (c >= '0' && c <= '9')) {
+            // RFC 8259: -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?  (no leading zeros, no bare '.', 'e' or sign)
             const size_t s = p_;
+            auto digits = [&]() { const size_t d = p_; while (p_ < t_.size() && t_[p_] >= '0' && t_[p_] <= '9') ++p_; return p_ - d; };
             if (t_[p_] == '-') ++p_;
-            while (p_ < t_.size() && t_[p_] >= '0' && t_[p_] <= '9') ++p_;
+            if (p_ >= t_.size()) return false;
+            if (t_[p_] == '0') ++p_;
+            else if (!digits()) return false;
             bool frac = false;
-            while (p_ < t_.size() && (t_[p_] == '.' || t_[p_] == 'e' || t_[p_] == 'E' || t_[p_] == '+' || t_[p_] == '-' ||
-                                      (t_[p_] >= '0' && t_[p_] <= '9'))) { frac = true; ++p_; }
+            if (p_ < t_.size() && t_[p_] == '.') { ++p_; frac = true; if (!digits()) return false; }
+            if (p_ < t_.size() && (t_[p_] == 'e' || t_[p_] == 'E')) {
+                ++p_;
+                frac = true;
+                if (p_ < t_.size() && (t_[p_] == '+' || t_[p_] == '-')) ++p_;
+                if (!digits()) return false;
+            }
             const std::string num = t_.substr(s, p_ - s);
-            if (num == "-" || num.empty()) return false;
             if (frac || num.size() > 18) { v.type = Json::Num; return true; }   // not an integer this schema can use
             v.type = Json::Int;
             v.i = std::stoll(num);
