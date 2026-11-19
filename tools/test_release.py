@@ -17,7 +17,13 @@ LOG = """# Changelog
 
 ## [Unreleased]
 
+### For players
+
 - Added a thing.
+
+### Added
+
+- Technical detail of the thing.
 
 ## [0.1.0] - 2026-01-02
 
@@ -122,6 +128,27 @@ def main():
         code, out = run("--root", str(d), "notes", "0.1.0")
         expect("Unreleased" not in out, "notes stop at the next heading")
         expect(run("--root", str(d), "notes", "9.9.9")[0] == 1, "notes for a missing version")
+        # notes: the player part and a link; a version without a player part prints its whole section
+        log2 = ("# Changelog\n\n## [Unreleased]\n\n## [0.2.0] - 2026-02-01\n\n### For players\n\n- Plain line.\n\n"
+                "### Added\n\n- Technical line.\n\n## [0.1.0] - 2026-01-02\n\n- First.\n")
+        d = repo("0.2.0", log=log2)
+        code, out = run("--root", str(d), "notes", "0.2.0")
+        expect(code == 0 and out.startswith("- Plain line.") and "Technical line" not in out, "notes: the player part only")
+        expect("blob/v0.2.0/CHANGELOG.md" in out, "notes: link to the full changelog of that tag")
+        expect("For players" not in out, "notes: no heading inside the notes")
+        expect(run("--root", str(d), "notes", "0.1.0")[1].strip() == "- First.", "notes: old section without a player part")
+        d = repo("0.2.0", log=log2.replace("- Plain line.", ""))
+        expect("Technical line" in run("--root", str(d), "notes", "0.2.0")[1], "notes: an empty player part falls back")
+        # bump needs the player part
+        refused(repo(log="# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Tech only.\n\n## [0.1.0] - 2026-01-02\n\n- First.\n"),
+                "patch", "For players")
+        refused(repo(log="# Changelog\n\n## [Unreleased]\n\n### For players\n\n### Added\n\n- Tech.\n\n"
+                         "## [0.1.0] - 2026-01-02\n\n- First.\n"), "patch", "For players")
+        d = repo()
+        code, out = run("--root", str(d), "bump", "0.2.0")
+        notes = run("--root", str(d), "notes", "0.2.0")[1]
+        expect(code == 0 and notes.startswith("- Added a thing.") and "Technical detail" not in notes,
+               "bump keeps the player part, notes show only it")
 
         # version spans in the docs
         readme = ("Get the <!-- version -->[0.1.0 pre-release](https://x/releases/tag/v0.1.0)<!-- /version --> or "

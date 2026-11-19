@@ -4,13 +4,32 @@ All notable changes are listed here, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are `X.Y.Z` (the number in `installer/VERSION`).
 0.1.0 to 0.5.1 are pre-releases; the first full release will be 1.0.0. Changes not in a release yet are under Unreleased.
 
+Each version starts with **For players**: a few plain lines about what changed in the game and the installer. They are the release notes. The technical entries below it (Added, Changed, Fixed) are the full record for people who work on the project.
+
 ## [Unreleased]
+
+### For players
+
+- New look for the project page, the fan site and the installer pictures, and a new icon (a star with a J) for the setup, the launcher and the settings window. The installer pictures and the settings window header have not been tried on Windows yet.
+- The Discord invite link on the project page is the new one.
+
+
+### Changed
+
+- Release notes are written for players: every version in `CHANGELOG.md` starts with `### For players` (a few plain lines on what a feature is, where to find it and what it does), and `tools/release.py notes` prints only that part plus a link to the full changelog, so the release page, the release pull request and the Discord post show it instead of the technical entries. `tools/release.py bump` refuses an Unreleased section without it; versions before 0.2.0 print their whole section. The technical entries stay as the full record; 0.2.0 to 0.5.1 got player notes written afterwards. `CONTRIBUTING.md` explains where each kind of line goes.
 
 ### Added
 
 - A new look for the README, the fan site, the installer images and the social preview, drawn in the style of a fighting-game main menu (our own drawings, no game art) around the project's ASCII star with the J, which is also the icon of the setup, the launcher and the settings window (shown in its header; the installer images and the settings window header are not yet tried on Windows): menu buttons and palette badges in the README, a site you walk like a menu (Up/Down, Enter, Esc, a game pad or a tap) with a no-script plain page, one palette file (`data/theme.json`) for all of it (`tools/site/`), and the new Discord invite (https://discord.gg/D2eTEnCK62) everywhere.
 
 ## [0.5.1] - 2026-11-19
+
+### For players
+
+- **Choose how online matches work, in the game.** The Online page of Port Settings (still an opt-in page in the Options menu) has a new Netcode row: Off, Delay (the game's own online) or Rollback (experimental). Only one can be on. Not tried in a running game yet.
+- **Rollback through a room.** Instead of typing an IP address, one player creates a room on a re-psn server and the other joins it. Tested on one PC only, not yet across real routers.
+- **Fixed:** two PCs with the same version installed could refuse each other's rollback match as "a different game build". Not yet tried on two PCs. A 0.5.1 game cannot play rollback against a 0.5.0 one.
+
 
 ### Added
 
@@ -22,6 +41,14 @@ All notable changes are listed here, newest first. The format follows
 - Rollback between two PCs: the build id the two games compare now comes from the release content (version, game region, glue sources and the patched toolkit's sources), not from the compile time. The installer builds the game on each PC, so two installs of the same release refused each other as "a different game build". Host-tested (same content in two folders and a CR-LF copy give one id; a changed glue or toolkit source, version or region gives another; a changed source re-runs the configure step, so an update in place gets the new id); not yet tried on two PCs. A 0.5.1 game refuses a 0.5.0 one as a different build.
 
 ## [0.5.0] - 2026-11-18
+
+### For players
+
+- **Rollback netcode (experimental, off unless switched on).** A new way to play online: two players connect by IP address and the game hides lag by guessing your opponent's moves and correcting them when the real ones arrive. It works in Free Battle. Tested on one PC only, not yet on two PCs.
+- **PlayStation pads.** DualSense, DualSense Edge and DualShock 4 pads work directly over USB or Bluetooth, up to four, next to Xbox-style pads. Not tested on real pads yet; no rumble or lightbar yet.
+- **Choose who is player 1, 2, 3, 4.** Each pad or the keyboard takes the next free player when you press a button on it. Start it from the Controls page of Port Settings, or hold Select + L3 + R3 for 2 seconds. Not tried with real pads.
+- Rumble now goes to the pad of the player it belongs to, also when you have not changed the player order. Not tried with real pads.
+
 
 ### Added
 
@@ -38,6 +65,17 @@ All notable changes are listed here, newest first. The format follows
 - Docs brought up to date after 0.4.0: ROADMAP (releases, Training options, KO count, the Impossible mode, Port Settings pages, online and Proton wording), the feature list (new Impossible mode row; KO count, Training options and in-game settings now in progress), README and INSTALL (`SHA256SUMS` from 0.4.0, speed numbers now in 0.4.0), KNOWN_ISSUES (0.4.0, a row for the new Free Battle options), `.recomp.json` notes and help list.
 
 ## [0.4.0] - 2026-11-16
+
+### For players
+
+- **KOs to win (Free Battle).** The game ends a fight after 3 KOs. On the Stage Select, press L1 or R1 to change it to anything from 1 to 5.
+- **Impossible mode (Free Battle).** A hard fight against a computer opponent that almost never makes a mistake: it blocks nearly everything and counters well. When Free Battle's Character Select opens, a window asks "Free Battle" or "Impossible". In Impossible you play two against one and win with 1 KO, while the computer needs 2. To make any computer fighter Impossible in a normal Free Battle, press Right once more at 5 stars (the stars turn orange-red).
+- **Smoother busy fights on slower PCs.** Fights with many characters or destroyed buildings run better, and the frame rate no longer drops to 20 on 60 Hz monitors. Nothing to set up.
+- The support bundle now lists your monitors and their refresh rate, so we can see why a PC is slow.
+- Updating over an older install now replaces the settings window too, so it no longer keeps the old one.
+- Port Settings labels are no longer cut off, and its first page hides your Windows user name in the settings path, so a screenshot does not show it.
+- Release downloads have one checksum file, `SHA256SUMS`, for people who verify their download.
+
 
 ### Added
 
@@ -59,6 +97,18 @@ All notable changes are listed here, newest first. The format follows
 - Docs: the README follows the shared port skeleton (Status first, then Download and play, with "How AI was used" as the AI heading), and new docs/INSTALL.md and docs/TROUBLESHOOTING.md hold requirements, setup refusals, troubleshooting by symptom, the support bundle, saves, updating, uninstalling and SHA-256 checks.
 
 ## [0.3.0] - 2026-11-13
+
+### For players
+
+- **Graphics tab in the settings window:** shadow quality, how far shadows reach, character detail and how far objects are drawn.
+- **Cheats tab with "Unlock everything".** It unlocks all cards, characters and more, after making a checked backup of your save. It works for one start of the game, then switches itself off. The installer has the same option, with a separate test save.
+- **Two-thread drawing.** A new box on the Display page lets busy fights run smoother on slower PCs. It needs one more CPU core. It was off by default in this version.
+- **Busy fights no longer fall from 30 to about 20 frames per second** (a 2 against 2 fight with the town in view), and sound comes back by itself when Windows takes the audio device away.
+- **Add to Steam:** an unticked box on the installer's last page adds the game to Steam as a non-Steam shortcut.
+- **Training fixes:** the Restart box shows its own question again, and the dummy's health refills correctly after it gets up.
+- **Port Settings** (opt-in): Display, Graphics and Controls pages in the game edit the settings window's options.
+- Fixed: Start Game in the settings window said "The game is not built yet" on a normal install; the version line on the main menu is smaller and only shows on the idle main menu; the Port Settings page is drawn full size at 4K; setup says clearly when the game is a single .iso file and needs an extracted disc folder.
+
 
 ### Added
 
@@ -89,6 +139,16 @@ All notable changes are listed here, newest first. The format follows
 - Sound no longer stays off for the rest of the run when Windows takes the audio device away (for example a default-device change, a headset or another program, or after alt-tab): the port opens the current default device again within about a second, and it also follows a switch of the default output device while playing (toolkit patch 3004). The log shows `audio device lost` and `audio device re-opened` lines.
 
 ## [0.2.0] - 2026-11-12
+
+### For players
+
+- **Port Settings page** (opt-in): a sixth row in the Options menu opens a page of the port's own settings. Its Online page edits the online method, server, name and community preset. Checked on one PC; not yet tried on Windows.
+- **Version line on the main menu:** shows "J-Stars Victory VS-EX" and the version in the lower right.
+- Installing a new version over an old one now rebuilds the game fully, so the new version no longer keeps the old version's code.
+- The support bundle also shows your CPU, whether it has AVX2, and your graphics driver versions.
+- Training: after a fight with Unlimited Stamina, the game no longer keeps writing stamina into fighters that are already gone.
+- Setup names the EBOOT file it checked and shows its checksum, and says which file to pick when it is the wrong one.
+
 
 ### Added
 

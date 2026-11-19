@@ -7,9 +7,17 @@
     python3 tools/release.py bump X.Y.Z       # or major | minor | patch: write the new version everywhere (also the
                                               # <!-- version --> spans in the docs) and turn
                                               # "## [Unreleased]" into "## [X.Y.Z] - date" (UTC) with a fresh empty one
-                                              # above it; nothing is written unless every check passes; no git is run
-    python3 tools/release.py notes X.Y.Z      # print that version's CHANGELOG section (the release notes)
+                                              # above it; nothing is written unless every check passes (the Unreleased
+                                              # section must have a "### For players" part); no git is run
+    python3 tools/release.py notes X.Y.Z      # print the release notes: the "### For players" part of that version's
+                                              # CHANGELOG section plus a link to the full changelog; a version without
+                                              # that part (the first releases) prints its whole section
     python3 tools/release.py --root DIR ...   # another repository root (the test's fixture)
+
+Release notes are for the people who install the game, not for the people who work on the project. Each version's CHANGELOG
+section may start with "### For players": a few plain-language lines saying what a feature is, where to find it and what it
+does, with no toolkit patch numbers, setting names or CI and docs changes. The technical entries (### Added, Changed, Fixed)
+stay below it as the full record. A change that players can see adds one line to each; any other change adds only a technical one.
 
 installer/VERSION is the single source (the installer and the portable zip read it). The two CMake projects are copied to
 and built on the player's PC, so they cannot read that file: each keeps a literal VERSION in its project() call, which
@@ -40,6 +48,9 @@ FIRST = "0.0.1"   # the pre-release version that needs no section
 PLAIN = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CMAKE_VERSION = re.compile(r"(project\(\s*\w+\s+VERSION\s+)(\S+)")
 HEADING = re.compile(r"^## .*$", re.M)
+PLAYERS = re.compile(r"^### For players[ \t]*$", re.M)
+SUBHEADING = re.compile(r"^### ", re.M)
+NOTES_LINK = "https://github.com/Tsamiuy/jsp-vs-ex/blob/v{version}/CHANGELOG.md"
 UNRELEASED = "## [Unreleased]"
 MARKER = re.compile(r"(<!-- version -->)(.*?)(<!-- /version -->)")
 OPEN_MARKER = "<!-- version -->"
@@ -82,6 +93,28 @@ def find_section(text, version):
         if head == f"## [{version}]" or head.startswith(f"## [{version}] "):
             return body.strip()
     return None
+
+
+def player_part(body):
+    """The text under '### For players' in one version's section (None when it has no such heading)."""
+    m = PLAYERS.search(body)
+    if m is None:
+        return None
+    rest = body[m.end():]
+    n = SUBHEADING.search(rest)
+    return (rest[:n.start()] if n else rest).strip()
+
+
+def release_notes(log, version):
+    """What the release page shows: the player part and a link to the full changelog; the whole section for a version
+    that has no player part (the first releases). None when the version has no section."""
+    body = find_section(log, version)
+    if body is None:
+        return None
+    players = player_part(body)
+    if not players:
+        return body
+    return players + "\n\nThe full technical list of changes: " + NOTES_LINK.format(version=version)
 
 
 def doc_files(root):
@@ -184,6 +217,9 @@ def bump(root, arg, today=None):
     head, body = sections(log)[0]
     if not body.strip():
         return [], [f"{CHANGELOG}: the Unreleased section is empty; list the user-visible changes first"]
+    if not player_part(body):
+        return [], [f"{CHANGELOG}: the Unreleased section has no '### For players' notes; write what changes for players, "
+                    f"in plain words, under that heading first"]
     today = today or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     # Every output is built before the first write.
     start = log.index(UNRELEASED)
@@ -228,7 +264,7 @@ def main(argv=None):
     if not a.arg:
         ap.error(f"{a.command} needs a version")
     if a.command == "notes":
-        body = find_section(read(root, CHANGELOG), a.arg)
+        body = release_notes(read(root, CHANGELOG), a.arg)
         if body is None:
             print(f"release: no '## [{a.arg}]' section in {CHANGELOG}")
             return 1
