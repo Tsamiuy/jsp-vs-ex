@@ -34,6 +34,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 #### Fixed
 
+- **Online:** sending a room invitation, opening received invitations and viewing a player's profile left the game on "Communicating..." for good: the game waits for the system dialog's result, and the toolkit did not export those three calls, so no result ever came. Toolkit patch 6018 closes each dialog at once as if the player had backed out (there is still no system dialog to show) and reports it through the game's handler on its next sysutil callback poll, and adding players to the recent-players history now reports its result as well. Tested: the new host test `installer/tools/np_dialogs_test.sh` (the toolkit's `test_np_basic_dialogs.c`, gcc and clang) and a MinGW compile of the changed file. Not tested: a game run, so that the menus come back is not confirmed yet.
 - **First run:** Build again redoes a step whose files were removed after a build (an antivirus removing `game\jsp.exe` left the launcher saying "The game program is missing" while Build again skipped every step). The log names the missing file, and a changed settings window source rebuilds the settings window. Tested: host tests only. (#211)
 
 ## [0.5.1] - 2026-11-19

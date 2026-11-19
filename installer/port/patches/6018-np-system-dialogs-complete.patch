@@ -1,0 +1,392 @@
+Patch 6018: the message, invitation and profile system dialogs close at once and report it, so a title waiting on them goes on.
+
+sceNpBasicSendMessageGui, sceNpBasicRecvMessageCustom and sceNpProfileCallGui were not exported: their imports were unresolved
+(faked CELL_OK) and nothing ever called the title back. J-Stars Victory VS+ marks such a dialog open after the call and clears the
+mark only in its handler, so sending or opening invitations and viewing a player's profile stayed on "Communicating..." for good.
+
+There is still no system dialog to show. Each call now returns CELL_OK and queues one completion for the title's next
+cellSysutilCheckCallback, as if the player had backed out: the basic handler gets the result event for the message's main type
+(SEND_INVITATION_RESULT 13, SEND_MESSAGE_RESULT 12, RECV_INVITATION_RESULT 14, RECV_CUSTOM_DATA_RESULT 20, ...) with retCode
+SCE_NP_BASIC_ERROR_CANCEL, and the profile handler gets SCE_NP_PROFILE_ERROR_CANCEL. Calls without NP, without a registered handler
+or with bad arguments return the error and queue nothing. sceNpBasicRegisterContextSensitiveHandler now stores its handler (J-Stars
+registers only that one), and sceNpBasicAddPlayersHistoryAsync reports ADD_PLAYERS_HISTORY_RESULT (retCode 0) with a fresh request id,
+which J-Stars also waits for. ASSUMPTION: a dialog backed out of reports CANCEL and the handler runs from cellSysutilCheckCallback;
+J-Stars only tests retCode against 0 and ignores the profile result. Event and error numbers of the SDK (as listed in RPCS3's
+sceNp.h, read for the numbers only). Test: libs/network/tests/test_np_basic_dialogs.c (installer/tools/np_dialogs_test.sh).
+
+diff --git a/libs/network/sceNpBasic.c b/libs/network/sceNpBasic.c
+index 301c40f..ea50e85 100644
+--- a/libs/network/sceNpBasic.c
++++ b/libs/network/sceNpBasic.c
+@@ -10,6 +10,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
++#include "../system/cellSysutil.h"          /* cellSysutilQueueGuestCallbackArgs */
+ 
+ /* ---------------------------------------------------------------------------
+  * Internal state
+@@ -21,6 +22,52 @@ static SceNpBasicPresenceHandler s_presence_handler = NULL;
+ static void* s_handler_arg = NULL;
+ static SceNpBasicPresence s_own_presence;
+ 
++/* The title's basic event handler as the guest sees it: the OPD and its arg
++ * (guest addresses), from sceNpBasicRegisterHandler or
++ * sceNpBasicRegisterContextSensitiveHandler. The "result" events of the
++ * message dialogs and of AddPlayersHistoryAsync go to it. */
++static u32 s_cb_opd, s_cb_arg;
++static u32 s_next_req_id = 1;
++
++/* Numbers of the SDK, not this header's legacy placeholders (the header's
++ * event and error values do not match what titles compare against; the
++ * NO_EVENT note below is the same finding). Event and error values as in
++ * RPCS3's sceNp.h (read for the numbers only); J-Stars Victory VS+ compares
++ * its handler's events against 13, 14 and 18 and GetEvent's return against
++ * 0x8002A66A, which agrees. */
++#define NP_BASIC_EVENT_ADD_FRIEND_RESULT           3
++#define NP_BASIC_EVENT_SEND_ATTACHMENT_RESULT      7
++#define NP_BASIC_EVENT_SEND_MESSAGE_RESULT         12
++#define NP_BASIC_EVENT_SEND_INVITATION_RESULT      13
++#define NP_BASIC_EVENT_RECV_INVITATION_RESULT      14
++#define NP_BASIC_EVENT_ADD_PLAYERS_HISTORY_RESULT  18
++#define NP_BASIC_EVENT_SEND_CUSTOM_DATA_RESULT     19
++#define NP_BASIC_EVENT_RECV_CUSTOM_DATA_RESULT     20
++#define NP_BASIC_EVENT_SEND_URL_ATTACHMENT_RESULT  22
++#define NP_BASIC_ERR_NOT_SUPPORTED     0x8002A663u
++#define NP_BASIC_ERR_INVALID_ARGUMENT  0x8002A665u
++#define NP_BASIC_ERR_NOT_REGISTERED    0x8002A66Du
++#define NP_BASIC_ERR_CANCEL            0x8002A671u
++#define NP_BASIC_MESSAGE_MAIN_TYPE_INVITE       3
++#define NP_BASIC_MESSAGE_MAIN_TYPE_CUSTOM_DATA  4
++#define NP_BASIC_RECV_MESSAGE_OPTIONS_ALL       0x00000007u
++#define NP_PROFILE_ERR_NOT_INITIALIZED   0x8002AB41u
++#define NP_PROFILE_ERR_CANCEL            0x8002AB45u
++#define NP_PROFILE_ERR_INVALID_ARGUMENT  0x8002AB48u
++
++/* int handler(int event, int retCode, u32 reqId, void* arg), called on the
++ * title's next cellSysutilCheckCallback, never inside the call that caused
++ * it: a title sets its "dialog open" flag after the call returns and clears it
++ * in the handler, so a call made from inside would be lost (J-Stars sets its
++ * flag after the call, @0x0045A94C, @0x00455574).
++ * ASSUMPTION: the console calls the basic handler from cellSysutilCheckCallback;
++ * the title only needs it after the call has returned. */
++static void basic_event(s32 event, s32 retCode, u32 reqId)
++{
++    const u64 args[8] = { (u64)(s64)event, (u64)(s64)retCode, reqId, s_cb_arg, 0, 0, 0, 0 };
++    if (s_cb_opd) cellSysutilQueueGuestCallbackArgs(s_cb_opd, args);
++}
++
+ /* sceNpBasic is usable once sceNpInit has run: in the SDK a title calls
+  * sceNpInit and then sceNpBasic*, and many never call sceNpBasicInit. Checking
+  * only Basic's own flag answered NOT_INITIALIZED to every presence, message
+@@ -62,6 +109,7 @@ s32 sceNpBasicTerm(void)
+     s_initialized = 0;
+     s_event_handler = NULL;
+     s_presence_handler = NULL;
++    s_cb_opd = s_cb_arg = 0;
+     return CELL_OK;
+ }
+ 
+@@ -95,6 +143,8 @@ s32 sceNpBasicRegisterHandler(SceNpBasicEventHandler handler,
+     s_event_handler = handler;
+     s_presence_handler = presenceHandler;
+     s_handler_arg = arg;
++    s_cb_opd = (u32)(uintptr_t)handler;
++    s_cb_arg = (u32)(uintptr_t)arg;
+     return CELL_OK;
+ }
+ 
+@@ -108,6 +158,7 @@ s32 sceNpBasicUnregisterHandler(void)
+     s_event_handler = NULL;
+     s_presence_handler = NULL;
+     s_handler_arg = NULL;
++    s_cb_opd = s_cb_arg = 0;
+     return CELL_OK;
+ }
+ 
+@@ -259,8 +310,11 @@ s32 sceNpBasicAddBlockListEntry(const SceNpOnlineId* onlineId)
+     return CELL_OK;
+ }
+ 
+-/* Players met online, and the context-sensitive (XMB) handler: nothing is
+- * recorded, the history is empty, the handler is accepted and never fires. */
++/* Players met online: nothing is recorded and the history is empty. The add
++ * still completes: ADD_PLAYERS_HISTORY_RESULT (retCode 0, as the call's own
++ * CELL_OK says) goes to the basic handler. J-Stars marks the add busy after the
++ * call (@0x00456DD4) and only that event clears it (@0x00453B58); its net step
++ * func_00471C50 waits on the flag (@0x00471D48). */
+ s32 sceNpBasicGetPlayersHistoryEntryCount(u32 options, u32* count)
+ {
+     (void)options;
+@@ -272,12 +326,95 @@ s32 sceNpBasicGetPlayersHistoryEntryCount(u32 options, u32* count)
+ s32 sceNpBasicAddPlayersHistoryAsync(const void* npids, u32 count, const void* description, u32* reqId)
+ {
+     (void)npids; (void)count; (void)description;
+-    if (reqId) vm_write32((u32)(uintptr_t)reqId, 1);
++    const u32 id = s_next_req_id++;
++    if (!s_next_req_id) s_next_req_id = 1;
++    if (reqId) vm_write32((u32)(uintptr_t)reqId, id);
++    basic_event(NP_BASIC_EVENT_ADD_PLAYERS_HISTORY_RESULT, CELL_OK, id);
+     return CELL_OK;
+ }
+ 
++/* The context-sensitive handler: the same event handler as RegisterHandler's,
++ * for titles that only register this one (J-Stars does, @0x00456858). */
+ s32 sceNpBasicRegisterContextSensitiveHandler(const void* context, void* handler, void* arg)
+ {
+-    (void)context; (void)handler; (void)arg;
++    if (!context || !handler)
++        return (s32)NP_BASIC_ERR_INVALID_ARGUMENT;
++    s_cb_opd = (u32)(uintptr_t)handler;
++    s_cb_arg = (u32)(uintptr_t)arg;
++    return CELL_OK;
++}
++
++/* ---------------------------------------------------------------------------
++ * System dialogs: sending a message or invitation, receiving one, and a
++ * player's profile. There is no system dialog to show, so each one closes
++ * at once as if the player had backed out, and says so through the
++ * title's handler. Without that completion the title waits for it for good:
++ * the imports were unresolved (faked CELL_OK, nothing ever called back) and
++ * J-Stars stayed on "Communicating..." after Invite or a profile.
++ * ASSUMPTION: a dialog the player backs out of ends with the result event
++ * carrying SCE_NP_BASIC_ERROR_CANCEL (the profile dialog: its handler gets
++ * SCE_NP_PROFILE_ERROR_CANCEL). J-Stars only tests retCode against 0
++ * (@0x00453AE4, @0x00453B10) and ignores the profile result (@0x00454870).
++ * -----------------------------------------------------------------------*/
++
++/* (const SceNpBasicMessageDetails* msg, sys_memory_container_t containerId).
++ * SceNpBasicMessageDetails: u64 msgId, u16 mainType (+8), u16 subType, ... */
++s32 sceNpBasicSendMessageGui(u32 msg, u32 containerId)
++{
++    (void)containerId;
++    if (!basic_ready())
++        return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
++    if (!s_cb_opd)
++        return (s32)NP_BASIC_ERR_NOT_REGISTERED;
++    if (!msg)
++        return (s32)NP_BASIC_ERR_INVALID_ARGUMENT;
++    static const s32 result_event[6] = {
++        NP_BASIC_EVENT_SEND_ATTACHMENT_RESULT, NP_BASIC_EVENT_SEND_MESSAGE_RESULT,
++        NP_BASIC_EVENT_ADD_FRIEND_RESULT, NP_BASIC_EVENT_SEND_INVITATION_RESULT,
++        NP_BASIC_EVENT_SEND_CUSTOM_DATA_RESULT, NP_BASIC_EVENT_SEND_URL_ATTACHMENT_RESULT };
++    const u32 mainType = vm_read16(msg + 8);
++    if (mainType >= 6)
++        return (s32)NP_BASIC_ERR_INVALID_ARGUMENT;
++    printf("[sceNpBasic] SendMessageGui(mainType=%u): no system dialog, closed\n", mainType);
++    basic_event(result_event[mainType], (s32)NP_BASIC_ERR_CANCEL, 0);
++    return CELL_OK;
++}
++
++/* (SceNpBasicMessageMainType mainType, SceNpBasicMessageRecvOptions recvOptions,
++ *  sys_memory_container_t containerId): the dialog lists received invitations
++ * or custom data messages. */
++s32 sceNpBasicRecvMessageCustom(u32 mainType, u32 recvOptions, u32 containerId)
++{
++    (void)containerId;
++    if (!basic_ready())
++        return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
++    if (!s_cb_opd)
++        return (s32)NP_BASIC_ERR_NOT_REGISTERED;
++    mainType &= 0xFFFF;
++    if (mainType != NP_BASIC_MESSAGE_MAIN_TYPE_INVITE && mainType != NP_BASIC_MESSAGE_MAIN_TYPE_CUSTOM_DATA)
++        return (s32)NP_BASIC_ERR_NOT_SUPPORTED;
++    if (recvOptions & ~NP_BASIC_RECV_MESSAGE_OPTIONS_ALL)
++        return (s32)NP_BASIC_ERR_INVALID_ARGUMENT;
++    printf("[sceNpBasic] RecvMessageCustom(mainType=%u): no system dialog, closed\n", mainType);
++    basic_event(mainType == NP_BASIC_MESSAGE_MAIN_TYPE_INVITE ? NP_BASIC_EVENT_RECV_INVITATION_RESULT
++                                                            : NP_BASIC_EVENT_RECV_CUSTOM_DATA_RESULT,
++                (s32)NP_BASIC_ERR_CANCEL, 0);
++    return CELL_OK;
++}
++
++/* sceNpProfileCallGui(const SceNpId* npid, SceNpProfileResultHandler handler,
++ * void* userArg, u64 options); the handler is int (int result, void* arg),
++ * called on the title's next cellSysutilCheckCallback (as above). Kept in this
++ * file: the profile dialog has no other state. */
++s32 sceNpProfileCallGui(u32 npid, u32 handler, u32 userArg, u64 options)
++{
++    (void)npid; (void)options;
++    if (!np_is_initialized())
++        return (s32)NP_PROFILE_ERR_NOT_INITIALIZED;
++    if (!handler)
++        return (s32)NP_PROFILE_ERR_INVALID_ARGUMENT;
++    printf("[sceNpProfile] CallGui: no system dialog, closed\n");
++    const u64 args[8] = { (u64)(s64)(s32)NP_PROFILE_ERR_CANCEL, userArg, 0, 0, 0, 0, 0, 0 };
++    cellSysutilQueueGuestCallbackArgs(handler, args);
+     return CELL_OK;
+ }
+diff --git a/libs/network/sceNpBasic.h b/libs/network/sceNpBasic.h
+index 954f0bc..4051f3d 100644
+--- a/libs/network/sceNpBasic.h
++++ b/libs/network/sceNpBasic.h
+@@ -113,6 +113,12 @@ s32 sceNpBasicSendInGameInvitation(const SceNpOnlineId* to,
+ s32 sceNpBasicRecvInGameInvitation(void* data, u32 dataMaxSize,
+                                      u32* dataSize);
+ 
++/* System dialogs (no dialog is shown: each closes at once and its result
++ * event reports SCE_NP_BASIC_ERROR_CANCEL; see sceNpBasic.c). Guest addresses. */
++s32 sceNpBasicSendMessageGui(u32 msg, u32 containerId);
++s32 sceNpBasicRecvMessageCustom(u32 mainType, u32 recvOptions, u32 containerId);
++s32 sceNpProfileCallGui(u32 npid, u32 handler, u32 userArg, u64 options);
++
+ /* Block list */
+ s32 sceNpBasicGetBlockListEntryCount(u32* count);
+ s32 sceNpBasicAddBlockListEntry(const SceNpOnlineId* onlineId);
+diff --git a/libs/network/tests/test_np_basic_dialogs.c b/libs/network/tests/test_np_basic_dialogs.c
+new file mode 100644
+index 0000000..f22cc06
+--- /dev/null
++++ b/libs/network/tests/test_np_basic_dialogs.c
+@@ -0,0 +1,151 @@
++/*
++ * test_np_basic_dialogs - the message, invitation and profile dialogs close
++ * and say so through the title's handler.
++ *
++ *   cc -std=gnu17 -I include -o test_np_basic_dialogs libs/network/tests/test_np_basic_dialogs.c
++ *
++ * Compiles sceNpBasic.c into this file with sysutil stubbed: the stub records
++ * what would be queued for the title's next cellSysutilCheckCallback. Checks
++ * that sceNpBasicSendMessageGui, sceNpBasicRecvMessageCustom and
++ * sceNpProfileCallGui are defined under the names whose NIDs titles import,
++ * that each queues exactly one completion (the result event with
++ * SCE_NP_BASIC_ERROR_CANCEL, or the profile handler with
++ * SCE_NP_PROFILE_ERROR_CANCEL) and calls nothing from inside the call, that
++ * AddPlayersHistoryAsync reports ADD_PLAYERS_HISTORY_RESULT with its request
++ * id, and the error paths (NP not up, no handler, bad arguments) queue nothing.
++ */
++#include "../sceNpBasic.c"
++#include "ps3emu/nid.h"
++
++#include <stdlib.h>
++
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++void spu_linelock_lock(uint32_t a) { (void)a; }
++void spu_linelock_release(uint32_t a) { (void)a; }
++
++/* sceNp.c's accessor, driven by the test. */
++static int s_np_up;
++int np_is_initialized(void) { return s_np_up; }
++
++#define QMAX 16
++static struct { u32 opd; u64 a[8]; } s_q[QMAX];
++static int s_nq;
++s32 cellSysutilQueueGuestCallbackArgs(u32 opd, const u64 args[8])
++{
++    if (s_nq < QMAX) {
++        s_q[s_nq].opd = opd;
++        memcpy(s_q[s_nq].a, args, sizeof(s_q[s_nq].a));
++    }
++    s_nq++;
++    return CELL_OK;
++}
++
++static int fails = 0;
++#define CHECK(expr, want, what) do { s32 got_ = (s32)(expr); int ok_ = got_ == (s32)(want);              \
++        printf("[%s] %s: 0x%08X (want 0x%08X)\n", ok_ ? "PASS" : "FAIL", what, (u32)got_, (u32)(want)); \
++        if (!ok_) fails++; } while (0)
++#define TRUE_(cond, what) do { int ok_ = !!(cond); printf("[%s] %s\n", ok_ ? "PASS" : "FAIL", what); \
++        if (!ok_) fails++; } while (0)
++
++/* The queued call k: opd and the first four arguments (32-bit views). */
++static void expect(int k, u32 opd, u32 a0, u32 a1, u32 a2, u32 a3, const char* what)
++{
++    int ok = k < s_nq && k < QMAX && s_q[k].opd == opd && (u32)s_q[k].a[0] == a0 && (u32)s_q[k].a[1] == a1
++             && (u32)s_q[k].a[2] == a2 && (u32)s_q[k].a[3] == a3;
++    printf("[%s] %s\n", ok ? "PASS" : "FAIL", what);
++    if (!ok) {
++        fails++;
++        if (k < s_nq && k < QMAX)
++            printf("       got opd 0x%X args 0x%X 0x%X 0x%X 0x%X\n", s_q[k].opd, (u32)s_q[k].a[0], (u32)s_q[k].a[1],
++                   (u32)s_q[k].a[2], (u32)s_q[k].a[3]);
++    }
++}
++
++static void put16(u32 ea, u16 v) { vm_base[ea] = (u8)(v >> 8); vm_base[ea + 1] = (u8)v; }
++
++int main(void)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    vm_base = calloc(1, 65536);
++    if (!vm_base) return 2;
++    const u32 MSG = 0x1000, REQ = 0x1100, NPID = 0x1200, CTX = 0x1300;
++    const u32 HANDLER = 0x2000, ARG = 0x3000, PHANDLER = 0x4000, PARG = 0x5000;
++    const u32 CANCEL = NP_BASIC_ERR_CANCEL, PCANCEL = NP_PROFILE_ERR_CANCEL;
++
++    /* The names resolve to the NIDs titles import (J-Stars Victory VS+ imports all three). */
++    TRUE_(ps3_compute_nid("sceNpBasicSendMessageGui") == 0x01FBBC9Bu, "NID of sceNpBasicSendMessageGui");
++    TRUE_(ps3_compute_nid("sceNpBasicRecvMessageCustom") == 0x806960ABu, "NID of sceNpBasicRecvMessageCustom");
++    TRUE_(ps3_compute_nid("sceNpProfileCallGui") == 0xCEEEBC7Au, "NID of sceNpProfileCallGui");
++
++    /* NP not up: refused, nothing queued. */
++    put16(MSG + 8, 3);
++    CHECK(sceNpBasicSendMessageGui(MSG, 0xFFFFFFFFu), SCE_NP_BASIC_ERROR_NOT_INITIALIZED, "before sceNpInit: SendMessageGui");
++    CHECK(sceNpBasicRecvMessageCustom(3, 2, 0xFFFFFFFFu), SCE_NP_BASIC_ERROR_NOT_INITIALIZED, "before sceNpInit: RecvMessageCustom");
++    CHECK(sceNpProfileCallGui(NPID, PHANDLER, PARG, 0), NP_PROFILE_ERR_NOT_INITIALIZED, "before sceNpInit: ProfileCallGui");
++    CHECK(s_nq, 0, "nothing queued");
++
++    /* NP up, no handler: the completion would have nowhere to go. */
++    s_np_up = 1;
++    CHECK(sceNpBasicSendMessageGui(MSG, 0xFFFFFFFFu), NP_BASIC_ERR_NOT_REGISTERED, "no handler: SendMessageGui");
++    CHECK(sceNpBasicRecvMessageCustom(3, 2, 0xFFFFFFFFu), NP_BASIC_ERR_NOT_REGISTERED, "no handler: RecvMessageCustom");
++    CHECK(sceNpBasicRegisterContextSensitiveHandler(NULL, (void*)(uintptr_t)HANDLER, (void*)(uintptr_t)ARG),
++          NP_BASIC_ERR_INVALID_ARGUMENT, "ContextSensitiveHandler without a context");
++    CHECK(s_nq, 0, "nothing queued");
++
++    CHECK(sceNpBasicRegisterContextSensitiveHandler((void*)(uintptr_t)CTX, (void*)(uintptr_t)HANDLER, (void*)(uintptr_t)ARG),
++          CELL_OK, "RegisterContextSensitiveHandler");
++
++    /* Send: one result event per call, chosen by mainType, retCode CANCEL, queued (not called inside). */
++    CHECK(sceNpBasicSendMessageGui(MSG, 0xFFFFFFFFu), CELL_OK, "SendMessageGui(INVITE)");
++    CHECK(s_nq, 1, "one completion queued");
++    expect(0, HANDLER, NP_BASIC_EVENT_SEND_INVITATION_RESULT, CANCEL, 0, ARG, "SEND_INVITATION_RESULT (13), CANCEL, the title's arg");
++    put16(MSG + 8, 1);
++    CHECK(sceNpBasicSendMessageGui(MSG, 0xFFFFFFFFu), CELL_OK, "SendMessageGui(GENERAL)");
++    expect(1, HANDLER, NP_BASIC_EVENT_SEND_MESSAGE_RESULT, CANCEL, 0, ARG, "SEND_MESSAGE_RESULT (12)");
++    put16(MSG + 8, 6);
++    CHECK(sceNpBasicSendMessageGui(MSG, 0xFFFFFFFFu), NP_BASIC_ERR_INVALID_ARGUMENT, "SendMessageGui(mainType 6)");
++    CHECK(sceNpBasicSendMessageGui(0, 0xFFFFFFFFu), NP_BASIC_ERR_INVALID_ARGUMENT, "SendMessageGui(NULL)");
++    CHECK(s_nq, 2, "errors queue nothing");
++
++    /* Receive. */
++    CHECK(sceNpBasicRecvMessageCustom(3, 2, 0xFFFFFFFFu), CELL_OK, "RecvMessageCustom(INVITE, INCLUDE_BOOTABLE)");
++    expect(2, HANDLER, NP_BASIC_EVENT_RECV_INVITATION_RESULT, CANCEL, 0, ARG, "RECV_INVITATION_RESULT (14), CANCEL");
++    CHECK(sceNpBasicRecvMessageCustom(4, 0, 0xFFFFFFFFu), CELL_OK, "RecvMessageCustom(CUSTOM_DATA)");
++    expect(3, HANDLER, NP_BASIC_EVENT_RECV_CUSTOM_DATA_RESULT, CANCEL, 0, ARG, "RECV_CUSTOM_DATA_RESULT (20)");
++    CHECK(sceNpBasicRecvMessageCustom(1, 0, 0xFFFFFFFFu), NP_BASIC_ERR_NOT_SUPPORTED, "RecvMessageCustom(GENERAL)");
++    CHECK(sceNpBasicRecvMessageCustom(3, 8, 0xFFFFFFFFu), NP_BASIC_ERR_INVALID_ARGUMENT, "RecvMessageCustom(unknown option)");
++    CHECK(s_nq, 4, "errors queue nothing");
++
++    /* Players history: the request id written and reported. */
++    CHECK(sceNpBasicAddPlayersHistoryAsync((void*)(uintptr_t)NPID, 1, NULL, (u32*)(uintptr_t)REQ), CELL_OK, "AddPlayersHistoryAsync");
++    const u32 id1 = vm_read32(REQ);
++    expect(4, HANDLER, NP_BASIC_EVENT_ADD_PLAYERS_HISTORY_RESULT, 0, id1, ARG, "ADD_PLAYERS_HISTORY_RESULT (18), retCode 0, its reqId");
++    CHECK(sceNpBasicAddPlayersHistoryAsync((void*)(uintptr_t)NPID, 1, NULL, (u32*)(uintptr_t)REQ), CELL_OK, "AddPlayersHistoryAsync again");
++    TRUE_(vm_read32(REQ) != id1 && vm_read32(REQ) != 0, "a new nonzero request id");
++    expect(5, HANDLER, NP_BASIC_EVENT_ADD_PLAYERS_HISTORY_RESULT, 0, vm_read32(REQ), ARG, "reported with that id");
++
++    /* Profile: its own handler and arg, result CANCEL. */
++    CHECK(sceNpProfileCallGui(NPID, PHANDLER, PARG, 0), CELL_OK, "ProfileCallGui");
++    expect(6, PHANDLER, PCANCEL, PARG, 0, 0, "profile handler(SCE_NP_PROFILE_ERROR_CANCEL, userArg)");
++    CHECK(sceNpProfileCallGui(NPID, 0, PARG, 0), NP_PROFILE_ERR_INVALID_ARGUMENT, "ProfileCallGui without a handler");
++    CHECK(s_nq, 7, "errors queue nothing");
++
++    /* Unregistered: refused again. */
++    CHECK(sceNpBasicUnregisterHandler(), CELL_OK, "UnregisterHandler");
++    put16(MSG + 8, 3);
++    CHECK(sceNpBasicSendMessageGui(MSG, 0xFFFFFFFFu), NP_BASIC_ERR_NOT_REGISTERED, "after UnregisterHandler: SendMessageGui");
++    CHECK(s_nq, 7, "nothing queued");
++
++    free(vm_base);
++    printf("%s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
++    return fails ? 1 : 0;
++}
