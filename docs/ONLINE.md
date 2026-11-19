@@ -63,7 +63,7 @@ The same re-psn server can also arrange a match for the port's experimental roll
 online. The two are separate methods and only one can be on: for rollback, `repsn.ini` keeps the server and your online
 name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The full recipe is in
 [ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Port Settings > Online
-(`JSP_PORT_MENU=1`) writes the same files.
+(on by default) writes the same files.
 
 ## If it does not work
 

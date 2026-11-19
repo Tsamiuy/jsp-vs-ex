@@ -403,7 +403,7 @@ the game's own online in that file must stay **off** (`enabled = 0`): `enabled =
    One player uses `JSP_ROLLBACK_ROLE=host` (creates the room), the other `JSP_ROLLBACK_ROLE=join`. `JSP_ROLLBACK_RELAY=1`
    allows the server's relay when a direct link fails (the server must offer it). Leave out `JSP_ROLLBACK_LISTEN` unless a
    firewall needs a fixed UDP port.
-3. Start the game. Port Settings > Online (`JSP_PORT_MENU=1`) writes the same two files: Netcode = Rollback, Connection =
+3. Start the game. Port Settings > Online (on by default) writes the same two files: Netcode = Rollback, Connection =
    re-psn and Save write the `play_settings.txt` lines and `enabled = 0` in `repsn.ini`.
 
 #### If rollback does not start
