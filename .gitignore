@@ -201,6 +201,7 @@ __pycache__/
 !/installer/port/jsp/lift_game_hooks.json
 !/installer/port/jsp/lod_hooks.py
 !/installer/port/jsp/CMakeLists.txt
+!/installer/port/jsp/jsp_build_id.cmake
 # GekkoNet (BSD-2-Clause, with zpp_bits, MIT): a pinned copy of the library sources for the experimental rollback netcode; no asio
 !/installer/port/jsp/gekkonet/
 !/installer/port/jsp/gekkonet/**/

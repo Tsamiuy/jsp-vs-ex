@@ -220,9 +220,13 @@ uint32_t build_id()
 {
     const char* e = std::getenv("JSP_NET_BUILD");   // test override
     if (e && *e) return (uint32_t)std::strtoul(e, nullptr, 0);
-    uint32_t h = 2166136261u;                       // FNV-1a of the compile date and time: two copies of the same exe agree
+#ifdef JSP_NET_BUILD_ID
+    return (uint32_t)JSP_NET_BUILD_ID;              // from the release content (jsp_build_id.cmake): every PC that builds the same release agrees
+#else
+    uint32_t h = 2166136261u;                       // built outside the project's CMake (syntax checks): FNV-1a of the compile date and time
     for (const char* p = __DATE__ " " __TIME__; *p; ++p) { h ^= (uint8_t)*p; h *= 16777619u; }
     return h;
+#endif
 }
 
 void show(const std::string& s)
