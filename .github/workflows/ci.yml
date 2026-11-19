@@ -139,23 +139,102 @@ jobs:
         with:
           python-version: '3.13'
 
-      # A slow or failing package mirror used 16 to 18 minutes of this job's 20 on three runs, so the tests ran out of
-      # time or did not run, with no sign of the cause. apt now gives up on a request after 30 s without data (3
-      # retries), a failed index update is an error instead of leaving stale lists, the whole apt part is tried a
-      # second time, and the step has a limit of its own: a mirror problem fails this step by name.
+      # The .deb files of the Mono and SDL2 packages are kept in the Actions cache, so a run whose cache restores
+      # installs them without the package mirror (a slow or failing mirror used 16 to 18 minutes of this job's 20 on
+      # three runs, and failed the first runs of #211, #212 and #217 and main's run on #218). The key is the image name,
+      # the package list and the image version. Several image versions are in use at once, so a run without a cache for
+      # its own version restores the newest one for the same image name and package list. Restored files are used only
+      # if their checksums match, none of their packages is already on the image (so nothing is downgraded or half
+      # installed) and `dpkg -i` installs every package; anything else goes to the mirror. A run that did not restore
+      # its own version's key saves the files it installed under that key, unless a failed cache install left the mirror
+      # only part of the set. No permission is added: the cache actions use the runner's own cache token. Caches saved
+      # on main are read by every branch and pull request; one saved on a pull request is read only by that pull
+      # request.
+      - name: Package cache key
+        id: debkey
+        env:
+          DEB_PACKAGES: mono-mcs mono-runtime libsdl2-dev
+        run: |
+          list=$(printf '%s\n' $DEB_PACKAGES | sort | sha256sum | cut -c1-16)
+          echo "prefix=debs-${ImageOS:-unknown}-$list-" >> "$GITHUB_OUTPUT"
+          echo "key=debs-${ImageOS:-unknown}-$list-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "packages=$DEB_PACKAGES" >> "$GITHUB_OUTPUT"
+
+      - name: Package cache (restore)
+        id: debcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/debs
+          key: ${{ steps.debkey.outputs.key }}
+          restore-keys: ${{ steps.debkey.outputs.prefix }}
+
+      # From the mirror, apt gives up on a request after 30 s without data (3 retries), a failed index update is an
+      # error instead of leaving stale lists, the whole apt part is tried a second time (-f repairs packages a failed
+      # cache install left half-installed), and the step has a limit of its own: a mirror problem fails it by name.
       - name: Host test dependencies (Pillow, numpy, Mono and SDL2)
+        id: debs
         timeout-minutes: 8
+        env:
+          DEBS: ${{ runner.temp }}/debs
+          PACKAGES: ${{ steps.debkey.outputs.packages }}
+          EXACT_HIT: ${{ steps.debcache.outputs.cache-hit }}
         run: |
           python3 -m pip install --disable-pip-version-check pillow==12.3.0 numpy==2.5.3
-          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          # The cache fits this image when every cached package is one the image does not have yet (the cache holds
+          # only what apt added) and every exact-version dependency on a package the image has names the version it
+          # has (a -dev package needs the same version of its library, which a newer image may have updated).
+          fits() {
+            (cd "$DEBS" && sha256sum -c --quiet SHA256SUMS) || return 1
+            for f in "$DEBS"/*.deb; do
+              p=$(dpkg-deb -f "$f" Package) || return 1
+              if [ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" = installed ]; then
+                echo "$p is already installed on this image"; return 1
+              fi
+              while read -r dep ver; do
+                have=$(dpkg-query -W -f='${Version}' "$dep" 2>/dev/null) || continue
+                if [ -n "$have" ] && ! dpkg --compare-versions "$have" eq "$ver"; then
+                  echo "$p needs $dep $ver, this image has $have"; return 1
+                fi
+              done < <(dpkg-deb -f "$f" Depends Pre-Depends | sed 's/^[A-Za-z-]*: //' | tr ',|' '\n\n' |
+                       sed -n 's/^ *\([^ :(]*\)\(:[a-z0-9]*\)\{0,1\} *(= *\([^)]*\)).*/\1 \3/p')
+            done
+          }
+          tried=false
+          if compgen -G "$DEBS/*.deb" >/dev/null; then
+            if fits; then
+              tried=true
+              if sudo dpkg -i --refuse-downgrade "$DEBS"/*.deb && dpkg -s $PACKAGES >/dev/null; then
+                echo "installed from the package cache"
+                [ "$EXACT_HIT" = true ] || echo "save=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            echo "::warning::package cache not usable, using the mirror"
+          fi
+          rm -rf "$DEBS"; mkdir -p "$DEBS/partial"
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dir::Cache::Archives=$DEBS"
           for try in 1 2; do
             if sudo apt-get $APT -o APT::Update::Error-Mode=any update -qq &&
-               sudo apt-get $APT install -y --no-install-recommends mono-mcs mono-runtime libsdl2-dev; then
+               sudo apt-get $APT install -f -y --no-install-recommends $PACKAGES; then
+              sudo rm -rf "$DEBS/partial" "$DEBS/lock"; sudo chown -R "$(id -u)" "$DEBS"
+              # Nothing downloaded: nothing to keep. After a failed cache install apt fetched only what was missing,
+              # so the set is incomplete and is not saved.
+              if compgen -G "$DEBS/*.deb" >/dev/null && [ "$EXACT_HIT" != true ] && [ "$tried" = false ]; then
+                (cd "$DEBS" && sha256sum ./*.deb > SHA256SUMS)
+                echo "save=true" >> "$GITHUB_OUTPUT"
+              fi
               exit 0
             fi
             echo "::warning::package mirror problem (attempt $try of 2)"
           done
           exit 1
+
+      - name: Package cache (save)
+        if: steps.debs.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/debs
+          key: ${{ steps.debkey.outputs.key }}
 
       - name: Fira Sans file (pinned download)
         run: |
