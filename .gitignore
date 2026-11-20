@@ -196,6 +196,9 @@ __pycache__/
 !/installer/tools/net_repsn_client_test.cpp
 !/installer/tools/net_repsn_test.sh
 !/installer/tools/np_dialogs_test.sh
+!/installer/tools/fs_vfile_test.sh
+!/installer/tools/mods_overlay_test.cpp
+!/installer/tools/mods_overlay_test.sh
 !/installer/tools/stepper_test.cpp
 !/installer/tools/stepper_test.sh
 !/installer/tools/snapshot_ring_test.cpp

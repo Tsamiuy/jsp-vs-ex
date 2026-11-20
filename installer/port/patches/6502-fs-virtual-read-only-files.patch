@@ -1,0 +1,688 @@
+Patch 6502: a title port may serve a read-only cellFs file through a virtual view (g_ps3_fs_vfile_ops, NULL by default).
+
+New header include/ps3emu/fs_vfile.h: a provider with open, size, read and close. cellFsOpen offers each read-only open (no O_TRUNC)
+to the provider after the host file is open; when it claims the path, the fd keeps its real host FILE* (the fd table, Write, Fsync and
+the logs work as before) and Read, Lseek, Fstat and AioRead go through the provider: the guest's position is kept per fd (under the
+fd's stream lock, held for a virtual fd even with FS_STREAM_LOCK=0), SEEK_END and Fstat use the virtual size, and a read is clamped to
+the virtual size before the provider is asked, so a read that crosses the end returns the short count. AioRead reads the virtual bytes
+and does not move the position. Close releases the view; a re-open is a new view. cellFsSdataOpen never serves a virtual file and logs
+one line when the provider would have claimed its path; cellFsStat by path and directory listings still report the host size. An fd keeps the ops it was opened with until it is closed. With the pointer
+NULL: one atomic load per open and one per Read/Lseek/Fstat/Close/AioRead, nothing else changes (the existing test_fs_* pass unchanged).
+Use in J-Stars: mods override entries inside the game's CPK archives without writing to them (the provider serves the original bytes,
+a TOC with the overridden rows rewritten, and the mod data appended); J-Stars bounds its reads by the Fstat size, so the virtual size
+must come from Fstat. Upstream candidate (general: "serve a file through a port-provided view").
+Test: runtime/ppu/tests/test_fs_vfile.cpp (tools/test_ppu_fs_vfile.py; installer/tools/fs_vfile_test.sh also runs the other test_fs_*).
+
+diff --git a/include/ps3emu/fs_vfile.h b/include/ps3emu/fs_vfile.h
+new file mode 100644
+index 0000000..e52e142
+--- /dev/null
++++ b/include/ps3emu/fs_vfile.h
+@@ -0,0 +1,63 @@
++/*
++ * ps3recomp - virtual read-only files for cellFs (runtime/ppu/ppu_fs.cpp).
++ *
++ * A title port may serve a file the guest opens read-only through a view of its
++ * own: the guest still gets a real fd on the real host file, but cellFsRead,
++ * cellFsLseek, cellFsFstat and cellFsAioRead on that fd see the provider's bytes
++ * and size instead of the host file's. cellFsClose releases the view. Use: a port
++ * that overrides entries inside a game archive without writing to it (the
++ * provider answers with the original bytes plus its own changes).
++ *
++ * g_ps3_fs_vfile_ops is NULL by default, and then nothing changes: one atomic
++ * load per cellFsOpen, one table read per Read/Lseek/Fstat/Close/AioRead. Set it
++ * before the guest starts (or at any time: an fd keeps the ops it was opened
++ * with until it is closed).
++ *
++ * Contract:
++ *  - open(guest_path, host_path): called for read-only opens (no O_TRUNC) after
++ *    the host file is open. Return NULL to leave the file alone. It must not
++ *    touch the guest's fd, and must not keep `host` FILE*s of its own past
++ *    close(). It may be called for a path that is then closed at once without
++ *    a read (cellFsSdataOpen asks it only to log that the path is not served).
++ *  - size(vf): the virtual size in bytes; constant for the life of the view.
++ *  - read(vf, host, pos, dst, n): copy n bytes of the virtual file at pos into
++ *    dst and return how many were copied. ppu_fs.cpp never asks past size(vf)
++ *    (it clamps n first), so a short return means an error. `host` is the real
++ *    file of this fd; the caller holds its stdio lock, and the provider may seek
++ *    it (cellFs keeps the guest's position itself for a virtual fd).
++ *  - close(vf): the guest closed the fd. Called once per successful open.
++ * All four may be called from any guest thread; calls for one fd are serialised
++ * by its stream lock, calls for different fds are not.
++ *
++ * Not virtual: cellFsStat (by path) and directory listings (cellFsReaddir,
++ * cellFsGetDirectoryEntries) still report the host file's size, and
++ * cellFsSdataOpen fds always read the host file.
++ */
++#ifndef PS3EMU_FS_VFILE_H
++#define PS3EMU_FS_VFILE_H
++
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct ps3_fs_vfile ps3_fs_vfile;   /* opaque, owned by the provider */
++
++typedef struct ps3_fs_vfile_ops {
++    ps3_fs_vfile* (*open)(const char* guest_path, const char* host_path);
++    uint64_t      (*size)(ps3_fs_vfile* vf);
++    size_t        (*read)(ps3_fs_vfile* vf, FILE* host, uint64_t pos, void* dst, size_t n);
++    void          (*close)(ps3_fs_vfile* vf);
++} ps3_fs_vfile_ops;
++
++/* Defined in runtime/ppu/ppu_fs.cpp. NULL = no provider. */
++extern const ps3_fs_vfile_ops* volatile g_ps3_fs_vfile_ops;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_FS_VFILE_H */
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 15d8840..7ce9338 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -106,6 +106,8 @@ static int fs_stream_lock_on(void)
+ struct FsStreamGuard {
+     FILE* f;
+     explicit FsStreamGuard(FILE* fp) : f(fs_stream_lock_on() ? fp : nullptr) { if (f) FS_LOCKF(f); }
++    /* always = true: held even with FS_STREAM_LOCK=0 (patch 6502: it guards a virtual fd's own position too) */
++    FsStreamGuard(FILE* fp, bool always) : f((always || fs_stream_lock_on()) ? fp : nullptr) { if (f) FS_LOCKF(f); }
+     ~FsStreamGuard() { if (f) FS_UNLOCKF(f); }
+ };
+ 
+@@ -118,6 +120,7 @@ extern "C" void     vm_write64(uint64_t a, uint64_t v);
+ #include "../platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
+ #include "ps3emu/log_first.h"
+ #include "ps3emu/ps3_env_once.h"   /* ps3_env_once: each switch looked up once */
++#include "ps3emu/fs_vfile.h"       /* patch 6502: g_ps3_fs_vfile_ops */
+ 
+ /* Host root that the PS3 mount points map into (dir containing PS3_GAME). */
+ extern "C" const char* ppu_vfs_root = ".";
+@@ -305,6 +308,30 @@ static DIR* fd_dir(int fd)
+     return fd >= 0 && fd < FS_MAX ? __atomic_load_n(&g_dirs[fd], __ATOMIC_ACQUIRE) : nullptr;
+ }
+ 
++/* Patch 6502: virtual read-only files (ps3emu/fs_vfile.h). A port provider may claim a read-only open; that fd keeps
++ * its real host FILE* (so every other handler and the fd table work as before), and Read, Lseek, Fstat and AioRead go
++ * through the provider with the guest's position kept here (g_fd_vpos, under the fd's stream lock). NULL by default. */
++extern "C" { const ps3_fs_vfile_ops* volatile g_ps3_fs_vfile_ops = nullptr; }
++/* Per fd: the view and the ops it was opened with. Set at open before the fd reaches the guest (ops first, then the
++ * view with release), cleared at close under g_fd_lock; a handler reads the slot once, like fd_file(). */
++static ps3_fs_vfile*           g_fd_vf[FS_MAX];
++static const ps3_fs_vfile_ops* g_fd_vops[FS_MAX];
++static uint64_t                g_fd_vpos[FS_MAX];
++struct FsVfile { ps3_fs_vfile* vf; const ps3_fs_vfile_ops* ops; };
++static FsVfile fd_vfile(int fd)
++{
++    FsVfile v = { nullptr, nullptr };
++    if (fd < 0 || fd >= FS_MAX) return v;
++    v.vf = __atomic_load_n(&g_fd_vf[fd], __ATOMIC_ACQUIRE);
++    if (v.vf) v.ops = __atomic_load_n(&g_fd_vops[fd], __ATOMIC_ACQUIRE);
++    if (!v.ops) v.vf = nullptr;
++    return v;
++}
++static const ps3_fs_vfile_ops* fs_vfile_provider(void)
++{
++    return __atomic_load_n(&g_ps3_fs_vfile_ops, __ATOMIC_ACQUIRE);
++}
++
+ /* ---- handlers ---- */
+ static void cellFsOpen(ppu_context* ctx)
+ {
+@@ -362,6 +389,18 @@ static void cellFsOpen(ppu_context* ctx)
+     }
+     int fd = fd_alloc_file(f);
+     if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EMFILE; return; }
++    /* Patch 6502: a read-only open may be claimed by the port's virtual-file provider (ps3emu/fs_vfile.h). */
++    ps3_fs_vfile* vf = nullptr;
++    if (acc == CELL_FS_O_RDONLY && !(flags & CELL_FS_O_TRUNC)) {
++        if (const ps3_fs_vfile_ops* vops = fs_vfile_provider()) {
++            vf = vops->open(gpath, hpath);
++            if (vf) {
++                g_fd_vpos[fd] = 0;
++                __atomic_store_n(&g_fd_vops[fd], vops, __ATOMIC_RELEASE);
++                __atomic_store_n(&g_fd_vf[fd], vf, __ATOMIC_RELEASE);
++            }
++        }
++    }
+     if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
+     g_fd_usm[fd] = (strstr(gpath, ".usm") != nullptr) ? 1 : 0;
+     /* FS_CALLER=1: name the guest function that opened each file. A title whose
+@@ -379,6 +418,11 @@ static void cellFsOpen(ppu_context* ctx)
+             if (want && *want && strstr(gpath, want)) ydkj_host_bt("fs-open");
+           } }
+       else fprintf(stderr, "[fs] open '%s' -> fd %d\n", gpath, fd); }
++    if (vf) {
++        const FsVfile v = fd_vfile(fd);
++        fprintf(stderr, "[fs] vfile fd %d '%s': served by the port's provider, virtual size %llu\n", fd, gpath,
++                v.vf ? (unsigned long long)v.ops->size(v.vf) : 0ull);
++    }
+     if (ps3_env_once("PS3_FSLOG_BT") && strstr(gpath, ".usm")) {
+         /* Resolve to GUEST functions (raw host RVAs are useless here): this tells us
+          * which criMv/criFs function opened the movie, so the reader-attach path
+@@ -425,6 +469,14 @@ static void cellFsSdataOpen(ppu_context* ctx)
+         fprintf(stderr, "[fs] SdataOpen FAIL '%s' -> '%s'\n", gpath, hpath);
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
+     }
++    /* Patch 6502: SdataOpen fds are never virtual. Say so when the provider would have claimed this path. */
++    if (const ps3_fs_vfile_ops* vops = fs_vfile_provider()) {
++        if (ps3_fs_vfile* vf = vops->open(gpath, hpath)) {
++            vops->close(vf);
++            fprintf(stderr, "[fs] vfile: SdataOpen '%s' is claimed by the port's provider but served unmodified "
++                            "(only cellFsOpen fds are virtual)\n", gpath);
++        }
++    }
+     FILE* f = fdopen(hfd, "rb");
+     if (!f) { close(hfd); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
+     /* If the file IS still NPD-encrypted, we can't serve it plaintext here --
+@@ -482,16 +534,21 @@ static void cellFsClose(ppu_context* ctx)
+     if (ps3_env_once("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
+         fprintf(stderr, "[fs] close fd=%d  (by %s)\n", fd, w); }
+     FILE* f = nullptr;
++    FsVfile v = { nullptr, nullptr };
+     if (fd >= 0 && fd < FS_MAX) {
+         std::lock_guard<std::mutex> hold(g_fd_lock);
+         f = g_files[fd];
+         if (f) {
+             if (g_fd_usm[fd] && ps3_env_once("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
++            v = fd_vfile(fd);   /* patch 6502 */
++            __atomic_store_n(&g_fd_vf[fd], (ps3_fs_vfile*)nullptr, __ATOMIC_RELEASE);
++            __atomic_store_n(&g_fd_vops[fd], (const ps3_fs_vfile_ops*)nullptr, __ATOMIC_RELEASE);
+             __atomic_store_n(&g_files[fd], (FILE*)nullptr, __ATOMIC_RELEASE);
+             g_fd_usm[fd] = 0; g_fd_dir[fd] = 0;
+         }
+     }
+     if (f) fclose(f);
++    if (v.vf) v.ops->close(v.vf);
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
+@@ -526,12 +583,23 @@ static void cellFsRead(ppu_context* ctx)
+     FILE* f = fd_file(fd);
+     if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
+     uint64_t raw_nbytes = ctx->gpr[5];
+-    FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
+-    long fpos_before = ftell(f);
++    const FsVfile v = fd_vfile(fd);   /* patch 6502: a virtual fd keeps its position in g_fd_vpos */
++    FsStreamGuard fs_guard(f, v.vf != nullptr);   /* FS_STREAM_LOCK; always held for a virtual fd */
++    long fpos_before = v.vf ? (long)g_fd_vpos[fd] : ftell(f);
+     if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
+     fs_prefault(buf, nbytes);
+-    fs_set_dir(fd, f, 1);
+-    size_t n = fread(vm_base + buf, 1, (size_t)nbytes, f);   /* raw bytes, no swap */
++    size_t n;
++    if (v.vf) {
++        /* Never ask the provider past its size: a read that crosses the virtual end returns the short count. */
++        const uint64_t vpos = g_fd_vpos[fd], vsize = v.ops->size(v.vf);
++        const uint64_t want = vpos >= vsize ? 0 : (nbytes < vsize - vpos ? nbytes : vsize - vpos);
++        n = want ? v.ops->read(v.vf, f, vpos, vm_base + buf, (size_t)want) : 0;
++        if (n > want) n = (size_t)want;
++        g_fd_vpos[fd] = vpos + n;
++    } else {
++        fs_set_dir(fd, f, 1);
++        n = fread(vm_base + buf, 1, (size_t)nbytes, f);   /* raw bytes, no swap */
++    }
+     /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
+      * The intro cinematic is 28 seconds and this port renders it at a few frames
+      * a second, so it cannot be watched to its end -- truncating the stream makes
+@@ -692,6 +760,21 @@ static void cellFsLseek(ppu_context* ctx)
+      * so the old position is put back explicitly. */
+     if (wh > CELL_FS_SEEK_END) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EINVAL; return; }
+     int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
++    /* Patch 6502: a virtual fd seeks in g_fd_vpos, SEEK_END from the provider's size; same rules (before the start =
++     * EINVAL and the offset stays, past the end is allowed). */
++    if (const FsVfile v = fd_vfile(fd); v.vf) {
++        FsStreamGuard vguard(f, true);
++        const int64_t base = (wh == CELL_FS_SEEK_END) ? (int64_t)v.ops->size(v.vf)
++                           : (wh == CELL_FS_SEEK_CUR) ? (int64_t)g_fd_vpos[fd] : 0;
++        int64_t np = 0;
++        if (__builtin_add_overflow(base, off, &np) || np < 0) {
++            ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EINVAL; return;
++        }
++        g_fd_vpos[fd] = (uint64_t)np;
++        if (pos_ptr) vm_write64(pos_ptr, (uint64_t)np);
++        ctx->gpr[3] = CELL_OK;
++        return;
++    }
+     FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
+     const int64_t before = FS_TELL64(f);
+     if (FS_SEEK64(f, off, worigin) != 0) {
+@@ -756,7 +839,10 @@ static void cellFsFstat(ppu_context* ctx)
+     if (ps3_env_once("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
+         fprintf(stderr, "[fs] fstat fd=%d  (by %s)\n", fd, w); }
+     int64_t cur, sz;
+-    { FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
++    if (const FsVfile v = fd_vfile(fd); v.vf) {
++        FsStreamGuard vguard(f, true);   /* as Read and Lseek: a Close's fclose waits for it */
++        sz = (int64_t)v.ops->size(v.vf);   /* patch 6502: the virtual size (a title may bound its reads by it) */
++    } else { FsStreamGuard fs_guard(f);   /* FS_STREAM_LOCK */
+       cur = FS_TELL64(f);
+       FS_SEEK64(f, 0, SEEK_END);
+       sz = FS_TELL64(f);
+@@ -1059,10 +1145,18 @@ static void cellFsAioRead(ppu_context* ctx)
+          * wherever the AIO stopped. Hold the stream lock across seek, read
+          * and the seek back (stdio's own calls take the same lock). */
+         HOST_LOCKFILE(f);
++        if (const FsVfile v = fd_vfile(fd); v.vf) {
++            /* patch 6502: absolute read of the virtual file, clamped to its size; g_fd_vpos is not moved */
++            const uint64_t vsize = v.ops->size(v.vf);
++            const uint64_t want = offset >= vsize ? 0 : (size < vsize - offset ? size : vsize - offset);
++            n = want ? v.ops->read(v.vf, f, offset, vm_base + buf, (size_t)want) : 0;
++            if (n > want) n = (size_t)want;
++        } else {
+         const int64_t pos = (int64_t)HOST_FTELL64(f);
+         if (HOST_FSEEK64(f, offset) == 0)
+             n = fread(vm_base + buf, 1, (size_t)size, f);
+         if (pos >= 0) HOST_FSEEK64(f, pos);
++        }
+         HOST_UNLOCKFILE(f);
+         err = CELL_OK;
+     }
+diff --git a/runtime/ppu/tests/test_fs_vfile.cpp b/runtime/ppu/tests/test_fs_vfile.cpp
+new file mode 100644
+index 0000000..0de6929
+--- /dev/null
++++ b/runtime/ppu/tests/test_fs_vfile.cpp
+@@ -0,0 +1,306 @@
++/*
++ * ps3recomp - virtual read-only files (ps3emu/fs_vfile.h, ppu_fs.cpp).
++ *
++ * A trivial provider serves "ABC" followed by the host file's bytes for one
++ * path. The test drives the guest calls on real files and checks:
++ *   - with g_ps3_fs_vfile_ops NULL, the same file reads and stats as the host
++ *     file (nothing changes);
++ *   - with the provider set: open, lseek SEEK_END (= virtual size), read,
++ *     fstat (= virtual size), a read that crosses the virtual end (short count,
++ *     the provider is never asked past its size), a read at the end (0), close
++ *     (the view is released), and a re-open that serves the same bytes;
++ *   - a seek before the start is EINVAL and leaves the position, a seek past
++ *     the end is allowed;
++ *   - cellFsAioRead on a virtual fd reads the virtual bytes and does not move
++ *     the fd's position;
++ *   - read-write and truncating opens and other paths are not offered, and
++ *     cellFsSdataOpen never serves a virtual file;
++ *   - an fd keeps the ops it was opened with after the pointer is cleared.
++ *
++ *   tools/test_ppu_fs_vfile.py [--exe-out PATH]
++ *   test_fs_vfile [DIR]      (DIR: scratch directory; default /tmp, or the temp dir on Windows)
++ */
++#include "../../platform/ps3_dev_flash.c"
++#include "ppu_fs.cpp"
++#ifdef _WIN32
++#  include <windows.h>
++#endif
++
++/* ---- link stubs: nothing on the paths this test drives calls them ---- */
++extern "C" {
++uint8_t* vm_base = nullptr;
++uint32_t ppu_vm_size = 0;
++void vm_write32(uint64_t a, uint32_t v) { uint32_t be = __builtin_bswap32(v); memcpy(vm_base + a, &be, 4); }
++void vm_write64(uint64_t a, uint64_t v) { uint64_t be = __builtin_bswap64(v); memcpy(vm_base + a, &be, 8); }
++void ppu_guest_caller(char* out, size_t n) { if (n) out[0] = 0; }
++void ps3_vfs_ps3game_fallback(char* path, size_t cap) { (void)path; (void)cap; }
++void ydkj_host_bt(const char* tag) { (void)tag; }
++void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*)) {}
++}
++ps3_guest_caller_fn g_ps3_guest_caller = nullptr;
++const char* edat_resolve(const char* host_path, char* buf, size_t cap) { (void)buf; (void)cap; return host_path; }
++
++static uint32_t rd32(uint32_t a) { uint32_t v; memcpy(&v, vm_base + a, 4); return __builtin_bswap32(v); }
++static uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, vm_base + a, 8); return __builtin_bswap64(v); }
++
++static int fails = 0;
++#define CHECK(c, ...) do { const bool ok_ = (c); printf(ok_ ? "[PASS] " : "[FAIL] "); printf(__VA_ARGS__); \
++                           printf("\n"); if (!ok_) fails++; } while (0)
++
++enum : uint32_t { PATH = 0x100, FDP = 0x500, NP = 0x508, POSP = 0x510, STATB = 0x600, AIO = 0x700, AIOID = 0x780,
++                  BUF = 0x1000 };
++
++/* ---- the trivial provider: "ABC" + the host file, for paths ending in vfile_test.bin ---- */
++static const char PREFIX[] = "ABC";
++static const uint64_t PRE = 3;
++struct ps3_fs_vfile { uint64_t host_size; };
++static int g_opens = 0, g_closes = 0, g_live = 0;
++static uint64_t g_max_end = 0;   /* the furthest byte any read asked for (pos + n) */
++
++static ps3_fs_vfile* t_open(const char* guest, const char* host)
++{
++    const size_t n = strlen(guest), k = strlen("vfile_test.bin");
++    if (n < k || strcmp(guest + n - k, "vfile_test.bin") != 0) return nullptr;
++    fs_stat64_t st;
++    if (FS_STAT64(host, &st) != 0) return nullptr;
++    ps3_fs_vfile* v = new ps3_fs_vfile{ (uint64_t)st.st_size };
++    g_opens++; g_live++;
++    return v;
++}
++static uint64_t t_size(ps3_fs_vfile* v) { return PRE + v->host_size; }
++static size_t t_read(ps3_fs_vfile* v, FILE* host, uint64_t pos, void* dst, size_t n)
++{
++    if (pos + n > g_max_end) g_max_end = pos + n;
++    uint8_t* d = (uint8_t*)dst;
++    size_t done = 0;
++    while (done < n) {
++        const uint64_t p = pos + done;
++        if (p >= t_size(v)) break;
++        if (p < PRE) { d[done++] = (uint8_t)PREFIX[p]; continue; }
++        if (FS_SEEK64(host, (int64_t)(p - PRE), SEEK_SET) != 0) break;
++        const size_t got = fread(d + done, 1, n - done, host);
++        if (!got) break;
++        done += got;
++    }
++    return done;
++}
++static void t_close(ps3_fs_vfile* v) { g_closes++; g_live--; delete v; }
++static const ps3_fs_vfile_ops OPS = { t_open, t_size, t_read, t_close };
++
++/* ---- guest calls ---- */
++static ppu_context mk(uint64_t a = 0, uint64_t b = 0, uint64_t c = 0, uint64_t d = 0)
++{
++    ppu_context ctx; memset(&ctx, 0, sizeof ctx);
++    ctx.gpr[3] = a; ctx.gpr[4] = b; ctx.gpr[5] = c; ctx.gpr[6] = d;
++    return ctx;
++}
++static uint32_t rc_of(ppu_context& ctx) { return (uint32_t)ctx.gpr[3]; }
++static uint32_t open_guest(const char* guest, uint32_t flags, uint32_t* fd)
++{
++    strcpy((char*)vm_base + PATH, guest);
++    ppu_context ctx = mk(PATH, flags, FDP);
++    cellFsOpen(&ctx);
++    if (rc_of(ctx) == 0 && fd) *fd = rd32(FDP);
++    return rc_of(ctx);
++}
++static uint32_t sdata_open_guest(const char* guest, uint32_t* fd)
++{
++    strcpy((char*)vm_base + PATH, guest);
++    ppu_context ctx = mk(PATH, 0, FDP);
++    cellFsSdataOpen(&ctx);
++    if (rc_of(ctx) == 0 && fd) *fd = rd32(FDP);
++    return rc_of(ctx);
++}
++static uint32_t lseek_guest(uint32_t fd, int64_t off, uint32_t whence, uint64_t* pos)
++{
++    ppu_context ctx = mk(fd, (uint64_t)off, whence, POSP);
++    cellFsLseek(&ctx);
++    if (rc_of(ctx) == 0 && pos) *pos = rd64(POSP);
++    return rc_of(ctx);
++}
++/* -> bytes read (or ~0 on an error code); the bytes land at BUF */
++static uint64_t read_guest(uint32_t fd, uint64_t n)
++{
++    memset(vm_base + BUF, 0xEE, (size_t)n + 16);
++    ppu_context ctx = mk(fd, BUF, n, NP);
++    cellFsRead(&ctx);
++    return rc_of(ctx) == 0 ? rd64(NP) : ~0ull;
++}
++static uint64_t fstat_size(uint32_t fd)
++{
++    ppu_context ctx = mk(fd, STATB);
++    cellFsFstat(&ctx);
++    return rc_of(ctx) == 0 ? rd64(STATB + 0x24) : ~0ull;
++}
++static void close_guest(uint32_t fd) { ppu_context ctx = mk(fd); cellFsClose(&ctx); }
++static uint64_t aio_read_guest(uint32_t fd, uint64_t off, uint64_t n)
++{
++    vm_write32(AIO + 0x00, fd);
++    vm_write64(AIO + 0x08, off);
++    vm_write32(AIO + 0x10, BUF);
++    vm_write64(AIO + 0x18, n);
++    memset(vm_base + BUF, 0xEE, (size_t)n + 16);
++    ppu_context ctx = mk(AIO, AIOID, 0 /* no callback */);
++    cellFsAioRead(&ctx);
++    /* n is not returned without a callback; count the bytes the read changed instead (the file holds no 0xEE). */
++    uint64_t got = 0;
++    while (got < n && vm_base[BUF + got] != 0xEE) got++;
++    return got;
++}
++
++int main(int argc, char** argv)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    static uint8_t mem[0x40000];
++    vm_base = mem; ppu_vm_size = sizeof mem;
++
++    const char* dir = argc > 1 ? argv[1] : NULL;
++#ifdef _WIN32
++    char tmp[MAX_PATH];
++    if (!dir) { DWORD n = GetTempPathA(sizeof tmp, tmp); if (n && n < sizeof tmp) { tmp[n - 1] = 0; dir = tmp; } }
++#endif
++    if (!dir) dir = "/tmp";
++    ppu_vfs_root = dir;
++
++    /* The host file: 5000 bytes, an odd size, with no 0xEE byte and not starting with "NPD". */
++    enum { HSIZE = 5000 };
++    static uint8_t host_bytes[HSIZE];
++    for (int i = 0; i < HSIZE; i++) host_bytes[i] = (uint8_t)('a' + (i * 7 + i / 13) % 26);
++    char host[1100], other[1100];
++    snprintf(host, sizeof host, "%s/ps3recomp_vfile_test.bin", dir);
++    snprintf(other, sizeof other, "%s/ps3recomp_vfile_other.bin", dir);
++    const char* const files[2] = { host, other };
++    for (const char* p : files) {
++        FILE* f = fopen(p, "wb");
++        if (!f || fwrite(host_bytes, 1, HSIZE, f) != HSIZE) { printf("FAIL (could not write %s)\n", p); return 1; }
++        fclose(f);
++    }
++    static uint8_t virt[PRE + HSIZE];
++    memcpy(virt, PREFIX, PRE);
++    memcpy(virt + PRE, host_bytes, HSIZE);
++    const uint64_t VSIZE = PRE + HSIZE;
++    const char* G = "/dev_hdd1/ps3recomp_vfile_test.bin";
++    const char* GO = "/dev_hdd1/ps3recomp_vfile_other.bin";
++
++    /* ---- no provider: nothing changes ---- */
++    {
++        CHECK(g_ps3_fs_vfile_ops == nullptr, "g_ps3_fs_vfile_ops is NULL by default");
++        uint32_t fd = 0;
++        CHECK(open_guest(G, 0, &fd) == 0, "open without a provider (fd %u)", fd);
++        CHECK(fstat_size(fd) == HSIZE, "fstat without a provider = host size %d", HSIZE);
++        uint64_t pos = 0;
++        CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_END, &pos) == 0 && pos == HSIZE, "SEEK_END without a provider = %llu",
++              (unsigned long long)pos);
++        lseek_guest(fd, 0, CELL_FS_SEEK_SET, nullptr);
++        const uint64_t n = read_guest(fd, 8192);
++        CHECK(n == HSIZE && memcmp(mem + BUF, host_bytes, HSIZE) == 0, "read without a provider = the host bytes (%llu)",
++              (unsigned long long)n);
++        close_guest(fd);
++        CHECK(g_opens == 0 && g_closes == 0, "provider never called while NULL");
++    }
++
++    __atomic_store_n(&g_ps3_fs_vfile_ops, &OPS, __ATOMIC_RELEASE);
++
++    /* ---- open, SEEK_END, read, fstat, crossing read, close ---- */
++    uint32_t fd = 0;
++    CHECK(open_guest(G, 0, &fd) == 0 && g_opens == 1 && g_live == 1, "read-only open is claimed (fd %u, opens %d)", fd,
++          g_opens);
++    uint64_t pos = 99;
++    CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_END, &pos) == 0 && pos == VSIZE, "SEEK_END = virtual size %llu (got %llu)",
++          (unsigned long long)VSIZE, (unsigned long long)pos);
++    CHECK(lseek_guest(fd, -10, CELL_FS_SEEK_END, &pos) == 0 && pos == VSIZE - 10, "SEEK_END -10 = %llu",
++          (unsigned long long)pos);
++    CHECK(read_guest(fd, 10) == 10 && memcmp(mem + BUF, virt + VSIZE - 10, 10) == 0, "the last 10 virtual bytes");
++    CHECK(fstat_size(fd) == VSIZE, "fstat = virtual size %llu", (unsigned long long)VSIZE);
++    CHECK(read_guest(fd, 16) == 0, "a read at the virtual end returns 0");
++
++    CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_SET, &pos) == 0 && pos == 0, "SEEK_SET 0");
++    CHECK(read_guest(fd, 2) == 2 && memcmp(mem + BUF, "AB", 2) == 0, "first 2 bytes 'AB'");
++    CHECK(read_guest(fd, 4) == 4 && memcmp(mem + BUF, virt + 2, 4) == 0 && mem[BUF] == 'C',
++          "a read across the prefix/file border ('C' + 3 file bytes)");
++    CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_CUR, &pos) == 0 && pos == 6, "SEEK_CUR 0 = 6 (got %llu)",
++          (unsigned long long)pos);
++
++    g_max_end = 0;
++    CHECK(lseek_guest(fd, (int64_t)VSIZE - 100, CELL_FS_SEEK_SET, &pos) == 0, "seek to virtual end - 100");
++    uint64_t n = read_guest(fd, 2048);
++    CHECK(n == 100 && memcmp(mem + BUF, virt + VSIZE - 100, 100) == 0 && mem[BUF + 100] == 0xEE,
++          "a 2048-byte read crossing the virtual end returns the short count 100 (got %llu), nothing past it written",
++          (unsigned long long)n);
++    CHECK(g_max_end == VSIZE, "the provider was never asked past the virtual size (furthest %llu)",
++          (unsigned long long)g_max_end);
++
++    CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_SET, nullptr) == 0, "rewind");
++    n = read_guest(fd, 0x10000);
++    CHECK(n == VSIZE && memcmp(mem + BUF, virt, (size_t)VSIZE) == 0, "a whole read = 'ABC' + the file (%llu B)",
++          (unsigned long long)n);
++
++    /* ---- seek rules ---- */
++    CHECK(lseek_guest(fd, 7, CELL_FS_SEEK_SET, &pos) == 0 && pos == 7, "SEEK_SET 7");
++    CHECK(lseek_guest(fd, -8, CELL_FS_SEEK_CUR, nullptr) == 0x80010002u, "a seek before the start is EINVAL");
++    CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_CUR, &pos) == 0 && pos == 7, "and the position stays 7 (got %llu)",
++          (unsigned long long)pos);
++    CHECK(lseek_guest(fd, 0, 3, nullptr) == 0x80010002u, "unknown whence is EINVAL");
++    CHECK(lseek_guest(fd, 100, CELL_FS_SEEK_END, &pos) == 0 && pos == VSIZE + 100, "a seek past the end is allowed");
++    CHECK(read_guest(fd, 16) == 0, "and a read there returns 0");
++
++    /* ---- AIO read: virtual bytes, position untouched ---- */
++    CHECK(lseek_guest(fd, 1, CELL_FS_SEEK_SET, nullptr) == 0, "SEEK_SET 1");
++    n = aio_read_guest(fd, 1, 6);
++    CHECK(n == 6 && memcmp(mem + BUF, virt + 1, 6) == 0, "AIO read at 1 = 'BC' + 4 file bytes");
++    n = aio_read_guest(fd, VSIZE - 3, 64);
++    CHECK(n == 3 && memcmp(mem + BUF, virt + VSIZE - 3, 3) == 0, "AIO read crossing the end returns 3 bytes (%llu)",
++          (unsigned long long)n);
++    CHECK(lseek_guest(fd, 0, CELL_FS_SEEK_CUR, &pos) == 0 && pos == 1, "AIO did not move the position (%llu)",
++          (unsigned long long)pos);
++    CHECK(read_guest(fd, 3) == 3 && memcmp(mem + BUF, "BC", 2) == 0, "the next read continues at 1");
++
++    close_guest(fd);
++    CHECK(g_closes == 1 && g_live == 0, "close releases the view (closes %d)", g_closes);
++    CHECK(fstat_size(fd) == ~0ull, "the closed fd is gone");
++
++    /* ---- re-open: same bytes, a fresh position ---- */
++    uint32_t fd2 = 0;
++    CHECK(open_guest(G, 0, &fd2) == 0 && g_opens == 2, "re-open is claimed again (fd %u)", fd2);
++    CHECK(fstat_size(fd2) == VSIZE, "re-open: fstat = virtual size");
++    n = read_guest(fd2, 0x10000);
++    CHECK(n == VSIZE && memcmp(mem + BUF, virt, (size_t)VSIZE) == 0, "re-open: reads from 0, the same bytes");
++    close_guest(fd2);
++    CHECK(g_closes == 2 && g_live == 0, "re-open's close releases its view");
++
++    /* ---- opens the provider is not offered or declines ---- */
++    {
++        uint32_t f3 = 0;
++        CHECK(open_guest(G, CELL_FS_O_RDWR, &f3) == 0 && g_opens == 2, "a read-write open is not offered");
++        CHECK(fstat_size(f3) == HSIZE, "and serves the host file");
++        close_guest(f3);
++        CHECK(g_closes == 2, "and its close does not call the provider");
++        CHECK(open_guest(GO, 0, &f3) == 0 && g_opens == 2 && fstat_size(f3) == HSIZE,
++              "another path is declined and serves the host file");
++        close_guest(f3);
++        uint32_t f4 = 0;
++        CHECK(sdata_open_guest(G, &f4) == 0, "cellFsSdataOpen of a claimed path opens (fd %u)", f4);
++        CHECK(g_opens == 3 && g_closes == 3 && g_live == 0, "SdataOpen asked the provider and released it at once");
++        CHECK(fstat_size(f4) == HSIZE, "and serves the host file, not the virtual one");
++        close_guest(f4);
++        CHECK(g_closes == 3, "closing the SdataOpen fd does not call the provider");
++    }
++
++    /* ---- an open fd keeps its ops after the pointer is cleared ---- */
++    {
++        uint32_t f5 = 0;
++        CHECK(open_guest(G, 0, &f5) == 0 && g_opens == 4, "open with the provider");
++        __atomic_store_n(&g_ps3_fs_vfile_ops, (const ps3_fs_vfile_ops*)nullptr, __ATOMIC_RELEASE);
++        CHECK(fstat_size(f5) == VSIZE, "after clearing the pointer the open fd still serves the virtual size");
++        close_guest(f5);
++        CHECK(g_closes == 4 && g_live == 0, "and its close still releases the view");
++        CHECK(open_guest(G, 0, &f5) == 0 && g_opens == 4 && fstat_size(f5) == HSIZE,
++              "a new open after clearing serves the host file");
++        close_guest(f5);
++    }
++
++    remove(host);
++    remove(other);
++    printf("%s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
++    return fails ? 1 : 0;
++}
+diff --git a/tools/test_ppu_fs_vfile.py b/tools/test_ppu_fs_vfile.py
+new file mode 100644
+index 0000000..bf46bd6
+--- /dev/null
++++ b/tools/test_ppu_fs_vfile.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python3
++"""Virtual read-only files for cellFs (include/ps3emu/fs_vfile.h, runtime/ppu/ppu_fs.cpp).
++
++With g_ps3_fs_vfile_ops NULL nothing changes. With a provider set, a read-only
++cellFsOpen it claims serves the provider's bytes: Lseek SEEK_END and Fstat use
++the virtual size, Read returns the short count at the virtual end, AioRead reads
++the virtual bytes without moving the fd's position, Close releases the view, a
++re-open serves the same bytes; read-write opens and cellFsSdataOpen are never
++virtual. This builds runtime/ppu/tests/test_fs_vfile.cpp (which includes
++ppu_fs.cpp) against a ppu_recomp.h made from the lifter's own HEADER_PREAMBLE
++and runs it.
++
++It needs a host C++ compiler (under CI=1 a missing one fails instead of
++skipping).
++
++Usage:
++    python3 tools/test_ppu_fs_vfile.py [--exe-out PATH] [--build-only]
++"""
++
++import argparse
++import importlib.util
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++
++TOOLS = os.path.dirname(os.path.abspath(__file__))
++ROOT = os.path.dirname(TOOLS)
++FIXTURE = os.path.join(ROOT, "runtime", "ppu", "tests", "test_fs_vfile.cpp")
++INCLUDE_DIRS = ["include", "runtime/ppu", "runtime/memory", "runtime", "libs", "."]
++
++
++def _cxx():
++    return (shutil.which(os.environ.get("CXX", "c++")) or shutil.which("g++")
++            or shutil.which("clang++"))
++
++
++def _stub_header():
++    spec = importlib.util.spec_from_file_location(
++        "ppu_lifter", os.path.join(TOOLS, "ppu_lifter.py"))
++    lifter = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(lifter)
++    return lifter.HEADER_PREAMBLE
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--exe-out", help="keep the built test program at this path")
++    ap.add_argument("--build-only", action="store_true",
++                    help="build (for another machine, e.g. a Windows target) and stop")
++    args = ap.parse_args()
++
++    cxx = _cxx()
++    if cxx is None:
++        if os.environ.get("CI"):
++            print("FAIL: no C++ compiler found")
++            return 1
++        print("skip test_ppu_fs_vfile: no C++ compiler")
++        return 0
++    with tempfile.TemporaryDirectory() as td:
++        with open(os.path.join(td, "ppu_recomp.h"), "w") as fh:
++            fh.write(_stub_header())
++        exe = args.exe_out or os.path.join(td, "test_fs_vfile")
++        cmd = [cxx, "-std=gnu++17", "-w", "-I" + td]
++        cmd += ["-I" + os.path.join(ROOT, d) for d in INCLUDE_DIRS]
++        cmd += ["-o", exe, FIXTURE]
++        if "mingw" in os.path.basename(cxx):
++            cmd += ["-static"]
++        r = subprocess.run(cmd, capture_output=True, text=True)
++        if r.returncode != 0:
++            print("FAIL: fixture did not build")
++            print((r.stdout + r.stderr)[-4000:])
++            return 1
++        if args.build_only:
++            print(f"built {exe}")
++            return 0
++        r = subprocess.run([exe, td], capture_output=True, text=True)
++        sys.stdout.write(r.stdout)
++        sys.stderr.write(r.stderr)
++        return r.returncode
++
++
++if __name__ == "__main__":
++    sys.exit(main())
