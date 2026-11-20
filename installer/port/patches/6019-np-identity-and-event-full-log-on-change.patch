@@ -17,6 +17,8 @@ queue that is still full refuses the next event, as on the console, and the titl
   number, never by online id or address. The psnr lines no longer print this player's online id, public address or
   the server's name (the port stays; the launcher logs the server it was given). An invalid online ID is reported
   with where it came from (--username or PS3_NP_ONLINE_ID) and its length.
+- sceNpBasic.c: SendMessage, SendMessageAttachment, SendInGameInvitation and AddBlockListEntry log the other player's online
+  id by its length only, and the attachment line says whether there is a subject, not what it says.
 Logging only. Ours.
 Tests: libs/network/tests/test_np_identity_log.c and runtime/syscalls/tests/test_evt_full_log.c, plus a source check
 of the NP files' printf arguments (installer/tools/np_log_test.sh).
@@ -98,10 +100,10 @@ index 8adba0b..50b3096 100644
      }
      UNLOCK();
 diff --git a/libs/network/sceNp.c b/libs/network/sceNp.c
-index 79890a1..00a6b27 100644
+index 79890a1..cfd5461 100644
 --- a/libs/network/sceNp.c
 +++ b/libs/network/sceNp.c
-@@ -51,6 +51,39 @@ static void np_build_fake_id(SceNpId* npId)
+@@ -51,6 +51,43 @@ static void np_build_fake_id(SceNpId* npId)
      npId->handle.term = '\0';
  }
  
@@ -128,7 +130,11 @@ index 79890a1..00a6b27 100644
 +    char cur[sizeof(s->last)];
 +    strncpy(cur, value ? value : "", sizeof(cur) - 1);
 +    cur[sizeof(cur) - 1] = '\0';
-+    while (__atomic_test_and_set(&s->busy, __ATOMIC_ACQUIRE)) { }
++    while (__atomic_test_and_set(&s->busy, __ATOMIC_ACQUIRE)) {
++#if defined(__x86_64__) || defined(__i386__)
++        __builtin_ia32_pause();
++#endif
++    }
 +    const unsigned long long n = ++s->calls;
 +    const int first = !s->seen, changed = first || strcmp(cur, s->last) != 0;
 +    if (changed) { memcpy(s->last, cur, sizeof(cur)); s->seen = 1; }
@@ -141,7 +147,7 @@ index 79890a1..00a6b27 100644
  /* ---------------------------------------------------------------------------
   * API implementations
   * -----------------------------------------------------------------------*/
-@@ -60,8 +93,8 @@ s32 sceNpInit(u32 poolSize, void* poolPtr)
+@@ -60,8 +97,8 @@ s32 sceNpInit(u32 poolSize, void* poolPtr)
      (void)poolSize;
      (void)poolPtr;
  
@@ -152,7 +158,7 @@ index 79890a1..00a6b27 100644
  
      if (s_np_initialized)
          return SCE_NP_ERROR_ALREADY_INITIALIZED;
-@@ -99,7 +132,7 @@ s32 sceNpGetNpId(s32 userId, SceNpId* npId)
+@@ -99,7 +136,7 @@ s32 sceNpGetNpId(s32 userId, SceNpId* npId)
       * time it asked for its NP ID online. */
      npId = GUEST_PTR(npId, SceNpId*);
      np_build_fake_id(npId);
@@ -161,7 +167,7 @@ index 79890a1..00a6b27 100644
      return CELL_OK;
  }
  
-@@ -118,7 +151,7 @@ s32 sceNpGetOnlineId(s32 userId, SceNpOnlineId* onlineId)
+@@ -118,7 +155,7 @@ s32 sceNpGetOnlineId(s32 userId, SceNpOnlineId* onlineId)
      strncpy(onlineId->data, np_psnr_online_id(), SCE_NP_ONLINEID_MAX_LENGTH);
      onlineId->term = '\0';
  
@@ -170,7 +176,7 @@ index 79890a1..00a6b27 100644
      return CELL_OK;
  }
  
-@@ -137,8 +170,7 @@ s32 sceNpGetOnlineName(s32 userId, SceNpOnlineName* onlineName)
+@@ -137,8 +174,7 @@ s32 sceNpGetOnlineName(s32 userId, SceNpOnlineName* onlineName)
      strncpy(onlineName->data, np_psnr_online_id(),
              SCE_NP_ONLINENAME_MAX_LENGTH - 1);
  
@@ -180,7 +186,7 @@ index 79890a1..00a6b27 100644
      return CELL_OK;
  }
  
-@@ -159,8 +191,7 @@ s32 sceNpGetUserProfile(s32 userId, SceNpUserInfo* userInfo)
+@@ -159,8 +195,7 @@ s32 sceNpGetUserProfile(s32 userId, SceNpUserInfo* userInfo)
              SCE_NP_ONLINENAME_MAX_LENGTH - 1);
      /* Leave avatar URL empty */
  
@@ -190,6 +196,57 @@ index 79890a1..00a6b27 100644
      return CELL_OK;
  }
  
+diff --git a/libs/network/sceNpBasic.c b/libs/network/sceNpBasic.c
+index e7ea460..0110a27 100644
+--- a/libs/network/sceNpBasic.c
++++ b/libs/network/sceNpBasic.c
+@@ -230,8 +230,9 @@ s32 sceNpBasicSendMessage(const SceNpOnlineId* to,
+     (void)body;
+     (void)bodySize;
+ 
+-    printf("[sceNpBasic] SendMessage(to=%.16s)\n",
+-           to ? to->data : "(null)");
++    /* Another player's online id: only its length is logged (patch 6019). */
++    printf("[sceNpBasic] SendMessage(to: online id of %u chars)\n",
++           to ? (unsigned)strnlen(to->data, sizeof(to->data)) : 0u);
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+@@ -247,9 +248,9 @@ s32 sceNpBasicSendMessageAttachment(const SceNpOnlineId* to,
+     (void)data;
+     (void)dataSize;
+ 
+-    printf("[sceNpBasic] SendMessageAttachment(to=%.16s, subj=%s)\n",
+-           to ? to->data : "(null)",
+-           subject ? subject : "(null)");
++    printf("[sceNpBasic] SendMessageAttachment(to: online id of %u chars, %s)\n",
++           to ? (unsigned)strnlen(to->data, sizeof(to->data)) : 0u,
++           subject ? "with a subject" : "no subject");
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+@@ -264,8 +265,8 @@ s32 sceNpBasicSendInGameInvitation(const SceNpOnlineId* to,
+     (void)data;
+     (void)dataSize;
+ 
+-    printf("[sceNpBasic] SendInGameInvitation(to=%.16s)\n",
+-           to ? to->data : "(null)");
++    printf("[sceNpBasic] SendInGameInvitation(to: online id of %u chars)\n",
++           to ? (unsigned)strnlen(to->data, sizeof(to->data)) : 0u);
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+@@ -300,8 +301,8 @@ s32 sceNpBasicGetBlockListEntryCount(u32* count)
+ s32 sceNpBasicAddBlockListEntry(const SceNpOnlineId* onlineId)
+ {
+     onlineId = GUEST_PTR(onlineId, const SceNpOnlineId*);
+-    printf("[sceNpBasic] AddBlockListEntry(%.16s)\n",
+-           onlineId ? onlineId->data : "(null)");
++    printf("[sceNpBasic] AddBlockListEntry(online id of %u chars)\n",
++           onlineId ? (unsigned)strnlen(onlineId->data, sizeof(onlineId->data)) : 0u);
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
 diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
 index 6b2ee7f..4003481 100644
 --- a/libs/network/sceNpMatching2.c
@@ -391,10 +448,10 @@ index 0000000..8610fd5
 +}
 diff --git a/runtime/syscalls/evt_full_log.h b/runtime/syscalls/evt_full_log.h
 new file mode 100644
-index 0000000..fa08623
+index 0000000..55c0b35
 --- /dev/null
 +++ b/runtime/syscalls/evt_full_log.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,91 @@
 +/*
 + * ps3recomp - the log of sys_event_port_send answering EBUSY (patch 6019)
 + *
@@ -419,15 +476,22 @@ index 0000000..fa08623
 +typedef struct {
 +    unsigned long long total;    /* EBUSY answers so far */
 +    unsigned long long runs;     /* runs of EBUSY started */
-+    unsigned long long run;      /* EBUSY answers of the current run, 0 between runs */
++    unsigned long long run;      /* EBUSY answers of the current run, 0 between runs (atomic: read without the lock) */
 +    unsigned long long longest;  /* longest run that has ended */
 +    int                first_run_ended;
 +    char               busy;     /* spin lock: a few counters under it */
 +} evt_full_site;
 +
++/* A CPU pause in spin loops (x86 PAUSE; elsewhere nothing). */
++#if defined(__x86_64__) || defined(__i386__)
++#define EVT_FULL_SPIN_PAUSE() __builtin_ia32_pause()
++#else
++#define EVT_FULL_SPIN_PAUSE() ((void)0)
++#endif
++
 +static inline void evt_full_lock(evt_full_site* s)
 +{
-+    while (__atomic_test_and_set(&s->busy, __ATOMIC_ACQUIRE)) { }
++    while (__atomic_test_and_set(&s->busy, __ATOMIC_ACQUIRE)) EVT_FULL_SPIN_PAUSE();
 +}
 +
 +static inline void evt_full_unlock(evt_full_site* s)
@@ -440,7 +504,7 @@ index 0000000..fa08623
 +{
 +    evt_full_lock(s);
 +    const int first = s->total++ == 0;
-+    if (s->run++ == 0) s->runs++;
++    if (__atomic_fetch_add(&s->run, 1, __ATOMIC_RELAXED) == 0) s->runs++;
 +    evt_full_unlock(s);
 +    if (first)
 +        fprintf(out, "[evt] port_send(port=%u): queue %d FULL -> EBUSY (logged once per port: the end of this run "
@@ -452,8 +516,7 @@ index 0000000..fa08623
 +{
 +    if (!__atomic_load_n(&s->run, __ATOMIC_RELAXED)) return;
 +    evt_full_lock(s);
-+    const unsigned long long r = s->run;
-+    s->run = 0;
++    const unsigned long long r = __atomic_exchange_n(&s->run, 0, __ATOMIC_RELAXED);
 +    if (r > s->longest) s->longest = r;
 +    const int report = r && !s->first_run_ended;
 +    if (report) s->first_run_ended = 1;
@@ -470,7 +533,8 @@ index 0000000..fa08623
 +        evt_full_site* s = &sites[i];
 +        evt_full_lock(s);
 +        const unsigned long long total = s->total, runs = s->runs;
-+        const unsigned long long longest = s->run > s->longest ? s->run : s->longest;
++        const unsigned long long open = __atomic_load_n(&s->run, __ATOMIC_RELAXED);
++        const unsigned long long longest = open > s->longest ? open : s->longest;
 +        evt_full_unlock(s);
 +        if (total)
 +            fprintf(out, "[evt] port_send(port=%u): %llu EBUSY in %llu runs, longest run %llu\n",
