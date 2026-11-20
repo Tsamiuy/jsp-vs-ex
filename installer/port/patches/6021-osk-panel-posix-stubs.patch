@@ -1,7 +1,7 @@
 Patch 6021: the OSK panel's entry points exist off Windows too (no panel there yet), so a POSIX build links.
 
-Patch 2508 adds the in-game OSK panel and the Yes/No box to cellOskDialog.c. On Windows the panel's functions are real; the
-POSIX branch had stand-ins for only five of them. The HLE NID table generator registers every cellOskDialog_* function
+Patch 2508 adds the in-game OSK panel and the Yes/No box to cellOskDialog.c. On Windows the panel's 11 functions are real; the
+POSIX branch had stand-ins for six of them and lacked the other five. The HLE NID table generator registers every cellOskDialog_* function
 it finds in the source, and the port's glue calls cellOskDialog_overlay_key, so the toolkit's boot smoke test (and a
 native port build) failed to link on Linux with overlay_gen, overlay_get, overlay_char, overlay_key and choice_label
 undefined. The new stand-ins describe a panel that is never open: no text, no keys taken, a generation that never

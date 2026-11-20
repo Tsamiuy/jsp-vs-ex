@@ -9,9 +9,9 @@ Linux build with a Vulkan renderer. It does not build or run the game yet, and n
 | Step | State |
 |---|---|
 | The patched toolkit (ps3recomp v0.19.0 plus `installer/port/patches`) builds natively on Linux x86_64 with its Vulkan renderer | done: clang and GCC, no errors |
-| The toolkit's own renderer test scenes run on Mesa's CPU Vulkan driver (lavapipe), under the Khronos validation layer | done: all scenes pass, no validation messages |
+| The toolkit's own renderer test scenes run on Mesa's CPU Vulkan driver (lavapipe) | done: the 9 fixed-function scenes pass (run without the validation layer, as upstream runs them); the 20 draw-engine scenes pass under the Khronos validation layer with no validation message |
 | The toolkit's boot smoke test (a small synthetic program, no game) runs natively | done: passes (it draws through the toolkit's null renderer) |
-| The renderer's own built-in shaders (the depth copy, edge smoothing, SMAA, overlay and tint passes and the vertex-pulling shader) translate to SPIR-V | done: all 25 translate and validate; none has been drawn with on Vulkan |
+| The built-in shaders of the Direct3D 12 renderer file (`rsx_d3d12_backend.c`: the basic, textured, depth copy, edge smoothing, SMAA, overlay and tint passes) translate to SPIR-V, with two vertex-decompiler samples | done: 25 translate and validate (23 built-in, the vertex-pulling shader and one plain decompiled vertex shader); none has been drawn with on Vulkan; the opt-in `rsx_live_draw.c` renderer, which the port does not use, is not covered |
 | The port (`installer/port/jsp`) compiles and links natively | not yet |
 | The game's own shaders translate to SPIR-V | not tried: that needs shaders from a game run |
 | The game boots natively and draws a frame | not yet |
@@ -59,12 +59,17 @@ for m in "" --draw "--draw --frames=60" --depth --tex --tex-io --quads --threads
 # the shared draw engine with guest programs, under the validation layer
 for m in "" --draw --depth --quads --shader --tex --tex-io --mip --rtt --depthtex --mrt --mrt-a --cube --depthbounds \
          --split-present --feedback --clip --clip-keep --float-rt --float-rt-r; do
-  PS3RECOMP_VK_GUEST_PROGRAMS=1 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation ./ps3recomp_host $m > run.log 2>&1 || echo "FAIL $m"
+  PS3RECOMP_VK_GUEST_PROGRAMS=1 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LOADER_DEBUG=error \
+    ./ps3recomp_host $m > run.log 2>&1 || echo "FAIL $m"
+  grep -q "was not found" run.log && echo "NO VALIDATION LAYER $m"
   grep -q VUID run.log && echo "VALIDATION $m"
   grep -q "register-file draw engine path" run.log || echo "NOT ON THE ENGINE $m"
+  grep -q "nothing to check" run.log && echo "SKIPPED $m"
 done
 # boot smoke test (synthetic program, no game)
 ./ps3recomp_boot_smoke smoke/smoke.elf | grep -E "^\[smoke\] (PASS|FAIL)"
 ```
 
-No output other than the scenes' own lines means every scene passed.
+Only the first loop prints the scenes' own lines. Any line starting with FAIL, NO VALIDATION LAYER, VALIDATION, NOT ON THE ENGINE
+or SKIPPED, or a `[smoke] FAIL`, means a check failed. `VK_LOADER_DEBUG=error` makes the loader report a missing validation layer,
+which it otherwise skips without a word.
