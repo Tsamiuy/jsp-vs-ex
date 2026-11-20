@@ -1,0 +1,35 @@
+Patch 6021: the OSK panel's entry points exist off Windows too (no panel there yet), so a POSIX build links.
+
+Patch 2508 adds the in-game OSK panel and the Yes/No box to cellOskDialog.c. On Windows the panel's functions are real; the
+POSIX branch had stand-ins for only five of them. The HLE NID table generator registers every cellOskDialog_* function
+it finds in the source, and the port's glue calls cellOskDialog_overlay_key, so the toolkit's boot smoke test (and a
+native port build) failed to link on Linux with overlay_gen, overlay_get, overlay_char, overlay_key and choice_label
+undefined. The new stand-ins describe a panel that is never open: no text, no keys taken, a generation that never
+moves. Windows is unchanged. The panel itself on Linux needs a window and drawing outside the D3D12 backend (later work).
+
+diff --git a/libs/misc/cellOskDialog.c b/libs/misc/cellOskDialog.c
+index 109c92f8..52b6aca6 100644
+--- a/libs/misc/cellOskDialog.c
++++ b/libs/misc/cellOskDialog.c
+@@ -237,9 +237,21 @@ int cellOskDialog_confirm_poll(void)
+     return (int)InterlockedExchange(&s_confirm_result, -1);
+ }
+ #else
++/* No in-game panel off Windows yet (its window procedure and drawing are in the D3D12 backend): the panel is never
++ * open, so it has no text, takes no keys and its generation never moves. These keep the same entry points as on
++ * Windows, which the HLE NID table and a port's glue reference on every platform. */
+ int cellOskDialog_overlay_active(void) { return 0; }
++unsigned cellOskDialog_overlay_gen(void) { return 0; }
+ int cellOskDialog_overlay_sel(void) { return 0; }
+ int cellOskDialog_overlay_mode(void) { return 0; }
++const wchar_t* cellOskDialog_choice_label(int b) { (void)b; return L""; }
++void cellOskDialog_overlay_get(wchar_t* prompt, int pmax, wchar_t* text, int tmax)
++{
++    if (prompt && pmax > 0) prompt[0] = 0;
++    if (text && tmax > 0) text[0] = 0;
++}
++void cellOskDialog_overlay_char(unsigned ch) { (void)ch; }
++int cellOskDialog_overlay_key(unsigned vk) { (void)vk; return 0; }
+ int cellOskDialog_confirm_open(const wchar_t* prompt) { (void)prompt; return 0; }
+ int cellOskDialog_choice_open(const wchar_t* prompt, const wchar_t* left, const wchar_t* right)
+ { (void)prompt; (void)left; (void)right; return 0; }

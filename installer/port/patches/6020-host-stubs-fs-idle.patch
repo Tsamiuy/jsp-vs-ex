@@ -1,0 +1,25 @@
+Patch 6020: the toolkit's own POSIX host program links again: a stand-in for ppu_fs_idle_ms, which patch 6007 added.
+
+Patch 6007 makes cellPad.c call ppu_fs_idle_ms() (PAD_SCRIPT "~N" events wait until guest file reads go quiet). The
+function lives in runtime/ppu/ppu_fs.cpp, which the runtime library leaves out: a port compiles it with its own boot
+code, so the J-Stars exe links. The toolkit's ps3recomp_host (its renderer test scenes, no game) has no PPU loader and
+satisfies such references from runtime/host/host_stubs.c, which did not have this one, so the host failed to link (it is
+built only on POSIX hosts: seen on Linux; macOS by reading, not built). The stand-in reports the file system idle for
+ever, which is true for a host that reads no guest files.
+
+diff --git a/runtime/host/host_stubs.c b/runtime/host/host_stubs.c
+index 6e79ec31..6df8a4ad 100644
+--- a/runtime/host/host_stubs.c
++++ b/runtime/host/host_stubs.c
+@@ -67,6 +67,11 @@ uint32_t vm_read32(uint64_t addr)
+ /* ppu_fs.cpp - VFS root consulted by cellGame/cellFs path mapping. */
+ const char* ppu_vfs_root = ".";
+ 
++/* ppu_fs.cpp - milliseconds since the last guest file read (cellPad's PAD_SCRIPT
++ * "~N" events wait on it). A host with no game reads no guest files: the file
++ * system has been idle since it started, so every such wait is already over. */
++unsigned long long ppu_fs_idle_ms(void) { return ~0ull; }
++
+ /* ---------------------------------------------------------------------------
+  * Title-diagnostic hooks the HLE modules call into the PPU loader.
+  *
