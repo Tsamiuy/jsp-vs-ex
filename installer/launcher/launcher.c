@@ -213,29 +213,54 @@ static void load_settings(const char *here, const char *cmd, char *exe, size_t e
  * proposal P8, not yet confirmed; AppData would be the other choice). The mods folder is <install folder>\mods. A value already in the
  * environment (the settings file, or the player's own) wins, and JSP_MODS=0 turns mods off. The launcher only passes paths: the game parses
  * and checks the list. `line` gets the launcher_log.txt line, "mods: N listed (<path>)", N = the lines that name something. */
+/* An environment value: 1 = read into b (it fits), 0 = unset or empty (b is ""), -1 = set but longer than the buffer (b is ""). */
+static int env_get(const char *k, char *b, DWORD n)
+{
+    DWORD r;
+    b[0] = 0;
+    r = GetEnvironmentVariableA(k, b, n);
+    if (r == 0) { b[0] = 0; return 0; }
+    if (r >= n) { b[0] = 0; return -1; }   /* the call returned the size it needs and wrote nothing usable */
+    return b[0] ? 1 : 0;
+}
+
+/* The path as the log shows it: under %APPDATA% it is printed with %APPDATA% (as the settings line does), so the profile folder stays out. */
+static void shown_path(const char *path, char *out, size_t n)
+{
+    char app[MAX_PATH] = "";
+    const int r = env_get("APPDATA", app, sizeof app);
+    const size_t k = strlen(app);
+    if (r == 1 && k && !_strnicmp(path, app, k) && (path[k] == '\\' || path[k] == '/')) snprintf(out, n, "%%APPDATA%%%s", path + k);
+    else snprintf(out, n, "%s", path);
+}
+
 static void mods_env(const char *here, char *line, size_t n)
 {
-    char list[MAX_PATH * 2], dir[MAX_PATH * 2], v[8], buf[512];
+    char list[MAX_PATH * 2] = "", dir[MAX_PATH * 2] = "", v[8] = "", buf[512] = "", show[MAX_PATH * 2 + 16] = "";
     const char *slash;
     DWORD a;
     FILE *f;
-    int count = 0;
-    if (GetEnvironmentVariableA("JSP_MODS", v, sizeof v) && !strcmp(v, "0")) { snprintf(line, n, "mods: off (JSP_MODS=0)"); return; }
-    if (!GetEnvironmentVariableA("JSP_MODS_DIR", dir, sizeof dir) || !dir[0]) {
+    int count = 0, r;
+    if (env_get("JSP_MODS", v, sizeof v) == 1 && !strcmp(v, "0")) { snprintf(line, n, "mods: off (JSP_MODS=0)"); return; }
+    if (env_get("JSP_MODS_DIR", dir, sizeof dir) == 0) {   /* a preset value (even one too long for this buffer) is the game's to read */
         snprintf(dir, sizeof dir, "%s\\mods", here);
         a = GetFileAttributesA(dir);
         if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) SetEnvironmentVariableA("JSP_MODS_DIR", dir);
     }
-    if (!GetEnvironmentVariableA("JSP_MODS_LIST", list, sizeof list) || !list[0]) {
+    r = env_get("JSP_MODS_LIST", list, sizeof list);
+    if (r < 0) { snprintf(line, n, "mods: JSP_MODS_LIST is longer than %u characters: not counted here (the game reads it)", (unsigned)(sizeof list - 1)); return; }
+    if (r == 0) {
         slash = strrchr(g_settings, '\\');
         if (strrchr(g_settings, '/') > slash) slash = strrchr(g_settings, '/');   /* --settings may be given with '/' */
         if (slash) snprintf(list, sizeof list, "%.*s\\mods.txt", (int)(slash - g_settings), g_settings);
         else snprintf(list, sizeof list, "%s\\mods.txt", here);
-        if (!file_exists(list)) { snprintf(line, n, "mods: 0 listed (%s, not found)", list); return; }
+        shown_path(list, show, sizeof show);
+        if (!file_exists(list)) { snprintf(line, n, "mods: 0 listed (%s, not found)", show); return; }
         SetEnvironmentVariableA("JSP_MODS_LIST", list);
     }
+    shown_path(list, show, sizeof show);
     f = fopen(list, "r");
-    if (!f) { snprintf(line, n, "mods: 0 listed (%s, cannot be read)", list); return; }
+    if (!f) { snprintf(line, n, "mods: 0 listed (%s, cannot be read)", show); return; }
     while (fgets(buf, sizeof buf, f)) {
         char *s = buf, *h = strchr(buf, '#');
         if (h) *h = 0;
@@ -244,7 +269,7 @@ static void mods_env(const char *here, char *line, size_t n)
         if (*s) count++;
     }
     fclose(f);
-    snprintf(line, n, "mods: %d listed (%s)", count, list);
+    snprintf(line, n, "mods: %d listed (%s)", count, show);
 }
 
 static void fail(const char *msg)
@@ -255,7 +280,7 @@ static void fail(const char *msg)
 int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
 {
     char here[MAX_PATH], path[MAX_PATH * 2], exe[MAX_PATH] = "JStarsRecomp.exe", elf[MAX_PATH] = "EBOOT.elf";
-    char why[MAX_PATH * 3], mods[MAX_PATH * 3], run[MAX_PATH * 2], cl[MAX_PATH * 4], disc[MAX_PATH * 2], bfile[MAX_PATH * 2], boost[8], *s;
+    char why[MAX_PATH * 3], mods[MAX_PATH * 3] = "", run[MAX_PATH * 2], cl[MAX_PATH * 4], disc[MAX_PATH * 2], bfile[MAX_PATH * 2], boost[8], *s;
     int boosted = 0;
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     STARTUPINFOA si;

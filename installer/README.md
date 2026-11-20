@@ -202,7 +202,7 @@ With none of them the defaults apply (`settings: none found`). The installed gam
 The mods folder's enable list, `mods.txt`, is looked for next to the settings file that won, or in the install folder when no
 settings file was found (a proposal still to be confirmed). The launcher passes its path to the game as `JSP_MODS_LIST`, and the
 mods folder `<install folder>\mods`, when it exists, as `JSP_MODS_DIR`; a value already set (in the settings file, say) is kept,
-and `JSP_MODS=0` turns mods off. It writes a second line to `launcher_log.txt`: `mods: N listed (<path of mods.txt>)`, where N counts
+and `JSP_MODS=0` turns mods off. It writes a second line to `launcher_log.txt`: `mods: N listed (<path of mods.txt>)` (a path under AppData is shown as `%APPDATA%\...`), where N counts
 the lines that name a mod, `mods: 0 listed (<path>, not found)` without a list, or `mods: off (JSP_MODS=0)`. The game itself reads
 and checks the list (its `[mods]` lines in `play_stderr.txt`). Mods are a framework in progress: there is no mod to install yet.
 

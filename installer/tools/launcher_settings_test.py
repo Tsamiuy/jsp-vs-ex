@@ -28,7 +28,7 @@ def env_of(rec):
     return out
 
 
-def case(tool, launcher, base, name, files, flag=False, want="", rule="", mods=None, mods_dir=False, mods_want=None, extra=""):
+def case(tool, launcher, base, name, files, flag=False, want="", rule="", mods=None, mods_dir=False, mods_want=None, extra="", preset=None):
     inst = base / name / "app"
     appdata = base / name / "appdata"
     shutil.rmtree(base / name, ignore_errors=True)
@@ -51,6 +51,7 @@ def case(tool, launcher, base, name, files, flag=False, want="", rule="", mods=N
     env = dict(os.environ, APPDATA=str(appdata), CPU_BOOST="0", FAKE_OUT=str(rec), FAKE_ENV="RES_SCALE,JSP_MODS_LIST,JSP_MODS_DIR")
     for k in ("JSP_MODS", "JSP_MODS_LIST", "JSP_MODS_DIR"):
         env.pop(k, None)
+    env.update(preset or {})   # values the player set before starting the launcher
     cmd = [str(inst / "jsp-launcher.exe")] + (["--settings", str(places["flag"])] if flag else [])
     subprocess.run(cmd, env=env, cwd=str(inst))
     for _ in range(100):
@@ -61,14 +62,19 @@ def case(tool, launcher, base, name, files, flag=False, want="", rule="", mods=N
     got = genv.get("RES_SCALE", "(game not started)")
     log = (inst / "game" / "run" / "launcher_log.txt").read_text().strip() if (inst / "game" / "run" / "launcher_log.txt").is_file() else "(no log)"
     ok = got == want and rule in log
-    if mods_want is not None:   # (where mods.txt is or None, the count, the log line's tail)
+    mods_line = [x for x in log.splitlines() if x.startswith("mods: ")]
+    if mods_want is not None and mods_want[0] == "preset":   # ("preset", the log line's start): the preset value goes through untouched
+        ok = ok and len(mods_line) == 1 and mods_line[0].startswith(mods_want[1])
+        ok = ok and all(genv.get(k, "") == v for k, v in (preset or {}).items())
+    elif mods_want is not None:   # (where mods.txt is or None, the count, the log line's tail)
         place, count, tail = mods_want
         listed = "" if place is None else str((places[place].parent / "mods.txt") if place != "install" else inst / "mods.txt")
-        mods_line = [x for x in log.splitlines() if x.startswith("mods: ")]
         ok = ok and len(mods_line) == 1 and mods_line[0].startswith(f"mods: {count} ") and mods_line[0].endswith(tail)
         ok = ok and genv.get("JSP_MODS_LIST", "") == listed and genv.get("JSP_MODS_DIR", "") == (str(inst / "mods") if mods_dir and count != "off" else "")
-        if listed:
-            ok = ok and listed in mods_line[0]
+        if listed:   # under %APPDATA% the line names it so (the profile folder stays out of the log), as the settings line does
+            ad = str(appdata)
+            shown = "%APPDATA%" + listed[len(ad):] if listed.lower().startswith(ad.lower() + os.sep) else listed
+            ok = ok and shown in mods_line[0] and (place != "appdata" or mods_line[0].startswith(f"mods: {count} listed (%APPDATA%"))
     print(f"{'ok  ' if ok else 'FAIL'} {name:26} RES_SCALE={got!r} want {want!r}; {log}; mods env {genv.get('JSP_MODS_LIST', '')!r} {genv.get('JSP_MODS_DIR', '')!r}")
     return ok
 
@@ -94,7 +100,11 @@ def main(launcher, tool, scratch):
               mods_want=(None, 0, "mods.txt, not found)")),
          # JSP_MODS=0 in the settings file: off, nothing passed
          case(tool, launcher, base, "mods-off", {"install": "I"}, want="I", rule="install folder", mods={"install": "swap\n"}, mods_dir=True,
-              extra="JSP_MODS=0\n", mods_want=(None, "off", "(JSP_MODS=0)"))]
+              extra="JSP_MODS=0\n", mods_want=(None, "off", "(JSP_MODS=0)")),
+         # values longer than the launcher's buffers: read as set (never uninitialised bytes), passed to the game untouched, not overwritten
+         case(tool, launcher, base, "mods-preset-too-long", {}, rule="none found", mods_dir=True,
+              preset={"JSP_MODS": "not-zero-and-long", "JSP_MODS_LIST": "C:\\" + "l" * 700 + "\\mods.txt", "JSP_MODS_DIR": "C:\\" + "d" * 700},
+              mods_want=("preset", "mods: JSP_MODS_LIST is longer than 519 characters"))]
     print("RESULT:", "ok" if all(r) else "FAILED")
     return 0 if all(r) else 1
 
