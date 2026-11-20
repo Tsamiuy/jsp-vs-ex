@@ -1,8 +1,10 @@
 # Changelog
 
-What changed in each version, newest first. Each version has two parts: **For players** is the release notes in plain words, and **Technical changes** is the full record. Versions are `X.Y.Z` (`installer/VERSION`); 0.1.0 to 0.5.1 are pre-releases, and the first full release will be 1.0.0. The technical part follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). How to write an entry, with a template: `CONTRIBUTING.md`.
+What changed in each version, newest first. Each version has two parts: **For players** is the release notes in plain words, and **Technical changes** is the full record. Versions are `X.Y.Z` (`installer/VERSION`); 0.1.0 to 0.6.0 are pre-releases, and the first full release will be 1.0.0. The technical part follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). How to write an entry, with a template: `CONTRIBUTING.md`.
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-11-20
 
 ### For players
 
@@ -12,20 +14,21 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 **Changed**
 
-- **New look.** The project page, the fan site and the installer pictures have a fighting-game menu style, and the setup, the launcher and the settings window have a new icon: a star with a J. The installer pictures and the settings window header are not tried on Windows yet.
+- **New look.** The project page, the fan site and the installer pictures have a fighting-game menu style, and the setup, the launcher and the settings window have a new icon: a star with a J. The installer pictures, the new icons and the settings window header are not tried on Windows yet.
 - The Discord invite on the project page is the new one.
-- **Rollback over a re-psn room has played its first match on two PCs** on one home network, with no desync. Start both games within about 30 seconds of each other (the host first); `docs/ROLLBACK.md` explains the two "timed out" and "no room" messages. The match ran slowly, and why is not known yet.
+- **Rollback over a re-psn room has run its first match on two PCs** on one home network, with no desync. It was a scripted test match, not played by hand. Start both games within about 30 seconds of each other (the host first); the rollback guide explains the two "timed out" and "no room" messages. The match ran slowly, and why is not known yet. A 0.6.0 game cannot play rollback against a 0.5.1 one: both players need the same version.
+- **The support bundle hides your online details.** It replaces the server and join addresses, online names (yours and other players') and your Windows user name with placeholders in every file, and it says which netcode your settings chose and how the last two starts went. Look over the zip before you post it: an address typed only on the command line, or an IPv6 address, is not caught. Not tried on Windows yet.
 - **Port Settings is on by default.** Options now has a sixth row, Port Settings, at the top of the list, without any setting, so the Online page where you choose Off, Delay or Rollback is easy to find (US version of the game only). The Netcode row was opened and switched to Rollback in a running game; saving it and playing a match from it are not tried yet.
 
 **Fixed**
 
-- **Build again** in the settings window rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start.
+- **Build again** in the settings window rebuilds game files that were removed after a build (for example by an antivirus), instead of saying the build is done while the game still cannot start. Tested only by script so far, not on a real install.
 - The fan site's tables keep their words whole, and its menu is one straight list with no second row of buttons.
 - **Online menus:** sending a room invitation, opening the invitations you received or viewing a player's profile left the game on "Communicating..." for good. These screens should now back out right away, as if you had pressed back, since the PC version has no system window to show them; this has not been tried in a game yet.
-- **Rollback that cannot start now says why on screen.** When rollback is asked for but cannot start (for example because the game's own online is switched on too), on the US 1.00 build the main menu shows the reason and the fix at the top of the screen for a few seconds (on the EU build only the log says why), instead of the match just not connecting. The rollback guide has a step-by-step setup for rollback over a re-psn server. Seen in one Proton run on the US 1.00 build with the game's own online and rollback both on: the notice showed on the main menu and came back after Options.
-- The version number in the main menu's lower right corner showed only the first time the main menu came up: after going into Options and back it stayed off. It now shows again each time the main menu's list is up.
-- **The game's log no longer fills up while you are online,** and it no longer writes your online name or other players' names and addresses. A support bundle keeps the start of the log again. Not tried in a game yet.
-- **Shader warm-up cache:** for long-time players the warm-up file `pipelines.bin` stopped working after it passed 2 GB, so every start rebuilt the pipelines and the file kept growing. It now loads, is cleaned of repeats and damaged records, and stays within 16384 pipelines (about 2.3 GB); a full or unreadable cache says so in the log. When it is full it keeps the first pipelines it saw until the game's graphics code changes. Not tried in a game yet.
+- **Rollback that cannot start now says why on screen.** When rollback is asked for but cannot start (for example because the game's own online is switched on too), on the US 1.00 build the main menu shows the reason and the fix at the top of the screen for a few seconds (on the EU build only the log says why), instead of the match just not connecting. The rollback guide has a step-by-step setup for rollback over a re-psn server. Seen in one test run on the US 1.00 build with the game's own online and rollback both on: the notice showed on the main menu and came back after Options. Not tried on Windows yet.
+- The version number in the main menu's lower right corner showed only the first time the main menu came up: after going into Options and back it stayed off. It now shows again each time the main menu's list is up. Seen in one test run on the US 1.00 build.
+- **The game's log no longer fills up while you are online.** The game's online code no longer writes your online name, or other players' names and addresses, many times a second. The rollback lines still name the server, your online name and a typed join address, and the support bundle replaces them with placeholders. A support bundle keeps the start of the log again. Not tried in a game yet.
+- **Shader warm-up cache:** for long-time players the warm-up file `pipelines.bin` stopped working after it passed 2 GB, so every start rebuilt the pipelines and the file kept growing. It now loads, is cleaned of repeats and damaged records, and stays within 16384 pipelines (about 2.3 GB); a full or unreadable cache says so in the log. When it is full it keeps the first pipelines it saw until the game's graphics code changes. The first start after the update may take longer while it cleans the file; a later version that changes the graphics code starts the cache over. Not tried in a game yet.
 
 ### Technical changes
 
