@@ -141,7 +141,7 @@ static UtfOut write_utf(const std::string& table, const std::vector<Col>& cols, 
 struct FileSpec { std::string path; size_t size; };
 struct SynthCpk {
     Bytes file;
-    uint64_t toc_offset = 0x800, utf_abs = 0, utf_len = 0;
+    uint64_t toc_offset = 0x800, utf_abs = 0, utf_len = 0, etoc_off = 0;
     bool masked = true;
     std::map<std::string, uint64_t> offset;   // entry -> absolute offset of its bytes
     std::map<std::string, size_t> row_of;     // entry -> TOC row
@@ -208,6 +208,7 @@ static SynthCpk make_cpk(std::vector<FileSpec> files, bool masked, uint64_t seed
     erows[0]["LocalDir"].s = "synthetic";
     UtfOut etoc = write_utf("CpkEtocInfo", { { 0x5A, "LocalDir" } }, {}, erows, masked);
     const uint64_t etoc_off = content_end;
+    c.etoc_off = etoc_off;
     // Header (one row; EnableTocCrc as a constant column).
     const std::vector<Col> hcols = { { 0x56, "ContentOffset" }, { 0x56, "ContentSize" }, { 0x56, "TocOffset" }, { 0x56, "TocSize" },
                                      { 0x56, "ItocOffset" }, { 0x56, "ItocSize" }, { 0x56, "EtocOffset" }, { 0x56, "EtocSize" },
@@ -346,7 +347,7 @@ static void test_helpers()
 static void test_plan_and_reads(MemIo& io, const SynthCpk& game)
 {
     // One cosmetic file override that grows the entry, one that shrinks another, with odd sizes.
-    const Bytes logo_new = noise(5001, 77), small_new = noise(13, 78);
+    const Bytes logo_new = noise(3900, 77), small_new = noise(13, 78);
     io.mods["logo/files/logo_a.pak"] = logo_new;
     io.mods["logo/files/logo_b.pak"] = small_new;
     add_mod(io, "logo", manifest("logo", file_ovr("game/logo/logo_a.pak", "files/logo_a.pak", logo_new) + ", " +
@@ -361,22 +362,24 @@ static void test_plan_and_reads(MemIo& io, const SynthCpk& game)
     const jmods::Plan& p = s.plans.at(GAME);
     const uint64_t orig = game.file.size();
     CHECK(orig % 2048 != 0);   // the synthetic file ends unaligned
-    CHECK(p.orig_size == orig && p.virt_size % 2048 == 0);
-    CHECK(p.overrides.size() == 2 && p.overrides[0].entry == "game/logo/logo_a.pak" && p.overrides[0].virt == jmods::align_up(orig));
-    CHECK(p.overrides[1].virt == jmods::align_up(p.overrides[0].virt + 5001) && p.virt_size == jmods::align_up(p.overrides[1].virt + 13));
+    // In place: logo_a grows inside its 4096 B slot (3001 B stored), logo_b shrinks; the archive keeps its size and every offset.
+    CHECK(p.orig_size == orig && p.virt_size == orig);
+    CHECK(p.overrides.size() == 2 && p.overrides[0].entry == "game/logo/logo_a.pak" && p.overrides[0].virt == game.offset.at("game/logo/logo_a.pak"));
+    CHECK(p.overrides[1].entry == "game/logo/logo_b.pak" && p.overrides[1].virt == game.offset.at("game/logo/logo_b.pak"));
+    const uint64_t slot_a = jmods::align_up(game.data.at("game/logo/logo_a.pak").size()), slot_b = jmods::align_up(game.data.at("game/logo/logo_b.pak").size());
 
     // The reference image: the original, the three TOC fields of both rows rewritten, zero padding, the two files.
     Bytes ref = game.file;
-    ref.resize(p.virt_size, 0);
+    memset(&ref[p.overrides[0].virt], 0, slot_a);
+    memset(&ref[p.overrides[1].virt], 0, slot_b);
     Bytes toc = game.toc_plain;
     std::set<size_t> changed;   // positions in the TOC table the rewrite may touch
     for (const auto& o : p.overrides) {
         const auto& rp = game.pos[game.row_of.at(o.entry)];
         jmods::put_be32(&toc[rp.at("FileSize")], uint32_t(o.len));
         jmods::put_be32(&toc[rp.at("ExtractSize")], uint32_t(o.len));
-        jmods::put_be64(&toc[rp.at("FileOffset")], o.virt - game.toc_offset);
-        for (const char* f : { "FileSize", "ExtractSize", "FileOffset" })
-            for (int k = 0; k < (std::string(f) == "FileOffset" ? 8 : 4); ++k) changed.insert(rp.at(f) + k);
+        for (const char* f : { "FileSize", "ExtractSize" })
+            for (int k = 0; k < 4; ++k) changed.insert(rp.at(f) + k);
     }
     if (game.masked) jmods::mask(toc.data(), toc.size());
     memcpy(&ref[game.utf_abs], toc.data(), toc.size());
@@ -400,13 +403,14 @@ static void test_plan_and_reads(MemIo& io, const SynthCpk& game)
         for (size_t i = 0; i < vt.size(); ++i)
             if (vt[i] != game.toc_plain[i]) (changed.count(i) ? diffs_inside : diffs_outside)++;
         for (uint64_t i = 0; same && i < orig; ++i)
-            if ((i < game.utf_abs || i >= game.utf_abs + game.utf_len) && v[i] != game.file[i]) same = false;
+            if ((i < game.utf_abs || i >= game.utf_abs + game.utf_len) && (i < p.overrides[0].virt || i >= p.overrides[0].virt + slot_a) &&
+                (i < p.overrides[1].virt || i >= p.overrides[1].virt + slot_b) && v[i] != game.file[i]) same = false;
         CHECK(same && diffs_outside == 0 && diffs_inside > 0);
     }
     // Reads around borders: crossing the original end into the padding, crossing the virtual end, at and past the end.
     {
         uint8_t b[64];
-        CHECK(p.read(io, orig - 5, b, 10) == 10 && memcmp(b, &game.file[orig - 5], 5) == 0 && b[5] == 0 && b[9] == 0);
+        CHECK(p.read(io, orig - 5, b, 10) == 5 && memcmp(b, &game.file[orig - 5], 5) == 0);   // the virtual end is the original end
         CHECK(p.read(io, p.virt_size - 4, b, 64) == 4);
         CHECK(p.read(io, p.virt_size, b, 64) == 0 && p.read(io, p.virt_size + 100, b, 1) == 0);
         CHECK(p.read(io, game.utf_abs - 3, b, 6) == 6 && memcmp(b, &ref[game.utf_abs - 3], 6) == 0);
@@ -973,6 +977,124 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
 }
 #endif
 
+// R6: the in-place layout, edge cases (after the GMOD R6 refutation review). The only in-game proof is the same-size case.
+static const jmods::Plan* plan1(MemIo& io, const std::string& id, const std::vector<std::pair<std::string, Bytes>>& ovs, jmods::ModSet& s)
+{
+    std::string o;
+    int k = 0;
+    for (auto& [entry, b] : ovs) {
+        const std::string f = "files/f" + std::to_string(k++) + ".bin";
+        io.mods[id + "/" + f] = b;
+        o += (o.empty() ? "" : ", ") + file_ovr(entry, f, b);
+    }
+    add_mod(io, id, manifest(id, o));
+    s = jmods::load_mod_set(io, id + "\n", opts());
+    return s.plans.count(GAME) ? &s.plans.at(GAME) : nullptr;
+}
+static void test_inplace_edges()
+{
+    MemIo io;
+    // logo_b 384 B (slot 2048), res 2048 (slot exactly 2048), last 777 is the last entry before the ETOC.
+    const SynthCpk game = make_cpk({ { "game/logo/logo_a.pak", 3001 }, { "game/logo/logo_b.pak", 384 }, { "game/resident/res.pak", 2048 },
+                                     { "game/zz/last.pak", 777 } }, true, 1000, 441);
+    io.archives[GAME] = game.file;
+    const uint64_t orig = game.file.size();
+    auto all = [&](const jmods::Plan& p) { return read_all(io, p, 4093); };
+    // 1. identical bytes: the virtual file IS the original file, byte for byte (the in-game proof of R6).
+    {
+        jmods::ModSet s;
+        const auto* p = plan1(io, "ident", { { "game/logo/logo_a.pak", game.data.at("game/logo/logo_a.pak") } }, s);
+        CHECK(p && p->virt_size == orig && p->overrides[0].virt == game.offset.at("game/logo/logo_a.pak"));
+        if (p) CHECK(all(*p) == game.file);
+    }
+    // 2. exactly the slot size (384 -> 2048) goes in place and the virtual archive parses with the new row size.
+    {
+        jmods::ModSet s;
+        const Bytes b = noise(2048, 5);
+        const auto* p = plan1(io, "exact", { { "game/logo/logo_b.pak", b } }, s);
+        CHECK(p && p->virt_size == orig);
+        if (p) {
+            const Bytes v = all(*p);
+            const uint64_t at = game.offset.at("game/logo/logo_b.pak");
+            CHECK(v.size() == orig && memcmp(&v[at], b.data(), 2048) == 0 && memcmp(&v[at + 2048], &game.file[at + 2048], orig - at - 2048) == 0);
+            MemIo vio;
+            vio.under = &io;
+            vio.virt[GAME] = p;
+            vio.archives = io.archives;
+            const jmods::Archive va = jmods::load_archive(vio, GAME);
+            const auto& row = va.rows[va.index.at("game/logo/logo_b.pak")];
+            CHECK(va.ok && row.size == 2048 && row.offset == at - game.toc_offset);
+        }
+    }
+    // 3. one byte over the slot is refused, naming the entry and both sizes; a zero-length replacement is refused too.
+    {
+        jmods::ModSet s;
+        const auto* p = plan1(io, "slot1", { { "game/logo/logo_b.pak", noise(2049, 6) } }, s);
+        CHECK(!p && mod(s, "slot1") && !mod(s, "slot1")->loaded);
+        CHECK(has_log(s, "entry game/logo/logo_b.pak: the replacement is 2049 B, but its slot in partition_op_game_ps3.cpk is 2048 B"));
+        CHECK(has_log(s, "a zero-size row has no slot"));
+        jmods::ModSet s2;
+        const auto* p2 = plan1(io, "zero", { { "game/logo/logo_b.pak", Bytes() } }, s2);
+        CHECK(!p2 && mod(s2, "zero") && !mod(s2, "zero")->loaded && has_log(s2, "the replacement is empty"));
+    }
+    // 4. the last entry before the ETOC (777 -> 2048): in place, the ETOC and the odd tail untouched.
+    {
+        jmods::ModSet s;
+        const Bytes b = noise(2048, 7);
+        const auto* p = plan1(io, "last", { { "game/zz/last.pak", b } }, s);
+        CHECK(p && p->virt_size == orig);
+        if (p) {
+            const Bytes v = all(*p);
+            CHECK(v.size() == orig && memcmp(&v[game.etoc_off], &game.file[game.etoc_off], orig - game.etoc_off) == 0);
+            CHECK(memcmp(&v[game.offset.at("game/zz/last.pak")], b.data(), 2048) == 0);
+        }
+    }
+    // 5. three in-place overrides in one archive: slot tails read as zeros, nothing else changes outside the TOC.
+    {
+        jmods::ModSet s;
+        const Bytes a = noise(10, 8), r = noise(2048, 9), l = noise(1, 10);
+        const auto* p = plan1(io, "multi", { { "game/logo/logo_a.pak", a }, { "game/resident/res.pak", r }, { "game/zz/last.pak", l } }, s);
+        CHECK(p && p->virt_size == orig && p->overrides.size() == 3);
+        if (p) {
+            const Bytes v = all(*p);
+            Bytes ref = game.file;
+            auto put = [&](const char* e, const Bytes& b) {
+                const uint64_t at = game.offset.at(e), slot = jmods::align_up(game.data.at(e).size());
+                memset(&ref[at], 0, slot);
+                memcpy(&ref[at], b.data(), b.size());
+            };
+            put("game/logo/logo_a.pak", a);
+            put("game/resident/res.pak", r);
+            put("game/zz/last.pak", l);
+            bool same = v.size() == ref.size();
+            for (uint64_t i = 0; same && i < ref.size(); ++i)
+                if ((i < game.utf_abs || i >= game.utf_abs + game.utf_len) && v[i] != ref[i]) same = false;
+            CHECK(same);
+        }
+    }
+    // 6. a zero-size row sharing its offset with the next entry: the next entry still goes in place, the zero row itself is refused.
+    {
+        MemIo io2;
+        const SynthCpk z = make_cpk({ { "game/a/empty.pak", 0 }, { "game/a/full.pak", 3000 }, { "game/b/x.pak", 100 } }, false, 3000, 5);
+        io2.archives[GAME] = z.file;
+        CHECK(z.offset.at("game/a/empty.pak") == z.offset.at("game/a/full.pak"));
+        jmods::ModSet s;
+        const auto* p = plan1(io2, "zf", { { "game/a/full.pak", noise(2000, 11) } }, s);
+        CHECK(p && p->virt_size == z.file.size());
+        jmods::ModSet s2;
+        const auto* p2 = plan1(io2, "ze", { { "game/a/empty.pak", noise(10, 12) } }, s2);
+        CHECK(!p2 && has_log(s2, "a zero-size row has no slot"));
+    }
+    // 7. an alias in place: logo_b <- alias res.pak (2048 B fits the 2048 B slot).
+    {
+        add_mod(io, "al", manifest("al", "{ \"entry\": \"game/logo/logo_b.pak\", \"alias\": \"game/resident/res.pak\" }"));
+        const jmods::ModSet s = jmods::load_mod_set(io, "al\n", opts());
+        const auto* p = s.plans.count(GAME) ? &s.plans.at(GAME) : nullptr;
+        CHECK(p && p->virt_size == orig && p->overrides[0].virt == game.offset.at("game/logo/logo_b.pak"));
+        if (p) CHECK(memcmp(&all(*p)[game.offset.at("game/logo/logo_b.pak")], game.data.at("game/resident/res.pak").data(), 2048) == 0);
+    }
+}
+
 int main()
 {
     MemIo io;
@@ -987,6 +1109,7 @@ int main()
 
     test_helpers();
     test_plan_and_reads(io, game);
+    test_inplace_edges();
     test_alias_and_classes(io, chara);
     test_refusals(io);
     test_conflicts_and_digest(io, game);

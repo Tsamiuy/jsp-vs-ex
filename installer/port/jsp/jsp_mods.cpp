@@ -121,6 +121,30 @@ std::wstring final_path(HANDLE h)
     return n > 0 && n < 1024 ? std::wstring(b, n) : std::wstring();
 }
 FILE* open_utf8(const std::string& path) { return _wfopen(wide(path).c_str(), L"rb"); }
+// A symbolic link, a junction (mount point) or a Linux-style link: the reparse tags that lead somewhere else. Other reparse points (cloud placeholders,
+// deduplicated files) are ordinary files for this check and stay accepted.
+bool is_link_tag(DWORD tag) { return tag == 0xA000000CUL || tag == 0xA0000003UL || tag == 0xA000001DUL; }
+// R6: true when this path (one component) is itself a symbolic link or junction. The final-path comparison alone is not enough: under Wine
+// GetFinalPathNameByHandleW resolves a Linux symlink without showing it (the R6 run followed a linked mod folder), so each component is also
+// looked at without following it: the reparse tag of a directory listing entry (FindFirstFileW does not follow) and of a handle opened with
+// FILE_FLAG_OPEN_REPARSE_POINT.
+bool is_link_component(const std::wstring& p)
+{
+    WIN32_FIND_DATAW d;
+    HANDLE f = FindFirstFileW(p.c_str(), &d);
+    if (f != INVALID_HANDLE_VALUE) {
+        FindClose(f);
+        if ((d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && is_link_tag(d.dwReserved0)) return true;
+    }
+    HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FILE_ATTRIBUTE_TAG_INFO ti;
+    const bool link = GetFileInformationByHandleEx(h, FileAttributeTagInfo, &ti, sizeof ti) && (ti.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                      is_link_tag(ti.ReparseTag);
+    CloseHandle(h);
+    return link;
+}
 #else
 const char* env_utf8(const char* name, std::string& keep)
 {
@@ -172,6 +196,12 @@ public:
         std::wstring r = wide(rel);
         for (auto& c : r) if (c == L'/') c = L'\\';
         const std::wstring path = root_ + L"\\" + r;
+        for (size_t e = 0; e != std::wstring::npos;) {   // R6: every component below the mods folder, none of them a link
+            e = r.find(L'\\', e);
+            const std::wstring part = root_ + L"\\" + r.substr(0, e);
+            if (is_link_component(part)) { why = "it is reached through a link or junction (not followed)"; return false; }
+            if (e != std::wstring::npos) ++e;
+        }
         // FILE_SHARE_READ only: nobody may write, rename or delete the file while the game has it (it is hashed and served through this handle).
         HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
@@ -312,6 +342,11 @@ public:
         const ModFile* f = file(rel);
         return f ? ModsRoot::read(*f, off, dst, n) : 0;
     }
+    std::string mod_why(const std::string& rel) override
+    {
+        const auto it = why_.find(rel);
+        return it == why_.end() ? std::string() : it->second;
+    }
     bool archive_size(const std::string& base, uint64_t& size) override
     {
         FILE* f = arch(base);
@@ -326,6 +361,7 @@ private:
     State& st_;
     std::string disc_;
     std::map<std::string, FILE*> arch_;
+    std::map<std::string, std::string> why_;   // rel -> why it could not be opened (not "not found")
     const ModFile* file(const std::string& rel)
     {
         auto it = st_.files.find(rel);
@@ -334,7 +370,7 @@ private:
             std::string why = "the mods folder is not open";
             if (!valid_rel_path(rel)) why = "not a valid mod path";
             else if (st_.root_ok && st_.root.open_file(rel, f, why)) why.clear();
-            if (!why.empty() && why != "not found") logl("[mods] " + rel + ": " + why);
+            if (!why.empty() && why != "not found") { logl("[mods] " + rel + ": " + why); why_[rel] = why; }
             it = st_.files.emplace(rel, f).first;
         }
         return it->second.ok ? &it->second : nullptr;
