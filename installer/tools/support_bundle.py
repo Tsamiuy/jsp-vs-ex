@@ -700,7 +700,8 @@ _NET_RULES = (   # always applied, also when the settings files were not found
     (re.compile(r"(\[psnr\] could not reach )\S+(:\d+ -- )"), r"\1<server>\2"),
     (re.compile(r"(\[sceNp\] (?:GetNpId|GetOnlineId|GetOnlineName|GetUserProfile)\(user=-?\d+\) -> )\"[^\"\r\n]*\""), r"\1<online name>"),
     (re.compile(r"(\[sceNp\] Init\(poolSize=\d+, username=)\"[^\"\r\n]*\""), r"\1<online name>"),
-    (re.compile(r"(?m)(\[sceNpMatching2\] room \d+: )[^\r\n]*?( joined as member \d+| left)(?=\r?$)"), r"\1<online name>\2"),
+    # (from toolkit patch 6019 on, "room N: member M left" has no name: an online ID has no space, so "member M" is never one)
+    (re.compile(r"(?m)(\[sceNpMatching2\] room \d+: )(?!member \d+ left\r?$)[^\r\n]*?( joined as member \d+| left)(?=\r?$)"), r"\1<online name>\2"),
     # a peer's name may hold ',' or ')': each rule runs up to the fixed tail of its format
     (re.compile(r"(\[sceNpMatching2\] signaling: member \d+ \()[^\r\n]*(\) at \d+\.\d+\.\d+\.\d+:\d+)"), r"\1<online name>\2"),
     (re.compile(r"(\[sceNpSignaling\] conn \d+ \()[^\r\n]*(, \d+\.\d+\.\d+\.\d+:\d+\) (?:established|dead))"), r"\1<online name>\2"),
