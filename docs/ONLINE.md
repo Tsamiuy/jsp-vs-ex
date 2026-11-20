@@ -87,11 +87,11 @@ name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The
   game's data that a gameplay mod changes differs from the one it was checked against (`[mods] set: refused` in the log).
 - **Name refused:** use 3 to 16 letters, digits, `-` or `_`, starting with a letter, and not a name another player
   already uses on that server.
-- **Rollback (experimental) over re-psn ends with `re-psn: timed out waiting for the other player` or
-  `re-psn: no rollback room for this build`:** the two games did not meet. The first message means a game
-  gave up 30 seconds after it started looking. The second means the joining game searched once and found no room from
-  this release with rollback, and it fails at once, not after 30 seconds. Start the host's game first and the other one
-  within about 30 seconds. See
+- **Rollback (experimental) over re-psn ends with `re-psn: no host with this version found within 2 minutes` or
+  `re-psn: no player with this version joined within 2 minutes`:** the two games did not meet. Each game waits 2 minutes
+  after its own start-up (the joining game keeps looking for the host's room), so start both at about the same time,
+  the host first if you can. Both players need the same version and the same gameplay mods (or none): the message and the
+  main menu show the build number (8 hex digits) to compare. See
   [ROLLBACK.md, Rollback over re-psn](ROLLBACK.md#rollback-over-re-psn-experimental).
 
 ## Where the settings live

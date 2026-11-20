@@ -28,7 +28,7 @@ struct FakeRepsn {
        // search_error: SEARCH_ROOMS answers ERROR 6
     std::vector<uint8_t> last_create, last_search, last_join, last_leave;   // the request bodies (after the request id) exactly as received, for the golden vectors   // relay_flag: HELLO_ACK bit 0; blackhole: members get an unreachable endpoint for each other (a router that cannot be punched)
     std::vector<Conn*> conns; std::vector<Room> rooms; uint64_t next_room = 0x100000007ull; uint32_t next_user = 1000;
-    int probes = 0, relayed = 0, hellos = 0, leaves = 0;
+    int probes = 0, relayed = 0, hellos = 0, leaves = 0, searches = 0;
     std::string last_name;
 
     bool start()
@@ -105,7 +105,7 @@ struct FakeRepsn {
             r.owner = r.next_member; r.data[c] = { r.next_member++, data }; r.members.push_back(c); c->room = r.id; c->member = r.owner;
             rooms.push_back(r); room_joined(c, req, rooms.back());
         } else if (type == 0x11) {   // SEARCH_ROOMS: start u16 max u16
-            last_search.assign(p, p + n);
+            last_search.assign(p, p + n); searches++;
             if (drop_on_search) { ::shutdown(c->fd, SHUT_RDWR); return; }
             if (search_error) { std::vector<uint8_t> e; p32(e, 6); reply(c, 0x8F, req, e); return; }
             std::vector<uint8_t> b; std::vector<Room*> list; for (auto& r : rooms) if (r.members.size() < r.max) list.push_back(&r);
@@ -174,12 +174,12 @@ struct FakeRepsn {
 // ---- two players ---------------------------------------------------------------------------------------------------------------------------------
 struct Player {
     UdpMux mux; std::unique_ptr<MessageHub> hub; std::unique_ptr<PsnrClientTransport> tr; std::unique_ptr<RePsnRendezvous> rz; Path last = Path::None; int result = 0;
-    void init(FakeRepsn& sv, const std::string& name, bool host, uint32_t build, bool allow_relay, int punch_ms = 4000)
+    void init(FakeRepsn& sv, const std::string& name, bool host, uint32_t build, bool allow_relay, int punch_ms = 4000, int give_up_ms = 20000, int lookup_every_ms = 300)
     {
         std::string err; CHECK(mux.open(0, &err));
         RepsnIdentity id; id.host = "127.0.0.1"; id.port = sv.port; id.name = name; id.comm_id = "NPWR08138_00";
         hub.reset(new MessageHub(mux)); tr.reset(new PsnrClientTransport(mux, id));
-        RePsnRendezvous::Config c; c.host = host; c.build = build; c.allow_relay = allow_relay; c.punch_ms = punch_ms; c.give_up_ms = 20000;
+        RePsnRendezvous::Config c; c.host = host; c.build = build; c.allow_relay = allow_relay; c.punch_ms = punch_ms; c.give_up_ms = give_up_ms; c.lookup_every_ms = lookup_every_ms;
         rz.reset(new RePsnRendezvous(*tr, mux, *hub, c));
         rz->on_path = [this](Path p, uint32_t u) { last = p; tr->set_peer_user(u); tr->set_relay_mode(p == Path::Relay); };
         tr->start(allow_relay);
@@ -272,11 +272,27 @@ int main()
         CHECK(!got && c.tr->control_dropped > 0 && c.tr->relay_rx_dropped == before); }   // dropped as control (not from the server: unwrap_from refuses it, no payload escapes)
     }
 
-    // ---- build mismatch: the client does not join (room list shows the record) ----
-    { FakeRepsn sv; CHECK(sv.start()); Player h, c; h.init(sv, "HostPlayer", true, B + 1, false); c.init(sv, "GuestPlayer", false, B, false);
+    // ---- build mismatch: the client never joins (room list shows the record); it keeps reading the list at its interval and gives up at its window, naming the build it saw ----
+    { FakeRepsn sv; CHECK(sv.start()); Player h, c; h.init(sv, "HostPlayer", true, B + 1, false); c.init(sv, "GuestPlayer", false, B, false, 4000, 3000, 300);
       { const uint64_t t0 = now_ms(); while (now_ms() - t0 < 5000) { h.step(); { std::lock_guard<std::mutex> lk(sv.mu); if (!sv.rooms.empty()) break; } std::this_thread::sleep_for(std::chrono::milliseconds(3)); } }
-      drive(c, h, 5000, false);   // only the client matters
-      CHECK(c.result == -1 && c.rz->error().find("no rollback room for this build") != std::string::npos); }
+      const uint64_t t0 = now_ms();
+      while (now_ms() - t0 < 8000 && c.result == 0) { h.step(); c.step(); std::this_thread::sleep_for(std::chrono::milliseconds(3)); }   // until the client decides
+      const uint64_t took = now_ms() - t0; int n; { std::lock_guard<std::mutex> lk(sv.mu); n = sv.searches; }
+      if (c.result != -1) std::printf("mismatch: client %d '%s'\n", c.result, c.rz->error().c_str());
+      if (took < 3000 || took >= 5000) std::printf("mismatch took %llu ms\n", (unsigned long long)took);
+      CHECK(c.result == -1 && took >= 3000 && took < 5000);
+      CHECK(c.rz->error() == "re-psn: no host with this version found within 3 seconds (seen: a rollback room with build 1234abce): start both games at about the same time "
+                             "(the host first is best; each waits 3 seconds after its own start-up); both need the same version (build 1234abcd) and the same gameplay mods (or none)");
+      CHECK(n >= 3 && n <= 3000 / 300 + 1 && (uint64_t)n == c.rz->lookups); }
+    // ---- the joiner starts first: it reads the room list over the real wire for 1.5 s with no room, then the host starts and they meet ----
+    { FakeRepsn sv; CHECK(sv.start()); Player h, c; c.init(sv, "GuestPlayer", false, B, false);
+      { const uint64_t t0 = now_ms(); while (now_ms() - t0 < 1500 && c.result == 0) { c.step(); std::this_thread::sleep_for(std::chrono::milliseconds(3)); } }
+      int n; { std::lock_guard<std::mutex> lk(sv.mu); n = sv.searches; }
+      CHECK(c.result == 0 && n >= 2 && n <= 1500 / 300 + 1);
+      h.init(sv, "HostPlayer", true, B, false);
+      drive(h, c, 10000, false);
+      if (h.result != 1 || c.result != 1) std::printf("joiner first: host %d '%s' client %d '%s'\n", h.result, h.rz->error().c_str(), c.result, c.rz->error().c_str());
+      CHECK(h.result == 1 && c.result == 1 && h.rz->path() == Path::Direct && c.rz->room_id() == h.rz->room_id()); }
     // ---- the server is not there: the failure text is shown at once, not after the 20 s give-up ----
     { FakeRepsn sv; CHECK(sv.start()); const uint16_t dead_port = sv.port; sv.stop = true; if (sv.th.joinable()) sv.th.join(); ::close(sv.tcp); sv.tcp = -1;
       Player c; c.init(sv, "GuestPlayer", false, B, false); (void)dead_port;

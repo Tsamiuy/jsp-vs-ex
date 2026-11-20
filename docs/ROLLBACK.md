@@ -319,17 +319,40 @@ game's own online, `repsn.ini`; see `docs/ONLINE.md`). **It has run once against
 home network (see [Tested so far](#tested-so-far)). It has not been tried across real routers (NATs), and the relay has not
 been used yet.** Host tests also run it against a fake server that speaks the server's documented wire format (below).
 
-**Start both games within about 30 seconds.** Each game gives up meeting the other one 30 seconds after it starts looking
-(once it has finished starting up). The host must be in its room before the other player looks for it:
-start the host's game first, then the joining player's game soon after, so that both are looking at the same time. If one
-side gives up, close both games and start again.
+**Start both games at about the same time.** Each game looks for the other one for 2 minutes (120 seconds, the
+same for both roles), counted from when it has finished starting up, not from when you start it. Two games meet when they
+finish starting up less than about 2 minutes apart (a little less: the host's connection and the 2-second list interval
+count too). The joining game reads the room list again every
+2 seconds until the host's room appears, so either game may start first; starting the host first is still best, because the
+joining game then meets it at its first look. The host's room stays listed the whole time it waits. Start-up takes a
+different time on every PC (the first start after an update builds the graphics pipelines), which is why the window is
+2 minutes and not shorter. If one side gives up, close both games and start again.
 
-**What the two "ended" lines mean** (shown on screen and in the log, after `rendezvous failed:`):
+**While they wait,** the main menu's top list shows a notice band ("Rollback: room open, waiting for the other player" or
+"Rollback: looking for the host's room", with the seconds waited), updated every 10 seconds, and the log gets one line every
+10 seconds (`[net] re-psn: room open, waiting for a player with build xxxxxxxx (40 s of 120 s)` or `[net] re-psn: looking for
+a host with build xxxxxxxx (40 s of 120 s, 20 room lists read)`). The build number (8 hex digits) is the same one the
+`[net] rollback opt-in: ... build xxxxxxxx` line shows: the two players compare it. It includes the gameplay mods, so two
+copies of the same version with different gameplay mods have different numbers. These notices have not been seen in a game yet.
+
+**When they do not meet** (on the same notice band and in the log, after `rendezvous failed:`). The band is drawn on the
+main menu's top list only: a player who is in another menu or a fight then sees the message when they return to the top list
+(for 15 seconds each time it comes up). Any other re-psn failure (the server cannot be reached, the other player cannot be
+reached directly, the other player left) is shown the same way. If rollback ends for another reason while the games are
+still waiting (for example a gameplay mod refusal), the waiting band goes and that reason is shown on the message line.
 
 | Line | What happened | What to do |
 |---|---|---|
-| `re-psn: timed out waiting for the other player` | 30 seconds passed and the two games did not meet: the other player did not join in time, or the connection between the two did not come up | Start both games again, closer together |
-| `re-psn: no rollback room for this build` | The joining game looked for a room and found none from the same release with rollback: the host's game had not created its room yet, had already given up, or runs a different release | Start the host first, then join within 30 seconds; check that both have the same release |
+| `re-psn: no host with this version found within 2 minutes: ...` | The joining game read the room list for 2 minutes and found no room from the same build with rollback: the host's game had not started, had already given up, or runs another version or other gameplay mods. When it saw a rollback room of another build it says so: `(seen: a rollback room with build xxxxxxxx)` | Start both games at about the same time; compare the build numbers |
+| `re-psn: no player with this version joined within 2 minutes: ...` | The host's room was open for 2 minutes and nobody with the same build joined (a player with another build is refused and counted) | The same |
+| `re-psn: the host's room did not answer within 2 minutes: ...` | The joining game joined a room but the host's details for a direct link never came within 2 minutes | Start both games again |
+| `re-psn: the re-psn server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
+
+Each of these lines ends with what to check: `start both games at about the same time (the host first is best; each waits
+2 minutes after its own start-up); both need the same version (build xxxxxxxx) and the same gameplay mods (or none)`. Version 0.6.0 used a 30 second window
+and the lines `re-psn: timed out waiting for the other player` and `re-psn: no rollback room for this build`; in 0.6.0 the
+joining game looked only once and gave up at once when the host's room was not there yet. A 0.6.1 game and a 0.6.0 game
+cannot meet (their build numbers differ).
 
 **One home network:** the two games try a direct link first. Only if no direct link comes up within 4 seconds is the
 server's relay used (and only when Allow relay is Yes and the server offers it). On one home network the direct link normally
@@ -343,7 +366,7 @@ comes up well within that time, so the match runs direct even with the relay all
 - It ran with test-harness settings, not as a player would play: scripted inputs, input delay 0, the fixed seed.
 - The match ran slowly, at about 4 ticks a second instead of 30, with long pauses of the game. The cause is not known yet.
   That PC's graphics card was busy with other work at the time, but that has not been shown to be the cause.
-- A first attempt failed because the two games were started too far apart (see the 30 seconds above).
+- A first attempt failed because the two games were started too far apart (0.6.0 waited only 30 seconds; see the 2 minutes above).
 - Not tried yet: across real routers, the relay, a typed IP address on two PCs, a match played by hand.
 
 - Set it up by hand, or check what the page wrote: see "Set up rollback over re-psn" just below.
