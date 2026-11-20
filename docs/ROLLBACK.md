@@ -230,6 +230,11 @@ the page says which method is on and what this session runs against what is save
   `installer/port/jsp/jsp_build_id.cmake`), so two
   PCs that each built the same release agree. Before 0.5.1 it came from the compile time, so two installs refused each
   other. CMake prints it at configure ("Rollback build id"); the game logs it in the `[net] rollback opt-in` line.
+- Mods (the mods folder, in progress): a set of gameplay mods is folded into that build id (the first 32 bits of SHA-256 of
+  the id and the set's digest, `installer/port/jsp/jsp_mods_glue.h`), so two games match only with the same release and
+  the same gameplay mods; with no gameplay mod the id is unchanged. Gameplay mods that were listed but could not all be
+  applied refuse rollback (`[mods] rollback refused`). The game logs the folded id as
+  `[mods] set: gameplay digest ..., net build 0x... (stock 0x...)`. Host-tested, not yet run in a game.
 - Not covered: the page has not been run in the game and there is no screenshot of it (layout is from the code: rows at
   pitch 40, 188 + 40 i; the longest new strings are 38 characters at scale 1.0 and were checked by the host test); the
   start decision and the refusal are host-tested and the wiring is compile-checked, not run in a game; hostnames in the join

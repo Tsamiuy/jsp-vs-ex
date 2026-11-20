@@ -583,9 +583,16 @@ template <int... Is> void install_all(std::integer_sequence<int, Is...>) { (Hook
 
 }  // namespace
 
+extern "C" int jsp_mods_net_build(uint32_t stock, uint32_t* out);   // jsp_mods.cpp: the build word with the mod set folded in; 0 = refused
+
 extern "C" void jsp_net_game_install(void)
 {
     if (!env_on("JSP_ROLLBACK")) return;
+    // ENHANCEMENT (mods, D40): two peers must run the same gameplay mod set. The set's digest is folded into the build word both sides
+    // compare (Hello/Propose BuildMismatch, the re-psn room filter); with no gameplay digest it is exactly build_id(). Gameplay mods that
+    // were listed but not all applied refuse rollback here, before any socket opens (jsp_mods.cpp logs why).
+    uint32_t net_build = 0;
+    if (!jsp_mods_net_build(build_id(), &net_build)) { std::fprintf(stderr, "[net] rollback refused: the mod set does not run as listed (see the [mods] lines): off\n"); return; }
     char b[96] = {};
     const bool have_listen = jsp_setting_get("JSP_ROLLBACK_LISTEN", b, sizeof b) && b[0];
     char j[96] = {};
@@ -620,7 +627,7 @@ extern "C" void jsp_net_game_install(void)
         char* end = nullptr; const long vk = std::strtol(eq + 1, &end, 0);
         if (end != eq + 1 && vk == 0x78) { const std::string name(*e, (size_t)(eq - *e)); _putenv_s(name.c_str(), ""); std::fprintf(stderr, "[net] binding %s = F9 dropped (F9 is the rollback cancel key)\n", name.c_str()); e = environ - 1; }
     }
-    g.caps.build = build_id();
+    g.caps.build = net_build;   // build_id() with the mod set folded in (above)
     { char bb[16] = {}; g.badge_on = jsp_setting_get(jpnb::kKey, bb, sizeof bb) && jpnb::key_on(bb); }
     // local preferences into the effective-value object (the proposal of a host starts from these; a client's own layer sits under the host's)
     for (size_t i = 0; i < jpsm::kCount; ++i) {

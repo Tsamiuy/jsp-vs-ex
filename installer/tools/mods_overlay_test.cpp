@@ -2,13 +2,16 @@
 // TOC rewrite, the virtual-file plan (original bytes, rewritten TOC, appended files at 2048 alignment), file and alias sources, conflicts,
 // groups, classification and the mod-set digest. No game data: the test writes its own SYNTHETIC CPK archives (a small @UTF writer, masked
 // and unmasked tables, odd file sizes, an unaligned end) and mod files in memory.
+// Also the pure parts of the game glue (installer/port/jsp/jsp_mods_glue.h): the start decision, the copy check, the served reads and the
+// online rules; and, with -DMODS_GLUE_FILES and the toolkit's include/ (mods_overlay_test.sh TOOLKIT), the glue itself
+// (installer/port/jsp/jsp_mods.cpp) on files the test writes in a temporary folder: the cellFs provider as ppu_fs.cpp calls it.
 // installer/tools/mods_overlay_test.sh builds and runs it (g++ or clang++, C++20)
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
-#include "jsp_mods_core.h"
+#include "jsp_mods_glue.h"
 
 using jmods::Bytes;
 
@@ -266,7 +269,7 @@ static jmods::Options opts()
     o.eboot_id = "BLUS31519 1.00";
     return o;
 }
-static Bytes read_all(MemIo& io, const jmods::Plan& p, size_t chunk_size, uint64_t start = 0)
+static Bytes read_all(jmods::Io& io, const jmods::Plan& p, size_t chunk_size, uint64_t start = 0)
 {
     Bytes out;
     Bytes buf(chunk_size);
@@ -631,6 +634,244 @@ static void test_conflicts_and_digest(MemIo& io, const SynthCpk& game)
     } else CHECK(false);
 }
 
+static void test_glue(MemIo& io, const SynthCpk& chara)
+{
+    using namespace jmods;
+    // ---- the start decision
+    CHECK(!choose_env("0", "D", "L").on && choose_env("0", "D", "L").why.find("JSP_MODS=0") != std::string::npos);
+    CHECK(!choose_env(nullptr, "D", nullptr).on && choose_env(nullptr, "D", nullptr).why.find("JSP_MODS_LIST") != std::string::npos);
+    CHECK(!choose_env(nullptr, "D", "").on);
+    { const EnvChoice c = choose_env(nullptr, "D", "L"); CHECK(c.on && c.dir == "D" && c.list == "L"); }
+    { const EnvChoice c = choose_env("1", nullptr, "L"); CHECK(c.on && c.dir.empty()); }   // no folder: every listed mod is refused (not stock)
+    CHECK(choose_env("00", "D", "L").on && choose_env("", "D", "L").on);   // only the exact "0" is the kill switch
+    // ---- which archive a path names
+    CHECK(base_of("/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/data/PS3/partition_op_character_ps3.cpk") == CHARA);
+    CHECK(base_of("C:\\Games\\disc/PS3_GAME\\USRDIR\\data\\PS3\\partition_op_game_ps3.cpk") == GAME);
+    CHECK(base_of("plain.cpk") == "plain.cpk" && base_of("dir/") == "" && base_of(nullptr) == "");
+
+    // ---- a gameplay set (alias, character) and a cosmetic one (file, game): served reads and the copy check
+    const Bytes lb = noise(1500, 77);
+    io.mods["glogo/files/l.pak"] = lb;
+    add_mod(io, "glogo", manifest("glogo", file_ovr("game/logo/logo_b.pak", "files/l.pak", lb)));
+    const ModSet s = load_mod_set(io, "swap\nglogo\n", opts());   // "swap" from test_alias_and_classes
+    CHECK(s.plans.count(GAME) && s.plans.count(CHARA) && s.digest_kind == DigestKind::Value);
+    if (!s.plans.count(GAME) || !s.plans.count(CHARA)) return;
+    for (const char* base : { GAME, CHARA }) {
+        const Plan& p = s.plans.at(base);
+        const Bytes& copy = io.archives.at(base);
+        const CopyCheck cc = copy_check(s, p);
+        CHECK(cc.size == copy.size() && cc.prefix_len == p.utf_abs + p.toc.size() && cc.prefix == p.prefix);
+        CHECK(cc.donors.size() == (std::string(base) == CHARA ? 3u : 0u));
+        auto reader = [](const Bytes& b) {
+            return ReadFn([&b](uint64_t off, void* d, size_t n) -> size_t {
+                if (off >= b.size()) return 0;
+                const size_t k = size_t(std::min<uint64_t>(n, b.size() - off));
+                memcpy(d, b.data() + off, k);
+                return k;
+            });
+        };
+        CHECK(verify_copy(cc, copy.size(), reader(copy)).empty());
+        CHECK(verify_copy(cc, copy.size() + 1, reader(copy)).find("size") != std::string::npos);
+        Bytes bad = copy;
+        bad[p.utf_abs + 40] ^= 1;   // a TOC byte
+        CHECK(verify_copy(cc, bad.size(), reader(bad)) == "its header or TOC differs");
+        bad = copy;
+        bad[5] ^= 1;   // a header byte
+        CHECK(verify_copy(cc, bad.size(), reader(bad)) == "its header or TOC differs");
+        if (std::string(base) == CHARA) {
+            bad = copy;
+            bad[chara.offset.at("character/model/character_model_001_i.pak") + 7] ^= 1;   // a donor byte: the digest would no longer describe it
+            CHECK(verify_copy(cc, bad.size(), reader(bad)).find("alias character/model/character_model_001_i.pak differ") != std::string::npos);
+            bad = copy;
+            bad[chara.offset.at("character/model/character_model_000_m.pak") + 7] ^= 1;   // an overridden entry's old bytes: never served, accepted
+            CHECK(verify_copy(cc, bad.size(), reader(bad)).empty());
+        }
+        // ServeIo: original bytes from the fd's own copy, mod bytes from the handle map; equals Plan::read over the planning Io.
+        ServeIo sio(reader(copy), [&io](const std::string& rel, uint64_t off, void* d, size_t n) { return io.mod_read(rel, off, d, n); });
+        CHECK(read_all(sio, p, 4093) == read_all(io, p, 65536) && read_all(sio, p, 4093).size() == p.virt_size);
+        // override_at: the first override a read touches
+        const PlannedOverride& o = p.overrides.front();
+        CHECK(override_at(p, 0, 16) == -1 && override_at(p, o.virt, 1) == 0 && override_at(p, o.virt - 4, 8) == 0);
+        CHECK(override_at(p, o.virt + o.len, 1) == (p.overrides.size() > 1 && p.overrides[1].virt == o.virt + o.len ? 1 : -1));
+    }
+    // ---- online rules
+    uint32_t out = 0;
+    CHECK(net_build(0x12345678u, DigestKind::None, Digest{}, out) && out == 0x12345678u);           // no digest: exactly the stock word
+    CHECK(net_build(0x12345678u, DigestKind::None, s.digest, out) && out == 0x12345678u);           // the digest bytes are ignored then
+    out = 7;
+    CHECK(!net_build(0x12345678u, DigestKind::Refused, refused_digest(), out) && out == 7);          // refused: no word at all
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+    CHECK(net_build(0x12345678u, DigestKind::Value, s.digest, a) && net_build(0x12345678u, DigestKind::Value, s.digest, b) && a == b);
+    {   // the formula, recomputed: first 32 bits (big-endian) of SHA-256(stock LE || digest)
+        uint8_t in[36] = { 0x78, 0x56, 0x34, 0x12 };
+        memcpy(in + 4, s.digest.data(), 32);
+        const Digest h = jpsm::sha256(in, sizeof in);
+        CHECK(a == (uint32_t(h[0]) << 24 | uint32_t(h[1]) << 16 | uint32_t(h[2]) << 8 | h[3]) && a != 0x12345678u);
+    }
+    Digest other = s.digest;
+    other[31] ^= 1;
+    CHECK(net_build(0x12345678u, DigestKind::Value, other, c) && c != a);                            // another set: another word
+    CHECK(net_build(0x12345679u, DigestKind::Value, s.digest, d) && d != a);                         // another release: another word
+    CHECK(!game_online_allowed(DigestKind::Value) && !game_online_allowed(DigestKind::Refused) && game_online_allowed(DigestKind::None));
+    // cosmetic only: no digest, the game's own online stays allowed
+    const ModSet cos = load_mod_set(io, "glogo\n", opts());
+    CHECK(cos.digest_kind == DigestKind::None && !cos.plans.empty() && game_online_allowed(cos.digest_kind));
+}
+
+#ifdef MODS_GLUE_FILES
+// ---------------------------------------------------------------------------------------------------- the glue on real files (POSIX branch)
+#include "jsp_mods.cpp"
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+extern "C" { const ps3_fs_vfile_ops* volatile g_ps3_fs_vfile_ops = nullptr; }
+static int g_online_refusals = 0;
+extern "C" void jsp_online_refuse_for_mods(void) { ++g_online_refusals; }
+
+static void put_file(const std::string& path, const Bytes& b)
+{
+    for (size_t i = 1; i < path.size(); ++i) if (path[i] == '/') mkdir(path.substr(0, i).c_str(), 0700);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (b.size()) std::fwrite(b.data(), 1, b.size(), f);
+    std::fclose(f);
+}
+static void put_text(const std::string& path, const std::string& t) { put_file(path, Bytes(t.begin(), t.end())); }
+// Runs fn with stderr captured; returns what it wrote.
+template <class F> static std::string capture(F fn)
+{
+    std::fflush(stderr);
+    char tmpl[] = "/tmp/jsp_mods_err.XXXXXX";
+    const int fd = mkstemp(tmpl);
+    const int saved = dup(2);
+    dup2(fd, 2);
+    fn();
+    std::fflush(stderr);
+    dup2(saved, 2);
+    ::close(saved);
+    std::string out;
+    lseek(fd, 0, SEEK_SET);
+    char buf[4096];
+    ssize_t n;
+    while ((n = ::read(fd, buf, sizeof buf)) > 0) out.append(buf, size_t(n));
+    ::close(fd);
+    unlink(tmpl);
+    return out;
+}
+static bool has(const std::string& log, const std::string& needle) { return log.find(needle) != std::string::npos; }
+
+static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& chara)
+{
+    const char* tmp = std::getenv("TMPDIR");
+    std::string root = std::string(tmp && *tmp ? tmp : "/tmp") + "/jsp_mods_files.XXXXXX";
+    if (!mkdtemp(root.data())) { CHECK(false); return; }
+    const std::string disc = root + "/disc", arch = disc + "/PS3_GAME/USRDIR/data/PS3/", mods = root + "/mods";
+    const std::string hdd = root + "/hdd0/game/BLUS31519-INSTALL/USRDIR/data/PS3/";
+    put_file(arch + GAME, game.file);
+    put_file(arch + CHARA, chara.file);
+    put_file(hdd + CHARA, chara.file);                     // the install copy: identical
+    Bytes badcopy = chara.file;
+    badcopy[chara.utf_abs + 33] ^= 0x10;
+    put_file(root + "/other/" + CHARA, badcopy);          // a copy whose TOC differs
+    put_text(root + "/eboot.elf", "not an elf, only its hash matters");
+    // the mods: an alias swap (gameplay, character) and a logo file (cosmetic, game), as in the in-memory tests
+    for (const auto& kv : io.mods)
+        if (kv.first.rfind("swap/", 0) == 0 || kv.first.rfind("glogo/", 0) == 0) put_file(mods + "/" + kv.first, kv.second);
+    // a mod whose file is a symbolic link to a file outside the mods folder, and a mod folder that is itself a link
+    const Bytes outside = noise(1500, 77);   // the same bytes as glogo's file: only the link makes it fail
+    put_file(root + "/outside/l.pak", outside);
+    put_text(mods + "/linked/mod.json", manifest("linked", file_ovr("game/logo/logo_a.pak", "files/l.pak", outside)));
+    mkdir((mods + "/linked/files").c_str(), 0700);
+    CHECK(symlink((root + "/outside/l.pak").c_str(), (mods + "/linked/files/l.pak").c_str()) == 0);
+    put_text(root + "/elsewhere/mod.json", manifest("dirlink", file_ovr("game/logo/logo_a.pak", "files/l.pak", outside)));
+    put_file(root + "/elsewhere/files/l.pak", outside);
+    CHECK(symlink((root + "/elsewhere").c_str(), (mods + "/dirlink").c_str()) == 0);
+
+    const jmods::ModSet want = jmods::load_mod_set(io, "swap\nglogo\n", opts());   // the plans the glue must serve
+    put_text(root + "/mods.txt", "swap\nglogo\n");
+    put_text(root + "/links.txt", "linked\ndirlink\n");
+    put_text(root + "/ghost.txt", "ghost\n");
+
+    // 1. off: the kill switch, and no list. No provider either way.
+    setenv("JSP_MODS_DIR", mods.c_str(), 1);
+    setenv("JSP_MODS_LIST", (root + "/mods.txt").c_str(), 1);
+    setenv("JSP_MODS", "0", 1);
+    std::string log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] off (JSP_MODS=0): stock game") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 0);
+    unsetenv("JSP_MODS");
+    unsetenv("JSP_MODS_LIST");
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] no mods list") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 0);
+    uint32_t nb = 0;
+    CHECK(jsp_mods_net_build(0xB001, &nb) == 1 && nb == 0xB001);   // nothing loaded: the stock word
+
+    // 2. links are not followed: both mods refused. linked's manifest was read (game/logo only: cosmetic), dirlink's could not be, so its
+    //    class is unknown: gameplay, and the set refuses online.
+    setenv("JSP_MODS_LIST", (root + "/links.txt").c_str(), 1);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] linked/files/l.pak: it is reached through a link (not followed)"));
+    CHECK(has(log, "[mods] linked: refused:") && has(log, "[mods] dirlink: refused:") && has(log, "[mods] dirlink/mod.json: it is reached through a link"));
+    CHECK(g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 1 && has(log, "online refused"));
+    CHECK(has(log, "[mods] linked: refused: entry game/logo/logo_a.pak: file files/l.pak is missing"));
+
+    // 3. a listed mod that does not exist: refused, the set refuses online and rollback
+    setenv("JSP_MODS_LIST", (root + "/ghost.txt").c_str(), 1);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] ghost: refused: no mod.json") && has(log, "online refused") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 2);
+    log = capture([&] { nb = 0; CHECK(jsp_mods_net_build(0xB001, &nb) == 0 && nb == 0); });
+    CHECK(has(log, "[mods] rollback refused"));
+
+    // 4. on: two archives served, the game's own online refused (swap is gameplay), the build word folded
+    setenv("JSP_MODS_LIST", (root + "/mods.txt").c_str(), 1);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] list " + root + "/mods.txt: 2 enabled (swap, glogo)"));
+    CHECK(has(log, "[mods] swap 1.0.0: gameplay, 3 overrides (alias), interfaces cpk-entry 1"));
+    CHECK(has(log, "[mods] override partition_op_character_ps3.cpk character/model/character_model_000_m.pak <- alias character/model/character_model_001_m.pak"));
+    CHECK(has(log, "[mods] serving 2 archive(s): partition_op_character_ps3.cpk, partition_op_game_ps3.cpk (eboot sha256:"));
+    CHECK(g_ps3_fs_vfile_ops == &k_ops && g_online_refusals == 3);
+    log = capture([&] { CHECK(jsp_mods_net_build(0xB001, &nb) == 1 && nb != 0xB001); });
+    CHECK(has(log, "[mods] set: gameplay digest ") && has(log, "net build 0x") && has(log, "(stock 0x0000b001)"));
+    {   // the same word as the pure fold over the same set (the eboot id differs, so only the shape is compared: a value, not the stock word)
+        uint32_t pure = 0;
+        CHECK(jmods::net_build(0xB001, want.digest_kind, want.digest, pure) && pure != 0xB001);
+    }
+    const ps3_fs_vfile_ops* ops = g_ps3_fs_vfile_ops;
+    // an archive with no plan, and a planned one at a copy that differs: not claimed (the stock file is read)
+    CHECK(ops->open("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/partition_op_map_ps3.cpk", (arch + "partition_op_map_ps3.cpk").c_str()) == nullptr);
+    log = capture([&] { CHECK(ops->open("/dev_x/other.cpk", (root + "/other/" + CHARA).c_str()) == nullptr); });
+    CHECK(has(log, "NOT served") && has(log, "its header or TOC differs"));
+    // the disc and the hdd0 copies are claimed; reads equal the planned virtual file; the override line comes once
+    for (const std::string& host : { arch + GAME, arch + CHARA, hdd + CHARA }) {
+        const std::string base = jmods::base_of(host.c_str());
+        const jmods::Plan& p = want.plans.at(base);
+        ps3_fs_vfile* vf = nullptr;
+        log = capture([&] { vf = ops->open(("/dev_x/" + base).c_str(), host.c_str()); });
+        CHECK(vf && has(log, "[mods] serve " + base + " (/dev_x/" + base + "): checked"));
+        if (!vf) continue;
+        CHECK(ops->size(vf) == p.virt_size);
+        FILE* h = std::fopen(host.c_str(), "rb");
+        Bytes got;
+        Bytes buf(3001);
+        std::string rlog = capture([&] {
+            for (uint64_t pos = 0; pos < p.virt_size;) {
+                const size_t n = size_t(std::min<uint64_t>(buf.size(), p.virt_size - pos));
+                const size_t k = ops->read(vf, h, pos, buf.data(), n);
+                got.insert(got.end(), buf.begin(), buf.begin() + k);
+                if (k != n) break;
+                pos += k;
+            }
+        });
+        std::fclose(h);
+        CHECK(got == read_all(io, p, 65536));
+        const bool first = host != hdd + CHARA;   // the hdd0 copy shares the archive's override lines with the disc copy
+        CHECK(has(rlog, "first read in override segment") == first);
+        if (base == CHARA && first) CHECK(has(rlog, "[mods] serve partition_op_character_ps3.cpk (/dev_x/partition_op_character_ps3.cpk) character/model/character_model_000_i.pak: first read in override segment (swap)"));
+        ops->close(vf);
+    }
+    std::string rm = "rm -rf '" + root + "'";
+    CHECK(std::system(rm.c_str()) == 0);
+}
+#endif
+
 int main()
 {
     MemIo io;
@@ -648,6 +889,10 @@ int main()
     test_alias_and_classes(io, chara);
     test_refusals(io);
     test_conflicts_and_digest(io, game);
+    test_glue(io, chara);
+#ifdef MODS_GLUE_FILES
+    test_glue_files(io, game, chara);
+#endif
 
     std::printf("%s: %d passed, %d failed\n", g_fail ? "FAIL" : "PASS", g_pass, g_fail);
     return g_fail ? 1 : 0;

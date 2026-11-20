@@ -1,6 +1,7 @@
 // Host test for the host-controlled session settings of the rollback netcode: installer/port/jsp/jsp_session_{digest,registry,effective,manifest,handshake}.h.
 // No game, no GPU. installer/tools/session_manifest_test.sh builds and runs it.
 #include "../port/jsp/jsp_session_handshake.h"
+#include "../port/jsp/jsp_mods_glue.h"   // the mod-set fold into Caps::build (jmods::net_build)
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -245,6 +246,33 @@ int main(int argc, char** argv)
         Room r(0x03); r.make_host(); Caps other = r.caps; other.build = 0xB002; r.make_client(1, other);
         r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
         CHECK(r.p[0].host->state() == State::Failed && r.p[0].host->reason() == Reason::BuildMismatch && r.p[0].host->bad_peer() == 1);
+    }
+    // --- the mod set folded into the build word (jsp_mods_glue.h net_build, used by jsp_net_game.cpp for Caps::build) ---
+    {
+        const uint32_t stock = 0xB001;
+        const char* s1 = "set one"; const char* s2 = "set two";
+        const Digest d1 = sha256((const uint8_t*)s1, 8), d2 = sha256((const uint8_t*)s2, 8);
+        uint32_t m1 = 0, m1b = 0, m2 = 0, none = 0;
+        CHECK(jmods::net_build(stock, jmods::DigestKind::Value, d1, m1) && jmods::net_build(stock, jmods::DigestKind::Value, d1, m1b) && m1 == m1b);
+        CHECK(jmods::net_build(stock, jmods::DigestKind::Value, d2, m2) && m2 != m1 && m1 != stock && m2 != stock);
+        CHECK(jmods::net_build(stock, jmods::DigestKind::None, d1, none) && none == stock);   // no gameplay digest: build_id() unchanged
+        uint32_t refused = 0;
+        CHECK(!jmods::net_build(stock, jmods::DigestKind::Refused, jmods::refused_digest(), refused));   // refused: no word, rollback never starts
+        auto run = [&](uint32_t host_build, uint32_t client_build, State* host_state, Reason* host_reason) {
+            Room r(0x03); r.caps.build = host_build; r.make_host();
+            Caps cc = r.caps; cc.build = client_build; r.make_client(1, cc);
+            r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
+            if (r.p[0].host->state() == State::Open) { CHECK(r.p[0].host->propose(rb_values(), 0) == Reason::None); r.pump(); }
+            if (r.p[0].host->state() == State::Ready) { CHECK(r.p[0].host->start(500) == Reason::None); r.pump(); }
+            *host_state = r.p[0].host->state(); *host_reason = r.p[0].host->reason();
+            return r.p[1].cl->state();
+        };
+        State hs; Reason hr;
+        CHECK(run(m1, m1b, &hs, &hr) == State::Started && hs == State::Started);                    // the same set: the session starts
+        CHECK(run(m1, m2, &hs, &hr) != State::Started && hs == State::Failed && hr == Reason::BuildMismatch);   // another set: BuildMismatch
+        CHECK(run(m1, none, &hs, &hr) != State::Started && hs == State::Failed && hr == Reason::BuildMismatch); // modded host, stock client
+        CHECK(run(none, stock, &hs, &hr) == State::Started && hs == State::Started);                // stock with the fold = an old stock peer
+        CHECK(std::strstr(explain(Reason::BuildMismatch), "build") != nullptr);
     }
     {   // build mismatch seen by the client (host build in the proposal differs from the client's)
         Room r(0x03); r.make_host(); r.make_client(1, r.caps); r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();

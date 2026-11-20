@@ -315,6 +315,23 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
     return online;
 }
 
+/* ENHANCEMENT (mods, D40 P2): a gameplay mod set (jsp_mods.cpp: a gameplay digest, or gameplay mods listed but not all applied) cannot
+ * be compared over the game's own online (Ranked and Free over np_psnr carry no build word), so that online is off for the session:
+ * PS3_NET_ONLINE is removed (every gate of the runtime's online needs it, see jsp_net_game.cpp decide_env) and JSP_NET_REFUSED=1 tells the
+ * Online page that this session refused it. Called from main() (jsp_mods_init), after apply() and before the guest starts. */
+static bool g_mods_refused = false;
+static void refuse_for_mods(const Env& env)
+{
+    g_mods_refused = true;
+    env.log("[mods] game online refused: gameplay mod set active");
+    if (env.get("PS3_NET_ONLINE")) {   /* any value, even "0", is on for the runtime */
+        env.set("PS3_NET_ONLINE", "");   /* "" removes the variable (the boot's set) */
+        env.set("JSP_NET_REFUSED", "1");
+        env.log("[online] the game's own online is off for this session: a gameplay mod set is active (mods.txt)");
+    }
+    g_view.online = 0;
+}
+
 static bool is_portable_ini(const std::string& iniPath)
 {
     std::string t; bool ex; Env quiet{nullptr, nullptr, [](const std::string&) {}};
@@ -560,7 +577,7 @@ extern "C" int jsp_online_describe(int line, char* out, int n)
     case 2: snprintf(out, n, "Online name: %s (%s)", v.name[0] ? v.name : "(none)", v.name_via); break;
     case 3: snprintf(out, n, "Community preset: %s (%d saved)", v.active[0] ? v.active : "(none)", v.presets); break;
     case 4: snprintf(out, n, "Settings files: %d read, %d rejected", v.files, v.rejected); break;
-    default: snprintf(out, n, "Online play this session: %s", v.online ? "yes" : "no"); break;
+    default: snprintf(out, n, "Online play this session: %s", v.online ? "yes" : g_mods_refused ? "no (gameplay mods are on)" : "no"); break;
     }
     return 5 - line;
 }
@@ -682,18 +699,21 @@ extern "C" void jsp_net_env_part(int part);   /* jsp_net_game.cpp */
 #ifdef _WIN32
 #include <stdlib.h>
 #endif
+/* "" removes the variable: the runtime counts any value of PS3_NET_ONLINE, even an empty one, as on. */
+static void boot_set(const char* k, const char* v)
+{
+#ifdef _WIN32
+    _putenv_s(k, v);   /* "" removes it on Windows */
+#else
+    if (!*v) unsetenv(k); else setenv(k, v, 1);
+#endif
+}
 static void jsp_online_boot(void)
 {
     using namespace jsp_online;
     Env env;
     env.get = [](const char* n) { return getenv(n); };
-    env.set = [](const char* k, const char* v) {
-#ifdef _WIN32
-        _putenv_s(k, v);
-#else
-        setenv(k, v, 1);
-#endif
-    };
+    env.set = boot_set;
     env.log = [](const std::string& s) { printf("%s\n", s.c_str()); };
     std::string exe_dir, appdata, psnr, user;
 #ifdef _WIN32
@@ -717,4 +737,16 @@ static void jsp_online_boot(void)
     jsp_net_env_part(2);   /* ENHANCEMENT (in-game netcode option): PS3_NET_ONLINE is final now; the rollback start decision (jsp_net_game.cpp) runs once both static constructors have reported */
 }
 namespace { struct JspOnlineInit { JspOnlineInit() { jsp_online_boot(); } } s_jsp_online_init; }
+
+/* jsp_mods.cpp: the mod set has a gameplay digest (or refused gameplay mods), so the game's own online is off for this session. Logs on
+ * stderr with the other [mods] lines. */
+extern "C" void jsp_online_refuse_for_mods(void)
+{
+    using namespace jsp_online;
+    Env env;
+    env.get = [](const char* n) { return getenv(n); };
+    env.set = boot_set;
+    env.log = [](const std::string& s) { fprintf(stderr, "%s\n", s.c_str()); };
+    refuse_for_mods(env);
+}
 #endif
