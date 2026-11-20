@@ -48,7 +48,7 @@ def case(tool, launcher, base, name, files, flag=False, want="", rule="", mods=N
     if mods_dir:
         (inst / "mods").mkdir()
     rec = base / name / "rec.txt"
-    env = dict(os.environ, APPDATA=str(appdata), CPU_BOOST="0", FAKE_OUT=str(rec), FAKE_ENV="RES_SCALE,JSP_MODS_LIST,JSP_MODS_DIR")
+    env = dict(os.environ, APPDATA=str(appdata), CPU_BOOST="0", FAKE_OUT=str(rec), FAKE_ENV="RES_SCALE,JSP_MODS,JSP_MODS_LIST,JSP_MODS_DIR")
     for k in ("JSP_MODS", "JSP_MODS_LIST", "JSP_MODS_DIR"):
         env.pop(k, None)
     env.update(preset or {})   # values the player set before starting the launcher
