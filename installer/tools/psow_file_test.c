@@ -59,7 +59,7 @@ static void put_rec(FILE* f, uint64_t key, uint32_t vs, uint32_t ps, int sparse)
     unsigned char head[HDR]; memset(head, 0, sizeof head);
     PswRecHead h = { PSW_REC_MAGIC, vs, ps, 0, key }; memcpy(head, &h, sizeof h);
     fwrite(head, sizeof head, 1, f);
-    if (!sparse) { unsigned char b[64]; for (uint32_t i = 0; i < vs + ps; i += sizeof b) { memset(b, (int)(key + i), sizeof b); fwrite(b, 1, (vs + ps - i) < sizeof b ? (vs + ps - i) : sizeof b, f); } }
+    if (!sparse) { unsigned char b[64]; for (uint32_t i = 0; i < vs + ps; i += sizeof b) { memset(b, (int)(key & 0xff), sizeof b); fwrite(b, 1, (vs + ps - i) < sizeof b ? (vs + ps - i) : sizeof b, f); } }
     else {   /* a hole: seek over the payload, and write its last byte so the file really extends */
         psw_seek(f, (psw_off)(vs + ps) - 1, SEEK_CUR); fputc(0, f);
     }
@@ -84,12 +84,19 @@ static void fresh(PswCache* c, const char* n, uint32_t maxrec, uint64_t stamp) {
 static void rec_head(unsigned char* head, uint64_t key, uint32_t vs, uint32_t ps) { memset(head, 0, HDR); PswRecHead h = { PSW_REC_MAGIC, vs, ps, 0, key }; memcpy(head, &h, sizeof h); }
 static void note(PswCache* c, uint64_t key, int expect)
 {
-    unsigned char head[HDR], body[16]; memset(body, 7, sizeof body); rec_head(head, key, 8, 8);
+    unsigned char head[HDR], body[16]; memset(body, (int)(key & 0xff), sizeof body); rec_head(head, key, 8, 8);
     const int r = psw_note(c, head, body, body);
     if (r != expect) { printf("FAIL note key %llu: got %d want %d\n", (unsigned long long)key, r, expect); fails++; }
 }
 static size_t occurrences(const char* hay, const char* needle) { size_t n = 0; for (const char* p = hay; (p = strstr(p, needle)); p += strlen(needle)) n++; return n; }
-static void freec(PswCache* c) { if (c->out) fclose(c->out); psw_noted_free(&c->noted); }
+static void freec(PswCache* c) { psw_free(c); }
+/* the test's record check: the payload is the key's low byte throughout (what put_rec and note write) */
+static int test_verify(const unsigned char* rec, uint32_t hdr, uint32_t vs, uint32_t ps)
+{
+    PswRecHead h; memcpy(&h, rec, sizeof h);
+    for (uint32_t i = 0; i < vs + ps; i++) if (rec[hdr + i] != (unsigned char)(h.key & 0xff)) return 0;
+    return 1;
+}
 
 int main(void)
 {
@@ -148,13 +155,16 @@ int main(void)
         CHECK(strstr(g_log, "rewritten") == NULL);
         freec(&c);
     }
-    /* the whole image of a prepared small file is readable */
+    /* the warm-up reads each record by its offset (no whole-file image) */
     {
-        fresh(&c, "big_dup.bin", 2048, STAMP); CHECK(psw_prepare(&c) == 2);
-        PswImage img; CHECK(psw_read_all(&c, &img) == 0);
-        CHECK(img.size == (size_t)c.size && img.first == HEADSZ);
-        PswRecHead h; memcpy(&h, img.buf + img.first, sizeof h); CHECK(h.key == 1 && h.vs_len == 100 && h.ps_len == 200);
-        free(img.buf); freec(&c);
+        fresh(&c, "big_dup.bin", 2048, STAMP); CHECK(psw_prepare(&c) == 2); CHECK(c.n_offs == 2);
+        FILE* f = fopen(path("big_dup.bin"), "rb"); PswRecHead h;
+        const size_t cap = HDR + 2u * MAXB; unsigned char* buf = (unsigned char*)malloc(cap);
+        CHECK(psw_read_record(&c, f, 0, buf, cap, &h) && h.key == 1 && h.vs_len == 100 && h.ps_len == 200);
+        CHECK(psw_read_record(&c, f, 1, buf, cap, &h) && h.key == 2 && h.vs_len == MAXB && h.ps_len == MAXB);
+        CHECK(!psw_read_record(&c, f, 2, buf, cap, &h));            /* past the end of the list */
+        CHECK(!psw_read_record(&c, f, 1, buf, HDR + 10, &h));       /* a buffer that is too small is refused, not overrun */
+        free(buf); fclose(f); freec(&c);
     }
 
     /* (b) a key already in the file is never appended, within a run and across runs */
@@ -204,6 +214,10 @@ int main(void)
         fresh(&c, "c.bin", 16, STAMP); CHECK(psw_prepare(&c) == -1); CHECK(c.dead); CHECK(strstr(g_log, "the old file is kept") != NULL); CHECK(strstr(g_log, "warm-up is off") != NULL);
         UNCHANGED(); note(&c, 99, -1); UNCHANGED(); freec(&c);
         rmdir(path("c.bin.tmp"));
+        /* a temporary name that cannot be deleted is reported */
+        CHECK(mkdir(path("c.bin.tmp"), 0700) == 0); { FILE* k = mk("c.bin.tmp/inner"); fclose(k); }
+        fresh(&c, "c.bin", 16, STAMP); CHECK(psw_prepare(&c) == -1); CHECK(strstr(g_log, "could not be removed") != NULL); UNCHANGED(); freec(&c);
+        unlink(path("c.bin.tmp/inner")); rmdir(path("c.bin.tmp"));
         /* the temporary file fills up: written to /dev/full */
         CHECK(symlink("/dev/full", path("c.bin.tmp")) == 0);
         fresh(&c, "c.bin", 16, STAMP); CHECK(psw_prepare(&c) == -1); CHECK(strstr(g_log, "write or sync failed") != NULL);
@@ -240,6 +254,35 @@ int main(void)
         fresh(&c, "t2.bin", 16, STAMP); CHECK(psw_prepare(&c) == 3); CHECK(strstr(g_log, "rewritten to 3 records") != NULL);
         note(&c, 77, 0); fclose(c.out); c.out = NULL; freec(&c);
         CHECK(count_recs(path("t2.bin"), keys, 8) == 4 && keys[3] == 77);   /* the record after the cut tail is reachable */
+    }
+    /* a torn record in the MIDDLE of an older file (the old code appended after a crash-torn record): it parses as a record whose body
+     * runs into the next records. Its bytes do not hash to its key, so it is not kept (and not built), and the key is free again. */
+    {
+        FILE* f = mk("m.bin");                                     /* no head: written before patch 2069 */
+        put_rec(f, 11, 64, 64, 0);
+        { unsigned char head[HDR]; rec_head(head, 22, 64, 64); fwrite(head, HDR, 1, f); for (int i = 0; i < 40; i++) fputc(0x16, f); }   /* torn: 40 of 128 */
+        put_rec(f, 33, 64, 64, 0); put_rec(f, 44, 64, 64, 0); put_rec(f, 55, 64, 64, 0);
+        fclose(f);
+        fresh(&c, "m.bin", 16, STAMP); c.verify = test_verify;
+        CHECK(psw_prepare(&c) == 1);
+        CHECK(strstr(g_log, "did not hash to their key") != NULL);
+        CHECK(c.n_offs == 1);
+        note(&c, 22, 0);                                           /* the real pipeline of key 22 can be noted again */
+        fclose(c.out); c.out = NULL; freec(&c);
+        uint64_t keys[8]; CHECK(count_recs(path("m.bin"), keys, 8) == 2 && keys[0] == 11 && keys[1] == 22);
+        fresh(&c, "m.bin", 16, STAMP); c.verify = test_verify; CHECK(psw_prepare(&c) == 2);
+        FILE* r = fopen(path("m.bin"), "rb"); PswRecHead h; unsigned char buf[HDR + 256];
+        CHECK(psw_read_record(&c, r, 0, buf, sizeof buf, &h) && psw_read_record(&c, r, 1, buf, sizeof buf, &h) && h.key == 22);
+        fclose(r);
+        /* bit rot in a file that is otherwise whole: the scan does not read bodies, the warm-up's read does and refuses it */
+        FILE* w = fopen(path("m.bin"), "r+b"); psw_seek(w, (psw_off)sizeof(PswFileHead) + HDR + 5, SEEK_SET); fputc(0x00, w); fclose(w);
+        r = fopen(path("m.bin"), "rb"); CHECK(!psw_read_record(&c, r, 0, buf, sizeof buf, &h)); CHECK(psw_read_record(&c, r, 1, buf, sizeof buf, &h)); fclose(r);
+        freec(&c);
+        /* an I/O error on a record head is an error, not the end of the list (a write-only handle cannot be read) */
+        FILE* wo = fopen(path("m.bin"), "ab"); PswRecHead hh; psw_off end;
+        fresh(&c, "m.bin", 16, STAMP);
+        CHECK(psw_rec_at(&c, wo, (psw_off)sizeof(PswFileHead), fsize(path("m.bin")), &hh, &end) == -1);
+        fclose(wo); freec(&c);
     }
     /* a head from another build empties the file; a file with no head keeps its records and gets one */
     {

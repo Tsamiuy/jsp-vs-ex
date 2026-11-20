@@ -448,7 +448,7 @@ def main():
               f"cache line of shader_cache.bin: {sb.cache_lines(app12)}")
         (run12 / "pso_cache.bin").write_bytes(b"")
         check(sb.cache_lines(app12)[-1] == "cache pso_cache.bin: 0 bytes, 0 records (0 distinct, 0 repeated), 0 bytes after the last whole record", "an empty cache file")
-        check(sb.cache_lines(t / "app-none") == ["cache files (pipelines.bin, shader_cache.bin): none found"], "no cache files: said so")
+        check(sb.cache_lines(t / "app-none") == ["cache files (pipelines.bin, shader_cache.bin, pso_cache.bin): none found"], "no cache files: said so")
         f12 = sb.facts(app12, {}, [], 0, [], ["facts.txt"])
         check("\ncache pipelines.bin: " in f12 and "\ncache shader_cache.bin: " in f12, "facts.txt carries the cache lines")
         zp12 = sb.make(app12, out, None, None)

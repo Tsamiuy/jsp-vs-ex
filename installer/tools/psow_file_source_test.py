@@ -64,7 +64,11 @@ def main():
             print(f"FAIL {rel}:{n}: {why}: {line}")
         bad += len(hits)
         print(f"{rel}: {len(hits)} hits")
-    text = (pathlib.Path(a.toolkit) / "libs/video/psow_file.h").read_text(encoding="utf-8", errors="replace")
+    hp = pathlib.Path(a.toolkit) / "libs/video/psow_file.h"
+    if not hp.exists():
+        print("psow_file_source_test: FAILED (libs/video/psow_file.h is missing: patch 2069 is not applied)")
+        return 1
+    text = hp.read_text(encoding="utf-8", errors="replace")
     for need in ("_ftelli64", "_fseeki64", "ftello", "fseeko"):
         if need not in text:
             print(f"FAIL: psow_file.h does not use {need}")

@@ -901,7 +901,7 @@ def cache_lines(app):
             p = folder / n
             if p.is_file() and not p.is_symlink():
                 out.append("cache " + cache_line(p))
-    return out or ["cache files (pipelines.bin, shader_cache.bin): none found"]
+    return out or ["cache files (pipelines.bin, shader_cache.bin, pso_cache.bin): none found"]
 
 
 def facts(app, blobs, refused, not_text, cuts, names, net=None):
