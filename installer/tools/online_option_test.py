@@ -69,6 +69,21 @@ def run_checks(rel):
     check("address rule: port 1..65535", "port < 1 || port > 65535" in ini)
     check("re-psn default port named in the tab", "port 36100 when left out" in tab)
     check("per-game keys never touched", not any(k in cs for k in ("comm_id", "p2p_port", "report_rtt")))
+    ro = cs[cs.index("bool RollbackOn()"):]
+    ro = ro[:ro.index("\n        }\n")]
+    check("rollback on refuses re-psn and Community (the error path stops Start Game too)",
+          re.search(r"if \(m != 0 && RollbackOn\(\)\)\s*return \"Rollback is on \(Port Settings > Online\)\.", save) is not None
+          and save.index("RollbackOn()") < save.index("OnlineIni.Load(RepsnPath()"))
+    check("RollbackOn only reads JSP_ROLLBACK (0 or empty is off) and never writes",
+          'StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)' in ro and 'TrimEnd(\' \', \'\\r\', \'\\n\')' in ro
+          and "v.Length != 0 && v[0] != '0'" in ro and "break" not in ro and "WriteAll" not in ro and "File.Replace" not in ro)
+    check("the launcher never writes JSP_ROLLBACK", [l for l in cs.splitlines() if "JSP_ROLLBACK" in l and not l.strip().startswith("//")] == [l for l in cs.splitlines() if 'StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)' in l])
+    load = cs[cs.index("void LoadOnline()"):cs.index("string SaveOnline()")]
+    check("a file with both on, or one on beside rollback, shows a note",
+          "RollbackOn()" in load and "Both files were switched on" in load and "note + \" \" + rn" in load)
+    check("Server and Name can be saved while Off is chosen (panel stays enabled, valid values are written)",
+          "repsnPanel.Enabled = rbOnRepsn.Checked" not in cs
+          and "bool writeR = ri.Exists || m == 1 || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname))" in save)
     check("launcher sets no online environment variable",
           not any(k in cs for k in ("PSNR_SERVER", "PS3_NET_ONLINE", "PS3_NP_ONLINE_ID")))
     # JStarsLauncher.cs saves through SaveOnlineIfDirty() on both start paths (installed and from source), v19 inline
@@ -108,6 +123,22 @@ def run_checks(rel):
     check("listing shows name, address:port, players, relay yes/no, version",
           all(t in find for t in ("s.Ip", "s.TcpPort", "s.Players", '"yes" : "no"', "s.Version")))
     check("no 'auto' server value is saved by the launcher", not re.search(r'"auto"', cs))
+
+
+def rollback_on_model(text):
+    """Model of RollbackOn() (launcher.c load_env + the game's env_on), checked on the cases found in review."""
+    v = ""
+    for line in text.split("\n"):
+        if line.upper().startswith("JSP_ROLLBACK="):
+            v = line[13:].rstrip(" \r")
+    return v != "" and v[0] != "0"
+
+
+for txt, want in (("JSP_ROLLBACK=1", True), ("JSP_ROLLBACK=0", False), ("JSP_ROLLBACK=", False), ("JSP_ROLLBACK=off", True),
+                  ("#JSP_ROLLBACK=1", False), (";JSP_ROLLBACK=1", False), ("JSP_ROLLBACK= 0", True), ("JSP_ROLLBACK=0\nJSP_ROLLBACK=1", True),
+                  ("JSP_ROLLBACK=1\nJSP_ROLLBACK=0", False), ("JSP_ROLLBACK=00", False), (" JSP_ROLLBACK=1", False),
+                  ("JSP_ROLLBACK =1", False), ("JSP_ROLLBACK=1\r", True), ("jsp_rollback=1", True), ("Jsp_Rollback=0", False), ("JSP_ROLLBACK=0\r", False)):
+    check("parser model: %r -> %s" % (txt, "on" if want else "off"), rollback_on_model(txt) == want)
 
 
 # the installer builds jsp-settings.exe from JStarsLauncher.cs; the v19 launcher is generated from it: both need the tab
