@@ -648,6 +648,21 @@ static void test_glue(MemIo& io, const SynthCpk& chara)
     CHECK(base_of("/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/data/PS3/partition_op_character_ps3.cpk") == CHARA);
     CHECK(base_of("C:\\Games\\disc/PS3_GAME\\USRDIR\\data\\PS3\\partition_op_game_ps3.cpk") == GAME);
     CHECK(base_of("plain.cpk") == "plain.cpk" && base_of("dir/") == "" && base_of(nullptr) == "");
+    // the keys: case folded only when asked (Windows), '\\' and repeated '/' made one '/'
+    CHECK(archive_key("X:\\disc\\PS3_GAME\\USRDIR\\data\\PS3\\Partition_OP_Character_PS3.CPK", true) == CHARA);
+    CHECK(archive_key("/d/Partition_OP_Character_PS3.CPK", false) == "Partition_OP_Character_PS3.CPK");
+    CHECK(archive_key((std::string("/d/") + CHARA).c_str(), true) == CHARA && archive_key(nullptr, true) == "");
+    CHECK(path_key("C:\\Games\\hdd0//game\\BLUS31519-INSTALL/USRDIR", false) == "C:/Games/hdd0/game/BLUS31519-INSTALL/USRDIR");
+    CHECK(path_key("C:\\Games\\HDD0//game/X.CPK", true) == path_key("c:/games/hdd0/game\\x.cpk", true));
+    CHECK(path_key("/a/B.cpk", false) != path_key("/a/b.cpk", false) && path_key(nullptr, true) == "");
+    {
+        const std::vector<std::string> cp = copy_paths("D/PS3_GAME/USRDIR/data/PS3/", "H", { "BLUS31519-INSTALL", "NPUB31647" }, CHARA);
+        CHECK(cp.size() == 3 && cp[0] == std::string("D/PS3_GAME/USRDIR/data/PS3/") + CHARA
+              && cp[1] == std::string("H/game/BLUS31519-INSTALL/USRDIR/data/PS3/") + CHARA && cp[2] == std::string("H/game/NPUB31647/USRDIR/data/PS3/") + CHARA);
+        CHECK(copy_paths("D/", "H", {}, GAME).size() == 1);
+    }
+    CHECK(after_copy_check(DigestKind::Value, true) == DigestKind::Refused && after_copy_check(DigestKind::Value, false) == DigestKind::Value);
+    CHECK(after_copy_check(DigestKind::None, true) == DigestKind::None && after_copy_check(DigestKind::Refused, false) == DigestKind::Refused);
 
     // ---- a gameplay set (alias, character) and a cosmetic one (file, game): served reads and the copy check
     const Bytes lb = noise(1500, 77);
@@ -656,6 +671,8 @@ static void test_glue(MemIo& io, const SynthCpk& chara)
     const ModSet s = load_mod_set(io, "swap\nglogo\n", opts());   // "swap" from test_alias_and_classes
     CHECK(s.plans.count(GAME) && s.plans.count(CHARA) && s.digest_kind == DigestKind::Value);
     if (!s.plans.count(GAME) || !s.plans.count(CHARA)) return;
+    CHECK(gameplay_archive(s, CHARA) && !gameplay_archive(s, GAME));   // swap (gameplay) changes character; glogo (cosmetic) changes game
+    CHECK(!gameplay_archive(load_mod_set(io, "glogo\n", opts()), GAME));
     for (const char* base : { GAME, CHARA }) {
         const Plan& p = s.plans.at(base);
         const Bytes& copy = io.archives.at(base);
@@ -820,9 +837,13 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     log = capture([&] { nb = 0; CHECK(jsp_mods_net_build(0xB001, &nb) == 0 && nb == 0); });
     CHECK(has(log, "[mods] rollback refused"));
 
-    // 4. on: two archives served, the game's own online refused (swap is gameplay), the build word folded
+    // 4. on: two archives served, the game's own online refused (swap is gameplay), the build word folded. Every copy found (the disc and
+    //    the hdd0 install folder) is checked at start.
     setenv("JSP_MODS_LIST", (root + "/mods.txt").c_str(), 1);
+    setenv("PS3_HDD0_ROOT", (root + "/hdd0").c_str(), 1);
     log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] check partition_op_character_ps3.cpk: 2 of 2 copies the game can open match the plan"));
+    CHECK(has(log, "[mods] check partition_op_game_ps3.cpk: 1 of 1 copy the game can open match the plan") && !has(log, "set: refused"));
     CHECK(has(log, "[mods] list " + root + "/mods.txt: 2 enabled (swap, glogo)"));
     CHECK(has(log, "[mods] swap 1.0.0: gameplay, 3 overrides (alias), interfaces cpk-entry 1"));
     CHECK(has(log, "[mods] override partition_op_character_ps3.cpk character/model/character_model_000_m.pak <- alias character/model/character_model_001_m.pak"));
@@ -837,8 +858,15 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     const ps3_fs_vfile_ops* ops = g_ps3_fs_vfile_ops;
     // an archive with no plan, and a planned one at a copy that differs: not claimed (the stock file is read)
     CHECK(ops->open("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/partition_op_map_ps3.cpk", (arch + "partition_op_map_ps3.cpk").c_str()) == nullptr);
+    CHECK(jsp_mods_copy_mismatch() == 0);
     log = capture([&] { CHECK(ops->open("/dev_x/other.cpk", (root + "/other/" + CHARA).c_str()) == nullptr); });
     CHECK(has(log, "NOT served") && has(log, "its header or TOC differs"));
+    // a gameplay archive's copy the start-up check did not see, that differs: loud, the flag is set, rollback is refused from now on
+    CHECK(has(log, "[mods] WARNING: partition_op_character_ps3.cpk") && has(log, "online content mismatch") && jsp_mods_copy_mismatch() == 1);
+    log = capture([&] { CHECK(ops->open("/dev_x/other.cpk", (root + "/other/" + CHARA).c_str()) == nullptr); });
+    CHECK(log.empty());   // one line per path
+    log = capture([&] { nb = 0; CHECK(jsp_mods_net_build(0xB001, &nb) == 0); });
+    CHECK(has(log, "[mods] rollback refused"));
     // the disc and the hdd0 copies are claimed; reads equal the planned virtual file; the override line comes once
     for (const std::string& host : { arch + GAME, arch + CHARA, hdd + CHARA }) {
         const std::string base = jmods::base_of(host.c_str());
@@ -867,6 +895,59 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
         if (base == CHARA && first) CHECK(has(rlog, "[mods] serve partition_op_character_ps3.cpk (/dev_x/partition_op_character_ps3.cpk) character/model/character_model_000_i.pak: first read in override segment (swap)"));
         ops->close(vf);
     }
+
+    // 5. a second hdd0 folder whose copies differ. A differing copy of the cosmetic-only archive (game): read stock, the set still runs as
+    //    listed. A differing copy of the gameplay archive (character): the set is Refused at start (no rollback, no game online).
+    const std::string patch = root + "/hdd0/game/BLUS31519-PATCH/USRDIR/data/PS3/";
+    Bytes badgame = game.file;
+    badgame[game.utf_abs + 33] ^= 0x10;
+    put_file(patch + GAME, badgame);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] check partition_op_game_ps3.cpk: the copy " + patch + GAME + " is not the one the mods were planned on (its header or TOC differs): it is read stock\n"));
+    CHECK(has(log, "[mods] check partition_op_game_ps3.cpk: 1 of 2 copies") && !has(log, "set: refused") && jsp_mods_copy_mismatch() == 0);
+    CHECK(g_online_refusals == 4);   // swap is gameplay: refused as before, not because of the copy
+    log = capture([&] { CHECK(jsp_mods_net_build(0xB001, &nb) == 1 && nb != 0xB001); });
+    {   // the bad copy is not claimed, without a second check
+        log = capture([&] { CHECK(g_ps3_fs_vfile_ops->open("/dev_hdd0/x", (patch + GAME).c_str()) == nullptr); });
+        CHECK(has(log, "NOT served") && !has(log, "WARNING"));
+    }
+    put_file(patch + CHARA, badcopy);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] check partition_op_character_ps3.cpk: the copy " + patch + CHARA + " is not the one the mods were planned on (its header or TOC differs): it is read stock, and a gameplay mod changes this archive"));
+    CHECK(has(log, "[mods] check partition_op_character_ps3.cpk: 2 of 3 copies") && has(log, "[mods] set: refused: a copy of an archive a gameplay mod changes differs"));
+    CHECK(g_online_refusals == 5 && g_ps3_fs_vfile_ops == &k_ops);   // local play still serves the copies that match
+    log = capture([&] { nb = 0; CHECK(jsp_mods_net_build(0xB001, &nb) == 0 && nb == 0); });
+    CHECK(has(log, "[mods] rollback refused"));
+    unsetenv("PS3_HDD0_ROOT");
+
+    // 6. the Windows match (case folded): a path that names the archive in another case is claimed, and serves the planned bytes
+    g_fold_case = true;
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] serving 2 archive(s): partition_op_character_ps3.cpk, partition_op_game_ps3.cpk"));
+    {
+        const std::string upper = root + "/Case/PARTITION_OP_CHARACTER_PS3.CPK";
+        put_file(upper, chara.file);
+        ps3_fs_vfile* vf = nullptr;
+        log = capture([&] { vf = g_ps3_fs_vfile_ops->open("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/PARTITION_OP_CHARACTER_PS3.CPK", upper.c_str()); });
+        CHECK(vf && has(log, "[mods] serve partition_op_character_ps3.cpk (/dev_bdvd/PS3_GAME/USRDIR/data/PS3/PARTITION_OP_CHARACTER_PS3.CPK): checked"));
+        if (vf) {
+            const jmods::Plan& p = want.plans.at(CHARA);
+            CHECK(g_ps3_fs_vfile_ops->size(vf) == p.virt_size);
+            FILE* h = std::fopen(upper.c_str(), "rb");
+            Bytes got(size_t(p.virt_size));
+            size_t k = 0;
+            log = capture([&] { k = g_ps3_fs_vfile_ops->read(vf, h, 0, got.data(), got.size()); });
+            CHECK(k == got.size() && got == read_all(io, p, 65536) && has(log, "first read in override segment (swap)"));
+            std::fclose(h);
+            g_ps3_fs_vfile_ops->close(vf);
+        }
+        // the start-up check's key and cellFs's host path agree whatever the case and slashes
+        log = capture([&] { vf = g_ps3_fs_vfile_ops->open("/dev_x", (arch + "PARTITION_op_character_ps3.cpk").c_str()); });
+        CHECK(vf == nullptr || has(log, "checked"));   // a POSIX file system has no such file: only the key is tested, below
+        if (vf) g_ps3_fs_vfile_ops->close(vf);
+        CHECK(g_st->verified.count(jmods::path_key((arch + CHARA).c_str(), true)) && g_st->verified.count(jmods::path_key((disc + "\\PS3_GAME//USRDIR\\data\\PS3\\" + CHARA).c_str(), true)));
+    }
+    g_fold_case = false;
     std::string rm = "rm -rf '" + root + "'";
     CHECK(std::system(rm.c_str()) == 0);
 }

@@ -39,6 +39,48 @@ inline std::string base_of(const char* path)
     for (const char* p = path; *p; ++p) if (*p == '/' || *p == '\\') b = p + 1;
     return b;
 }
+// The keys the glue looks paths up by. fold: ASCII case is folded (Windows, where the file system ignores case, so the game may open a
+// planned archive under another case and still get the same file). A path key also turns '\\' into '/' and collapses repeated '/', so the
+// paths the start-up check builds and the host paths cellFs hands the provider (ppu_fs host_path: '/' only) name the same copy.
+inline std::string fold_ascii(std::string s)
+{
+    for (char& ch : s) if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+    return s;
+}
+inline std::string archive_key(const char* path, bool fold) { return fold ? fold_ascii(base_of(path)) : base_of(path); }
+inline std::string path_key(const char* path, bool fold)
+{
+    std::string k;
+    for (const char* p = path ? path : ""; *p; ++p) {
+        const char ch = *p == '\\' ? '/' : *p;
+        if (ch == '/' && !k.empty() && k.back() == '/') continue;
+        k += ch;
+    }
+    return fold ? fold_ascii(k) : k;
+}
+// The game opens a CPK from the disc (<disc>/PS3_GAME/USRDIR/data/PS3/<archive>) or from an hdd0 install folder
+// (<hdd0>/game/<folder>/USRDIR/data/PS3/<archive>). The copies the start-up check verifies, given the folders found under <hdd0>/game.
+inline std::vector<std::string> copy_paths(const std::string& disc_dir, const std::string& hdd0_root, const std::vector<std::string>& game_folders,
+                                           const std::string& archive)
+{
+    std::vector<std::string> v{ disc_dir + archive };
+    for (const std::string& d : game_folders) v.push_back(hdd0_root + "/game/" + d + "/USRDIR/data/PS3/" + archive);
+    return v;
+}
+// True when a gameplay mod (one the digest covers) serves an override in `archive`. A copy of such an archive that cannot be served (it is
+// not the copy the plan was made from) would run stock bytes under a digest that says modded: the set then does not run as listed.
+inline bool gameplay_archive(const ModSet& set, const std::string& archive)
+{
+    for (const ModState& st : set.mods)
+        if (st.gameplay)
+            for (const ResolvedOverride& r : st.ovr) if (r.served && r.archive == archive) return true;
+    return false;
+}
+// The digest after the start-up copy check: a gameplay archive with a copy that differs makes a gameplay set refuse (online and rollback).
+inline DigestKind after_copy_check(DigestKind kind, bool gameplay_copy_differs)
+{
+    return kind == DigestKind::Value && gameplay_copy_differs ? DigestKind::Refused : kind;
+}
 
 // ---- is this copy the copy the plan was made from -------------------------------------------------------------------------------------
 // The plan was made from the disc copy; the game also opens the hdd0 install copies (byte-identical on a good install). A virtual fd reads

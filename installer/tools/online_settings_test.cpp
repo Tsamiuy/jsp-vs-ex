@@ -198,12 +198,12 @@ int main()
     {   // a gameplay mod set (jsp_mods.cpp calls this): the game's own online is off for the session, with the reason on the page
         reset(); char b[200];
         { Env e = mk(); refuse_for_mods(e); }   // online was off anyway: only the [mods] line, nothing set
-        check("mods refusal, online off: the [mods] line, nothing set", logged("[mods] game online refused: gameplay mod set active") && g("PS3_NET_ONLINE") == "<unset>" && g("JSP_NET_REFUSED") == "<unset>");
+        check("mods refusal, online off: the [mods] line, nothing set", logged("[mods] game online refused: gameplay mod set active") && g("PS3_NET_ONLINE") == "<unset>" && g("JSP_NET_REFUSED") == "<unset>" && g("JSP_MODS_ONLINE_OFF") == "<unset>");
         reset(); wr("shared/repsn.ini", SHR);
         check("mods refusal: online configured first", run() == 1 && g("PS3_NET_ONLINE") == "1");
         { Env e = mk(); refuse_for_mods(e); }
-        check("mods refusal: PS3_NET_ONLINE removed (\"\" = unset), JSP_NET_REFUSED=1, both lines logged",
-              g("PS3_NET_ONLINE") == "" && g("JSP_NET_REFUSED") == "1" && logged("[mods] game online refused: gameplay mod set active") && logged("a gameplay mod set is active"));
+        check("mods refusal: PS3_NET_ONLINE removed (\"\" = unset), JSP_MODS_ONLINE_OFF=1 (not the rollback refusal key), both lines logged",
+              g("PS3_NET_ONLINE") == "" && g("JSP_MODS_ONLINE_OFF") == "1" && g("JSP_NET_REFUSED") == "<unset>" && logged("[mods] game online refused: gameplay mod set active") && logged("a gameplay mod set is active"));
         check("mods refusal: the page says why", jsp_online_describe(5, b, sizeof b) == 0 && std::string(b) == "Online play this session: no (gameplay mods are on)");
     }
     system(("rm -rf " + root).c_str());

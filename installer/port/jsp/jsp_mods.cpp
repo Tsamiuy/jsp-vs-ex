@@ -10,16 +10,21 @@
  * main.cpp calls jsp_mods_init() before the PPU table and the rollback install, so the rollback build word (jsp_net_game.cpp) and the
  * game's own online (jsp_online.cpp) see the set.
  *
- * Files: a mod file is opened once, with writers and deleters shut out for the whole session (Windows share mode), hashed through that handle
- * and served through it, so the bytes served are the bytes in the digest. A path whose final location is not exactly <mods>\<id>\<path>
+ * Files: a mod file is opened once, with other Windows programs' writers and deleters shut out for the whole session (the Windows share mode;
+ * under Proton a native Linux program can still rewrite it), hashed through that handle and served through it, so the bytes served are the
+ * bytes in the digest. A path whose final location is not exactly <mods>\<id>\<path>
  * (a symbolic link or a junction anywhere below the mods folder) is refused, not followed. The archives are planned from the disc copy
  * (<disc>/PS3_GAME/USRDIR/data/PS3/<archive>, the path the game opens) and each fd serves the original bytes from its own copy (disc or
- * hdd0), once that copy is checked to have the planned size, header, TOC and alias bytes.
+ * hdd0), once that copy is checked to have the planned size, header, TOC and alias bytes. Every copy the game can open (the disc copy and
+ * <hdd0>/game/<folder>/USRDIR/data/PS3/<archive>) is checked at start: a copy of an archive a gameplay mod changes that differs makes the
+ * set Refused (no rollback, no game online), since that copy would run stock under a digest that says modded. A copy first seen later that
+ * differs is logged loudly and sets jsp_mods_copy_mismatch(). On Windows the archive name is matched without regard to case.
  * Logs: "[mods] ..." lines on stderr (play_stderr.txt).
  */
 #include "jsp_mods_glue.h"
 #include "ps3emu/fs_vfile.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -39,6 +45,7 @@
 #include <windows.h>
 #else
 #include <cerrno>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -261,19 +268,29 @@ private:
 struct Served {
     Plan plan;
     CopyCheck check;
+    bool gameplay = false;                         // a gameplay mod serves an override here (a differing copy refuses the set)
     std::unique_ptr<std::atomic<bool>[]> logged;   // one "first read in override segment" line per override
+    mutable std::atomic<uint64_t> short_reads{ 0 };   // logged at 1, 10, 100, ... (one line, with the count)
 };
+struct Verified { std::string why; bool logged = false; };   // why: "" = serves, else why the stock file is read
 struct State {
     ModsRoot root;
     bool root_ok = false;
     std::map<std::string, ModFile> files;   // "<id>/<path>" -> the open file (a failed open is kept with ok = false)
     ModSet set;
-    std::map<std::string, Served> served;   // by archive basename
+    std::map<std::string, Served> served;   // by archive_key (the basename; case folded on Windows)
     std::mutex mu;
-    std::map<std::string, std::string> verified;   // host path -> "" (serves) or why it is served stock
+    std::map<std::string, Verified> verified;   // by path_key of the host path; filled at start for every copy found, later on first open
 };
 State* g_st = nullptr;                                // set once by jsp_mods_init, never freed (fds may outlive any teardown)
-std::atomic<int> g_kind{ (int)DigestKind::None };   // the set's DigestKind
+std::atomic<int> g_kind{ (int)DigestKind::None };   // the set's DigestKind (Refused also after a gameplay copy differs)
+std::atomic<int> g_copy_mismatch{ 0 };               // a gameplay archive copy first opened after start differs (jsp_mods_copy_mismatch)
+
+#ifdef _WIN32
+bool g_fold_case = true;    // the file system ignores case: so does the archive match
+#else
+bool g_fold_case = false;   // (the host test turns it on to drive the Windows match)
+#endif
 
 // Reads for load_mod_set: mod files through ModsRoot, archives from the disc copy.
 class LoadIo : public Io {
@@ -346,20 +363,33 @@ ps3_fs_vfile* v_open(const char* guest_path, const char* host_path)
 {
     State* st = g_st;
     if (!st || !host_path) return nullptr;
-    const auto it = st->served.find(base_of(host_path));
+    const auto it = st->served.find(archive_key(host_path, g_fold_case));
     if (it == st->served.end()) return nullptr;
+    const Served& s = it->second;
+    const char* name = s.plan.archive.c_str();
     std::string why;
     {
         std::lock_guard<std::mutex> lk(st->mu);   // never held while taking another fd's stream lock: only our own FILE is used in here
-        auto v = st->verified.find(host_path);
-        if (v == st->verified.end()) {
-            why = check_copy(it->second, host_path);
-            st->verified.emplace(host_path, why);
-            if (why.empty()) logl(fmt("[mods] serve %s (%s): checked, %llu override(s), virtual size %llu B", it->first.c_str(), guest_path ? guest_path : "?",
-                                      (unsigned long long)it->second.plan.overrides.size(), (unsigned long long)it->second.plan.virt_size));
+        const std::string key = path_key(host_path, g_fold_case);
+        auto v = st->verified.find(key);
+        const bool late = v == st->verified.end();   // a copy the start-up check did not find
+        if (late) v = st->verified.emplace(key, Verified{ check_copy(s, host_path), false }).first;
+        why = v->second.why;
+        if (!v->second.logged) {
+            v->second.logged = true;
+            if (why.empty()) logl(fmt("[mods] serve %s (%s): checked, %llu override(s), virtual size %llu B", name, guest_path ? guest_path : "?",
+                                      (unsigned long long)s.plan.overrides.size(), (unsigned long long)s.plan.virt_size));
             else logl(fmt("[mods] serve %s (%s): NOT served, the stock file is read: this copy is not the one the mods were planned on (%s)",
-                          it->first.c_str(), guest_path ? guest_path : "?", why.c_str()));
-        } else why = v->second;
+                          name, guest_path ? guest_path : "?", why.c_str()));
+        }
+        if (late && !why.empty() && s.gameplay) {   // one line per such path (the result is kept)
+            g_copy_mismatch.store(1);
+            // The start-time decision (the build word, the game's online) could not see this copy: this process now runs stock bytes where
+            // a gameplay mod was planned. Online peers would run different content; the session layer reads jsp_mods_copy_mismatch().
+            g_kind.store((int)DigestKind::Refused);
+            logl(fmt("[mods] WARNING: %s (%s) is a copy the start-up check did not find and it differs from the planned copy: this session no "
+                     "longer runs the mod set as listed (online content mismatch)", name, host_path));
+        }
     }
     if (!why.empty()) return nullptr;
     return reinterpret_cast<ps3_fs_vfile*>(new View{ &it->second, guest_path ? guest_path : "" });
@@ -381,12 +411,40 @@ size_t v_read(ps3_fs_vfile* vf, FILE* host, uint64_t pos, void* dst, size_t n)
         if (pos < o.virt + o.len && o.virt < pos + n && !s.logged[i].exchange(true))
             logl(fmt("[mods] serve %s (%s) %s: first read in override segment (%s)", s.plan.archive.c_str(), v->guest.c_str(), o.entry.c_str(), o.mod_id.c_str()));
     }
-    if (got < n) logl(fmt("[mods] serve %s: short read at %llu (%llu of %llu B)", s.plan.archive.c_str(), (unsigned long long)pos,
-                          (unsigned long long)got, (unsigned long long)n));
+    if (got < n) {   // one line per decade of the count, so a file rewritten under the game cannot flood the log
+        const uint64_t c = s.short_reads.fetch_add(1) + 1;
+        uint64_t d = 1;
+        while (d < c && d <= UINT64_MAX / 10) d *= 10;
+        if (d == c) logl(fmt("[mods] serve %s: short read at %llu (%llu of %llu B); %llu short read(s) so far", s.plan.archive.c_str(), (unsigned long long)pos,
+                             (unsigned long long)got, (unsigned long long)n, (unsigned long long)c));
+    }
     return got;
 }
 void v_close(ps3_fs_vfile* vf) { delete reinterpret_cast<View*>(vf); }
 const ps3_fs_vfile_ops k_ops = { v_open, v_size, v_read, v_close };
+
+// The folders under <hdd0>/game (each may hold an install copy of the archives). Narrow names, as ppu_fs opens them.
+std::vector<std::string> game_folders(const std::string& hdd0)
+{
+    std::vector<std::string> v;
+#ifdef _WIN32
+    WIN32_FIND_DATAA d;
+    HANDLE h = FindFirstFileA((hdd0 + "\\game\\*").c_str(), &d);
+    if (h == INVALID_HANDLE_VALUE) return v;
+    do {
+        if ((d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && std::strcmp(d.cFileName, ".") != 0 && std::strcmp(d.cFileName, "..") != 0) v.push_back(d.cFileName);
+    } while (FindNextFileA(h, &d));
+    FindClose(h);
+#else
+    DIR* dir = opendir((hdd0 + "/game").c_str());
+    if (!dir) return v;
+    while (const dirent* e = readdir(dir))
+        if (std::strcmp(e->d_name, ".") != 0 && std::strcmp(e->d_name, "..") != 0) v.push_back(e->d_name);
+    closedir(dir);
+#endif
+    std::sort(v.begin(), v.end());
+    return v;
+}
 
 std::string eboot_id(const char* path)
 {
@@ -406,6 +464,7 @@ std::string eboot_id(const char* path)
  * title_id: PARAM.SFO's (manifests name the game versions they are for). Call once, before the guest starts. */
 extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const char* title_id)
 {
+    g_copy_mismatch.store(0);
     std::string k1, k2, k3;
     const EnvChoice c = choose_env(env_utf8("JSP_MODS", k1), env_utf8("JSP_MODS_DIR", k2), env_utf8("JSP_MODS_LIST", k3));
     if (!c.on) { logl(c.why); return; }   // off means stock: no provider is registered at all
@@ -426,10 +485,11 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
     opt.list_name = c.list;
     opt.title_id = title_id ? title_id : "";
     opt.eboot_id = eboot_id(eboot);
+    std::string disc = vfs_root && *vfs_root ? vfs_root : ".";
+    while (!disc.empty() && (disc.back() == '/' || disc.back() == '\\')) disc.pop_back();
+    const std::string disc_dir = disc + "/PS3_GAME/USRDIR/data/PS3/";
     {
-        std::string disc = vfs_root && *vfs_root ? vfs_root : ".";
-        while (!disc.empty() && (disc.back() == '/' || disc.back() == '\\')) disc.pop_back();
-        LoadIo io(*st, disc + "/PS3_GAME/USRDIR/data/PS3/");
+        LoadIo io(*st, disc_dir);
         st->set = load_mod_set(io, text, opt);
     }
     for (const std::string& l : st->set.log) logl(l);
@@ -439,10 +499,42 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
         for (const Segment& sg : kv.second.segs) if (sg.kind == Segment::ModFile) used[sg.rel] = true;
     for (auto& kv : st->files) if (!used.count(kv.first)) ModsRoot::close(kv.second);
     for (const auto& kv : st->set.plans) {
-        Served& s = st->served[kv.first];
+        Served& s = st->served[archive_key(kv.first.c_str(), g_fold_case)];
         s.plan = kv.second;
         s.check = copy_check(st->set, kv.second);
+        s.gameplay = gameplay_archive(st->set, kv.first);
         s.logged.reset(new std::atomic<bool>[kv.second.overrides.size() + 1]());
+    }
+    // Every copy the game can open, checked now, before the digest is published: hdd0 is PS3_HDD0_ROOT, else the disc root (ppu_fs host_path).
+    bool gameplay_differs = false;
+    if (!st->served.empty()) {
+        const char* h = std::getenv("PS3_HDD0_ROOT");
+        std::string hdd0 = h && *h ? h : disc;
+        while (!hdd0.empty() && (hdd0.back() == '/' || hdd0.back() == '\\')) hdd0.pop_back();
+        const std::vector<std::string> folders = game_folders(hdd0);
+        for (const auto& kv : st->served) {
+            const Served& s = kv.second;
+            int found = 0, ok = 0;
+            for (const std::string& path : copy_paths(disc_dir, hdd0, folders, s.plan.archive)) {
+                FILE* f = std::fopen(path.c_str(), "rb");
+                if (!f) continue;   // no copy here
+                std::fclose(f);
+                ++found;
+                const std::string why = check_copy(s, path.c_str());
+                st->verified[path_key(path.c_str(), g_fold_case)] = Verified{ why, false };
+                if (why.empty()) { ++ok; continue; }
+                logl(fmt("[mods] check %s: the copy %s is not the one the mods were planned on (%s): it is read stock%s", s.plan.archive.c_str(), path.c_str(),
+                         why.c_str(), s.gameplay ? ", and a gameplay mod changes this archive" : ""));
+                if (s.gameplay) gameplay_differs = true;
+            }
+            logl(fmt("[mods] check %s: %d of %d cop%s the game can open match the plan", s.plan.archive.c_str(), ok, found, found == 1 ? "y" : "ies"));
+        }
+    }
+    const DigestKind kind = after_copy_check(st->set.digest_kind, gameplay_differs);
+    if (kind != st->set.digest_kind) {
+        logl("[mods] set: refused: a copy of an archive a gameplay mod changes differs from the planned copy (see the check lines); the game's "
+             "online and rollback are off, local play reads that copy stock");
+        st->set.digest_kind = kind;
     }
     g_kind.store((int)st->set.digest_kind);
     g_st = st;
@@ -454,6 +546,10 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
     }
     if (!game_online_allowed(st->set.digest_kind)) jsp_online_refuse_for_mods();
 }
+
+/* 1 when a copy of an archive a gameplay mod changes was first opened after start and differs from the planned copy: this process reads it
+ * stock, so a running online session no longer runs the set the peers agreed on (the session layer may end it as a content mismatch). */
+extern "C" int jsp_mods_copy_mismatch(void) { return g_copy_mismatch.load(); }
 
 /* The rollback build word with the mod set folded in (jsp_mods_glue.h net_build). 1 = *out is the word to use; 0 = refused (gameplay mods
  * were listed but not all applied): rollback must not start. */

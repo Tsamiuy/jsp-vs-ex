@@ -317,8 +317,9 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
 
 /* ENHANCEMENT (mods, D40 P2): a gameplay mod set (jsp_mods.cpp: a gameplay digest, or gameplay mods listed but not all applied) cannot
  * be compared over the game's own online (Ranked and Free over np_psnr carry no build word), so that online is off for the session:
- * PS3_NET_ONLINE is removed (every gate of the runtime's online needs it, see jsp_net_game.cpp decide_env) and JSP_NET_REFUSED=1 tells the
- * Online page that this session refused it. Called from main() (jsp_mods_init), after apply() and before the guest starts. */
+ * PS3_NET_ONLINE is removed (every gate of the runtime's online needs it, see jsp_net_game.cpp decide_env) and JSP_MODS_ONLINE_OFF=1 tells
+ * the port's Online page (jsp_net_online.h kKeyModsOff) that the mods turned it off, which a restart does not change while the mods are on.
+ * JSP_NET_REFUSED is not set: that key means a refused rollback start. Called from main() (jsp_mods_init), after apply() and before the guest starts. */
 static bool g_mods_refused = false;
 static void refuse_for_mods(const Env& env)
 {
@@ -326,7 +327,7 @@ static void refuse_for_mods(const Env& env)
     env.log("[mods] game online refused: gameplay mod set active");
     if (env.get("PS3_NET_ONLINE")) {   /* any value, even "0", is on for the runtime */
         env.set("PS3_NET_ONLINE", "");   /* "" removes the variable (the boot's set) */
-        env.set("JSP_NET_REFUSED", "1");
+        env.set("JSP_MODS_ONLINE_OFF", "1");
         env.log("[online] the game's own online is off for this session: a gameplay mod set is active (mods.txt)");
     }
     g_view.online = 0;
