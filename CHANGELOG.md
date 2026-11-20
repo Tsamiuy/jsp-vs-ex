@@ -4,6 +4,12 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### Technical changes
+
+#### Added
+
+- **Mods folder: a `roster` section in `mod.json` (ENHANCEMENT, opt-in, US 1.00 only).** A mod that declares interface `roster` 1 can add fighter ids 19, 20 or 21 to the character select, behind a given id, with an optional intro-logo alias and an owned flag, with no rebuild (`jsp_roster.cpp` puts it into the guest; the pure rules, list and digest are in `jsp_mods_core.h`). The list is capped at 56 ids (the random select's stack buffer; the three allowed ids make 55). A roster mod runs only on BLUS31519 and must name it in `game.title_ids` (the EU build is unverified); an id already in the list or out of range, an `after` that names nothing, or a `logo_as` that is not a stock fighter id (on the stock list, below 200) refuses the whole mod. A roster mod is gameplay: its fighters are part of the digest, so online refuses mismatched sets. The guest side checks every expected byte first (both list pointers, the whole 52-id stock list and its terminator, the code the logo alias relies on, the free memory for the copy); on any mismatch, or if the copy is later found changed, the list pointers go back to the stock list, nothing further is hooked and the set is reported as not run as listed. The list-repoint approach was first shown by a community mod. **A fight with an added fighter is untested, and this change serves no model, voice or card art for one: do not pick an added fighter unless its full data is in place (`owned` defaults to true, so its card is selectable).** Tested: host test `installer/tools/mods_overlay_test.sh` (278 checks; 347 with the toolkit glue), the port syntax check, and one Proton run with a roster mod without assets (the list of 53 ids was written at 0x0086FE00, the owned bit stamped, the select shows a placeholder card and the page counter 01/08 instead of 01/07). Not tested: a fighter with real assets, selecting an added fighter or starting a fight with one, JSP_UNLOCK_ALL together with a roster (the shared save-update hook is compiled and host-checked only), the EU build, a Windows run.
+
 ## [0.6.1] - 2026-11-20
 
 ### For players
