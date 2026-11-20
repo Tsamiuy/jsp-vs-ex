@@ -419,9 +419,10 @@ the game's own online in that file must stay **off** (`enabled = 0`): `enabled =
    It is in `<install folder>\shared\repsn.ini` for a portable install, else in `%APPDATA%\PS3Recomp\repsn.ini`
    (`PS3RECOMP_SHARED_DIR` picks another folder). A second `repsn.ini` in the game folder (`<install folder>` for a
    portable install, else `%APPDATA%\JSP Fan Revival\`) can override these keys, so it must not say `enabled = 1` either.
-   The easy way: in the launcher's **Online** tab choose re-psn, fill in Server and Online name and save, then choose
-   **Off** and save again; Off writes `enabled = 0` and keeps a valid server and name. Choosing re-psn there again (or
-   pressing Start Game with re-psn chosen) writes `enabled = 1` and rollback is refused at the next start.
+   The easy way: in the launcher's **Online** tab leave the method on **Off**, fill in Server and Online name and save;
+   Off writes `enabled = 0` and keeps a valid server and name. Do not choose re-psn or Community there while rollback
+   is on: the launcher refuses to save it ("Rollback is on ... only one online method can be active"), and Start Game
+   stops with the same message. To use the game's own online again, turn rollback off in Port Settings > Online first.
 2. `play_settings.txt` (in the install folder, or `%APPDATA%\JSP Fan Revival\`) gets these lines:
 
    ```

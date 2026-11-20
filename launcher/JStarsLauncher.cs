@@ -1448,7 +1448,6 @@ namespace JStarsLauncher
 
         void OnlineChanged()
         {
-            repsnPanel.Enabled = rbOnRepsn.Checked;
             commPanel.Enabled = rbOnComm.Checked;
             if (loading) return;
             onlineDirty = true;
@@ -1530,6 +1529,25 @@ namespace JStarsLauncher
             OnlineChanged();
         }
 
+        // True when play_settings.txt turns rollback on, read the way jsp-launcher.exe (launcher.c load_env) and the
+        // game do: a line is "JSP_ROLLBACK=" at column 0 (# and ; lines are comments; letter case is ignored, like
+        // Windows environment names), the last such line wins, only trailing space, CR and LF are trimmed, and the
+        // value is on when it is not empty and its first character is not '0'. Read only, never written; the file is
+        // read at the time of the call because the in-game Port Settings page writes it.
+        bool RollbackOn()
+        {
+            string v = "";
+            try
+            {
+                if (!File.Exists(settingsFile)) return false;
+                foreach (string line in File.ReadAllLines(settingsFile))
+                    if (line.StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)) v = line.Substring(13).TrimEnd(' ', '\r', '\n');
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return v.Length != 0 && v[0] != '0';
+        }
+
         // Reads both files into the controls. A file that cannot be used is reported and left alone.
         void LoadOnline()
         {
@@ -1541,6 +1559,11 @@ namespace JStarsLauncher
             string note = e1 != null ? e1 : e2;
             bool on1 = ri.Get("repsn", "enabled") == "1", on2 = ci.Get("community", "enabled") == "1";
             if (on1 && on2) { note = "Both files were switched on; saving turns one off."; on1 = on2 = false; }
+            if ((on1 || on2) && RollbackOn())
+            {
+                string rn = "Rollback is on (Port Settings > Online) and so is this method; the game refuses to start both. Turn one of them off.";
+                note = note == null ? rn : note + " " + rn;
+            }
             rbOnRepsn.Checked = on1; rbOnComm.Checked = on2; rbOnOff.Checked = !on1 && !on2;
             repsnServerBox.Text = ri.Get("repsn", "server") ?? "";
             repsnNameBox.Text = ri.Get("repsn", "name") ?? "";
@@ -1556,7 +1579,7 @@ namespace JStarsLauncher
             activeLabel = ci.Get("community", "active") ?? "";
             presetLabelBox.Text = presetAddrBox.Text = presetNameBox.Text = "";
             RefreshPresetList();
-            repsnPanel.Enabled = rbOnRepsn.Checked; commPanel.Enabled = rbOnComm.Checked;
+            repsnPanel.Enabled = true; commPanel.Enabled = rbOnComm.Checked;
             onlineDirty = false;
             onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
             onlineMsg.Text = note ?? "";
@@ -1575,6 +1598,8 @@ namespace JStarsLauncher
                 if (!OnlineIni.ValidAddress(server)) return "re-psn: the server is a host name or IP address, optionally :port (1 to 65535).";
                 if (!OnlineIni.ValidName(rname)) return "re-psn: the online name is 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.";
             }
+            if (m != 0 && RollbackOn())
+                return "Rollback is on (Port Settings > Online). Turn it off there first, or keep this tab on Off: only one online method can be active.";
             Preset act = null;
             foreach (Preset q in presets) if (string.Equals(q.Label, activeLabel, StringComparison.OrdinalIgnoreCase)) act = q;
             if (m == 2 && act == null) return "Community server: pick a preset and press \"Use this one\" (add one first if the list is empty).";
@@ -1585,7 +1610,7 @@ namespace JStarsLauncher
             e = OnlineIni.Load(CommunityPath(), out ci);
             if (e != null) return e;
 
-            bool writeR = ri.Exists || m == 1, writeC = ci.Exists || m == 2 || presets.Count > 0;
+            bool writeR = ri.Exists || m == 1 || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname)), writeC = ci.Exists || m == 2 || presets.Count > 0;
             if (writeR)
             {
                 ri.SetPreamble("; re-psn server settings. Written by the launcher; the game reads it.");
