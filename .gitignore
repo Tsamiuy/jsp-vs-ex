@@ -182,6 +182,8 @@ __pycache__/
 !/installer/tools/settings_test.sh
 !/installer/tools/port_overlay_test.c
 !/installer/tools/pad_join_test.c
+!/installer/tools/psow_file_test.c
+!/installer/tools/psow_file_source_test.py
 !/installer/tools/overlay_font_test.cpp
 !/installer/tools/overlay_font_test.sh
 !/installer/tools/session_manifest_test.cpp

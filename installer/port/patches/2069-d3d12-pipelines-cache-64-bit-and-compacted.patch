@@ -1,0 +1,507 @@
+Patch 2069 (fix line): pipelines.bin is read with 64-bit offsets, never appends a key it already holds, and is compacted.
+
+Symptom: after a long time of play the pipeline warm-up (patch 2068) did nothing. The reader took the size of pipelines.bin
+with `long ftell`, which is 32 bits on Windows: at 2 GiB or more the size reads as zero or negative, the buffer stayed NULL and
+the loader returned with no log line, so the warm table stayed empty for the whole session. Worse, the noted-set that stops a
+pipeline being appended twice is filled from that same read, so with the read failing every pipeline of every run was appended
+again: the file grew by a whole table (1.5 to 2.25 GB) per start (4.35 and 4.50 GB were seen). A correct file can reach about
+2.26 GB by itself (16384 records, mean 137.7 KB), so the 2^31 line is crossed at about 15,590 records.
+
+New libs/video/psow_file.h (plain C, host-tested by installer/tools/psow_file_test.c):
+ - every size and offset is 64-bit (_ftelli64/_fseeki64 on Windows, ftello/fseeko elsewhere); the same in shader_cache.bin's
+   loader (sc_open), which used `long good = ftell(in)`.
+ - every way out of the loader logs one [PSOW] line with the reason and the size; success logs the byte size, the record
+   count and how many were repeats, over capacity or a damaged tail.
+ - the file is walked once, seeking over the bytecode (one small read per record, so a 4.5 GB file needs no memory); when it
+   has repeated keys, a damaged tail (a torn record would hide everything appended after it), more records than the table
+   holds, or no file head, it is written again to pipelines.bin.tmp (first record of each key, at most 16384) and replaces the
+   old file in one step (MoveFileEx REPLACE_EXISTING|WRITE_THROUGH on Windows, rename elsewhere) after flush and sync. When any
+   step fails the temporary file is removed, the old file is kept, and warm-up is off for the run with a log line.
+ - a file head {PSWH, format, stamp, record head size} records the build: the stamp hashes this file's build time and the record layout. Records
+   are keyed by a hash of the translated bytecode, so records of an older translator are never hit again, yet were built at every
+   start and filled the 16384 slots until new pipelines were no longer kept. A head from another build empties the file. A file
+   without a head (written before this patch) is kept (deduplicated, given a head). ASSUMPTION: the build time of this file is
+   the proxy for a translator change; a translator-only rebuild keeps the stamp (delete pipelines.bin then).
+ - the capacity is a real limit: PSOW_SLOTS 32768 keys at half load = 16384 records (as before). A full file says so once.
+ - psow_note loads the file first (psow_start under the lock), so a pipeline built before the first frame's psow_start cannot
+   be appended a second time; the file image (up to gigabytes) is freed when the last warm-up build is done.
+
+Not tested on the GPU or under Wine: the host test (installer/tools/psow_file_test.c) covers the file logic with a sparse file over 2 GiB.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 1111111..2222222 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -23,6 +23,7 @@
+ #include "rsx_present_policy.h"
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
++#include "psow_file.h"   /* pipelines.bin: 64-bit offsets, bounded, compacted (patch 2069) */
+ #include "rsx_vpull.h"
+ #include "rsx_texture_layout.h"
+ #include "jsp_ex_logo.h"   /* optional logo art (patch 2013) */
+@@ -2120,7 +2121,7 @@
+     if (!c->on) return;
+     FILE* in = fopen(c->file, "rb");
+     const int existed = in != NULL;
+-    long good = 0;
++    psw_off good = 0;   /* patch 2069: 64-bit (a long is 32 bits on Windows and reads 2 GiB or more as negative) */
+     if (in) {
+         struct { u32 magic, size; u64 key; } h;
+         while (fread(&h, sizeof h, 1, in) == 1 && h.magic == 0x31435344u &&
+@@ -2129,14 +2130,17 @@
+             if (!data) break;
+             if (fread(data, 1, h.size, in) != h.size) { free(data); break; }
+             sc_set(c, sc_find(c, h.key), h.key, data, h.size);
+-            good = ftell(in);
++            const psw_off at = psw_tell(in);
++            if (at < 0) { fprintf(stderr, "[SHADERCACHE] %s: cannot read the file position (errno %d), loading stops at %u entries%c", c->file, errno, c->n, 10); break; }
++            good = at;
+         }
+         fclose(in);
+     }
+     /* Later records go after the last whole one. */
+     c->out = fopen(c->file, existed ? "r+b" : "wb");
+-    if (c->out) fseek(c->out, good, SEEK_SET);
+-    fprintf(stderr, "[SHADERCACHE] %s: %u loaded, %ld bytes%c", c->file, c->n, good, 10);
++    if (c->out && psw_seek(c->out, good, SEEK_SET) != 0) { fclose(c->out); c->out = NULL; }
++    if (!c->out) fprintf(stderr, "[SHADERCACHE] %s: cannot be written, new entries are not kept%c", c->file, 10);
++    fprintf(stderr, "[SHADERCACHE] %s: %u loaded, %lld bytes%c", c->file, c->n, (long long)good, 10);
+ }
+ static void sc_store(SCache* c, SCSlot* sl, u64 key, const void* data, u32 size)
+ {
+@@ -2208,11 +2212,15 @@
+ #define PSOW_MAX_BYTES (1u << 20)
+ typedef struct { u32 magic, vs_len, ps_len, n_il; u64 key; D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; } PsoRec;
+ typedef struct { u64 key; ID3D12PipelineState* pso; } PsowSlot;
+-#define PSOW_SLOTS 16384u
++/* Patch 2069: 32768 slots hold at most PSOW_MAX_RECORDS = 16384 pipelines (the same as before, now at half load so a probe always ends).
++ * That is the capacity of pipelines.bin: at 137.7 KB a record (the measured mean) a full file is 2.26 GB, and the most a record can
++ * be is sizeof(PsoRec) + 2 * PSOW_MAX_BYTES. When the file is full a new pipeline is built but not noted, and the log says so once. */
++#define PSOW_SLOTS 32768u
++#define PSOW_MAX_RECORDS (PSOW_SLOTS / 2u)
+ static PsowSlot s_psow_tab[PSOW_SLOTS];
+ static SRWLOCK s_psow_lock = SRWLOCK_INIT;
+-static u64 s_psow_noted[PSOW_SLOTS];
+-static FILE* s_psow_out;
++static PswCache s_psow_cache;   /* the file, the keys already in it, the append handle (guarded by s_psow_lock) */
++static int s_psow_ran;
+ static volatile LONG s_psow_built, s_psow_taken, s_psow_total;
+ static int psow_on(void)
+ {
+@@ -2275,31 +2283,29 @@
+     ReleaseSRWLockExclusive(&s_psow_lock);
+     if (pso) pso->lpVtbl->Release(pso);   /* already there, or the table is full */
+ }
+-/* 1 when key was already noted (this run or a file record). */
+-static int psow_noted(u64 key)
+-{
+-    u32 i = (u32)(key ^ (key >> 31)) & (PSOW_SLOTS - 1u), n = 0;
+-    while (s_psow_noted[i] && s_psow_noted[i] != key) { if (++n >= PSOW_SLOTS) return 1; i = (i + 1u) & (PSOW_SLOTS - 1u); }
+-    if (s_psow_noted[i] == key) return 1;
+-    s_psow_noted[i] = key;
+-    return 0;
++static void psow_start(void);
++/* The identity of this build's pipelines: a rebuild of this file (the translator output is what the keys hash), or a change
++ * to the record layout, gives another stamp, and pipelines.bin written under a different one is emptied at the next start
++ * (its records would be built every start for nothing and fill the file). ASSUMPTION: the build time of this file is the
++ * proxy for a translator change; a change to a translator file alone, built without this file, keeps the stamp: delete
++ * pipelines.bin then. */
++static u64 psow_stamp(void)
++{
++    u64 h = sc_hash(14695981039346656037ull, __DATE__ " " __TIME__, sizeof(__DATE__ " " __TIME__));
++    const u64 lay[3] = { sizeof(PsoRec), sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC), PSW_FORMAT };
++    return sc_hash(h, lay, sizeof lay);
+ }
+-/* After a guest-FP pipeline was built: append it to pipelines.bin once. */
++/* After a guest-FP pipeline was built: append it to pipelines.bin once (a key already in the file is never appended). */
+ static void psow_note(const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pd, u64 key)
+ {
+     if (!psow_on() || !psow_guest(pd)) return;
++    psow_start();   /* the file is read, deduplicated and its keys noted before the first record is appended */
+     AcquireSRWLockExclusive(&s_psow_lock);
+-    if (!psow_noted(key)) {
+-        if (!s_psow_out) s_psow_out = fopen("pipelines.bin", "ab");
+-        if (s_psow_out) {
+-            PsoRec r; memset(&r, 0, sizeof r);
+-            r.magic = PSOW_MAGIC; r.vs_len = (u32)pd->VS.BytecodeLength; r.ps_len = (u32)pd->PS.BytecodeLength;
+-            r.n_il = pd->InputLayout.NumElements; r.key = key; r.pd = *pd; psow_plain(&r.pd);
+-            fwrite(&r, sizeof r, 1, s_psow_out);
+-            fwrite(pd->VS.pShaderBytecode, 1, r.vs_len, s_psow_out);
+-            fwrite(pd->PS.pShaderBytecode, 1, r.ps_len, s_psow_out);
+-            fflush(s_psow_out);
+-        }
++    if (s_psow_ran) {
++        PsoRec r; memset(&r, 0, sizeof r);
++        r.magic = PSOW_MAGIC; r.vs_len = (u32)pd->VS.BytecodeLength; r.ps_len = (u32)pd->PS.BytecodeLength;
++        r.n_il = pd->InputLayout.NumElements; r.key = key; r.pd = *pd; psow_plain(&r.pd);
++        psw_note(&s_psow_cache, &r, pd->VS.pShaderBytecode, pd->PS.pShaderBytecode);
+     }
+     ReleaseSRWLockExclusive(&s_psow_lock);
+ }
+@@ -2322,40 +2328,51 @@
+         if (SUCCEEDED(s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso)) && pso)
+             psow_put(t->rec->key, pso);
+         if (InterlockedIncrement(&s_psow_built) == s_psow_total)
++        {
+             fprintf(stderr, "[PSOW] warmed %ld noted pipelines in %.1f s%c", s_psow_total, perf_now() - s_psow_t0, 10);
++            /* every build is done and nothing reads the file image again (up to gigabytes): give it back */
++            free(s_psow_items); s_psow_items = NULL; free(s_psow_buf); s_psow_buf = NULL;
++        }
+     }
+     return 0;
+ }
+-/* Once, as soon as the device and the guest root signature exist: start building the noted pipelines. */
++/* Once, as soon as the device and the guest root signature exist: read (and if needed compact) pipelines.bin, then start
++ * building the noted pipelines. Every way out of the file handling says why in the log (psow_file.h). */
+ static void psow_start(void)
+ {
+-    static int ran = 0;
+-    if (ran || !psow_on() || !s_d3d.device || !s_d3d.vp_root_sig) return;
+-    ran = 1;
++    if (!psow_on() || !s_d3d.device || !s_d3d.vp_root_sig) return;   /* not up yet: tried again next frame, nothing to say */
++    AcquireSRWLockExclusive(&s_psow_lock);
++    if (s_psow_ran) { ReleaseSRWLockExclusive(&s_psow_lock); return; }
++    s_psow_ran = 1;
+     psow_il_init();
+-    FILE* f = fopen("pipelines.bin", "rb");
+-    if (!f) { fprintf(stderr, "[PSOW] no pipelines noted yet (first start)%c", 10); return; }
+-    fseek(f, 0, SEEK_END); const long sz = ftell(f); fseek(f, 0, SEEK_SET);
+-    s_psow_buf = sz > 0 ? (u8*)malloc((size_t)sz) : NULL;
+-    if (!s_psow_buf || fread(s_psow_buf, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(s_psow_buf); s_psow_buf = NULL; return; }
+-    fclose(f);
+-    int cap = 0; long pos = 0;
+-    while (pos + (long)sizeof(PsoRec) <= sz) {   /* a torn last record ends the list */
+-        PsoRec* r = (PsoRec*)(s_psow_buf + pos);
+-        if (r->magic != PSOW_MAGIC || r->vs_len > PSOW_MAX_BYTES || r->ps_len > PSOW_MAX_BYTES || (r->n_il != 0 && r->n_il != 16) ||
+-            pos + (long)sizeof(PsoRec) + (long)r->vs_len + (long)r->ps_len > sz) break;
+-        pos += (long)sizeof(PsoRec) + r->vs_len + r->ps_len; cap++;
+-    }
+-    s_psow_items = (PsowItem*)calloc(cap ? cap : 1, sizeof(PsowItem));
+-    LONG n = 0; pos = 0;
+-    for (int i = 0; i < cap; i++) {
+-        PsoRec* r = (PsoRec*)(s_psow_buf + pos);
+-        const u8* vs = s_psow_buf + pos + sizeof(PsoRec);
+-        if (!psow_noted(r->key)) { s_psow_items[n].rec = r; s_psow_items[n].vs = vs; s_psow_items[n].ps = vs + r->vs_len; n++; }
+-        pos += (long)sizeof(PsoRec) + r->vs_len + r->ps_len;
++    if (!psw_init(&s_psow_cache, "pipelines.bin", (uint32_t)sizeof(PsoRec), PSOW_MAX_BYTES, PSOW_MAX_RECORDS, psow_stamp())) {
++        s_psow_cache.dead = 1; fprintf(stderr, "[PSOW] out of memory for the key table; pipelines are not noted or warmed%c", 10);
++    }
++    PswImage img; memset(&img, 0, sizeof img);
++    const int have = s_psow_cache.dead ? -1 : psw_prepare(&s_psow_cache);
++    int cap = 0; LONG n = 0;
++    if (have > 0 && psw_read_all(&s_psow_cache, &img) == 0) {
++        s_psow_buf = img.buf;
++        const size_t sz = img.size; size_t pos = img.first;
++        while (pos + sizeof(PsoRec) <= sz) {   /* the file was just made whole; still a bad record ends the list */
++            PsoRec* r = (PsoRec*)(s_psow_buf + pos);
++            if (r->magic != PSOW_MAGIC || r->vs_len > PSOW_MAX_BYTES || r->ps_len > PSOW_MAX_BYTES || (r->n_il != 0 && r->n_il != 16) ||
++                sizeof(PsoRec) + r->vs_len + r->ps_len > sz - pos) break;
++            pos += sizeof(PsoRec) + r->vs_len + r->ps_len; cap++;
++        }
++        s_psow_items = (PsowItem*)calloc(cap ? cap : 1, sizeof(PsowItem));
++        pos = img.first;
++        for (int i = 0; s_psow_items && i < cap; i++) {
++            PsoRec* r = (PsoRec*)(s_psow_buf + pos);
++            const u8* vs = s_psow_buf + pos + sizeof(PsoRec);
++            s_psow_items[n].rec = r; s_psow_items[n].vs = vs; s_psow_items[n].ps = vs + r->vs_len; n++;
++            pos += sizeof(PsoRec) + r->vs_len + r->ps_len;
++        }
++        if (!s_psow_items) fprintf(stderr, "[PSOW] out of memory for %d records; no pipelines are warmed%c", cap, 10);
+     }
+     s_psow_total = n;
+-    if (!n) return;
++    ReleaseSRWLockExclusive(&s_psow_lock);
++    if (!n) { if (s_psow_buf) { free(s_psow_buf); s_psow_buf = NULL; } free(s_psow_items); s_psow_items = NULL; return; }
+     SYSTEM_INFO si; GetSystemInfo(&si);
+     int nt = (int)si.dwNumberOfProcessors / 2; if (nt < 1) nt = 1; if (nt > 8) nt = 8;
+     { const char* e = getenv("PSO_WARMUP_THREADS"); if (e && atoi(e) > 0) nt = atoi(e); }
+diff --git a/libs/video/psow_file.h b/libs/video/psow_file.h
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/libs/video/psow_file.h
+@@ -0,0 +1,283 @@
++/* Patch 2069: the pipeline warm-up file (pipelines.bin), 64-bit offsets, bounded and compacted.
++ *
++ * Plain C with no Direct3D types, so a host test can compile it (installer/tools/psow_file_test.c).
++ *
++ * File layout: one file head {'PSWH', format, stamp, record head size, 0} (24 bytes), then records. A record is a fixed head of `hdr_size` bytes
++ * whose first 24 bytes are PswRecHead (magic, vs_len, ps_len, n_il, key), then vs_len + ps_len bytes of shader bytecode.
++ * A file without the head (written before this patch) is read as records from byte 0 and given a head when it is rewritten.
++ *
++ * Why this exists: the reader took the file size with `long` (32 bits on Windows), so a file of 2 GiB or more read as
++ * negative, nothing was loaded and nothing was said; with an empty noted-set every pipeline of the run was appended again,
++ * so the file grew by a whole table each start. Here every size and offset is 64-bit, every early return logs its reason,
++ * a key already in the file is never appended, and a file with repeated keys, a damaged tail, more records than the table
++ * holds, or a head from another build is rewritten to a temporary file that replaces the old one in one step. */
++#ifndef PSOW_FILE_H
++#define PSOW_FILE_H
++#include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++#ifdef _WIN32
++#include <windows.h>
++#include <io.h>
++#else
++#include <sys/types.h>
++#include <unistd.h>
++#endif
++
++#ifndef PSW_LOG
++#define PSW_LOG(...) do { fprintf(stderr, "[PSOW] "); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
++#endif
++
++typedef int64_t psw_off;   /* every file size and offset in this file: never `long`, never ftell/fseek */
++#ifdef _WIN32
++static psw_off psw_tell(FILE* f) { return (psw_off)_ftelli64(f); }
++static int psw_seek(FILE* f, psw_off o, int whence) { return _fseeki64(f, o, whence); }
++#else
++typedef char psw_off_t_is_64_bit[sizeof(off_t) == 8 ? 1 : -1];
++static psw_off psw_tell(FILE* f) { return (psw_off)ftello(f); }
++static int psw_seek(FILE* f, psw_off o, int whence) { return fseeko(f, (off_t)o, whence); }
++#endif
++
++/* Replace dst with tmp in one step; the old dst stays when this fails. (A test may define PSW_REPLACE.) */
++#ifndef PSW_REPLACE
++#ifdef _WIN32
++#define PSW_REPLACE(tmp, dst) (MoveFileExA((tmp), (dst), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 0 : -1)
++#else
++#define PSW_REPLACE(tmp, dst) rename((tmp), (dst))
++#endif
++#endif
++static int psw_sync(FILE* f)
++{
++#ifdef _WIN32
++    return _commit(_fileno(f));
++#else
++    return fsync(fileno(f));
++#endif
++}
++
++#define PSW_REC_MAGIC  0x32575350u   /* "PSW2": a record */
++#define PSW_FILE_MAGIC 0x48575350u   /* "PSWH": the file head */
++#define PSW_FORMAT     3u
++typedef struct { uint32_t magic, vs_len, ps_len, n_il; uint64_t key; } PswRecHead;   /* first 24 bytes of a record */
++typedef struct { uint32_t magic, format; uint64_t stamp; uint32_t hdr_size, reserved; } PswFileHead;   /* 24 bytes; hdr_size lets a reader (the support bundle) walk the records */
++
++/* Set of keys already in the file (this run or on disk): at most `max` keys in a table twice that size (so a probe ends). */
++typedef struct { uint64_t* slot; uint32_t slots, n, max; } PswNoted;
++static int psw_noted_init(PswNoted* s, uint32_t max)
++{
++    uint32_t n = 16; while (n < max * 2u) n <<= 1;
++    s->slot = (uint64_t*)calloc(n, sizeof(uint64_t)); s->slots = n; s->n = 0; s->max = max;
++    return s->slot != NULL;
++}
++static void psw_noted_clear(PswNoted* s) { if (s->slot) memset(s->slot, 0, (size_t)s->slots * sizeof(uint64_t)); s->n = 0; }
++static void psw_noted_free(PswNoted* s) { free(s->slot); s->slot = NULL; s->slots = s->n = 0; }
++/* 0 = new key, now noted; 1 = already noted; 2 = new but the set is at its maximum (not noted). */
++static int psw_noted_add(PswNoted* s, uint64_t key)
++{
++    uint32_t i = (uint32_t)(key ^ (key >> 29)) & (s->slots - 1u);
++    while (s->slot[i]) { if (s->slot[i] == key) return 1; i = (i + 1u) & (s->slots - 1u); }
++    if (s->n >= s->max) return 2;
++    s->slot[i] = key; s->n++;
++    return 0;
++}
++
++typedef struct {
++    const char* path;
++    uint32_t hdr_size;      /* bytes of a record's fixed head (>= sizeof(PswRecHead)) */
++    uint32_t max_bytes;     /* most bytes of one shader */
++    uint32_t max_records;   /* the capacity of the file: the most distinct records it keeps */
++    uint64_t stamp;         /* identity of the build whose pipelines these are (changes when the translator or the record layout does) */
++    PswNoted noted;
++    FILE* out;
++    psw_off size;           /* file size after prepare */
++    uint32_t n_records;     /* records in the file after prepare */
++    int ready, dead, full_said;
++} PswCache;
++
++static int psw_init(PswCache* c, const char* path, uint32_t hdr_size, uint32_t max_bytes, uint32_t max_records, uint64_t stamp)
++{
++    memset(c, 0, sizeof *c);
++    c->path = path; c->hdr_size = hdr_size; c->max_bytes = max_bytes; c->max_records = max_records; c->stamp = stamp;
++    return psw_noted_init(&c->noted, max_records);
++}
++
++/* A valid record head at pos, or 0. */
++static int psw_rec_at(const PswCache* c, FILE* f, psw_off pos, psw_off size, PswRecHead* h, psw_off* end)
++{
++    if (pos < 0 || size - pos < (psw_off)c->hdr_size) return 0;
++    if (psw_seek(f, pos, SEEK_SET) != 0 || fread(h, sizeof *h, 1, f) != 1) return 0;
++    if (h->magic != PSW_REC_MAGIC || !h->key || h->vs_len > c->max_bytes || h->ps_len > c->max_bytes ||
++        (h->n_il != 0 && h->n_il != 16)) return 0;
++    *end = pos + (psw_off)c->hdr_size + (psw_off)h->vs_len + (psw_off)h->ps_len;
++    return *end <= size;
++}
++
++typedef struct { psw_off size, good_end; int has_head, stamp_ok; uint64_t n_rec, n_unique, n_repeat, n_over; } PswScan;
++/* Walk the records (seeking over the bytecode, so a multi-gigabyte file costs one small read per record). Distinct keys go
++ * into c->noted. Returns 0, or -1 when the size cannot be read. */
++static int psw_scan(PswCache* c, FILE* f, PswScan* s)
++{
++    memset(s, 0, sizeof *s);
++    if (psw_seek(f, 0, SEEK_END) != 0) return -1;
++    s->size = psw_tell(f);
++    if (s->size < 0 || psw_seek(f, 0, SEEK_SET) != 0) return -1;
++    psw_off pos = 0; PswFileHead fh;
++    if (s->size >= (psw_off)sizeof fh && fread(&fh, sizeof fh, 1, f) == 1 && fh.magic == PSW_FILE_MAGIC) {
++        s->has_head = 1; s->stamp_ok = fh.format == PSW_FORMAT && fh.stamp == c->stamp && fh.hdr_size == c->hdr_size;
++        pos = (psw_off)sizeof fh;
++        if (!s->stamp_ok) { s->good_end = pos; return 0; }
++    }
++    PswRecHead h; psw_off end;
++    while (psw_rec_at(c, f, pos, s->size, &h, &end)) {
++        s->n_rec++;
++        const int r = psw_noted_add(&c->noted, h.key);
++        if (r == 0) s->n_unique++; else if (r == 1) s->n_repeat++; else s->n_over++;
++        pos = end;
++    }
++    s->good_end = pos;
++    return 0;
++}
++
++/* Write the file again to path.tmp (the head, then the first record of each key, at most max_records; none when
++ * keep_records is 0) and replace the old file with it. The old file is not touched unless every byte is written and synced
++ * and the replacement succeeds; on any failure the temporary file is removed and -1 is returned. */
++static int psw_rewrite(PswCache* c, int keep_records, uint64_t* kept)
++{
++    char tmp[1024]; PswNoted seen; FILE *in = NULL, *out = NULL; int rc = -1; const char* why = "";
++    *kept = 0;
++    if (snprintf(tmp, sizeof tmp, "%s.tmp", c->path) >= (int)sizeof tmp) { PSW_LOG("%s: path too long, file kept as it is", c->path); return -1; }
++    if (!psw_noted_init(&seen, c->max_records)) { PSW_LOG("%s: out of memory, file kept as it is", c->path); return -1; }
++    out = fopen(tmp, "wb");
++    if (!out) { why = "cannot create the temporary file"; goto done; }
++    PswFileHead fh = { PSW_FILE_MAGIC, PSW_FORMAT, c->stamp, c->hdr_size, 0 };
++    if (fwrite(&fh, sizeof fh, 1, out) != 1) { why = "cannot write the head"; goto done; }
++    if (keep_records) {
++        in = fopen(c->path, "rb");
++        if (!in) { why = "cannot reopen the old file"; goto done; }
++        if (psw_seek(in, 0, SEEK_END) != 0) { why = "cannot size the old file"; goto done; }
++        const psw_off size = psw_tell(in); psw_off pos = 0; PswFileHead oh;
++        if (size < 0 || psw_seek(in, 0, SEEK_SET) != 0) { why = "cannot size the old file"; goto done; }
++        if (size >= (psw_off)sizeof oh && fread(&oh, sizeof oh, 1, in) == 1 && oh.magic == PSW_FILE_MAGIC) pos = (psw_off)sizeof oh;
++        PswRecHead h; psw_off end; static unsigned char buf[1 << 16];
++        while (psw_rec_at(c, in, pos, size, &h, &end)) {
++            if (psw_noted_add(&seen, h.key) == 0) {
++                psw_off at = pos;
++                if (psw_seek(in, at, SEEK_SET) != 0) { why = "seek failed"; goto done; }
++                while (at < end) {
++                    const size_t n = (size_t)((end - at) < (psw_off)sizeof buf ? (end - at) : (psw_off)sizeof buf);
++                    if (fread(buf, 1, n, in) != n) { why = "read failed"; goto done; }
++                    if (fwrite(buf, 1, n, out) != n) { why = "write failed"; goto done; }
++                    at += (psw_off)n;
++                }
++                (*kept)++;
++            }
++            pos = end;
++        }
++    }
++    if (fflush(out) != 0 || ferror(out) || psw_sync(out) != 0) { why = "write or sync failed"; goto done; }
++    if (fclose(out) != 0) { out = NULL; why = "close failed"; goto done; }
++    out = NULL;
++    if (in) { fclose(in); in = NULL; }
++    if (PSW_REPLACE(tmp, c->path) != 0) { why = "cannot replace the old file"; goto done; }
++    rc = 0;
++done:
++    if (out) fclose(out);
++    if (in) fclose(in);
++    if (rc != 0) { remove(tmp); PSW_LOG("%s: rewrite failed (%s, errno %d), the old file is kept", c->path, why, errno); }
++    psw_noted_free(&seen);
++    return rc;
++}
++
++/* Read the file head and records, compact it when it needs it, and note every key. Logs what it found and why it returns.
++ * Returns the number of records in the file (0 when there is none or it was emptied), or -1 when the cache cannot be used
++ * this run (nothing is read or written then, the file is left as it is). */
++static int psw_prepare(PswCache* c)
++{
++    FILE* f = fopen(c->path, "rb"); PswScan s;
++    c->ready = 1;
++    if (!f) { PSW_LOG("%s: no file yet (first start)", c->path); return 0; }
++    if (psw_scan(c, f, &s) != 0) {
++        fclose(f); c->dead = 1;
++        PSW_LOG("%s: cannot read the file size (errno %d); warm-up is off for this run and the file is kept", c->path, errno);
++        return -1;
++    }
++    fclose(f);
++    PSW_LOG("%s: %lld bytes, %s, %llu records (%llu distinct, %llu repeated, %llu beyond the capacity of %u), %lld bytes after the last whole record",
++            c->path, (long long)s.size, !s.has_head ? "no head (older build)" : s.stamp_ok ? "head matches this build" : "head from another build",
++            (unsigned long long)s.n_rec, (unsigned long long)s.n_unique, (unsigned long long)s.n_repeat, (unsigned long long)s.n_over,
++            c->max_records, (long long)(s.size - s.good_end));
++    if (s.size == 0) { c->size = 0; return 0; }   /* an empty file: the first note writes the head */
++    const int stale = s.has_head && !s.stamp_ok;
++    if (stale || !s.has_head || s.n_repeat || s.n_over || s.good_end != s.size) {
++        uint64_t kept = 0;
++        if (stale) psw_noted_clear(&c->noted);
++        if (psw_rewrite(c, !stale, &kept) != 0) {
++            c->dead = 1; psw_noted_clear(&c->noted);
++            PSW_LOG("%s: warm-up is off for this run", c->path);
++            return -1;
++        }
++        PSW_LOG("%s: rewritten to %llu records (%s)", c->path, (unsigned long long)kept,
++                stale ? "emptied, it was made by another build" : "repeats, damaged tail, over-capacity records and the missing head removed");
++        c->n_records = (uint32_t)kept;
++    } else {
++        c->n_records = (uint32_t)s.n_unique;
++    }
++    FILE* g = fopen(c->path, "rb");
++    if (g) { if (psw_seek(g, 0, SEEK_END) == 0) c->size = psw_tell(g); fclose(g); }
++    PSW_LOG("%s: %u records, %lld bytes", c->path, c->n_records, (long long)c->size);
++    return (int)c->n_records;
++}
++
++typedef struct { unsigned char* buf; size_t size; size_t first; } PswImage;   /* the whole file; records start at `first` */
++/* Read the prepared file into memory (call only when prepare returned > 0). 0 on success. */
++static int psw_read_all(const PswCache* c, PswImage* img)
++{
++    memset(img, 0, sizeof *img);
++    FILE* f = fopen(c->path, "rb");
++    if (!f) { PSW_LOG("%s: cannot open for reading (errno %d); no pipelines are warmed", c->path, errno); return -1; }
++    if (c->size <= 0 || (uint64_t)c->size > (uint64_t)SIZE_MAX) { fclose(f); PSW_LOG("%s: size %lld does not fit memory", c->path, (long long)c->size); return -1; }
++    img->buf = (unsigned char*)malloc((size_t)c->size);
++    if (!img->buf) { fclose(f); PSW_LOG("%s: out of memory for %lld bytes; no pipelines are warmed", c->path, (long long)c->size); return -1; }
++    if (fread(img->buf, 1, (size_t)c->size, f) != (size_t)c->size) {
++        fclose(f); free(img->buf); img->buf = NULL;
++        PSW_LOG("%s: short read of %lld bytes; no pipelines are warmed", c->path, (long long)c->size);
++        return -1;
++    }
++    fclose(f);
++    img->size = (size_t)c->size;
++    PswFileHead fh; img->first = (img->size >= sizeof fh && (memcpy(&fh, img->buf, sizeof fh), fh.magic == PSW_FILE_MAGIC)) ? sizeof fh : 0;
++    return 0;
++}
++
++/* Append one record: 0 appended, 1 its key is already in the file, 2 the file is at its capacity (said once), -1 writing is off
++ * or failed (said once). `rec` is the fixed head (hdr_size bytes, its first 24 bytes a PswRecHead). The caller serialises. */
++static int psw_note(PswCache* c, const void* rec, const void* vs, const void* ps)
++{
++    const PswRecHead* h = (const PswRecHead*)rec;
++    if (c->dead) return -1;
++    const int r = psw_noted_add(&c->noted, h->key);
++    if (r == 1) return 1;
++    if (r == 2) {
++        if (!c->full_said) { c->full_said = 1; PSW_LOG("%s: full (%u records), new pipelines are not kept for the next start", c->path, c->max_records); }
++        return 2;
++    }
++    if (!c->out) {
++        c->out = fopen(c->path, "ab");
++        if (c->out && psw_seek(c->out, 0, SEEK_END) == 0 && psw_tell(c->out) == 0) {
++            PswFileHead fh = { PSW_FILE_MAGIC, PSW_FORMAT, c->stamp, c->hdr_size, 0 };
++            if (fwrite(&fh, sizeof fh, 1, c->out) != 1) { fclose(c->out); c->out = NULL; }
++        }
++        if (!c->out) { c->dead = 1; PSW_LOG("%s: cannot open for appending (errno %d); new pipelines are not kept", c->path, errno); return -1; }
++    }
++    if (fwrite(rec, c->hdr_size, 1, c->out) != 1 || (h->vs_len && fwrite(vs, 1, h->vs_len, c->out) != h->vs_len) ||
++        (h->ps_len && fwrite(ps, 1, h->ps_len, c->out) != h->ps_len) || fflush(c->out) != 0) {
++        c->dead = 1; fclose(c->out); c->out = NULL;
++        PSW_LOG("%s: write failed (errno %d); new pipelines are not kept (the damaged tail is cut at the next start)", c->path, errno);
++        return -1;
++    }
++    c->n_records++;
++    return 0;
++}
++#endif

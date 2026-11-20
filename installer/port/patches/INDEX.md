@@ -69,6 +69,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2066 | fix | the D3D12 backend never frees or reuses GPU objects under a batch that may still be running: the GPU wait | rsx_d3d12_backend.c |  |  | candidate |
 | 2067 | fix | DXT1/23/45 textures whose width or height is not a multiple of 4 are decoded to RGBA8 on the CPU | rsx_d3d12_backend.c | tex_hint_on, vp_upload_tex_slot_impl, render_frame | BC_NATIVE | J-Stars |
 | 2068 | fix | Patch 2068 (fix line): pipeline warm-up. Every guest-FP pipeline a run builds is noted in pipelines.bin (beside | rsx_d3d12_backend.c | sc_compile, vp_fp_make_pso, render_frame | PSO_WARMUP, PSO_WARMUP_THREADS | J-Stars |
+| 2069 | fix | Patch 2069 (fix line): pipelines.bin is read with 64-bit offsets, never appends a key it already holds, and is compacted. | rsx_d3d12_backend.c, psow_file.h |  |  | J-Stars |
 | 2070 | fix | Patch 2070 (fix line): a vertex program seen for the first time is compiled on a worker thread instead of on the | rsx_d3d12_backend.c | sc_pipeline, vp_get_vs, vp_get_fp_pso | VS_ASYNC | J-Stars |
 | 2500 | feature | the window options of the v0.15 port: WINDOW_SIZE=<w>x<h>, FULLSCREEN=1 (borderless, F11 toggles), | rsx_d3d12_backend.c | d3d12_wndproc, create_window | WINDOW_ICON, WINDOW_SIZE, FULLSCREEN, TITLE_STATS | J-Stars |
 | 2501 | feature | the game window hides the cursor where cellPad says so (g_pad_cursor_hidden, patch 6500) and adds mouse | rsx_d3d12_backend.c | win_set_fullscreen |  | J-Stars |

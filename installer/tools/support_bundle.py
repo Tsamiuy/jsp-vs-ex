@@ -44,6 +44,7 @@ import pathlib
 import platform
 import re
 import shutil
+import struct
 import sys
 import zipfile
 
@@ -829,6 +830,80 @@ def net_log_lines(blobs, secrets=None, shown=None):
     return out
 
 
+CACHE_NAMES = ("pipelines.bin", "shader_cache.bin", "pso_cache.bin")   # beside the game's working folder; patches 2038, 2068, 2069
+
+
+def _walk_cache(f, size, pos, head_fmt, head_len, magic, body_len):
+    """Records of a cache file by their small heads only (the bodies are seeked over, so a multi-gigabyte file costs one tiny read
+    per record). -> (records, distinct keys, repeated keys, pos after the last whole record). `body_len(fields)` -> bytes after the head."""
+    n, keys = 0, set()
+    while size - pos >= head_len:
+        f.seek(pos)
+        raw = f.read(head_len)
+        if len(raw) < head_len:
+            break
+        fields = struct.unpack(head_fmt, raw)
+        if fields[0] != magic:
+            break
+        end = pos + body_len(fields)
+        if end > size:
+            break
+        n += 1
+        keys.add(fields[-1])
+        pos = end
+    return n, len(keys), n - len(keys), pos
+
+
+def cache_line(path):
+    """One facts line for a cache file: its size and its records. Never raises (a file that cannot be read says so)."""
+    name = pathlib.Path(path).name
+    try:
+        size = pathlib.Path(path).stat().st_size
+        with open(path, "rb") as f:
+            if name == "pipelines.bin":
+                head = f.read(24)
+                pos, hdr, shown = 0, None, "no file head (written by an older build)"
+                if len(head) == 24 and struct.unpack("<I", head[:4])[0] == 0x48575350:   # 'PSWH'
+                    _m, fmt, stamp, hdr, _r = struct.unpack("<IIQII", head)
+                    pos, shown = 24, f"file head format {fmt}, record head {hdr} bytes"
+                else:
+                    # an older file has no head: the record head size is where the next record's magic is
+                    f.seek(0)
+                    first = f.read(24)
+                    if len(first) == 24 and struct.unpack("<I", first[:4])[0] == 0x32575350:   # 'PSW2'
+                        _m, vs, ps, _il, _k = struct.unpack("<IIIIQ", first)
+                        for h in range(24, 4096, 8):
+                            at = h + vs + ps
+                            if at + 4 <= size:
+                                f.seek(at)
+                                if f.read(4) == b"PSW2":
+                                    hdr = h
+                                    break
+                if not hdr:
+                    return f"{name}: {size} bytes, {shown}, records not counted"
+                n, d, rep, end = _walk_cache(f, size, pos, "<IIIIQ", 24,
+                                             0x32575350, lambda t: hdr + t[1] + t[2])
+                if pos == 0 and n == 0:
+                    return f"{name}: {size} bytes, {shown}, records not counted"
+                return f"{name}: {size} bytes, {shown}, {n} records ({d} distinct, {rep} repeated), {size - end} bytes after the last whole record"
+            n, d, rep, end = _walk_cache(f, size, 0, "<IIQ", 16, 0x31435344, lambda t: 16 + t[1])   # 'DSC1': magic, size, key
+            return f"{name}: {size} bytes, {n} records ({d} distinct, {rep} repeated), {size - end} bytes after the last whole record"
+    except (OSError, struct.error) as e:
+        return f"{name}: cannot be read ({type(e).__name__})"
+
+
+def cache_lines(app):
+    """The pipeline and shader cache files that exist in the game's working folder (game/run, or game): size and record counts.
+    A cache that passed 2 GB once stopped loading, so its size is what a report needs."""
+    out = []
+    for folder in (pathlib.Path(app) / "game" / "run", pathlib.Path(app) / "game"):
+        for n in CACHE_NAMES:
+            p = folder / n
+            if p.is_file() and not p.is_symlink():
+                out.append("cache " + cache_line(p))
+    return out or ["cache files (pipelines.bin, shader_cache.bin): none found"]
+
+
 def facts(app, blobs, refused, not_text, cuts, names, net=None):
     app = pathlib.Path(app)
     L = ["J-Stars Fan Revival support bundle", f"made: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}"]
@@ -858,6 +933,7 @@ def facts(app, blobs, refused, not_text, cuts, names, net=None):
     L.append("GPU driver: " + ("; ".join(drivers) if drivers else "not found (not Windows, or no display driver key)"))
     L += display_lines(displays(), game_display(exe_name))
     L.append(f"present mode: {present_mode(blobs)}")
+    L += cache_lines(app)
     net = net or {}
     head = net_scrub(firstrun.scrub("\n".join(L) + "\n"), net.get("secrets"))
     # The Netcode section is made safe line by line (net_mode prints program words only, net_log_lines passes every [net] line through
