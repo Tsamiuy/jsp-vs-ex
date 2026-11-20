@@ -107,6 +107,19 @@ int main(void)
 
     /* (d) offsets */
     CHECK(sizeof(psw_off) == 8);
+    /* a key taken out of the noted set leaves every other key findable (back-shift deletion in a probe chain) */
+    {
+        PswNoted n; CHECK(psw_noted_init(&n, 8));
+        const uint64_t ks[4] = { 1, 17, 33, 2 };                   /* 1, 17 and 33 share a home slot; 2 sits behind them */
+        for (int i = 0; i < 4; i++) CHECK(psw_noted_add(&n, ks[i]) == 0);
+        psw_noted_remove(&n, 17);
+        CHECK(n.n == 3 && psw_noted_has(&n, 1) && !psw_noted_has(&n, 17) && psw_noted_has(&n, 33) && psw_noted_has(&n, 2));
+        CHECK(psw_noted_add(&n, 17) == 0 && n.n == 4);
+        psw_noted_remove(&n, 99); CHECK(n.n == 4);
+        psw_noted_free(&n);
+    }
+    /* the flag read without a lock */
+    { volatile long fl = 0; CHECK(!psw_flag_get(&fl)); psw_flag_set(&fl); CHECK(psw_flag_get(&fl)); }
 
     /* (a) 1: a file of 1100 x ~2 MiB = 2.2 GB (sparse) that is a clean list of distinct keys: read as it is, no rewrite */
     {
@@ -276,7 +289,27 @@ int main(void)
         fclose(r);
         /* bit rot in a file that is otherwise whole: the scan does not read bodies, the warm-up's read does and refuses it */
         FILE* w = fopen(path("m.bin"), "r+b"); psw_seek(w, (psw_off)sizeof(PswFileHead) + HDR + 5, SEEK_SET); fputc(0x00, w); fclose(w);
-        r = fopen(path("m.bin"), "rb"); CHECK(!psw_read_record(&c, r, 0, buf, sizeof buf, &h)); CHECK(psw_read_record(&c, r, 1, buf, sizeof buf, &h)); fclose(r);
+        r = fopen(path("m.bin"), "rb");
+        CHECK(psw_read_record(&c, r, 0, buf, sizeof buf, &h) == 2 && h.key == 11);   /* refused, and its key is known */
+        CHECK(psw_read_record(&c, r, 1, buf, sizeof buf, &h) == 1);
+        fclose(r);
+        /* the warm-up forgets the key (the pipeline can be noted again) and marks the file for a rewrite at the next start */
+        psw_mark_bad(&c, 11);
+        CHECK(exists(path("m.bin.rewrite"))); CHECK(strstr(g_log, "rewritten at the next start") != NULL);
+        note(&c, 11, 0);
+        fclose(c.out); c.out = NULL; freec(&c);
+        CHECK(count_recs(path("m.bin"), keys, 8) == 3 && keys[2] == 11);       /* the bad record and the new whole one are both in the file */
+        fresh(&c, "m.bin", 16, STAMP); c.verify = test_verify;
+        CHECK(psw_prepare(&c) == 2);                                           /* the rewrite kept the whole 11 and 22, and dropped the rotted one */
+        CHECK(strstr(g_log, "rewritten to 2 records") != NULL && strstr(g_log, "did not hash to their key") != NULL);
+        CHECK(!exists(path("m.bin.rewrite")) && !exists(path("m.bin.tmp")));
+        r = fopen(path("m.bin"), "rb");
+        CHECK(psw_read_record(&c, r, 0, buf, sizeof buf, &h) == 1 && psw_read_record(&c, r, 1, buf, sizeof buf, &h) == 1);
+        fclose(r);
+        /* the marker alone (every record whole) also makes the next start rewrite */
+        { FILE* mk2 = fopen(path("m.bin.rewrite"), "wb"); fclose(mk2); }
+        freec(&c); fresh(&c, "m.bin", 16, STAMP); c.verify = test_verify;
+        CHECK(psw_prepare(&c) == 2); CHECK(strstr(g_log, "rewritten to 2 records") != NULL); CHECK(!exists(path("m.bin.rewrite")));
         freec(&c);
         /* an I/O error on a record head is an error, not the end of the list (a write-only handle cannot be read) */
         FILE* wo = fopen(path("m.bin"), "ab"); PswRecHead hh; psw_off end;
