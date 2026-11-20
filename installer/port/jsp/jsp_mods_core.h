@@ -12,15 +12,18 @@
 //   4. Conflicts: the later mod in the list wins an entry, with a "[mods] conflict" line ("conflicts_ok" only silences it). A group
 //      (entries that load together, e.g. a model's _m/_i/_v) that loses any entry to a later mod is dropped whole.
 //   5. One Plan per archive basename: the original bytes up to the TOC table, the TOC @UTF table with each overridden row's FileSize,
-//      ExtractSize and FileOffset rewritten (unmasked, edited, re-masked; names, sort order, ITOC and ETOC untouched), the rest of the
-//      original file, then each override's bytes at a 2048-aligned offset; the virtual size is the 2048-padded end.
+//      ExtractSize rewritten (unmasked, edited, re-masked; names, sort order, ITOC and ETOC untouched), the rest of the
+//      original file. A replacement is written IN PLACE over its entry's own 2048-aligned slot: the archive keeps its size and layout
+//      (GMOD R6: the game reacts to the archive's size or end layout; an archive that grew left the boot black even with unchanged
+//      bytes). A replacement larger than its slot is refused for now (the appended layout is not proven in a game).
 //   6. Class: an entry is cosmetic only under the allow-list (game/logo/, movie/, sound/); every other path is gameplay. The manifest's
 //      "gameplay": true can raise a mod's class, never lower it.
 //   7. Digest: SHA-256 over "jsp-modset 1\n", the EBOOT id, and for each applied gameplay mod in load order "id version\n" plus
 //      "entry sha256-of-served-bytes\n" per served entry. No applied gameplay mod = no digest. A listed mod that was refused and is not
 //      provably cosmetic makes the digest the fixed refusing value (kRefused): the set does not run as listed, so online must refuse.
-// ASSUMPTION: CRI does not check FileOffset+FileSize against the header's ContentOffset/ContentSize or EnabledPackedSize/EnabledDataSize
-// (the header row is left as it is; the first in-game run of an appended entry tests it).
+// ASSUMPTION: CRI does not check an entry's FileSize against the header's EnabledPackedSize/EnabledDataSize (2x the sum of the FileSize
+// values on the US disc; the header row is left as it is, so a smaller replacement leaves them unchanged). The first in-game run of a
+// smaller replacement tests it.
 // ASSUMPTION: entry data lies at TocOffset + FileOffset (true for every J-Stars archive; a CPK whose ContentOffset is below its
 // TocOffset is refused rather than guessed).
 // ASSUMPTION: a group that loses one entry to a later mod is dropped whole (design choice: a model is never mixed from two mods).
@@ -55,6 +58,8 @@ public:
     virtual ~Io() = default;
     virtual bool mod_size(const std::string& rel, uint64_t& size) = 0;
     virtual size_t mod_read(const std::string& rel, uint64_t off, void* dst, size_t n) = 0;
+    // Why the last mod_size of `rel` failed, when the glue knows (a link, a sharing violation): added to the refusal line. "" = no reason known.
+    virtual std::string mod_why(const std::string&) { return std::string(); }
     virtual bool archive_size(const std::string& base, uint64_t& size) = 0;
     virtual size_t archive_read(const std::string& base, uint64_t off, void* dst, size_t n) = 0;
 };
@@ -608,7 +613,7 @@ struct Archive {
     std::string base;
     bool ok = false;
     std::string err;
-    uint64_t file_size = 0, toc_offset = 0, toc_size = 0, content_offset = 0;
+    uint64_t file_size = 0, toc_offset = 0, toc_size = 0, content_offset = 0, etoc_offset = 0;   // etoc_offset 0 = no ETOC
     uint64_t utf_abs = 0, utf_len = 0;   // the TOC @UTF table: [utf_abs, utf_abs + utf_len) of the file
     UtfTable toc;
     std::vector<TocRow> rows;
@@ -641,6 +646,7 @@ inline Archive load_archive(Io& io, const std::string& base)
         a.err = base + ": header has no TocOffset/TocSize/ContentOffset";
         return a;
     }
+    if (const UtfColumn* c_eo = ht.col("EtocOffset")) ht.uint_at(*c_eo, 0, a.etoc_offset);
     if (a.toc_offset < 16 + hlen || a.content_offset < a.toc_offset || a.toc_offset + 16 > a.file_size) {
         a.err = base + ": unsupported layout (TOC must follow the header and precede the content)";
         return a;
@@ -803,6 +809,22 @@ inline bool hash_source(Io& io, bool archive, const std::string& name, uint64_t 
     return true;
 }
 
+// The slot of an entry: its stored size rounded up to the archive's 2048-byte alignment. A zero-size row has no slot.
+inline uint64_t slot_of(const TocRow& row) { return align_up(row.size ? row.size : row.extract); }
+// True when `len` bytes can be written over the entry's own slot: it fits, the slot lies inside the content area (at or after
+// ContentOffset, before the ETOC, or the end of the file when there is none) and no other row's slot overlaps it (rows that share an offset).
+inline bool fits_in_place(const Archive& a, const TocRow& row, uint64_t len)
+{
+    const uint64_t slot = slot_of(row);
+    if (slot == 0 || len > slot) return false;
+    const uint64_t at = a.toc_offset + row.offset;
+    const uint64_t limit = a.etoc_offset && a.etoc_offset <= a.file_size ? a.etoc_offset : a.file_size;
+    if (at < a.content_offset || at + slot > limit) return false;
+    for (const TocRow& o : a.rows)
+        if (&o != &row && a.toc_offset + o.offset < at + slot && a.toc_offset + o.offset + slot_of(o) > at) return false;
+    return true;
+}
+
 // Resolve one mod's overrides against the archives (rows, donors, files, hashes). false + reason = refuse the mod.
 inline bool resolve_mod(Io& io, ModState& st, std::map<std::string, Archive>& archives, std::string& err)
 {
@@ -840,40 +862,79 @@ inline bool resolve_mod(Io& io, ModState& st, std::map<std::string, Archive>& ar
             if (!hash_source(io, true, r.archive, r.src, r.len, r.content)) { err = "entry " + s.entry + ": cannot read alias " + s.alias; return false; }
         } else {
             const std::string rel = st.id + "/" + s.file;
-            if (!io.mod_size(rel, r.len)) { err = "entry " + s.entry + ": file " + s.file + " is missing"; return false; }
+            if (!io.mod_size(rel, r.len)) {
+                err = "entry " + s.entry + ": file " + s.file + " is missing";
+                const std::string w = io.mod_why(rel);
+                if (!w.empty()) err += " (" + w + ")";
+                return false;
+            }
             if (!hash_source(io, false, rel, 0, r.len, r.content)) { err = "entry " + s.entry + ": cannot read " + s.file; return false; }
             if (hex(r.content) != s.sha256) { err = "entry " + s.entry + ": " + s.file + " does not match its sha256"; return false; }
         }
         if (r.len == 0) { err = "entry " + s.entry + ": the replacement is empty"; return false; }
         if (r.len > 0xFFFFFFFFull) { err = "entry " + s.entry + ": the replacement is 4 GiB or more"; return false; }
+        if (!fits_in_place(a, a.rows[row->second], r.len)) {
+            const uint64_t slot = slot_of(a.rows[row->second]);
+            err = "entry " + s.entry + ": the replacement is " + std::to_string(r.len) + " B, but its slot in " + r.archive + " is " + std::to_string(slot) +
+                  " B (the entry's size rounded up to 2048; a zero-size row has no slot, and rows that share an offset have none either): " +
+                  "a larger replacement is not supported yet";
+            return false;
+        }
         st.ovr.push_back(std::move(r));
     }
     return true;
 }
 
+// Put `ov` over [ov.virt, ov.virt + ov.len) of a segment list that covers the virtual file without gaps (splits what it overlaps).
+inline void overlay_segment(std::vector<Segment>& segs, const Segment& ov)
+{
+    std::vector<Segment> out;
+    const uint64_t a = ov.virt, b = ov.virt + ov.len;
+    bool put = false;
+    for (const Segment& g : segs) {
+        const uint64_t ga = g.virt, gb = g.virt + g.len;
+        if (gb <= a || ga >= b) {
+            if (ga >= b && !put) { out.push_back(ov); put = true; }
+            out.push_back(g);
+            continue;
+        }
+        if (ga < a) { Segment l = g; l.len = a - ga; out.push_back(l); }
+        if (!put) { out.push_back(ov); put = true; }
+        if (gb > b) {
+            Segment r = g;
+            r.virt = b;
+            r.len = gb - b;
+            if (g.kind != Segment::Zero) r.src = g.src + (b - ga);
+            out.push_back(r);
+        }
+    }
+    if (!put) out.push_back(ov);
+    segs.swap(out);
+}
+
+// Every served override is in place (resolve_mod refused the ones that do not fit): the TOC rows get the new FileSize and ExtractSize, the
+// data goes over the entry's slot, the rest of the slot reads as zeros, and the archive keeps its size.
 inline Plan build_plan(const Archive& a, const std::vector<std::pair<const ModState*, const ResolvedOverride*>>& served)
 {
     Plan p;
     p.archive = a.base;
     p.orig_size = a.file_size;
+    p.virt_size = a.file_size;
     p.toc_offset = a.toc_offset;
     p.utf_abs = a.utf_abs;
     p.prefix = a.prefix;
     p.toc = a.toc.b;   // unmasked copy
     std::vector<std::pair<const ModState*, const ResolvedOverride*>> order = served;
     std::sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.second->spec.entry < y.second->spec.entry; });
-    uint64_t cur = align_up(a.file_size);
-    std::vector<Segment> tail;
-    uint64_t end = a.file_size;
+    std::vector<Segment> over;
     for (const auto& [ms, r] : order) {
         const TocRow& row = a.rows[a.index.at(r->spec.entry)];
-        const uint64_t virt = cur;
-        if (virt > end) tail.push_back({ Segment::Zero, end, virt - end, 0, "" });
-        if (r->spec.alias.empty()) tail.push_back({ Segment::ModFile, virt, r->len, 0, ms->id + "/" + r->spec.file });
-        else tail.push_back({ Segment::Original, virt, r->len, r->src, "" });
+        const uint64_t virt = a.toc_offset + row.offset, slot = slot_of(row);
+        over.push_back(r->spec.alias.empty() ? Segment{ Segment::ModFile, virt, r->len, 0, ms->id + "/" + r->spec.file }
+                                             : Segment{ Segment::Original, virt, r->len, r->src, "" });
+        if (r->len < slot) over.push_back({ Segment::Zero, virt + r->len, slot - r->len, 0, "" });
         put_be32(&p.toc[row.pos_size], uint32_t(r->len));
         put_be32(&p.toc[row.pos_extract], uint32_t(r->len));
-        put_be64(&p.toc[row.pos_offset], virt - a.toc_offset);
         PlannedOverride po;
         po.entry = r->spec.entry;
         po.mod_id = ms->id;
@@ -883,17 +944,13 @@ inline Plan build_plan(const Archive& a, const std::vector<std::pair<const ModSt
         po.len = r->len;
         po.virt = virt;
         p.overrides.push_back(po);
-        end = virt + r->len;
-        cur = align_up(end);
     }
-    if (cur > end) tail.push_back({ Segment::Zero, end, cur - end, 0, "" });
-    p.virt_size = cur;
     if (a.toc.masked) mask(p.toc.data(), p.toc.size());
     p.segs.push_back({ Segment::Original, 0, a.utf_abs, 0, "" });
     p.segs.push_back({ Segment::Memory, a.utf_abs, a.utf_len, 0, "" });
     if (a.file_size > a.utf_abs + a.utf_len)
         p.segs.push_back({ Segment::Original, a.utf_abs + a.utf_len, a.file_size - (a.utf_abs + a.utf_len), a.utf_abs + a.utf_len, "" });
-    p.segs.insert(p.segs.end(), tail.begin(), tail.end());
+    for (const Segment& g : over) overlay_segment(p.segs, g);
     return p;
 }
 
@@ -920,7 +977,7 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
             uint64_t sz = 0;
             const std::string rel = e.id + "/mod.json";
             std::string text;
-            if (!io.mod_size(rel, sz)) err = "no mod.json";
+            if (!io.mod_size(rel, sz)) { err = "no mod.json"; const std::string w = io.mod_why(rel); if (!w.empty()) err += " (" + w + ")"; }
             else if (sz > (1u << 20)) err = "mod.json is larger than 1 MiB";
             else {
                 text.resize(size_t(sz));
