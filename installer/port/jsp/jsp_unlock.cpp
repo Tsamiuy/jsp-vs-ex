@@ -21,6 +21,8 @@
 #include "ppu_recomp.h"
 
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
+extern "C" void jsp_roster_after_save_update(ppu_context* c);   /* jsp_roster.cpp: the owned bits of roster mods (shares this hook) */
+extern "C" int jsp_unlock_owns_save_hook(void);                  /* answered at the end of this file: the roster registers its own save-update hook only when this is 0 */
 
 namespace {
 
@@ -130,9 +132,11 @@ bool cards_all_set(uint32_t buf)
 
 
 fn_t g_orig_update;
+bool g_hooked = false;
 void save_update_wrap(ppu_context* c)
 {
     g_orig_update(c);
+    jsp_roster_after_save_update(c);    // ENHANCEMENT (roster): no-op without an applied roster mod
     const uint32_t s = vm_read32(k_save_mgr);
     const uint32_t buf = s ? vm_read32(s) : 0;
     if (!buf || cards_all_set(buf)) return;
@@ -156,8 +160,11 @@ extern "C" void jsp_register_unlock_overrides(void)
         if (function_table[i].addr == 0x0014E898u) {
             g_orig_update = function_table[i].func;
             ppu_register_function(0x0014E898u, save_update_wrap);
+            g_hooked = true;
             std::fprintf(stderr, "[unlock] JSP_UNLOCK_ALL set: everything is unlocked in the live save after load\n");
             return;
         }
     std::fprintf(stderr, "[unlock] no lifted function at 0014E898\n");
 }
+
+extern "C" int jsp_unlock_owns_save_hook(void) { return g_hooked ? 1 : 0; }

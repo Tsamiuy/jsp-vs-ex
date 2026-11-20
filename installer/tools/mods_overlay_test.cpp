@@ -1095,6 +1095,157 @@ static void test_inplace_edges()
     }
 }
 
+// ---------------------------------------------------------------------------------------------------- roster (ENHANCEMENT)
+static std::string roster_mod(const std::string& id, const std::string& fighters, const std::string& ifs = "\"roster\": 1", const std::string& version = "1.0.0")
+{
+    return "{ \"schema\": 1, \"id\": \"" + id + "\", \"version\": \"" + version + "\", \"game\": { \"title_ids\": [\"BLUS31519\"] },\n"
+           "  \"interfaces\": { " + ifs + " }, \"roster\": { \"fighters\": [ " + fighters + " ] } }\n";
+}
+static std::string ids_of(const std::vector<uint32_t>& l, size_t from, size_t n)
+{
+    std::string r;
+    for (size_t i = from; i < from + n && i < l.size(); ++i) r += (r.empty() ? "" : " ") + std::to_string(l[i]);
+    return r;
+}
+static void test_roster(MemIo& io)
+{
+    // one mod, one fighter after Joseph (40, index 8): list has 53 ids, 19 at index 9, the rest in stock order
+    add_mod(io, "jo", roster_mod("jo", "{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"owned\": true }"));
+    jmods::ModSet s = jmods::load_mod_set(io, "jo\n", opts());
+    CHECK(mod(s, "jo") && mod(s, "jo")->loaded && mod(s, "jo")->applied && mod(s, "jo")->gameplay);
+    CHECK(s.roster.size() == 1 && s.roster[0].id == 19 && s.roster[0].logo_as == 39 && s.roster[0].owned);
+    CHECK(s.digest_kind == jmods::DigestKind::Value);   // a roster mod is gameplay: it has a digest
+    CHECK(has_log(s, "[mods] jo: roster adds 1 fighter(s): 19(after 40, logo as 39, owned)"));
+    std::vector<uint32_t> l = jmods::build_roster_list(s.roster);
+    CHECK(l.size() == 53 && ids_of(l, 7, 4) == "39 40 19 24" && l[0] == 32 && l[52] == 201);
+    std::vector<uint32_t> stock = jmods::build_roster_list({});
+    CHECK(stock.size() == 52 && stock[8] == 40);
+    {   // removing 19 gives the stock list back: nobody else moved
+        std::vector<uint32_t> w = l; w.erase(w.begin() + 9);
+        CHECK(w == stock);
+    }
+    const jpsm::Digest d1 = s.digest;
+    // digest follows the set: other fighter data, other digest; same set, same digest
+    add_mod(io, "jo2", roster_mod("jo2", "{ \"id\": 19, \"after\": 40, \"owned\": true }"));
+    jmods::ModSet s2 = jmods::load_mod_set(io, "jo2\n", opts());
+    CHECK(s2.digest_kind == jmods::DigestKind::Value && s2.digest != d1);
+    jmods::ModSet s3 = jmods::load_mod_set(io, "jo\n", opts());
+    CHECK(s3.digest == d1);
+    // no roster mod: no digest and no fighters
+    jmods::ModSet s0 = jmods::load_mod_set(io, "", opts());
+    CHECK(s0.roster.empty() && s0.digest_kind == jmods::DigestKind::None);
+
+    // several mods: order = load order; "after" may name an earlier mod's fighter; no anchor = before the first support
+    add_mod(io, "ma", roster_mod("ma", "{ \"id\": 19, \"after\": 40 }"));
+    add_mod(io, "mb", roster_mod("mb", "{ \"id\": 21, \"after\": 19 }"));
+    jmods::ModSet m = jmods::load_mod_set(io, "ma\nmb\n", opts());
+    CHECK(m.roster.size() == 2);
+    l = jmods::build_roster_list(m.roster);
+    CHECK(l.size() == 54 && ids_of(l, 8, 4) == "40 19 21 24");
+    add_mod(io, "mc", roster_mod("mc", "{ \"id\": 20, \"after\": 40 }"));
+    add_mod(io, "md", roster_mod("md", "{ \"id\": 21 }"));
+    {   // same anchor chains behind the earlier fighter
+        jmods::ModSet c = jmods::load_mod_set(io, "ma\nmc\n", opts());
+        std::vector<uint32_t> cl = jmods::build_roster_list(c.roster);
+        CHECK(cl.size() == 54 && ids_of(cl, 8, 4) == "40 19 20 24");
+        jmods::ModSet d = jmods::load_mod_set(io, "md\n", opts());
+        std::vector<uint32_t> dl = jmods::build_roster_list(d.roster);
+        size_t k = 0; while (dl[k] != 206) ++k;
+        CHECK(dl[k - 1] == 21);   // no anchor: right before the first support
+    }
+    jmods::ModSet mrev = jmods::load_mod_set(io, "mb\nma\n", opts());   // mb first: its "after 19" names nothing yet, so mb is refused whole
+    CHECK(mod(mrev, "mb") && !mod(mrev, "mb")->loaded && has_log(mrev, "[mods] mb: refused: roster: fighter 21 goes after id 19"));
+    CHECK(mrev.digest_kind == jmods::DigestKind::Refused);
+    // the same set twice gives the same list and digest (deterministic)
+    jmods::ModSet m2 = jmods::load_mod_set(io, "ma\nmb\n", opts());
+    CHECK(m2.digest == m.digest && jmods::build_roster_list(m2.roster) == l);
+
+    // refusals (each refuses the whole mod, with a reason)
+    struct Bad { const char* fighters; const char* ifs; const char* why; };
+    const Bad bad[] = {
+        { "{ \"id\": 40, \"after\": 40 }", "\"roster\": 1", "must be 19, 20 or 21" },     // a stock id is not an allowed id at all
+        { "{ \"id\": 19 }, { \"id\": 19 }", "\"roster\": 1", "fighter id 19 is already in the character list" },     // twice in one mod
+        { "{ \"id\": 64 }", "\"roster\": 1", "must be 19, 20 or 21" },                                          // owned field / grid limit
+        { "{ \"id\": 200 }", "\"roster\": 1", "must be 19, 20 or 21" },
+        { "{ \"id\": 42 }", "\"roster\": 1", "must be 19, 20 or 21" },
+        { "{ \"id\": 22 }", "\"roster\": 1", "must be 19, 20 or 21" },
+        { "{ \"id\": -1 }", "\"roster\": 1", "must be 19, 20 or 21" },
+        { "{ \"id\": 19, \"after\": 99 }", "\"roster\": 1", "which is not in the list" },                                   // unknown anchor
+        { "{ \"id\": 19, \"after\": 19 }", "\"roster\": 1", "which is not in the list" },                                   // itself
+        { "{ \"id\": 19, \"logo_as\": 300 }", "\"roster\": 1", "\"logo_as\" must be" },
+        { "{ \"id\": 19, \"logo_as\": 20 }", "\"roster\": 1", "\"logo_as\" must be" },       // an added id is not a stock fighter
+        { "{ \"id\": 19, \"logo_as\": 206 }", "\"roster\": 1", "\"logo_as\" must be" },      // a support
+        { "{ \"id\": 19, \"logo_as\": 42 }", "\"roster\": 1", "\"logo_as\" must be" },       // not on the stock list
+        { "{ \"id\": 19, \"logo_as\": -1 }", "\"roster\": 1", "\"logo_as\" must be" },
+        { "{ \"id\": 19, \"owned\": 1 }", "\"roster\": 1", "\"owned\" must be true or false" },
+        { "{ \"id\": 19, \"afer\": 40 }", "\"roster\": 1", "unknown key" },
+        { "{ \"id\": 19 }", "\"cpk-entry\": 1", "needs interface \"roster\"" },
+        { "{ \"id\": 19 }", "\"roster\": 2", "newer than this build supports" },
+    };
+    for (const Bad& b : bad) {
+        add_mod(io, "bad", roster_mod("bad", b.fighters, b.ifs));
+        jmods::ModSet r = jmods::load_mod_set(io, "bad\n", opts());
+        CHECK(mod(r, "bad") && !mod(r, "bad")->loaded && r.roster.empty() && has_log(r, b.why));
+        if (!(mod(r, "bad") && !mod(r, "bad")->loaded && has_log(r, b.why))) std::printf("  roster refusal case: %s\n", b.fighters);
+        CHECK(r.digest_kind == jmods::DigestKind::Refused);   // requested, not applied: online refused
+    }
+    // a second mod with an id an earlier mod added is refused whole; the first stays
+    add_mod(io, "dup1", roster_mod("dup1", "{ \"id\": 19 }"));
+    add_mod(io, "dup2", roster_mod("dup2", "{ \"id\": 20 }, { \"id\": 19 }"));
+    jmods::ModSet dd = jmods::load_mod_set(io, "dup1\ndup2\n", opts());
+    CHECK(mod(dd, "dup1")->loaded && !mod(dd, "dup2")->loaded && dd.roster.size() == 1 && dd.digest_kind == jmods::DigestKind::Refused);
+    // capacity: the list holds 56 ids; the three allowed ids make 55, so all three fit, alone or spread over three mods
+    add_mod(io, "f3", roster_mod("f3", "{ \"id\": 19 }, { \"id\": 20 }, { \"id\": 21 }"));
+    jmods::ModSet c3 = jmods::load_mod_set(io, "f3\n", opts());
+    CHECK(mod(c3, "f3")->loaded && jmods::build_roster_list(c3.roster).size() == 55);
+    {
+        add_mod(io, "ta", roster_mod("ta", "{ \"id\": 19 }"));
+        add_mod(io, "tb", roster_mod("tb", "{ \"id\": 20 }"));
+        add_mod(io, "tc", roster_mod("tc", "{ \"id\": 21 }"));
+        jmods::ModSet x = jmods::load_mod_set(io, "ta\ntb\ntc\n", opts());
+        CHECK(mod(x, "ta")->loaded && mod(x, "tb")->loaded && mod(x, "tc")->loaded && x.roster.size() == 3);
+        CHECK(jmods::build_roster_list(x.roster).size() == 55 && x.digest_kind == jmods::DigestKind::Value);
+        jmods::ModSet y = jmods::load_mod_set(io, "ta\ntb\ntc\n", opts());   // the same set again: the same digest
+        CHECK(y.digest == x.digest);
+        jmods::ModSet z = jmods::load_mod_set(io, "ta\nf3\n", opts());   // f3 repeats 19: refused whole, ta stays
+        CHECK(mod(z, "ta")->loaded && !mod(z, "f3")->loaded && z.roster.size() == 1);
+    }
+    {   // the cap itself (the id rule keeps real manifests under it): check_roster refuses a list that is one over a given cap
+        jmods::Manifest m;
+        m.roster.push_back({ 19, -1, -1, true });
+        m.roster.push_back({ 20, -1, -1, true });
+        std::set<int> ids = jmods::stock_roster_ids();
+        std::string err;
+        CHECK(!jmods::check_roster(m, ids, err, 53) && err.find("would not fit the select lists (room for 53)") != std::string::npos);
+        CHECK(ids.size() == 52);   // nothing was added by the refused mod
+        CHECK(jmods::check_roster(m, ids, err, 54) && ids.size() == 54);
+        CHECK(jmods::kRosterGrid == 56 && jmods::stock_roster_ids().size() + 3 <= jmods::kRosterGrid);
+    }
+    // the title rule: a roster mod runs only on BLUS31519, and must name it
+    add_mod(io, "eu", "{ \"schema\": 1, \"id\": \"eu\", \"version\": \"1\", \"game\": { \"title_ids\": [\"BLES02136\", \"BLUS31519\"] },\n"
+                      "  \"interfaces\": { \"roster\": 1 }, \"roster\": { \"fighters\": [ { \"id\": 19 } ] } }\n");
+    add_mod(io, "notitle", "{ \"schema\": 1, \"id\": \"notitle\", \"version\": \"1\",\n"
+                           "  \"interfaces\": { \"roster\": 1 }, \"roster\": { \"fighters\": [ { \"id\": 19 } ] } }\n");
+    add_mod(io, "wrong", "{ \"schema\": 1, \"id\": \"wrong\", \"version\": \"1\", \"game\": { \"title_ids\": [\"BLES02136\"] },\n"
+                         "  \"interfaces\": { \"roster\": 1 }, \"roster\": { \"fighters\": [ { \"id\": 19 } ] } }\n");
+    {
+        jmods::Options eu = opts(); eu.title_id = "BLES02136";
+        jmods::Options none = opts(); none.title_id = "";
+        jmods::ModSet a = jmods::load_mod_set(io, "eu\n", eu), b = jmods::load_mod_set(io, "eu\n", none);
+        CHECK(!mod(a, "eu")->loaded && has_log(a, "runs only on that build (this one is BLES02136)") && a.roster.empty());
+        CHECK(!mod(b, "eu")->loaded && has_log(b, "(this one is unknown)") && b.roster.empty());
+        jmods::ModSet c = jmods::load_mod_set(io, "notitle\n", opts()), d = jmods::load_mod_set(io, "wrong\n", opts());
+        CHECK(!mod(c, "notitle")->loaded && !mod(d, "wrong")->loaded && c.roster.empty() && d.roster.empty());
+        CHECK(a.digest_kind == jmods::DigestKind::Refused && c.digest_kind == jmods::DigestKind::Refused);
+        jmods::ModSet ok = jmods::load_mod_set(io, "eu\n", opts());
+        CHECK(mod(ok, "eu")->loaded && ok.roster.size() == 1);
+    }
+    // a roster mod beside a cosmetic mod: still gameplay, the cosmetic one does not change the digest
+    add_mod(io, "cos", manifest("cos", "", ""));
+    jmods::ModSet mix = jmods::load_mod_set(io, "jo\ncos\n", opts());
+    CHECK(mix.digest_kind == jmods::DigestKind::Value && mix.digest == d1);
+}
+
 int main()
 {
     MemIo io;
@@ -1114,6 +1265,7 @@ int main()
     test_refusals(io);
     test_conflicts_and_digest(io, game);
     test_glue(io, chara);
+    test_roster(io);
 #ifdef MODS_GLUE_FILES
     test_glue_files(io, game, chara);
 #endif

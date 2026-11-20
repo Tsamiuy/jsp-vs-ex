@@ -504,6 +504,8 @@ std::string eboot_id(const char* path)
     return "sha256:" + hex(s.finish());
 }
 
+std::vector<RosterFighter> g_roster;   // ENHANCEMENT (roster): the applied mods' added fighters, for jsp_roster.cpp
+
 }  // namespace
 
 /* vfs_root: the folder holding PS3_GAME (main.cpp's ppu_vfs_root); eboot: the ELF main() loads (its SHA-256 is the digest's EBOOT id);
@@ -585,6 +587,7 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
         st->set.digest_kind = kind;
     }
     g_kind.store((int)st->set.digest_kind);
+    g_roster = st->set.roster;
     g_st = st;
     if (!st->served.empty()) {
         __atomic_store_n(&g_ps3_fs_vfile_ops, &k_ops, __ATOMIC_RELEASE);
@@ -614,4 +617,43 @@ extern "C" int jsp_mods_net_build(uint32_t stock, uint32_t* out)
         logl(fmt("[mods] set: gameplay digest %s..., net build 0x%08x (stock 0x%08x)", hex(st->set.digest).substr(0, 16).c_str(), v, stock));
     *out = v;
     return 1;
+}
+
+/* ENHANCEMENT (roster, jsp_roster.cpp). The applied roster mods' fighters, load order; returns the count (0 = none), at most cap. */
+extern "C" int jsp_mods_roster_fighters(int* id, int* logo_as, int* owned, int cap)
+{
+    int n = 0;
+    for (const RosterFighter& f : g_roster) {
+        if (n >= cap) break;
+        id[n] = f.id; logo_as[n] = f.logo_as; owned[n] = f.owned ? 1 : 0;
+        ++n;
+    }
+    return n;
+}
+
+/* The final character list (stock ids plus the added ones, no terminator); returns its length, or 0 when it does not fit cap. */
+extern "C" int jsp_mods_roster_list(uint32_t* out, int cap)
+{
+    const std::vector<uint32_t> l = build_roster_list(g_roster);
+    if ((int)l.size() > cap) return 0;
+    for (size_t i = 0; i < l.size(); ++i) out[i] = l[i];
+    return (int)l.size();
+}
+
+/* The stock character list (the 52 ids, no terminator), for the guest side's comparison; returns its length, or 0 when it does not fit cap. */
+extern "C" int jsp_mods_roster_stock(uint32_t* out, int cap)
+{
+    const int n = (int)(sizeof kStockRoster / sizeof kStockRoster[0]);
+    if (n > cap) return 0;
+    for (int i = 0; i < n; ++i) out[i] = kStockRoster[i];
+    return n;
+}
+
+/* The roster could not be put into the guest (not US 1.00, or the guest list is not the stock one): the set no longer runs as listed, so it
+ * is Refused (no rollback, no game online), the same as a gameplay mod that was requested but not applied. */
+extern "C" void jsp_mods_roster_failed(const char* why)
+{
+    g_kind.store((int)DigestKind::Refused);
+    logl(std::string("[mods] roster not applied (") + (why ? why : "?") + "): gameplay mods requested but not applied on this build: online refused");
+    jsp_online_refuse_for_mods();
 }

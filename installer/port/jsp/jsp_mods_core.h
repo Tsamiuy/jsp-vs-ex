@@ -21,6 +21,14 @@
 //   7. Digest: SHA-256 over "jsp-modset 1\n", the EBOOT id, and for each applied gameplay mod in load order "id version\n" plus
 //      "entry sha256-of-served-bytes\n" per served entry. No applied gameplay mod = no digest. A listed mod that was refused and is not
 //      provably cosmetic makes the digest the fixed refusing value (kRefused): the set does not run as listed, so online must refuse.
+//   8. ENHANCEMENT, roster (interface "roster" 1, GMOD roster step): a manifest may add fighter ids to the character select list
+//      (jsp_roster.cpp applies it in the guest). Pure rules here: the running title and the manifest's game.title_ids must both be
+//      BLUS31519 (the EU build is unverified); ids 19, 20 or 21 only, none already in the 52-id stock list or added by an earlier mod;
+//      "after" must name an id already in the list; "logo_as" must be a stock fighter id (on the stock list, below 200); at most 56 ids in
+//      all (kRosterGrid; with three allowed ids the list tops out at 55). Any violation refuses the whole mod. A roster mod is gameplay and
+//      its fighters are part of the digest.
+//      A fight with an added fighter is untested and no model, voice or card art is served for one: a mod must not offer a fighter whose full
+//      data is not in place ("owned" defaults to true, so the card is selectable). The list-repoint approach was first shown by a community mod.
 // ASSUMPTION: CRI does not check an entry's FileSize against the header's EnabledPackedSize/EnabledDataSize (2x the sum of the FileSize
 // values on the US disc; the header row is left as it is, so a smaller replacement leaves them unchanged). The first in-game run of a
 // smaller replacement tests it.
@@ -354,10 +362,33 @@ struct Interface { std::string name; int version; };
 // What this build supports. Round 1: cpk-entry 1 only ("balance" joins with its applier, step R8).
 inline const std::vector<Interface>& supported_interfaces()
 {
-    static const std::vector<Interface> k = { { "cpk-entry", 1 } };
+    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 1 } };
     return k;
 }
 struct OverrideSpec { std::string entry, alias, file, sha256; };
+// ENHANCEMENT (roster): one added fighter. id 0..63 (the save's "owned" field covers ids 0..63: word id/32 of three words at save +0x29A9C,
+// the third also holds the supports 200..231 as id-136, jsp_unlock.cpp); after: the id it goes behind in the list (-1 = before the first
+// support, id >= 200); logo_as: a stock fighter id whose intro series logo this fighter shows (the switch @0x00127A94 is run with that id
+// in place of the added one; -1 = none); owned: whether the fighter is marked owned in the save (default true).
+struct RosterFighter { int id = -1, after = -1, logo_as = -1; bool owned = true; };
+constexpr int kRosterIdMax = 63;
+// The list capacity: 56 ids. The select grid is 4 cells a row, 16 rows (64 cells) in the static select object; the owned ids take a cell each,
+// every other id a locked card, plus one random card, rounded up to an even row count (2 rows a page), so the grid itself holds 60 ids. The
+// random select (func_001882D4) gathers the ids in a stack buffer of 56 words, which is what limits the list to 56.
+constexpr size_t kRosterGrid = 56;
+// Ids a mod may add: only the three the game leaves unused in every table checked (19, 20 = the cut Dio, 21). 42-57 alias the supports in the
+// dense and image indexes, 58-63 are not traced (table lengths unknown), supports 200+ are not accepted at all.
+inline bool roster_id_ok(int id) { return id >= 19 && id <= 21; }
+constexpr const char* kRosterTitle = "BLUS31519";   // the only build the guest side is verified on
+// The US 1.00 list at 0x00756C64 (52 ids, then -1), in order. The guest side compares all of it before it changes anything.
+inline const uint32_t kStockRoster[52] = { 32, 36, 28, 30, 33, 34, 41, 39, 40, 24, 38, 37, 13, 14, 31, 7, 9, 8, 4, 5, 6, 17, 18, 15, 16, 27, 25, 26,
+                                           35, 29, 10, 12, 11, 22, 23, 0, 1, 2, 3, 206, 209, 205, 210, 212, 211, 203, 213, 204, 207, 202, 200, 201 };
+// A stock fighter id: on the stock list and below 200 (the supports are not fighters).
+inline bool roster_logo_ok(int id)
+{
+    if (id < 0 || id >= 200) return false;
+    return std::find(std::begin(kStockRoster), std::end(kStockRoster), (uint32_t)id) != std::end(kStockRoster);
+}
 struct Manifest {
     int schema = 0;
     std::string id, version, title;
@@ -367,6 +398,7 @@ struct Manifest {
     std::vector<std::vector<std::string>> groups;
     std::vector<OverrideSpec> overrides;
     std::vector<std::string> conflicts_ok;
+    std::vector<RosterFighter> roster;
 };
 
 inline bool parse_manifest(const std::string& text, const std::string& folder_id, const std::vector<Interface>& supported,
@@ -478,6 +510,43 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
                 one.push_back(x.s);
             }
             m.groups.push_back(std::move(one));
+        }
+    }
+    if ((v = j.get("roster"))) {
+        const bool decl = std::find_if(m.interfaces.begin(), m.interfaces.end(), [](const Interface& i) { return i.name == "roster"; }) != m.interfaces.end();
+        if (!decl) { err = "mod.json: \"roster\" needs interface \"roster\""; return false; }
+        if (title_id != kRosterTitle || std::find(m.title_ids.begin(), m.title_ids.end(), std::string(kRosterTitle)) == m.title_ids.end()) {
+            err = std::string("mod.json: a roster mod needs game.title_ids to name ") + kRosterTitle + " and runs only on that build (this one is " + (title_id.empty() ? "unknown" : title_id) + ")";
+            return false;
+        }
+        if (v->type != Json::Obj) { err = "mod.json: \"roster\" must be an object"; return false; }
+        for (const std::string& k : v->keys) if (k != "fighters") { err = "mod.json: roster: unknown key \"" + k + "\""; return false; }
+        const Json* fl = v->get("fighters");
+        if (!fl || fl->type != Json::Arr || fl->arr.empty() || fl->arr.size() > kRosterGrid) { err = "mod.json: roster.fighters must be a non-empty array"; return false; }
+        for (const Json& o : fl->arr) {
+            if (o.type != Json::Obj) { err = "mod.json: a roster fighter is not an object"; return false; }
+            for (const std::string& k : o.keys)
+                if (k != "id" && k != "after" && k != "logo_as" && k != "owned") { err = "mod.json: roster fighter: unknown key \"" + k + "\""; return false; }
+            RosterFighter f;
+            const Json* x = o.get("id");
+            if (!x || x->type != Json::Int || x->i < 0 || x->i > kRosterIdMax || !roster_id_ok(int(x->i))) {
+                err = "mod.json: roster fighter \"id\" must be 19, 20 or 21 (the only ids unused in every table checked)";
+                return false;
+            }
+            f.id = int(x->i);
+            if ((x = o.get("after"))) {
+                if (x->type != Json::Int || x->i < 0 || x->i > 255) { err = "mod.json: roster fighter \"after\" must be an integer 0..255"; return false; }
+                f.after = int(x->i);
+            }
+            if ((x = o.get("logo_as"))) {
+                if (x->type != Json::Int || !roster_logo_ok(int(x->i))) { err = "mod.json: roster fighter \"logo_as\" must be a stock fighter id (on the stock list, below 200)"; return false; }
+                f.logo_as = int(x->i);
+            }
+            if ((x = o.get("owned"))) {
+                if (x->type != Json::Bool) { err = "mod.json: roster fighter \"owned\" must be true or false"; return false; }
+                f.owned = x->b;
+            }
+            m.roster.push_back(f);
         }
     }
     if ((v = j.get("conflicts_ok"))) {
@@ -750,6 +819,44 @@ struct Plan {
     }
 };
 
+// ---- roster rules (pure) -----------------------------------------------------------------------------------------------------------
+// `ids` holds the stock ids and the ids earlier mods added; on success it gains this mod's. false + err = refuse the whole mod.
+inline bool check_roster(const Manifest& m, std::set<int>& ids, std::string& err, size_t cap = kRosterGrid)
+{
+    std::set<int> t = ids;
+    for (const RosterFighter& f : m.roster) {
+        if (t.count(f.id)) { err = fmt("roster: fighter id %d is already in the character list (stock, or added by an earlier mod)", f.id); return false; }
+        if (f.after >= 0 && !t.count(f.after)) { err = fmt("roster: fighter %d goes after id %d, which is not in the list at that point", f.id, f.after); return false; }
+        t.insert(f.id);
+    }
+    if (t.size() > cap) { err = fmt("roster: %llu ids would not fit the select lists (room for %llu)", (unsigned long long)t.size(), (unsigned long long)cap); return false; }
+    ids = std::move(t);
+    return true;
+}
+inline std::set<int> stock_roster_ids() { return std::set<int>(std::begin(kStockRoster), std::end(kStockRoster)); }
+// The final list: the stock ids, each added fighter (in the order given: load order, then manifest order) right behind its "after" id and
+// behind any fighter already added there; without "after" before the first support (id >= 200).
+inline std::vector<uint32_t> build_roster_list(const std::vector<RosterFighter>& add)
+{
+    std::vector<uint32_t> l(std::begin(kStockRoster), std::end(kStockRoster));
+    std::map<uint32_t, int> anchor;   // added id -> its "after" (-1 none)
+    for (const RosterFighter& f : add) {
+        size_t pos = l.size();
+        if (f.after >= 0) {
+            pos = 0;
+            while (pos < l.size() && l[pos] != (uint32_t)f.after) ++pos;
+            if (pos < l.size()) ++pos;
+        } else {
+            pos = 0;
+            while (pos < l.size() && l[pos] < 200) ++pos;
+        }
+        while (pos < l.size() && anchor.count(l[pos]) && anchor[l[pos]] == f.after) ++pos;
+        l.insert(l.begin() + (long)pos, (uint32_t)f.id);
+        anchor[(uint32_t)f.id] = f.after;
+    }
+    return l;
+}
+
 // ---- the mod set ------------------------------------------------------------------------------------------------------------------
 enum class DigestKind { None, Value, Refused };
 // Fixed value for "gameplay mods were listed but not all applied": SHA-256("jsp-modset 1\nrefused\n"). Online code must refuse on
@@ -789,6 +896,7 @@ struct Options {
 struct ModSet {
     std::vector<ModState> mods;
     std::map<std::string, Plan> plans;   // by archive basename
+    std::vector<RosterFighter> roster;   // every applied mod's added fighters, load order (build_roster_list gives the list)
     DigestKind digest_kind = DigestKind::None;
     Digest digest{};
     std::vector<std::string> log;
@@ -967,6 +1075,7 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
                           ids.c_str(), ids.empty() ? "" : ")"));
     }
     std::map<std::string, Archive> archives;
+    std::set<int> roster_ids = stock_roster_ids();
     for (const ListEntry& e : list) {
         ModState st;
         st.id = e.id;
@@ -983,7 +1092,7 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
                 text.resize(size_t(sz));
                 if (io.mod_read(rel, 0, text.data(), text.size()) != text.size()) err = "cannot read mod.json";
                 else if ((st.manifest_ok = parse_manifest(text, e.id, opt.supported, opt.title_id, st.m, err)) &&
-                         resolve_mod(io, st, archives, err))
+                         resolve_mod(io, st, archives, err) && check_roster(st.m, roster_ids, err))
                     st.loaded = true;
             }
         }
@@ -1042,6 +1151,15 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
                               g.front().c_str()));
         }
         for (const auto& r : st.ovr) if (r.served) st.applied = true;
+        if (!st.m.roster.empty()) {
+            st.applied = true;
+            std::string ids;
+            for (const RosterFighter& f : st.m.roster) {
+                set.roster.push_back(f);
+                ids += fmt("%s%d(after %d%s%s)", ids.empty() ? "" : ", ", f.id, f.after, f.logo_as >= 0 ? fmt(", logo as %d", f.logo_as).c_str() : "", f.owned ? ", owned" : "");
+            }
+            log.push_back(fmt("[mods] %s: roster adds %llu fighter(s): %s", st.id.c_str(), (unsigned long long)st.m.roster.size(), ids.c_str()));
+        }
     }
 
     // Plans, one per archive with served overrides.
@@ -1069,6 +1187,7 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
         std::string l = st.id + " " + st.m.version + "\n";
         for (const auto& r : st.ovr)
             if (r.served) l += r.spec.entry + " " + hex(r.content) + "\n";
+        for (const RosterFighter& f : st.m.roster) l += fmt("roster %d after %d logo %d owned %d\n", f.id, f.after, f.logo_as, f.owned ? 1 : 0);
         h.update((const uint8_t*)l.data(), l.size());
     }
     if (refused_gameplay) {
