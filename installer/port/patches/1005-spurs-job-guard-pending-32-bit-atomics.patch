@@ -1,0 +1,47 @@
+Patch 1005: the job guard's pending count is updated with 32-bit atomics on every platform. (Upstream candidate together with 1002 and 1004.)
+
+Patches 1002 and 1004 count a guard's notifications in a u32 (`pending`, offset 12 of a 24-byte table entry) and update it
+through `(volatile long*)` casts. On Windows `long` is 32 bits, so the operation is the right width. On a 64-bit POSIX
+build `long` is 64 bits and the toolkit's win32_compat.h picks its 64-bit operation for a `long*` in C (its `_Generic`
+selection), so the increment and the credit subtraction were 8-byte locked operations on a 4-byte field: they also
+covered `auto_reset`, the next field, and the entry's 12-byte offset puts some of them across a cache line (entry 2:
+bytes 60-67), a split lock. Measured on a native Linux clang build: `lock incq 0xc(...)` and `lock add %rax,0xc(...)`
+before, `lock incl` and `lock add %eax` after. A carry into `auto_reset` needs `pending` to wrap, so corruption was
+unlikely; the width and the split lock were not.
+
+The casts now name `volatile LONG*` (and the subtrahend `LONG`), which is what they meant: LONG is `long` on Windows,
+so the Windows build is unchanged, and int32_t in win32_compat.h elsewhere.
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 37fc269a..de4b7182 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -2882,7 +2882,7 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
+ #ifdef _WIN32
+     if (jg_event_on()) AcquireSRWLockExclusive(&s_jg_lock);
+ #endif
+-    _InterlockedIncrement((volatile long*)&s_jobguards[i].pending);
++    _InterlockedIncrement((volatile LONG*)&s_jobguards[i].pending);
+ #ifdef _WIN32
+     if (jg_event_on()) { ReleaseSRWLockExclusive(&s_jg_lock); WakeAllConditionVariable(&s_jg_cv); }
+ #endif
+@@ -2933,7 +2933,7 @@ static int jg_wait(u32 ea, int slot)
+             if (s_jobchains[slot].shutdown) { ReleaseSRWLockExclusive(&s_jg_lock); return 0; }
+             if (s_jobguards[i].pending >= s_jobguards[i].reset) {
+                 /* as below: consume exactly one release worth of credits */
+-                _InterlockedExchangeAdd((volatile long*)&s_jobguards[i].pending, -(long)s_jobguards[i].reset);
++                _InterlockedExchangeAdd((volatile LONG*)&s_jobguards[i].pending, -(LONG)s_jobguards[i].reset);
+                 if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
+                 s_jobguards[i].count = s_jobguards[i].reset;
+                 ReleaseSRWLockExclusive(&s_jg_lock);
+@@ -2951,8 +2951,8 @@ static int jg_wait(u32 ea, int slot)
+         if (s_jobguards[i].pending >= s_jobguards[i].reset) {
+             /* Consume exactly one release worth of credits, so notifies that
+              * arrived during the previous lap still count. */
+-            _InterlockedExchangeAdd((volatile long*)&s_jobguards[i].pending,
+-                                    -(long)s_jobguards[i].reset);
++            _InterlockedExchangeAdd((volatile LONG*)&s_jobguards[i].pending,
++                                    -(LONG)s_jobguards[i].reset);
+             if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
+             s_jobguards[i].count = s_jobguards[i].reset;
+             vm_write32(ea, s_jobguards[i].count);

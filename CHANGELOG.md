@@ -4,6 +4,16 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### Technical changes
+
+#### Added
+
+- **Linux (experimental, native build):** new page `docs/LINUX.md`: the steps and the distribution packages (SDL2, Vulkan headers and loader, glslang with its CMake files, SPIRV-Tools; lavapipe and the validation layer for the tests) to build the patched toolkit natively on Linux x86_64 with its opt-in Vulkan renderer (`PS3RECOMP_RSX_VULKAN=ON`) and run upstream's Vulkan test scenes. Proton stays the supported Linux path; the page says so and lists what does not work yet (the port does not compile natively, the game has not run natively, J-Stars' renderer work is Direct3D 12 only). Tested on NixOS with clang 19.1.7 and GCC 16.2.0: the toolkit and its programs build with no errors; `test_shader_spirv` (28 checks) and the 9 fixed-function scenes (run without the validation layer, as upstream runs them) pass on lavapipe (Mesa 26.2.5), and the 20 draw-engine scenes with guest programs pass there under the Khronos validation layer with no validation message (the scene list and checks of upstream's `linux-vulkan.yml`); `ps3recomp_boot_smoke` passes (null renderer); 25 shaders translate through the toolkit's glslang path and pass `spirv-val`: the 23 built-in HLSL shaders of `rsx_d3d12_backend.c`, the vertex-pulling shader and one plain decompiled vertex shader (the opt-in `rsx_live_draw.c`, unused by the port, is not covered). Not tested: the Fedora and Arch package names, Ubuntu itself, a real GPU, the game's own shaders (they need a game run), any part of the game.
+
+#### Fixed
+
+- **Toolkit (native Linux build):** patch 1005: the job guard's `pending` count (patches 1002 and 1004) was updated through `(volatile long*)` casts, which on 64-bit Linux are 8-byte locked operations on a 4-byte field that also cover the next field and can cross a cache line (`lock incq`/`lock add %rax` in a clang build; `lock incl`/`lock add %eax` after); the casts now name `volatile LONG*`, so Windows, where LONG is long, is unchanged. Upstream candidate together with 1002 and 1004. Patch 6020: the toolkit's `ps3recomp_host` (built on POSIX hosts only) failed to link since patch 6007 made cellPad call `ppu_fs_idle_ms`, which lives in the port-side `ppu_fs.cpp`; `runtime/host/host_stubs.c` now stands in for it (seen on Linux; macOS by reading). Patch 6021: the POSIX branch of the OSK panel (patch 2508) lacked five of its functions, which the HLE NID table and the port's glue reference, so a native link failed; they are stand-ins for a panel that is never open. Tested: the series applies (`tools/ci/check_patch_series.py`, also with core.autocrlf true); a native Linux build with each patch, the disassembly before and after 1005, and the scenes and smoke test above. Not tested: a Windows build and a game run with the three patches (none changes a Windows code path: 1005 is the same type there, 6020 and 6021 touch only the POSIX host's stubs and the non-Windows branch of cellOskDialog.c).
+
 ## [0.6.0] - 2026-11-20
 
 ### For players
