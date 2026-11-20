@@ -306,6 +306,16 @@ def main():
         crlf = [
             ("[sceNpMatching2] room 1: PeerGuy joined as member 2\r\n", "[sceNpMatching2] room 1: <online name> joined as member 2\r\n"),
             ("[sceNpMatching2] room 1: PeerGuy left\r\n", "[sceNpMatching2] room 1: <online name> left\r\n"),
+            # the lines of toolkit patch 6019 hold no name or address and pass as they are
+            ("[sceNpMatching2] room 1: member 2 left\r\n", "[sceNpMatching2] room 1: member 2 left\r\n"),
+            ("[sceNpMatching2] room 1: member 2 joined\r\n", "[sceNpMatching2] room 1: member 2 joined\r\n"),
+            ("[sceNpMatching2] signaling: member 2 active\r\n", "[sceNpMatching2] signaling: member 2 active\r\n"),
+            ("[sceNpSignaling] conn 1 established\r\n", "[sceNpSignaling] conn 1 established\r\n"),
+            ("[sceNpSignaling] ActivateConnection(ctx=1) -> conn 1 (pending)\r\n", "[sceNpSignaling] ActivateConnection(ctx=1) -> conn 1 (pending)\r\n"),
+            ("[sceNp] GetNpId(user=0) -> online id set (8 chars), call 1\r\n", "[sceNp] GetNpId(user=0) -> online id set (8 chars), call 1\r\n"),
+            ("[psnr] player online id set (8 chars)\r\n", "[psnr] player online id set (8 chars)\r\n"),
+            ("[psnr] connected to the server (port 36100) (NPWR1_00), user 2, p2p port 3658\r\n",
+             "[psnr] connected to the server (port 36100) (NPWR1_00), user 2, p2p port 3658\r\n"),
             ("[sceNpMatching2] signaling: member 2 (PeerGuy) at 203.0.113.9:3658\r\n", "[sceNpMatching2] signaling: member 2 (<online name>) at <IPv4>:3658\r\n"),
             ("[sceNpSignaling] conn 1 (PeerGuy, 203.0.113.9:3658) established\r\n", "[sceNpSignaling] conn 1 (<online name>, <IPv4>:3658) established\r\n"),
             ("[sceNpSignaling] ActivateConnection(ctx=1, PeerGuy) -> conn 1 (pending)\r\n", "[sceNpSignaling] ActivateConnection(ctx=1, <online name>) -> conn 1 (pending)\r\n"),

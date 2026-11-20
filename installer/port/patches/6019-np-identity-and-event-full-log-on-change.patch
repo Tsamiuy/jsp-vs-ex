@@ -1,0 +1,656 @@
+Patch 6019: the NP identity getters and port_send's EBUSY log once and on change, and no NP line prints an online id or address.
+
+J-Stars Victory VS+ calls sceNpGetNpId about 15 times a second while it is online, and sceNpGetNpId printed the player's
+online id on every call: tens of thousands of lines, most of a session's log, the start of the log pushed out of a
+support bundle's size budget and the online id written into it over and over. sys_event_port_send printed
+"queue N FULL -> EBUSY" on every EBUSY: over a hundred thousand lines in one session. The EBUSY itself is right (a size-1
+queue that is still full refuses the next event, as on the console, and the title sends again later); only the logging was.
+
+- sceNp.c: GetNpId, GetOnlineId, GetOnlineName and GetUserProfile (and the sceNpManager* forms, which call them) each log
+  their first call and then only a call whose answer differs from the last one logged, with the call count. The line
+  says "online id set (N chars)" or "online id changed (N chars)"; the id is never printed. sceNpInit logs the id's
+  length instead of the id. What the getters write is unchanged.
+- sys_event.c, new evt_full_log.h: each port logs its first EBUSY, the end of its first run of EBUSY (the next event
+  its queue takes) with the run's length, and at exit, if it ever answered EBUSY, the total, the number of runs and the
+  longest run. At most three lines per port. What the send returns is unchanged.
+- sceNpMatching2.c, sceNpSignaling.c, np_psnr.c: other players are named by their member, connection or psnr user
+  number, never by online id or address. The psnr lines no longer print this player's online id, public address or
+  the server's name (the port stays; the launcher logs the server it was given). An invalid online ID is reported
+  with where it came from (--username or PS3_NP_ONLINE_ID) and its length.
+- sceNpBasic.c: SendMessage, SendMessageAttachment, SendInGameInvitation and AddBlockListEntry log the other player's online
+  id by its length only, and the attachment line says whether there is a subject, not what it says.
+Logging only. Ours.
+Tests: libs/network/tests/test_np_identity_log.c and runtime/syscalls/tests/test_evt_full_log.c, plus a source check
+of the NP files' printf arguments (installer/tools/np_log_test.sh).
+
+diff --git a/libs/network/np_psnr.c b/libs/network/np_psnr.c
+index 8adba0b..50b3096 100644
+--- a/libs/network/np_psnr.c
++++ b/libs/network/np_psnr.c
+@@ -72,9 +72,11 @@ void np_psnr_setup(const char* username, const char* server)
+     for (int i = 0; i < 2 && !found; i++) {
+         if (!named[i] || !*named[i]) continue;
+         found = clean_online_id(named[i], s_id);
++        /* No online ID, address or server name is printed by this file, only
++         * where a value came from and its length (patch 6019). */
+         if (!found)
+-            printf("[psnr] \"%s\" is not a valid online ID (3-16 letters, digits, - or _, "
+-                   "starting with a letter)\n", named[i]);
++            printf("[psnr] the online ID from %s (%u chars) is not valid (3-16 letters, digits, - or _, "
++                   "starting with a letter)\n", i ? "PS3_NP_ONLINE_ID" : "--username", (unsigned)strlen(named[i]));
+     }
+     if (!found) {
+         if (!np_psnr_enabled()) { s_id_state = 2; return; }   /* offline: "PS3Player" */
+@@ -86,7 +88,7 @@ void np_psnr_setup(const char* username, const char* server)
+         if (!clean_online_id(os, s_id)) strcpy(s_id, "PS3Player");
+     }
+     s_id_state = 1;
+-    printf("[psnr] player \"%s\"%s\n", s_id, np_psnr_enabled() ? "" : " (offline)");
++    printf("[psnr] player online id set (%u chars)%s\n", (unsigned)strlen(s_id), np_psnr_enabled() ? "" : " (offline)");
+ }
+ 
+ const char* np_psnr_identity(void)
+@@ -143,14 +145,13 @@ int np_psnr_connect(const char* comm_id)
+     s_user_id = user_id;
+     UNLOCK();
+     if (s_client)
+-        printf("[psnr] connected to %s:%u as \"%s\" (%s), user %u, seen from %u.%u.%u.%u, p2p port %u\n",
+-               host, port, np_psnr_online_id(), comm_id, user_id, ip[0], ip[1], ip[2], ip[3],
+-               np_psnr_p2p_port());
++        printf("[psnr] connected to the server (port %u) (%s), user %u, p2p port %u\n",
++               port, comm_id, user_id, np_psnr_p2p_port());
+     else if (psnr_connect_error() == PSNR_E_NAME_TAKEN)
+-        printf("[psnr] %s:%u: another player there is already \"%s\" -- pick another "
+-               "with --username. NP stays offline\n", host, port, np_psnr_online_id());
++        printf("[psnr] server (port %u): another player there already has this online ID -- pick another "
++               "with --username. NP stays offline\n", port);
+     else
+-        printf("[psnr] could not reach %s:%u -- NP stays offline\n", host, port);
++        printf("[psnr] could not reach the server (port %u) -- NP stays offline\n", port);
+     return s_client ? 0 : -1;
+ }
+ 
+@@ -284,7 +285,7 @@ int np_psnr_p2p_filter(void* buf, uint32_t* len, uint8_t from_ip[4], uint16_t* f
+         if (!s_probed) {
+             s_probed = 1;
+             s_next_probe = nat_now_ms() + REPROBE_MS;
+-            printf("[psnr] P2P socket seen at %u.%u.%u.%u:%u\n", ip[0], ip[1], ip[2], ip[3], port);
++            printf("[psnr] P2P socket seen by the server (public port %u)\n", port);
+         }
+     } else {   /* a punch */
+         LOCK();
+@@ -346,8 +347,7 @@ int64_t np_psnr_stream_connect(const uint8_t ip[4], uint16_t port)
+     UNLOCK();
+     if (!to || !s_client) return -2;
+     int64_t fd = psnr_stream_connect(s_client, to, port, STREAM_TIMEOUT_MS);
+-    printf("[psnr] stream to %u.%u.%u.%u:%u through the relay: %s\n",
+-           ip[0], ip[1], ip[2], ip[3], port, fd >= 0 ? "open" : "failed");
++    printf("[psnr] stream to user %u through the relay: %s\n", to, fd >= 0 ? "open" : "failed");
+     return fd;
+ }
+ 
+@@ -413,8 +413,7 @@ static void nat_tick(void)
+         if (!p->relay_udp && !p->heard_at && p->punched_at && now - p->punched_at > RELAY_AFTER &&
+             psnr_relay_available(s_client)) {
+             p->relay_udp = 1;
+-            printf("[psnr] nothing direct from %u.%u.%u.%u:%u; its datagrams go through the relay\n",
+-                   p->ip[0], p->ip[1], p->ip[2], p->ip[3], p->port);
++            printf("[psnr] nothing direct from user %u; its datagrams go through the relay\n", p->user);
+         }
+     }
+     UNLOCK();
+diff --git a/libs/network/sceNp.c b/libs/network/sceNp.c
+index 79890a1..cfd5461 100644
+--- a/libs/network/sceNp.c
++++ b/libs/network/sceNp.c
+@@ -51,6 +51,43 @@ static void np_build_fake_id(SceNpId* npId)
+     npId->handle.term = '\0';
+ }
+ 
++/* Patch 6019: titles poll the identity getters (J-Stars asks for its NP ID about
++ * 15 times a second while online), so each getter logs its first call and then
++ * only a call whose answer differs from the last one it logged, with the call
++ * count. The answer itself is never printed, only its length: a log or a
++ * support bundle must not carry the player's online name. */
++typedef struct {
++    const char*        name;
++    unsigned long long calls;
++    char               last[SCE_NP_ONLINEID_MAX_LENGTH + 1];
++    int                seen;
++    char               busy;            /* spin lock: a few compares under it */
++} np_id_log_site;
++
++static np_id_log_site s_log_npid    = { .name = "GetNpId" };
++static np_id_log_site s_log_oid     = { .name = "GetOnlineId" };
++static np_id_log_site s_log_oname   = { .name = "GetOnlineName" };
++static np_id_log_site s_log_profile = { .name = "GetUserProfile" };
++
++static void np_id_log(np_id_log_site* s, s32 userId, const char* value)
++{
++    char cur[sizeof(s->last)];
++    strncpy(cur, value ? value : "", sizeof(cur) - 1);
++    cur[sizeof(cur) - 1] = '\0';
++    while (__atomic_test_and_set(&s->busy, __ATOMIC_ACQUIRE)) {
++#if defined(__x86_64__) || defined(__i386__)
++        __builtin_ia32_pause();
++#endif
++    }
++    const unsigned long long n = ++s->calls;
++    const int first = !s->seen, changed = first || strcmp(cur, s->last) != 0;
++    if (changed) { memcpy(s->last, cur, sizeof(cur)); s->seen = 1; }
++    __atomic_clear(&s->busy, __ATOMIC_RELEASE);
++    if (changed)
++        printf("[sceNp] %s(user=%d) -> online id %s (%u chars), call %llu\n", s->name, userId,
++               first ? "set" : "changed", (unsigned)strlen(cur), n);
++}
++
+ /* ---------------------------------------------------------------------------
+  * API implementations
+  * -----------------------------------------------------------------------*/
+@@ -60,8 +97,8 @@ s32 sceNpInit(u32 poolSize, void* poolPtr)
+     (void)poolSize;
+     (void)poolPtr;
+ 
+-    printf("[sceNp] Init(poolSize=%u, username=\"%s\")\n",
+-           poolSize, np_psnr_online_id());
++    printf("[sceNp] Init(poolSize=%u, online id set (%u chars))\n",
++           poolSize, (unsigned)strlen(np_psnr_online_id()));
+ 
+     if (s_np_initialized)
+         return SCE_NP_ERROR_ALREADY_INITIALIZED;
+@@ -99,7 +136,7 @@ s32 sceNpGetNpId(s32 userId, SceNpId* npId)
+      * time it asked for its NP ID online. */
+     npId = GUEST_PTR(npId, SceNpId*);
+     np_build_fake_id(npId);
+-    printf("[sceNp] GetNpId(user=%d) -> \"%s\"\n", userId, np_psnr_online_id());
++    np_id_log(&s_log_npid, userId, np_psnr_online_id());
+     return CELL_OK;
+ }
+ 
+@@ -118,7 +155,7 @@ s32 sceNpGetOnlineId(s32 userId, SceNpOnlineId* onlineId)
+     strncpy(onlineId->data, np_psnr_online_id(), SCE_NP_ONLINEID_MAX_LENGTH);
+     onlineId->term = '\0';
+ 
+-    printf("[sceNp] GetOnlineId(user=%d) -> \"%s\"\n", userId, np_psnr_online_id());
++    np_id_log(&s_log_oid, userId, np_psnr_online_id());
+     return CELL_OK;
+ }
+ 
+@@ -137,8 +174,7 @@ s32 sceNpGetOnlineName(s32 userId, SceNpOnlineName* onlineName)
+     strncpy(onlineName->data, np_psnr_online_id(),
+             SCE_NP_ONLINENAME_MAX_LENGTH - 1);
+ 
+-    printf("[sceNp] GetOnlineName(user=%d) -> \"%s\"\n",
+-           userId, np_psnr_online_id());
++    np_id_log(&s_log_oname, userId, np_psnr_online_id());
+     return CELL_OK;
+ }
+ 
+@@ -159,8 +195,7 @@ s32 sceNpGetUserProfile(s32 userId, SceNpUserInfo* userInfo)
+             SCE_NP_ONLINENAME_MAX_LENGTH - 1);
+     /* Leave avatar URL empty */
+ 
+-    printf("[sceNp] GetUserProfile(user=%d) -> \"%s\"\n",
+-           userId, np_psnr_online_id());
++    np_id_log(&s_log_profile, userId, np_psnr_online_id());
+     return CELL_OK;
+ }
+ 
+diff --git a/libs/network/sceNpBasic.c b/libs/network/sceNpBasic.c
+index e7ea460..0110a27 100644
+--- a/libs/network/sceNpBasic.c
++++ b/libs/network/sceNpBasic.c
+@@ -230,8 +230,9 @@ s32 sceNpBasicSendMessage(const SceNpOnlineId* to,
+     (void)body;
+     (void)bodySize;
+ 
+-    printf("[sceNpBasic] SendMessage(to=%.16s)\n",
+-           to ? to->data : "(null)");
++    /* Another player's online id: only its length is logged (patch 6019). */
++    printf("[sceNpBasic] SendMessage(to: online id of %u chars)\n",
++           to ? (unsigned)strnlen(to->data, sizeof(to->data)) : 0u);
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+@@ -247,9 +248,9 @@ s32 sceNpBasicSendMessageAttachment(const SceNpOnlineId* to,
+     (void)data;
+     (void)dataSize;
+ 
+-    printf("[sceNpBasic] SendMessageAttachment(to=%.16s, subj=%s)\n",
+-           to ? to->data : "(null)",
+-           subject ? subject : "(null)");
++    printf("[sceNpBasic] SendMessageAttachment(to: online id of %u chars, %s)\n",
++           to ? (unsigned)strnlen(to->data, sizeof(to->data)) : 0u,
++           subject ? "with a subject" : "no subject");
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+@@ -264,8 +265,8 @@ s32 sceNpBasicSendInGameInvitation(const SceNpOnlineId* to,
+     (void)data;
+     (void)dataSize;
+ 
+-    printf("[sceNpBasic] SendInGameInvitation(to=%.16s)\n",
+-           to ? to->data : "(null)");
++    printf("[sceNpBasic] SendInGameInvitation(to: online id of %u chars)\n",
++           to ? (unsigned)strnlen(to->data, sizeof(to->data)) : 0u);
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+@@ -300,8 +301,8 @@ s32 sceNpBasicGetBlockListEntryCount(u32* count)
+ s32 sceNpBasicAddBlockListEntry(const SceNpOnlineId* onlineId)
+ {
+     onlineId = GUEST_PTR(onlineId, const SceNpOnlineId*);
+-    printf("[sceNpBasic] AddBlockListEntry(%.16s)\n",
+-           onlineId ? onlineId->data : "(null)");
++    printf("[sceNpBasic] AddBlockListEntry(online id of %u chars)\n",
++           onlineId ? (unsigned)strnlen(onlineId->data, sizeof(onlineId->data)) : 0u);
+ 
+     if (!basic_ready())
+         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
+diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
+index 6b2ee7f..4003481 100644
+--- a/libs/network/sceNpMatching2.c
++++ b/libs/network/sceNpMatching2.c
+@@ -651,8 +651,8 @@ static void on_push(const psnr_msg* m)
+         int owner;
+         if (r->n >= MEMBER_MAX || !parse_member(&r->m[r->n], p, end, &owner)) return;
+         m2_member* nm = &r->m[r->n++];
+-        printf("[sceNpMatching2] room %llu: %s joined as member %u\n",
+-               (unsigned long long)r->id, nm->online_id, nm->id);
++        /* By member id: no online name or address in the log (patch 6019). */
++        printf("[sceNpMatching2] room %llu: member %u joined\n", (unsigned long long)r->id, nm->id);
+         member_event(c, nm, ROOM_EV_MemberJoined, 0);
+         establish_later(c, nm->id);
+         break;
+@@ -662,7 +662,7 @@ static void on_push(const psnr_msg* m)
+         u16 gone = psnr_get16(p), owner = psnr_get16(p + 2);
+         m2_member* gm = room_member(r, gone);
+         if (!gm) return;
+-        printf("[sceNpMatching2] room %llu: %s left\n", (unsigned long long)r->id, gm->online_id);
++        printf("[sceNpMatching2] room %llu: member %u left\n", (unsigned long long)r->id, gm->id);
+         cancel_signal(ctx_id(c), gone);
+         signal_member(c, gone, SIG_EV_Dead);
+         member_event(c, gm, ROOM_EV_MemberLeft, CAUSE_LEAVE_ACTION);
+@@ -1347,8 +1347,8 @@ s32 sceNpMatching2SignalingGetConnectionStatus(u16 ctxId, u64 roomId, u16 member
+     if (connStatus) vm_write32(connStatus, m ? SIG_CONN_ACTIVE : SIG_CONN_INACTIVE);
+     if (peerAddr) memcpy(vm_ptr8(peerAddr), m ? m->ip : (const u8*)"\0\0\0\0", 4);
+     if (peerPort) vm_write16(peerPort, m ? m->port : 0);
+-    if (m) printf("[sceNpMatching2] signaling: member %u (%s) at %u.%u.%u.%u:%u\n", memberId,
+-                  m->online_id, m->ip[0], m->ip[1], m->ip[2], m->ip[3], m->port);
++    /* By member id: no online name or address in the log (patch 6019). */
++    if (m) printf("[sceNpMatching2] signaling: member %u active\n", memberId);
+     return CELL_OK;
+ }
+ 
+diff --git a/libs/network/sceNpSignaling.c b/libs/network/sceNpSignaling.c
+index e61e9f7..d5ae7ad 100644
+--- a/libs/network/sceNpSignaling.c
++++ b/libs/network/sceNpSignaling.c
+@@ -113,8 +113,8 @@ void np_signaling_room_peer(const char* online_id, const u8 ip[4], u16 port, int
+     if (up) { memcpy(c->ip, ip, 4); c->port = port; }
+     if (c->status == want) return;
+     c->status = want;
+-    printf("[sceNpSignaling] conn %d (%s, %u.%u.%u.%u:%u) %s\n", idx + 1, c->online_id, c->ip[0], c->ip[1], c->ip[2],
+-           c->ip[3], c->port, up ? "established" : "dead");
++    /* By connection number: no online name or address in the log (patch 6019). */
++    printf("[sceNpSignaling] conn %d %s\n", idx + 1, up ? "established" : "dead");
+     conn_event((SceNpSignalingConnId)(idx + 1), up ? SCE_NP_SIGNALING_EVENT_ESTABLISHED : SCE_NP_SIGNALING_EVENT_DEAD, 0);
+     if (up) conn_check_mutual(idx);
+     else c->activated = c->mutual = 0;
+@@ -207,7 +207,7 @@ s32 sceNpSignalingActivateConnection(SceNpSignalingCtxId ctxId,
+     if (c->status == SCE_NP_SIGNALING_CONN_STATUS_INACTIVE) c->status = SCE_NP_SIGNALING_CONN_STATUS_PENDING;
+     c->activated = 1;
+     vm_write32((u32)(uintptr_t)connId, (u32)(idx + 1));
+-    printf("[sceNpSignaling] ActivateConnection(ctx=%u, %s) -> conn %d (%s)\n", ctxId, id, idx + 1,
++    printf("[sceNpSignaling] ActivateConnection(ctx=%u) -> conn %d (%s)\n", ctxId, idx + 1,
+            c->status == SCE_NP_SIGNALING_CONN_STATUS_ACTIVE ? "active" : "pending");
+     if (c->status == SCE_NP_SIGNALING_CONN_STATUS_ACTIVE) {   /* already up: say so, as a new activation would */
+         conn_event((SceNpSignalingConnId)(idx + 1), SCE_NP_SIGNALING_EVENT_ESTABLISHED, 0);
+diff --git a/libs/network/tests/test_np_identity_log.c b/libs/network/tests/test_np_identity_log.c
+new file mode 100644
+index 0000000..8610fd5
+--- /dev/null
++++ b/libs/network/tests/test_np_identity_log.c
+@@ -0,0 +1,134 @@
++/*
++ * test_np_identity_log - the NP identity getters log their first call and a
++ * changed answer, never the online id itself (patch 6019).
++ *
++ *   cc -std=gnu17 -I include -o test_np_identity_log libs/network/tests/test_np_identity_log.c
++ *   (installer/tools/np_log_test.sh builds and runs it)
++ *
++ * Compiles sceNp.c into this file with the online id under the test's control
++ * and the process's stdout sent to a temporary file. Checks: 1000 calls of
++ * each getter with one id log exactly one line per getter; a changed id logs
++ * exactly one more per getter; the sceNpManager* forms share their getter's
++ * line; Init logs no id; nothing logged ever holds either id.
++ */
++#include "../sceNp.c"
++
++#include <stdlib.h>
++#include <unistd.h>
++
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++void spu_linelock_lock(uint32_t a) { (void)a; }
++void spu_linelock_release(uint32_t a) { (void)a; }
++s32 cellSysutilQueueGuestCallbackArgs(u32 opd, const u64 args[8]) { (void)opd; (void)args; return CELL_OK; }
++void edat_add_klicensee(const uint8_t klic[16]) { (void)klic; }
++
++static const char* s_id = "Zqxv-Tester_01";      /* 14 chars */
++int np_psnr_enabled(void) { return 1; }
++const char* np_psnr_online_id(void) { return s_id; }
++
++#define NPID    0x1000u
++#define ONLID   0x1100u
++#define ONAME   0x1200u
++#define PROFILE 0x1400u
++
++static int fails = 0;
++#define EXPECT(cond, what) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", what); fails++; } } while (0)
++
++static FILE* s_cap;
++static int   s_saved_fd = -1;
++
++static void capture_begin(void)
++{
++    fflush(stdout);
++    s_cap = tmpfile();
++    s_saved_fd = dup(1);
++    if (!s_cap || s_saved_fd < 0 || dup2(fileno(s_cap), 1) < 0) { perror("capture"); exit(2); }
++}
++
++/* -> the captured text (malloc'd), stdout restored. */
++static char* capture_end(void)
++{
++    fflush(stdout);
++    dup2(s_saved_fd, 1);
++    close(s_saved_fd);
++    fseek(s_cap, 0, SEEK_END);
++    long n = ftell(s_cap);
++    if (n < 0) n = 0;
++    rewind(s_cap);
++    char* t = (char*)calloc(1, (size_t)n + 1);
++    if (n && fread(t, 1, (size_t)n, s_cap) != (size_t)n) { perror("read"); exit(2); }
++    fclose(s_cap);
++    return t;
++}
++
++static int count(const char* text, const char* needle)
++{
++    int n = 0;
++    for (const char* p = text; (p = strstr(p, needle)) != NULL; p += strlen(needle)) n++;
++    return n;
++}
++
++static void call_all(int times)
++{
++    for (int i = 0; i < times; i++) {
++        sceNpGetNpId(0, (SceNpId*)(uintptr_t)NPID);
++        sceNpGetOnlineId(0, (SceNpOnlineId*)(uintptr_t)ONLID);
++        sceNpGetOnlineName(0, (SceNpOnlineName*)(uintptr_t)ONAME);
++        sceNpGetUserProfile(0, (SceNpUserInfo*)(uintptr_t)PROFILE);
++    }
++}
++
++int main(void)
++{
++    vm_base = (uint8_t*)calloc(1, 65536);
++    if (!vm_base) return 2;
++
++    capture_begin();
++    EXPECT(sceNpInit(131072, (void*)0x8000) == CELL_OK, "sceNpInit");
++    call_all(1000);
++    for (int i = 0; i < 1000; i++) sceNpManagerGetNpId((SceNpId*)(uintptr_t)NPID);
++    char* first = capture_end();
++
++    EXPECT(count(first, "[sceNp] Init(poolSize=131072, online id set (14 chars))") == 1, "Init logs the id's length once");
++    EXPECT(count(first, "[sceNp] GetNpId(") == 1, "1000 + 1000 GetNpId calls with one id: exactly 1 line");
++    EXPECT(count(first, "[sceNp] GetNpId(user=0) -> online id set (14 chars), call 1\n") == 1, "GetNpId first line");
++    EXPECT(count(first, "[sceNp] GetOnlineId(") == 1, "1000 GetOnlineId calls: 1 line");
++    EXPECT(count(first, "[sceNp] GetOnlineName(") == 1, "1000 GetOnlineName calls: 1 line");
++    EXPECT(count(first, "[sceNp] GetUserProfile(") == 1, "1000 GetUserProfile calls: 1 line");
++    EXPECT(count(first, "\n") == 5, "5 lines in all (Init + 4 getters)");
++    /* the getters still answer with the id */
++    EXPECT(strcmp((const char*)vm_base + NPID, s_id) == 0, "GetNpId still writes the id");
++    EXPECT(strcmp((const char*)vm_base + ONAME, s_id) == 0, "GetOnlineName still writes the id");
++
++    capture_begin();
++    s_id = "Wmrk7";                                  /* 5 chars */
++    call_all(1000);
++    for (int i = 0; i < 1000; i++) sceNpManagerGetNpId((SceNpId*)(uintptr_t)NPID);
++    char* second = capture_end();
++
++    EXPECT(count(second, "[sceNp] GetNpId(user=0) -> online id changed (5 chars), call 2001\n") == 1,
++           "a changed id: 1 more GetNpId line, with the call count");
++    EXPECT(count(second, "[sceNp] GetOnlineId(user=0) -> online id changed (5 chars), call 1001\n") == 1, "GetOnlineId changed");
++    EXPECT(count(second, "[sceNp] GetOnlineName(user=0) -> online id changed (5 chars), call 1001\n") == 1, "GetOnlineName changed");
++    EXPECT(count(second, "[sceNp] GetUserProfile(user=0) -> online id changed (5 chars), call 1001\n") == 1, "GetUserProfile changed");
++    EXPECT(count(second, "\n") == 4, "4 lines for the change (one per getter)");
++
++    /* the id never reaches the log */
++    EXPECT(!strstr(first, "Zqxv") && !strstr(second, "Zqxv"), "the first id is never printed");
++    EXPECT(!strstr(first, "Wmrk7") && !strstr(second, "Wmrk7"), "the second id is never printed");
++    EXPECT(!strstr(first, "PS3Player") && !strstr(second, "PS3Player"), "the default name is never printed");
++
++    if (fails) { fputs(first, stderr); fputs(second, stderr); }
++    printf("test_np_identity_log: %s (%d failure%s)\n", fails ? "FAIL" : "ok", fails, fails == 1 ? "" : "s");
++    free(first); free(second);
++    return fails ? 1 : 0;
++}
+diff --git a/runtime/syscalls/evt_full_log.h b/runtime/syscalls/evt_full_log.h
+new file mode 100644
+index 0000000..55c0b35
+--- /dev/null
++++ b/runtime/syscalls/evt_full_log.h
+@@ -0,0 +1,91 @@
++/*
++ * ps3recomp - the log of sys_event_port_send answering EBUSY (patch 6019)
++ *
++ * A port whose queue is full answers CELL_EBUSY, as lv2 does; a title with a
++ * size-1 queue meets that all the time and simply sends again later. Logging
++ * every EBUSY wrote over a hundred thousand lines in one session, so each port
++ * logs only:
++ *   - its first EBUSY;
++ *   - the end of its first run of EBUSY (the next send its queue takes), with
++ *     the run's length;
++ *   - at exit, if it ever answered EBUSY: the total, the number of runs and
++ *     the longest run.
++ * At most three lines per port, however long the session. Logging only: what
++ * the send returns does not depend on any of this.
++ */
++#ifndef PS3_EVT_FULL_LOG_H
++#define PS3_EVT_FULL_LOG_H
++
++#include <stdint.h>
++#include <stdio.h>
++
++typedef struct {
++    unsigned long long total;    /* EBUSY answers so far */
++    unsigned long long runs;     /* runs of EBUSY started */
++    unsigned long long run;      /* EBUSY answers of the current run, 0 between runs (atomic: read without the lock) */
++    unsigned long long longest;  /* longest run that has ended */
++    int                first_run_ended;
++    char               busy;     /* spin lock: a few counters under it */
++} evt_full_site;
++
++/* A CPU pause in spin loops (x86 PAUSE; elsewhere nothing). */
++#if defined(__x86_64__) || defined(__i386__)
++#define EVT_FULL_SPIN_PAUSE() __builtin_ia32_pause()
++#else
++#define EVT_FULL_SPIN_PAUSE() ((void)0)
++#endif
++
++static inline void evt_full_lock(evt_full_site* s)
++{
++    while (__atomic_test_and_set(&s->busy, __ATOMIC_ACQUIRE)) EVT_FULL_SPIN_PAUSE();
++}
++
++static inline void evt_full_unlock(evt_full_site* s)
++{
++    __atomic_clear(&s->busy, __ATOMIC_RELEASE);
++}
++
++/* The port's queue was full: the send answers EBUSY. */
++static inline void evt_full_note_busy(evt_full_site* s, FILE* out, uint32_t port, int queue)
++{
++    evt_full_lock(s);
++    const int first = s->total++ == 0;
++    if (__atomic_fetch_add(&s->run, 1, __ATOMIC_RELAXED) == 0) s->runs++;
++    evt_full_unlock(s);
++    if (first)
++        fprintf(out, "[evt] port_send(port=%u): queue %d FULL -> EBUSY (logged once per port: the end of this run "
++                     "and the totals at exit follow)\n", port, queue);
++}
++
++/* The port's queue took an event. Cheap when no run is open. */
++static inline void evt_full_note_sent(evt_full_site* s, FILE* out, uint32_t port, int queue)
++{
++    if (!__atomic_load_n(&s->run, __ATOMIC_RELAXED)) return;
++    evt_full_lock(s);
++    const unsigned long long r = __atomic_exchange_n(&s->run, 0, __ATOMIC_RELAXED);
++    if (r > s->longest) s->longest = r;
++    const int report = r && !s->first_run_ended;
++    if (report) s->first_run_ended = 1;
++    evt_full_unlock(s);
++    if (report)
++        fprintf(out, "[evt] port_send(port=%u): queue %d took an event again after %llu EBUSY (later runs are "
++                     "only counted)\n", port, queue, r);
++}
++
++/* At exit: one line per port of `sites` (port number = index + 1) that ever answered EBUSY. */
++static inline void evt_full_summary(evt_full_site* sites, unsigned count, FILE* out)
++{
++    for (unsigned i = 0; i < count; i++) {
++        evt_full_site* s = &sites[i];
++        evt_full_lock(s);
++        const unsigned long long total = s->total, runs = s->runs;
++        const unsigned long long open = __atomic_load_n(&s->run, __ATOMIC_RELAXED);
++        const unsigned long long longest = open > s->longest ? open : s->longest;
++        evt_full_unlock(s);
++        if (total)
++            fprintf(out, "[evt] port_send(port=%u): %llu EBUSY in %llu runs, longest run %llu\n",
++                    i + 1, total, runs, longest);
++    }
++}
++
++#endif /* PS3_EVT_FULL_LOG_H */
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index 4ee9a14..75f718f 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -1118,6 +1118,12 @@ uint32_t sys_event_find_queue_by_key(uint64_t key)
+     return 0;
+ }
+ 
++/* EBUSY from a full queue is logged per port, a bounded number of lines
++ * (patch 6019, evt_full_log.h). */
++#include "evt_full_log.h"
++static evt_full_site s_evt_full[SYS_EVENT_PORT_MAX];
++static void evt_full_at_exit(void) { evt_full_summary(s_evt_full, SYS_EVENT_PORT_MAX, stderr); }
++
+ int64_t sys_event_port_send(ppu_context* ctx)
+ {
+     uint32_t port_id = LV2_ARG_U32(ctx, 0);
+@@ -1202,10 +1208,12 @@ int64_t sys_event_port_send(ppu_context* ctx)
+       g_spu_pending_evt_valid = 0; }
+ 
+     if (event_queue_push(q, &evt) < 0) {
+-        fprintf(stderr, "[evt] port_send(port=%u): queue %d FULL -> EBUSY%c",
+-                port_id, qidx, 10);
++        static char s_at_exit;
++        if (!__atomic_test_and_set(&s_at_exit, __ATOMIC_RELAXED)) atexit(evt_full_at_exit);
++        evt_full_note_busy(&s_evt_full[port_id - 1], stderr, port_id, qidx);
+         return (int64_t)(int32_t)CELL_EBUSY;
+     }
++    evt_full_note_sent(&s_evt_full[port_id - 1], stderr, port_id, qidx);
+ 
+     return CELL_OK;
+ }
+diff --git a/runtime/syscalls/tests/test_evt_full_log.c b/runtime/syscalls/tests/test_evt_full_log.c
+new file mode 100644
+index 0000000..8753cbb
+--- /dev/null
++++ b/runtime/syscalls/tests/test_evt_full_log.c
+@@ -0,0 +1,73 @@
++/*
++ * test_evt_full_log - sys_event_port_send's EBUSY is logged a bounded number
++ * of times per port (patch 6019, runtime/syscalls/evt_full_log.h).
++ *
++ *   cc -std=gnu17 -o test_evt_full_log runtime/syscalls/tests/test_evt_full_log.c
++ *   (installer/tools/np_log_test.sh builds and runs it)
++ *
++ * Checks: the first EBUSY of a port logs one line; 100000 more log nothing;
++ * the next send that is taken logs the run's length once; later runs, long
++ * or alternating with taken sends, log nothing; sends with no run open log
++ * nothing; a second port has lines of its own; the exit summary is one line
++ * per port that ever answered EBUSY, with the totals.
++ */
++#include "../evt_full_log.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++static int fails = 0;
++#define EXPECT(cond, what) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", what); fails++; } } while (0)
++
++static char* read_all(FILE* f)
++{
++    fflush(f);
++    fseek(f, 0, SEEK_END);
++    long n = ftell(f);
++    rewind(f);
++    char* t = (char*)calloc(1, (size_t)(n > 0 ? n : 0) + 1);
++    if (n > 0 && fread(t, 1, (size_t)n, f) != (size_t)n) { perror("read"); exit(2); }
++    return t;
++}
++
++static int count(const char* text, const char* needle)
++{
++    int n = 0;
++    for (const char* p = text; (p = strstr(p, needle)) != NULL; p += strlen(needle)) n++;
++    return n;
++}
++
++int main(void)
++{
++    static evt_full_site sites[8];
++    FILE* out = tmpfile();
++    if (!out) { perror("tmpfile"); return 2; }
++
++    for (int i = 0; i < 5; i++) evt_full_note_sent(&sites[2], out, 3, 7);    /* no run open: nothing */
++    for (int i = 0; i < 100001; i++) evt_full_note_busy(&sites[2], out, 3, 7);
++    evt_full_note_sent(&sites[2], out, 3, 7);                                  /* first run ends: 100001 */
++    for (int i = 0; i < 50000; i++) {                                          /* a size-1 queue: busy, taken, ... */
++        evt_full_note_busy(&sites[2], out, 3, 7);
++        evt_full_note_sent(&sites[2], out, 3, 7);
++    }
++    for (int i = 0; i < 300000; i++) evt_full_note_busy(&sites[2], out, 3, 7);  /* a long later run, never ended */
++    for (int i = 0; i < 3; i++) evt_full_note_busy(&sites[5], out, 6, 1);       /* another port */
++    char* during = read_all(out);
++
++    EXPECT(count(during, "\n") == 3, "3 lines for 450004 EBUSY on two ports");
++    EXPECT(count(during, "[evt] port_send(port=3): queue 7 FULL -> EBUSY (logged once per port") == 1, "port 3 first EBUSY");
++    EXPECT(count(during, "[evt] port_send(port=3): queue 7 took an event again after 100001 EBUSY") == 1, "port 3 first run's end");
++    EXPECT(count(during, "[evt] port_send(port=6): queue 1 FULL -> EBUSY (logged once per port") == 1, "port 6 first EBUSY");
++
++    evt_full_summary(sites, 8, out);
++    char* all = read_all(out);
++    const char* summary = all + strlen(during);
++    EXPECT(count(summary, "\n") == 2, "summary: one line per port that answered EBUSY");
++    EXPECT(count(summary, "[evt] port_send(port=3): 450001 EBUSY in 50002 runs, longest run 300000\n") == 1, "port 3 totals");
++    EXPECT(count(summary, "[evt] port_send(port=6): 3 EBUSY in 1 runs, longest run 3\n") == 1, "port 6 totals");
++
++    if (fails) fputs(all, stderr);
++    printf("test_evt_full_log: %s (%d failure%s)\n", fails ? "FAIL" : "ok", fails, fails == 1 ? "" : "s");
++    free(during); free(all); fclose(out);
++    return fails ? 1 : 0;
++}

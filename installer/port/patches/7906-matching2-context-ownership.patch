@@ -3,6 +3,7 @@ Patch 7906 (experimental): reject async Matching2 work after context ownership e
 Persistent owner epochs and serialized state commits; peer registration takes the
 adapter lock before state. Lifecycle invalidation does not wait for that adapter lock.
 Queued callbacks, same-owner room ordering and server cancellation remain separate.
+Context lines refreshed for patch 6019 (three Matching2 log lines); the changes of this patch are as before.
 
 diff --git a/libs/network/np_psnr.h b/libs/network/np_psnr.h
 --- a/libs/network/np_psnr.h
@@ -356,8 +357,8 @@ diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
 -        if (r->n >= MEMBER_MAX || !parse_member(&r->m[r->n], p, end, &owner)) return;
 +        if (r->n >= MEMBER_MAX || !parse_member(&r->m[r->n], p, end, &owner)) goto finished;
          m2_member* nm = &r->m[r->n++];
-         printf("[sceNpMatching2] room %llu: %s joined as member %u\n",
-                (unsigned long long)r->id, nm->online_id, nm->id);
+         /* By member id: no online name or address in the log (patch 6019). */
+         printf("[sceNpMatching2] room %llu: member %u joined\n", (unsigned long long)r->id, nm->id);
 @@ -658,10 +741,10 @@
          break;
      }
@@ -368,7 +369,7 @@ diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
          m2_member* gm = room_member(r, gone);
 -        if (!gm) return;
 +        if (!gm) goto finished;
-         printf("[sceNpMatching2] room %llu: %s left\n", (unsigned long long)r->id, gm->online_id);
+         printf("[sceNpMatching2] room %llu: member %u left\n", (unsigned long long)r->id, gm->id);
          cancel_signal(ctx_id(c), gone);
          signal_member(c, gone, SIG_EV_Dead);
 @@ -680,21 +763,21 @@
@@ -942,8 +943,8 @@ diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
      if (connStatus) vm_write32(connStatus, m ? SIG_CONN_ACTIVE : SIG_CONN_INACTIVE);
      if (peerAddr) memcpy(vm_ptr8(peerAddr), m ? m->ip : (const u8*)"\0\0\0\0", 4);
      if (peerPort) vm_write16(peerPort, m ? m->port : 0);
-     if (m) printf("[sceNpMatching2] signaling: member %u (%s) at %u.%u.%u.%u:%u\n", memberId,
-                   m->online_id, m->ip[0], m->ip[1], m->ip[2], m->ip[3], m->port);
+     /* By member id: no online name or address in the log (patch 6019). */
+     if (m) printf("[sceNpMatching2] signaling: member %u active\n", memberId);
 -    return CELL_OK;
 +    M2_RETURN(CELL_OK);
  }
