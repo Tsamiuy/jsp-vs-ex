@@ -274,6 +274,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_ROLLBACK_BUILD=1)
 # The rollback build id from the release content (jsp_build_id.cmake), on the one file that reads it.
 include("${CMAKE_CURRENT_SOURCE_DIR}/jsp_build_id.cmake")
 jsp_build_id(JSP_NET_BUILD_ID "${PROJECT_VERSION}" "${JSP_GAME_REGION}" "${CMAKE_CURRENT_SOURCE_DIR}" "${PS3RECOMP_DIR}")
+# Toolkit patch 2069: the pipelines.bin stamp from the content of the translators and the D3D12 backend (jsp_psow_stamp), on the one
+# toolkit file that reads it. The backend is a source of the toolkit's runtime library, so the property is set in its directory.
+jsp_psow_stamp(JSP_PSOW_STAMP "${PS3RECOMP_DIR}")
+set_property(SOURCE "${PS3RECOMP_DIR}/libs/video/rsx_d3d12_backend.c" TARGET_DIRECTORY ps3recomp_runtime
+             APPEND PROPERTY COMPILE_DEFINITIONS PSOW_BUILD_STAMP=${JSP_PSOW_STAMP})
 message(STATUS "Rollback build id: ${JSP_NET_BUILD_ID}")
 set_property(SOURCE jsp_net_game.cpp APPEND PROPERTY COMPILE_DEFINITIONS JSP_NET_BUILD_ID=${JSP_NET_BUILD_ID})
 

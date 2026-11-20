@@ -4,6 +4,7 @@
 """
 import os
 import pathlib
+import struct
 import sys
 import tempfile
 import zipfile
@@ -410,6 +411,50 @@ def main():
         for bad in ("Anderson", "Zed.example", "Bob;x", ";x", "FriendHouse", "c.example"):
             check(bad not in all11, f"fourth review: {bad!r} appears nowhere in the zip")
         check("(the launch before):" in f11 and "rollback started: yes (host)" in f11, "fourth review: the launch before keeps its label when a secret renames its file")
+
+        # cache files: sizes and record counts (a pipelines.bin that passed 2 GiB stopped loading, so its size is what a report needs)
+        app12 = t / "app12"
+        run12 = app12 / "game" / "run"
+        run12.mkdir(parents=True)
+
+        def pipe(path, keys, head, hdr=40, vs=1 << 20, ps=1 << 20, cut=0):
+            with open(path, "wb") as fh:
+                if head:
+                    fh.write(struct.pack("<IIQII", 0x48575350, 3, 99, hdr, 0))
+                for k in keys:                                   # a sparse file: only the heads are real bytes
+                    fh.write(struct.pack("<IIIIQ", 0x32575350, vs, ps, 16, k) + b"\0" * (hdr - 24))
+                    fh.seek(vs + ps - 1, 1)
+                    fh.write(b"\0")
+                if cut:
+                    fh.truncate(fh.tell() - cut)
+
+        reps = 1100 if os.name != "nt" else 3                                 # 2.2 GB sparse on POSIX; NTFS would write the holes, so a small file there
+        pipe(run12 / "pipelines.bin", [1] + [2] * reps, head=True)            # reps repeats of one key
+        size12 = (run12 / "pipelines.bin").stat().st_size
+        check(size12 > 2 ** 31 or os.name == "nt", "the synthetic pipelines.bin is over 2 GiB (POSIX)")
+        L12 = sb.cache_lines(app12)
+        check(L12 == [f"cache pipelines.bin: {size12} bytes, file head format 3, record head 40 bytes, {reps + 1} records (2 distinct, {reps - 1} repeated), 0 bytes after the last whole record"],
+              f"cache line of a pipelines.bin over 2 GiB: {L12}")
+        pipe(run12 / "pipelines.bin", [5, 6, 7], head=False, hdr=64, vs=300, ps=200, cut=10)   # older build: no head, record size inferred, torn tail
+        s12 = (run12 / "pipelines.bin").stat().st_size
+        check(sb.cache_lines(app12) == [f"cache pipelines.bin: {s12} bytes, no file head (written by an older build), 2 records (2 distinct, 0 repeated), {64 + 500 - 10} bytes after the last whole record"],
+              f"cache line of a pipelines.bin without a head: {sb.cache_lines(app12)}")
+        with open(run12 / "shader_cache.bin", "wb") as fh:
+            for k in (1, 2, 1):
+                fh.write(struct.pack("<IIQ", 0x31435344, 5, k) + b"hello")
+            fh.write(struct.pack("<IIQ", 0x31435344, 50, 9) + b"cut")           # torn last record
+        s13 = (run12 / "shader_cache.bin").stat().st_size
+        check(sb.cache_lines(app12)[1] == f"cache shader_cache.bin: {s13} bytes, 3 records (2 distinct, 1 repeated), {16 + 3} bytes after the last whole record",
+              f"cache line of shader_cache.bin: {sb.cache_lines(app12)}")
+        (run12 / "pso_cache.bin").write_bytes(b"")
+        check(sb.cache_lines(app12)[-1] == "cache pso_cache.bin: 0 bytes, 0 records (0 distinct, 0 repeated), 0 bytes after the last whole record", "an empty cache file")
+        check(sb.cache_lines(t / "app-none") == ["cache files (pipelines.bin, shader_cache.bin, pso_cache.bin): none found"], "no cache files: said so")
+        f12 = sb.facts(app12, {}, [], 0, [], ["facts.txt"])
+        check("\ncache pipelines.bin: " in f12 and "\ncache shader_cache.bin: " in f12, "facts.txt carries the cache lines")
+        zp12 = sb.make(app12, out, None, None)
+        z12 = zipfile.ZipFile(zp12)
+        check(not any(n.endswith(".bin") for n in z12.namelist()), "the cache files themselves are not in the zip")
+        z12.close()
 
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")

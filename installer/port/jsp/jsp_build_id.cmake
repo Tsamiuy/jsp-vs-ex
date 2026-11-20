@@ -47,3 +47,31 @@ function(jsp_build_id out version region glue toolkit)
     endif()
     set(${out} "0x${id}" PARENT_SCOPE)
 endfunction()
+
+# ENHANCEMENT (pipelines.bin, toolkit patch 2069): the stamp of the pipeline warm-up file, the same way (content, never the compile
+# time: the exe is built on each player's PC, so a time stamp would empty a cache of up to 2.3 GB at every rebuild, moved install or
+# toolchain change). It hashes the files that decide what bytecode and pipeline keys a build produces: the video translators
+# (libs/video/rsx_*decompiler*), the D3D12 backend and its headers (libs/video/rsx_d3d12_*, rsx_vpull.h) and psow_file.h, each as
+# relative path + bytes with CR-LF made LF. The d3dcompiler version is not an input (not known at configure time).
+#   jsp_psow_stamp(<out var> <toolkit dir>)  sets <out var> to 0xXXXXXXXXXXXXXXXXULL (64 bits of a SHA-256)
+function(jsp_psow_stamp out toolkit)
+    set(acc "jsp-psow-stamp 1\n")
+    set(deps "")
+    file(GLOB files RELATIVE "${toolkit}" LIST_DIRECTORIES false
+         "${toolkit}/libs/video/rsx_*decompiler*" "${toolkit}/libs/video/rsx_d3d12_*" "${toolkit}/libs/video/rsx_vpull.h"
+         "${toolkit}/libs/video/psow_file.h")
+    list(SORT files)
+    foreach(f IN LISTS files)
+        file(READ "${toolkit}/${f}" text)
+        string(REPLACE "\r\n" "\n" text "${text}")
+        string(SHA256 h "${text}")
+        string(APPEND acc "${f} ${h}\n")
+        list(APPEND deps "${toolkit}/${f}")
+    endforeach()
+    string(SHA256 all "${acc}")
+    string(SUBSTRING "${all}" 0 16 id)
+    if(NOT CMAKE_SCRIPT_MODE_FILE)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${deps})
+    endif()
+    set(${out} "0x${id}ULL" PARENT_SCOPE)
+endfunction()

@@ -47,6 +47,8 @@ posix   | installer/tools/matching2_context_test.py --sdk {toolkit} --output {sc
 posix   | installer/tools/overlay_font_test.sh {font}
 posix   | installer/tools/port_overlay_test.c {toolkit}
 posix   | installer/tools/pad_join_test.c {toolkit}
+posix   | installer/tools/psow_file_test.c {toolkit}
+posix   | installer/tools/psow_file_source_test.py --toolkit {toolkit}
 posix   | installer/tools/session_manifest_test.sh
 posix   | installer/tools/net_session_test.sh {scratch}
 posix   | installer/tools/net_session_driver_test.py
