@@ -35,6 +35,7 @@ static const char* const kKeyRole = "JSP_ROLLBACK_ROLE";     // re-psn only: "ho
 static const char* const kKeyRelay = "JSP_ROLLBACK_RELAY";   // re-psn only: 1 = the player allows the server's relay when a direct path fails
 // The real psnr transport (PsnrClientTransport over the re-psn v0.8.0 client, jsp_net_repsn_client.h) is wired into jsp_net_game.cpp: a re-psn start is allowed.
 static const bool kRepsnWired = true;
+static const char* const kKeyModsOff = "JSP_MODS_ONLINE_OFF";   // set to 1 by jsp_online.cpp when a gameplay mod set turned the game's own online off (ENHANCEMENT, mods)
 static const char* const kKeyRefused = "JSP_NET_REFUSED";   // set to 1 by resolve_env whenever it refused a rollback start (both methods on, or no valid role key)
 static const char* const kDefaultPort = "36200";   // ASSUMPTION: any free UDP port will do; 36200 is only the suggested default
 
@@ -181,6 +182,16 @@ inline std::string status_line(int running, int saved, bool* restart)
     auto nm = [](int n) { return n == NC_CONFLICT ? "refused" : n == NC_ROLLBACK ? "Rollback" : n == NC_DELAY ? "Delay" : "Off"; };
     if (restart) *restart = running != saved;
     return std::string("This session: ") + nm(running) + ".  Saved: " + nm(saved) + (running != saved ? ".  Restart to apply." : ".");
+}
+// The same, when a gameplay mod set turned the game's own online off for this session (kKeyModsOff): with Delay saved, a restart would not
+// turn it on while the mods are on, so the line names the cause instead of "Restart to apply".
+inline std::string status_line(int running, int saved, bool* restart, bool mods_off)
+{
+    if (mods_off && saved == NC_DELAY) {
+        if (restart) *restart = false;
+        return "This session: off (gameplay mods are on); turn the mods off to play online.";
+    }
+    return status_line(running, saved, restart);
 }
 
 // ---- the start decision (jsp_net_game.cpp EnvInit side; host-tested) -------------------------------------------------------------------------------------------

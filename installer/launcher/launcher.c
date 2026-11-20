@@ -22,7 +22,8 @@
  *   2. a marker file:       <install folder>\settings_here.txt    (then only <install folder>\play_settings.txt, never AppData)
  *   3. the install folder:  <install folder>\play_settings.txt
  *   4. AppData:             %APPDATA%\JSP Fan Revival\play_settings.txt   (answers the #52 note that this copy was ignored)
- * No rule merges with another; paths.txt is always read first. The file that won is also put in JSP_SETTINGS_FILE for the game: the in-game
+ * mods.txt (the mods folder's enable list) is looked for next to the file that won, else in the install folder; a second log line says
+ * "mods: N listed (<path>)" (mods_env below). No rule merges with another; paths.txt is always read first. The file that won is also put in JSP_SETTINGS_FILE for the game: the in-game
  * settings pages (jsp_settings.cpp) save to that same file.
  *
  * Reads <exe folder>\paths.txt (KEY=VALUE lines written by firstrun.py: PS3_VFS_ROOT, PS3_HDD0_ROOT, PS3_DEV_FLASH, PS3_TITLE,
@@ -171,30 +172,104 @@ static int flag_settings(const char *cmd, char *out, size_t n)
     return 1;
 }
 
+/* The settings file that won (empty: none), for mods.txt next to it. */
+static char g_settings[MAX_PATH * 2];
+
+static void use_settings(const char *f, char *exe, size_t exe_n, char *elf, size_t elf_n)
+{
+    load_env(f, exe, exe_n, elf, elf_n);
+    SetEnvironmentVariableA("JSP_SETTINGS_FILE", f);
+    snprintf(g_settings, sizeof g_settings, "%s", f);
+}
+
 /* Picks and loads the settings file by the fixed order above; `why` gets the line for launcher_log.txt. */
 static void load_settings(const char *here, const char *cmd, char *exe, size_t exe_n, char *elf, size_t elf_n, char *why, size_t why_n)
 {
     char f[MAX_PATH * 2], app[MAX_PATH];
     snprintf(f, sizeof f, "%s\\settings_here.txt", here);
     if (flag_settings(cmd, f, sizeof f)) {
-        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: command line (--settings %s)", f); }
+        if (file_exists(f)) { use_settings(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: command line (--settings %s)", f); }
         else snprintf(why, why_n, "settings: command line (--settings %s), file not found, defaults", f);
         return;
     }
     snprintf(f, sizeof f, "%s\\settings_here.txt", here);
     if (file_exists(f)) {
         snprintf(f, sizeof f, "%s\\play_settings.txt", here);
-        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: marker file (settings_here.txt), install folder (play_settings.txt)"); }
+        if (file_exists(f)) { use_settings(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: marker file (settings_here.txt), install folder (play_settings.txt)"); }
         else snprintf(why, why_n, "settings: marker file (settings_here.txt), no play_settings.txt in the install folder, defaults");
         return;
     }
     snprintf(f, sizeof f, "%s\\play_settings.txt", here);
-    if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: install folder (play_settings.txt)"); return; }
+    if (file_exists(f)) { use_settings(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: install folder (play_settings.txt)"); return; }
     if (GetEnvironmentVariableA("APPDATA", app, sizeof app)) {
         snprintf(f, sizeof f, "%s\\JSP Fan Revival\\play_settings.txt", app);
-        if (file_exists(f)) { load_env(f, exe, exe_n, elf, elf_n); SetEnvironmentVariableA("JSP_SETTINGS_FILE", f); snprintf(why, why_n, "settings: AppData (%%APPDATA%%\\JSP Fan Revival\\play_settings.txt)"); return; }
+        if (file_exists(f)) { use_settings(f, exe, exe_n, elf, elf_n); snprintf(why, why_n, "settings: AppData (%%APPDATA%%\\JSP Fan Revival\\play_settings.txt)"); return; }
     }
     snprintf(why, why_n, "settings: none found, defaults");
+}
+
+/* ENHANCEMENT (the mods folder, the game's jsp_mods.cpp): the game reads mods.txt (JSP_MODS_LIST, the enable list) and the mods in
+ * JSP_MODS_DIR. mods.txt sits next to the settings file that won; with no settings file, in the install folder (ASSUMPTION: the design's
+ * proposal P8, not yet confirmed; AppData would be the other choice). The mods folder is <install folder>\mods. A value already in the
+ * environment (the settings file, or the player's own) wins, and JSP_MODS=0 turns mods off. The launcher only passes paths: the game parses
+ * and checks the list. `line` gets the launcher_log.txt line, "mods: N listed (<path>)", N = the lines that name something. */
+/* An environment value: 1 = read into b (it fits), 0 = unset or empty (b is ""), -1 = set but longer than the buffer (b is ""). */
+static int env_get(const char *k, char *b, DWORD n)
+{
+    DWORD r;
+    b[0] = 0;
+    r = GetEnvironmentVariableA(k, b, n);
+    if (r == 0) { b[0] = 0; return 0; }
+    if (r >= n) { b[0] = 0; return -1; }   /* the call returned the size it needs and wrote nothing usable */
+    return b[0] ? 1 : 0;
+}
+
+/* The path as the log shows it: under %APPDATA% it is printed with %APPDATA% (as the settings line does), so the profile folder stays out. */
+static void shown_path(const char *path, char *out, size_t n)
+{
+    char app[MAX_PATH] = "";
+    const int r = env_get("APPDATA", app, sizeof app);
+    const size_t k = strlen(app);
+    if (r == 1 && k && !_strnicmp(path, app, k) && (path[k] == '\\' || path[k] == '/')) snprintf(out, n, "%%APPDATA%%%s", path + k);
+    else snprintf(out, n, "%s", path);
+}
+
+static void mods_env(const char *here, char *line, size_t n)
+{
+    char list[MAX_PATH * 2] = "", dir[MAX_PATH * 2] = "", v[8] = "", buf[512] = "", show[MAX_PATH * 2 + 16] = "";
+    const char *slash;
+    DWORD a;
+    FILE *f;
+    int count = 0, r;
+    if (env_get("JSP_MODS", v, sizeof v) == 1 && !strcmp(v, "0")) { snprintf(line, n, "mods: off (JSP_MODS=0)"); return; }
+    if (env_get("JSP_MODS_DIR", dir, sizeof dir) == 0) {   /* a preset value (even one too long for this buffer) is the game's to read */
+        snprintf(dir, sizeof dir, "%s\\mods", here);
+        a = GetFileAttributesA(dir);
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) SetEnvironmentVariableA("JSP_MODS_DIR", dir);
+    }
+    r = env_get("JSP_MODS_LIST", list, sizeof list);
+    if (r < 0) { snprintf(line, n, "mods: JSP_MODS_LIST is longer than %u characters: not counted here (the game reads it)", (unsigned)(sizeof list - 1)); return; }
+    if (r == 0) {
+        slash = strrchr(g_settings, '\\');
+        if (strrchr(g_settings, '/') > slash) slash = strrchr(g_settings, '/');   /* --settings may be given with '/' */
+        if (slash) snprintf(list, sizeof list, "%.*s\\mods.txt", (int)(slash - g_settings), g_settings);
+        else snprintf(list, sizeof list, "%s\\mods.txt", here);
+        shown_path(list, show, sizeof show);
+        if (!file_exists(list)) { snprintf(line, n, "mods: 0 listed (%s, not found)", show); return; }
+        SetEnvironmentVariableA("JSP_MODS_LIST", list);
+    }
+    shown_path(list, show, sizeof show);
+    f = fopen(list, "r");
+    if (!f) { snprintf(line, n, "mods: 0 listed (%s, cannot be read)", show); return; }
+    while (fgets(buf, sizeof buf, f)) {
+        char *s = buf, *h = strchr(buf, '#');
+        if (h) *h = 0;
+        if (!strncmp(s, "\xEF\xBB\xBF", 3)) s += 3;   /* a UTF-8 BOM on the first line */
+        while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+        if (*s) count++;
+    }
+    fclose(f);
+    snprintf(line, n, "mods: %d listed (%s)", count, show);
 }
 
 static void fail(const char *msg)
@@ -205,7 +280,7 @@ static void fail(const char *msg)
 int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
 {
     char here[MAX_PATH], path[MAX_PATH * 2], exe[MAX_PATH] = "JStarsRecomp.exe", elf[MAX_PATH] = "EBOOT.elf";
-    char why[MAX_PATH * 3], run[MAX_PATH * 2], cl[MAX_PATH * 4], disc[MAX_PATH * 2], bfile[MAX_PATH * 2], boost[8], *s;
+    char why[MAX_PATH * 3], mods[MAX_PATH * 3] = "", run[MAX_PATH * 2], cl[MAX_PATH * 4], disc[MAX_PATH * 2], bfile[MAX_PATH * 2], boost[8], *s;
     int boosted = 0;
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     STARTUPINFOA si;
@@ -224,6 +299,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     }
     load_env(path, exe, sizeof exe, elf, sizeof elf);
     load_settings(here, cmd, exe, sizeof exe, elf, sizeof elf, why, sizeof why);
+    mods_env(here, mods, sizeof mods);
 
     /* The disc folder: gone (a mounted image under another drive letter, a moved folder) means the game would run on without
      * data and flood its log. Check it here and say where the path is kept. */
@@ -246,7 +322,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     snprintf(run, sizeof run, "%s\\game\\run", here);
     CreateDirectoryA(run, NULL);
     snprintf(bfile, sizeof bfile, "%s\\launcher_log.txt", run);   /* not `path`: it still holds the game program's path for cl below */
-    { FILE *lg = fopen(bfile, "w"); if (lg) { fprintf(lg, "%s\n", why); fclose(lg); } }
+    { FILE *lg = fopen(bfile, "w"); if (lg) { fprintf(lg, "%s\n%s\n", why, mods); fclose(lg); } }
     snprintf(cl, sizeof cl, "\"%s\" \"%s\\game\\%s\"", path, here, elf);
 
     snprintf(path, sizeof path, "%s\\play_stdout.txt", run);

@@ -79,6 +79,12 @@ name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The
   game's own online were both on, so neither runs and nothing can connect. For rollback, set `enabled = 0` in `repsn.ini`
   (keep `server` and `name`); for the game's own online, remove `JSP_ROLLBACK=1` from `play_settings.txt` (or set it to 0).
   The other "Rollback is off" texts are listed in [ROLLBACK.md](ROLLBACK.md#if-rollback-does-not-start).
+- **Mods:** while the mods folder's list (`mods.txt`) holds a mod that changes gameplay, the game's own Online Battle is off
+  for that session (the log says `[mods] game online refused: gameplay mod set active`, and the Online page says
+  "gameplay mods are on"; turn the mods off to play it). Mods that only change the look or the sound (logos, music) do not turn it off.
+  Rollback is meant to work when both players run the same mods, but that has not yet been run in a game (the mods folder is in
+  progress, and there is no mod to install yet). Rollback is off when a listed gameplay mod could not be applied, or when a copy of the
+  game's data that a gameplay mod changes differs from the one it was checked against (`[mods] set: refused` in the log).
 - **Name refused:** use 3 to 16 letters, digits, `-` or `_`, starting with a letter, and not a name another player
   already uses on that server.
 - **Rollback (experimental) over re-psn ends with `re-psn: timed out waiting for the other player` or

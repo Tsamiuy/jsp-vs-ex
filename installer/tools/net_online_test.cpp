@@ -110,7 +110,12 @@ int main()
     }
     { bool r; std::string s = status_line(NC_OFF, NC_OFF, &r); CHECK(!r && s.find("Restart") == std::string::npos);
       s = status_line(NC_OFF, NC_ROLLBACK, &r); CHECK(r && s.find("Restart to apply") != std::string::npos && s.find("Rollback") != std::string::npos);
-      s = status_line(NC_CONFLICT, NC_OFF, &r); CHECK(r && s.find("refused") != std::string::npos); }
+      s = status_line(NC_CONFLICT, NC_OFF, &r); CHECK(r && s.find("refused") != std::string::npos);
+      // a gameplay mod set turned the game's own online off: the cause, no "Restart to apply" (a restart does not help while the mods are on)
+      s = status_line(NC_OFF, NC_DELAY, &r, true); CHECK(!r && s == "This session: off (gameplay mods are on); turn the mods off to play online.");
+      s = status_line(NC_OFF, NC_ROLLBACK, &r, true); CHECK(r && s.find("Restart to apply") != std::string::npos);   // another saved choice: as before
+      s = status_line(NC_OFF, NC_DELAY, &r, false); CHECK(r && s.find("Restart to apply") != std::string::npos);
+      for (char ch : status_line(NC_OFF, NC_DELAY, &r, true)) CHECK(ch >= 0x20 && ch <= 0x7E); }
 
     // ---- the page: no settings file access (io == nullptr): the older page, row for row ----
     { Fake fk; Menu e; e.be = &fk; e.enter_online();
@@ -164,6 +169,10 @@ int main()
     // the running game started with the same choice: no restart note
     io.env["JSP_ROLLBACK"] = "1"; e.enter_online(); { bool r; status_line(e.nc_running, e.nc_saved, &r); CHECK(!r && e.nc_running == NC_ROLLBACK); }
     io.env.clear();
+    // the page reads the mods key the game set at start (jsp_online.cpp refuse_for_mods); without it the flag is off
+    CHECK(!e.nc_mods_off);
+    io.env["JSP_MODS_ONLINE_OFF"] = "1"; e.enter_online(); CHECK(e.nc_mods_off && e.nc_running == NC_OFF);
+    io.env.clear(); e.enter_online(); CHECK(!e.nc_mods_off);
 
     // ---- Save: Rollback host replaces the join key ----
     e.osel = 0; e.nc = NC_ROLLBACK; e.rb.host = true; e.rb.port = "36200"; e.edited = true;

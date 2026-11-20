@@ -233,6 +233,7 @@ add_executable(${PROJECT_NAME}
     jsp_settings.cpp   # ENHANCEMENT: settings file, live values for the in-game settings pages (jsp_settings.h)
     jsp_session_startup.cpp # ENHANCEMENT: actual startup state; no session/ACK activation
     jsp_lod_lifetime.cpp # verified emitted entries + actual loader-buffer identity
+    jsp_mods.cpp       # ENHANCEMENT: the mods folder (mods.txt, JSP_MODS_LIST/JSP_MODS_DIR, JSP_MODS=0 off): virtual CPK archives through toolkit patch 6502
     # ENHANCEMENT, EXPERIMENTAL rollback netcode: every file below does nothing unless JSP_ROLLBACK=1 (docs/ROLLBACK.md)
     jsp_rollback.cpp   # the entry points main.cpp and stubs.cpp call; each returns at once without JSP_ROLLBACK=1
     jsp_net_game.cpp   # the game glue: settings handshake, session start, frame hooks, overlays

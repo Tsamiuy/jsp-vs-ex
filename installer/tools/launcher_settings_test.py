@@ -6,6 +6,8 @@ Wine/Proton with a Windows Python. Never touches the power plan (CPU_BOOST=0 is 
 
 FAKE_TOOL.exe (fake_tool.c) stands in for the game: it writes the value of RES_SCALE it was started with. Each file in a case sets
 RES_SCALE to its own letter, so the letter says which file won; launcher_log.txt must name the rule.
+The mods cases check where the launcher looks for mods.txt (next to the settings file that won, else the install folder), the
+JSP_MODS_LIST / JSP_MODS_DIR it gives the game, and its "mods: N listed (<path>)" line in launcher_log.txt.
 """
 import os
 import pathlib
@@ -15,7 +17,18 @@ import sys
 import time
 
 
-def case(tool, launcher, base, name, files, flag=False, want="", rule=""):
+def env_of(rec):
+    """The fake game's ENV line as a dict (NAME=value, tab separated)."""
+    out = {}
+    for line in rec.read_text(errors="replace").splitlines() if rec.is_file() else []:
+        if line.startswith("ENV"):
+            for kv in line.split("\t")[1:]:
+                k, _, v = kv.partition("=")
+                out[k] = v
+    return out
+
+
+def case(tool, launcher, base, name, files, flag=False, want="", rule="", mods=None, mods_dir=False, mods_want=None, extra="", preset=None):
     inst = base / name / "app"
     appdata = base / name / "appdata"
     shutil.rmtree(base / name, ignore_errors=True)
@@ -29,19 +42,40 @@ def case(tool, launcher, base, name, files, flag=False, want="", rule=""):
     places = {"install": inst / "play_settings.txt", "appdata": appdata / "JSP Fan Revival" / "play_settings.txt",
               "marker": inst / "settings_here.txt", "flag": base / name / "one-run.txt"}
     for k, letter in files.items():
-        places[k].write_text(f"RES_SCALE={letter}\n" if k != "marker" else "")
+        places[k].write_text(f"RES_SCALE={letter}\n{extra}" if k != "marker" else "")
+    for k, text in (mods or {}).items():   # mods.txt next to a settings place ("install" = the install folder)
+        (places[k].parent / "mods.txt").write_text(text, encoding="utf-8")
+    if mods_dir:
+        (inst / "mods").mkdir()
     rec = base / name / "rec.txt"
-    env = dict(os.environ, APPDATA=str(appdata), CPU_BOOST="0", FAKE_OUT=str(rec), FAKE_ENV="RES_SCALE")
+    env = dict(os.environ, APPDATA=str(appdata), CPU_BOOST="0", FAKE_OUT=str(rec), FAKE_ENV="RES_SCALE,JSP_MODS,JSP_MODS_LIST,JSP_MODS_DIR")
+    for k in ("JSP_MODS", "JSP_MODS_LIST", "JSP_MODS_DIR"):
+        env.pop(k, None)
+    env.update(preset or {})   # values the player set before starting the launcher
     cmd = [str(inst / "jsp-launcher.exe")] + (["--settings", str(places["flag"])] if flag else [])
     subprocess.run(cmd, env=env, cwd=str(inst))
     for _ in range(100):
         if rec.is_file() and b"ENV" in rec.read_bytes():
             break
         time.sleep(0.1)
-    got = rec.read_text(errors="replace").split("RES_SCALE=")[-1].strip() if rec.is_file() else "(game not started)"
+    genv = env_of(rec)
+    got = genv.get("RES_SCALE", "(game not started)")
     log = (inst / "game" / "run" / "launcher_log.txt").read_text().strip() if (inst / "game" / "run" / "launcher_log.txt").is_file() else "(no log)"
     ok = got == want and rule in log
-    print(f"{'ok  ' if ok else 'FAIL'} {name:26} RES_SCALE={got!r} want {want!r}; {log}")
+    mods_line = [x for x in log.splitlines() if x.startswith("mods: ")]
+    if mods_want is not None and mods_want[0] == "preset":   # ("preset", the log line's start): the preset value goes through untouched
+        ok = ok and len(mods_line) == 1 and mods_line[0].startswith(mods_want[1])
+        ok = ok and all(genv.get(k, "") == v for k, v in (preset or {}).items())
+    elif mods_want is not None:   # (where mods.txt is or None, the count, the log line's tail)
+        place, count, tail = mods_want
+        listed = "" if place is None else str((places[place].parent / "mods.txt") if place != "install" else inst / "mods.txt")
+        ok = ok and len(mods_line) == 1 and mods_line[0].startswith(f"mods: {count} ") and mods_line[0].endswith(tail)
+        ok = ok and genv.get("JSP_MODS_LIST", "") == listed and genv.get("JSP_MODS_DIR", "") == (str(inst / "mods") if mods_dir and count != "off" else "")
+        if listed:   # under %APPDATA% the line names it so (the profile folder stays out of the log), as the settings line does
+            ad = str(appdata)
+            shown = "%APPDATA%" + listed[len(ad):] if listed.lower().startswith(ad.lower() + os.sep) else listed
+            ok = ok and shown in mods_line[0] and (place != "appdata" or mods_line[0].startswith(f"mods: {count} listed (%APPDATA%"))
+    print(f"{'ok  ' if ok else 'FAIL'} {name:26} RES_SCALE={got!r} want {want!r}; {log}; mods env {genv.get('JSP_MODS_LIST', '')!r} {genv.get('JSP_MODS_DIR', '')!r}")
     return ok
 
 
@@ -53,7 +87,24 @@ def main(launcher, tool, scratch):
          case(tool, launcher, base, "marker-ignores-appdata", {"marker": "M", "appdata": "A"}, want="", rule="marker file"),
          case(tool, launcher, base, "marker-uses-install", {"marker": "M", "install": "I", "appdata": "A"}, want="I", rule="marker file"),
          case(tool, launcher, base, "flag-beats-all", {"marker": "M", "install": "I", "appdata": "A", "flag": "F"}, flag=True, want="F", rule="command line"),
-         case(tool, launcher, base, "flag-file-missing", {"install": "I"}, flag=True, want="", rule="not found")]
+         case(tool, launcher, base, "flag-file-missing", {"install": "I"}, flag=True, want="", rule="not found"),
+         # mods.txt: no list anywhere -> 0 listed, nothing passed
+         case(tool, launcher, base, "mods-none", {}, rule="none found", mods_want=(None, 0, "mods.txt, not found)")),
+         # no settings file: the install folder's mods.txt (ASSUMPTION P8), the mods folder passed when it exists; comments and blanks not counted
+         case(tool, launcher, base, "mods-install", {}, rule="none found", mods={"install": "\ufeffswap\n# off-for-now\n\n  glogo  # the logo\n"},
+              mods_dir=True, mods_want=("install", 2, "mods.txt)")),
+         # the AppData settings file won: mods.txt next to it, never the install folder's
+         case(tool, launcher, base, "mods-next-to-appdata", {"appdata": "A"}, want="A", rule="AppData", mods={"appdata": "one\n", "install": "x\ny\n"},
+              mods_want=("appdata", 1, "mods.txt)")),
+         case(tool, launcher, base, "mods-appdata-has-none", {"appdata": "A"}, want="A", rule="AppData", mods={"install": "x\n"},
+              mods_want=(None, 0, "mods.txt, not found)")),
+         # JSP_MODS=0 in the settings file: off, nothing passed
+         case(tool, launcher, base, "mods-off", {"install": "I"}, want="I", rule="install folder", mods={"install": "swap\n"}, mods_dir=True,
+              extra="JSP_MODS=0\n", mods_want=(None, "off", "(JSP_MODS=0)")),
+         # values longer than the launcher's buffers: read as set (never uninitialised bytes), passed to the game untouched, not overwritten
+         case(tool, launcher, base, "mods-preset-too-long", {}, rule="none found", mods_dir=True,
+              preset={"JSP_MODS": "not-zero-and-long", "JSP_MODS_LIST": "C:\\" + "l" * 700 + "\\mods.txt", "JSP_MODS_DIR": "C:\\" + "d" * 700},
+              mods_want=("preset", "mods: JSP_MODS_LIST is longer than 519 characters"))]
     print("RESULT:", "ok" if all(r) else "FAILED")
     return 0 if all(r) else 1
 

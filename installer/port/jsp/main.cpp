@@ -87,6 +87,8 @@ void     ppu_sysprx_register(void);           /* boot-critical CRT (sys_initiali
 void     ppu_fs_register(void);               /* cellFs over the real game directory */
 void     lv2_init_syscalls(void);             /* the lv2 syscall table */
 void     cellGame_init_from_paramsfo(const char* sfo_path);   /* libs/system/cellGame.c */
+const char* cellGame_get_title_id(void);                      /* libs/system/cellGame.c: PARAM.SFO's TITLE_ID */
+void     jsp_mods_init(const char* vfs_root, const char* eboot, const char* title_id);   /* jsp_mods.cpp (ENHANCEMENT, the mods folder) */
 void     cellfs_add_path_mapping(const char* ps3_prefix, const char* host_path);   /* libs/filesystem/cellFs.c */
 int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
 
@@ -682,6 +684,11 @@ int main(int argc, char** argv)
         if (h && *h)   { snprintf(hdd0, sizeof hdd0, "%s/", h);    cellfs_add_path_mapping("/dev_hdd0/", hdd0); }
         if (fl && *fl) { snprintf(flash, sizeof flash, "%s/", fl); cellfs_add_path_mapping("/dev_flash/", flash); }
     }
+
+    /* ENHANCEMENT (the mods folder, jsp_mods.cpp): reads mods.txt (JSP_MODS_LIST) and serves the planned CPK archives through the cellFs
+     * virtual-file hook; with no list or JSP_MODS=0 it registers nothing. Before the PPU table and jsp_rollback_after_table: the rollback
+     * build word folds in the mod set, and a gameplay set switches the game's own online off before the guest can start it. */
+    jsp_mods_init(ppu_vfs_root, argv[1], cellGame_get_title_id());
 
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */

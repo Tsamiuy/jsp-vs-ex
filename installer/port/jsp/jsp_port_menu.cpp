@@ -177,6 +177,7 @@ struct Menu {
     // keys live in play_settings.txt). Without them the page is the older one, row for row.
     bool net_on = false;
     int nc = 0, nc_saved = 0, nc_running = 0;   // working choice, saved choice, what this process started with (jpno::Netcode)
+    bool nc_mods_off = false;                   // a gameplay mod set turned the game's own online off for this session (jpno::kKeyModsOff)
     jpno::Rollback rb;
     int delay_method = 1;               // the last Delay method (1 re-psn, 2 community): leaving Delay and coming back keeps it
     std::string net_note;
@@ -257,6 +258,7 @@ struct Menu {
         nc_saved = jpno::saved_netcode(f, be->method());
         delay_method = be->method() ? be->method() : 1;
         nc_running = jpno::running_netcode([&](const char* k) { return io->active(k); });
+        nc_mods_off = jpno::flag_on(io->active(jpno::kKeyModsOff));
         nc = nc_saved == jpno::NC_CONFLICT ? jpno::NC_OFF : nc_saved;
         if (nc_saved == jpno::NC_CONFLICT) { be->set_method(0); net_note = "Rollback and the game's own online are both on in the saved files; the game refuses both. Pick one and save."; }
         else if (rb.both_set) net_note = "Both a Rollback host port and a join address are saved; saving keeps only the one for the chosen role.";
@@ -751,7 +753,7 @@ void draw_online_edit(uint32_t white, uint32_t gold)
     if (g_menu.net_on) {
         // the exclusion rule and what this session runs against what is saved (a restart applies a changed choice)
         bool restart = false;
-        const std::string st = jpno::status_line(g_menu.nc_running, g_menu.nc_saved, &restart);
+        const std::string st = jpno::status_line(g_menu.nc_running, g_menu.nc_saved, &restart, g_menu.nc_mods_off);
         jsp_overlay_text_style(260, 476, jpno::exclusion_line(g_menu.nc), 0.6f, white, 0);
         jsp_overlay_text_style(260, 502, st.c_str(), 0.6f, restart ? gold : white, 0);
     } else

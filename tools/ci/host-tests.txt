@@ -51,7 +51,7 @@ posix   | installer/tools/net_session_test.sh {scratch}
 posix   | installer/tools/net_session_driver_test.py
 posix   | installer/tools/stepper_test.sh
 posix   | installer/tools/snapshot_ring_test.sh
-posix   | installer/tools/mods_overlay_test.sh
+posix   | installer/tools/mods_overlay_test.sh {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
 exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py
