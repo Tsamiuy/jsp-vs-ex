@@ -663,6 +663,8 @@ static void test_glue(MemIo& io, const SynthCpk& chara)
     }
     CHECK(after_copy_check(DigestKind::Value, true) == DigestKind::Refused && after_copy_check(DigestKind::Value, false) == DigestKind::Value);
     CHECK(after_copy_check(DigestKind::None, true) == DigestKind::None && after_copy_check(DigestKind::Refused, false) == DigestKind::Refused);
+    CHECK(rollback_gate(false) == nullptr && rollback_gate(true) == kModsNotAsListed
+          && std::string(kModsNotAsListed) == "the mod set does not run as listed (see the [mods] lines)");
 
     // ---- a gameplay set (alias, character) and a cosmetic one (file, game): served reads and the copy check
     const Bytes lb = noise(1500, 77);
@@ -863,6 +865,7 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     CHECK(has(log, "NOT served") && has(log, "its header or TOC differs"));
     // a gameplay archive's copy the start-up check did not see, that differs: loud, the flag is set, rollback is refused from now on
     CHECK(has(log, "[mods] WARNING: partition_op_character_ps3.cpk") && has(log, "online content mismatch") && jsp_mods_copy_mismatch() == 1);
+    CHECK(jmods::rollback_gate(jsp_mods_copy_mismatch() != 0) == jmods::kModsNotAsListed);   // the rollback pump stops before the rendezvous / Hello
     log = capture([&] { CHECK(ops->open("/dev_x/other.cpk", (root + "/other/" + CHARA).c_str()) == nullptr); });
     CHECK(log.empty());   // one line per path
     log = capture([&] { nb = 0; CHECK(jsp_mods_net_build(0xB001, &nb) == 0); });
@@ -948,6 +951,23 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
         CHECK(g_st->verified.count(jmods::path_key((arch + CHARA).c_str(), true)) && g_st->verified.count(jmods::path_key((disc + "\\PS3_GAME//USRDIR\\data\\PS3\\" + CHARA).c_str(), true)));
     }
     g_fold_case = false;
+
+    // 7. a copy still being written (first-boot install): read stock while it differs, checked again once its size changed, then served
+    {
+        log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+        const std::string late = root + "/late/" + CHARA;
+        put_file(late, Bytes(chara.file.begin(), chara.file.begin() + chara.file.size() / 2));
+        log = capture([&] { CHECK(g_ps3_fs_vfile_ops->open("/dev_x", late.c_str()) == nullptr); });
+        CHECK(has(log, "NOT served") && has(log, "its size is") && jsp_mods_copy_mismatch() == 1);
+        log = capture([&] { CHECK(g_ps3_fs_vfile_ops->open("/dev_x", late.c_str()) == nullptr); });
+        CHECK(log.empty());   // same size: the kept result, no second check
+        put_file(late, chara.file);
+        ps3_fs_vfile* vf = nullptr;
+        log = capture([&] { vf = g_ps3_fs_vfile_ops->open("/dev_x", late.c_str()); });
+        CHECK(vf && has(log, "[mods] serve partition_op_character_ps3.cpk (/dev_x): checked"));
+        if (vf) g_ps3_fs_vfile_ops->close(vf);
+        CHECK(jsp_mods_copy_mismatch() == 1);   // the refusal already made stays
+    }
     std::string rm = "rm -rf '" + root + "'";
     CHECK(std::system(rm.c_str()) == 0);
 }

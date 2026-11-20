@@ -172,6 +172,11 @@ inline bool net_build(uint32_t stock, DigestKind kind, const Digest& digest, uin
 // The game's own online (Ranked and Free over np_psnr) has no build word to compare, so any gameplay set refuses it (D40 P2): only a set with
 // no gameplay digest (stock or cosmetic only) may use it.
 inline bool game_online_allowed(DigestKind kind) { return kind == DigestKind::None; }
+// The rollback refusal text (jsp_net_game.cpp logs it as "[net] rollback refused: <text>: off"). The build word is fixed once at start, so a
+// gameplay archive copy that is first opened later and differs (jsp_mods_copy_mismatch) is checked again before the session's rendezvous
+// is polled and again before the settings handshake's Hello: nullptr = the session may go on.
+inline constexpr const char* kModsNotAsListed = "the mod set does not run as listed (see the [mods] lines)";
+inline const char* rollback_gate(bool copy_mismatch) { return copy_mismatch ? kModsNotAsListed : nullptr; }
 
 }  // namespace jmods
 

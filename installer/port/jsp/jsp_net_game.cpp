@@ -48,6 +48,7 @@ extern "C" int jsp_net_notice(char*, int, char*, int) { return 0; }
 #include "jsp_session_handshake.h"
 #include "jsp_session_reader.h"
 #include "jsp_session_manifest.h"
+#include "jsp_mods_glue.h"   // rollback_gate, kModsNotAsListed (ENHANCEMENT, mods)
 
 extern "C" {
 int jsp_online_repsn_identity(char* server, int sn, char* name, int nn, char* comm, int cn, int* report_rtt);   // jsp_online.cpp: repsn.ini even with enabled=0
@@ -302,6 +303,17 @@ bool m2_cancelled_within(int ms, std::string* text)
         Sleep(20);
     }
 }
+extern "C" int jsp_mods_copy_mismatch(void);   // jsp_mods.cpp: 1 = a gameplay archive copy opened after start differs from the planned copy
+void pump_fail(const std::string& t);
+// True (and the session ends with the start-up refusal's text) when the mod set no longer runs as listed. Pump thread only.
+bool mods_refuse_now()
+{
+    const char* why = jmods::rollback_gate(jsp_mods_copy_mismatch() != 0);
+    if (!why) return false;
+    std::fprintf(stderr, "[net] rollback refused: %s: off\n", why);
+    pump_fail(std::string("rollback refused: ") + why);
+    return true;
+}
 void pump_fail(const std::string& t) { log("settings layer / rendezvous ended", t); { std::lock_guard<std::mutex> lk(g.txt_mu); if (!g.m2_ended.load()) g.m2_text = t; } g.m2_ended = true; }   // the main thread acts on it (boundary)
 
 uint64_t random_session_id()
@@ -347,11 +359,15 @@ void pump_tick(uint64_t t)
         if (cur != last) { last = cur; std::fprintf(stderr, "[net] handshake state -> %d (%s)\n", cur, g.host ? "host" : "client"); }
     }
     if (!g.plan_ready) {
+        // ENHANCEMENT (mods, D40): a gameplay archive copy that was first opened after start and differs (jsp_mods.cpp) means this process
+        // no longer runs the set its build word names: no rendezvous and no Hello from then on. A session already past its Hello is not ended here.
+        if (mods_refuse_now()) return;
         const int r = g.rz->poll();
         if (r < 0) { pump_fail("rendezvous failed: " + g.rz->error()); return; }
         if (r == 0) return;
         g.plan = g.rz->plan();
         g.link->set_peer(g.host ? 1 : 0, g.plan.remotes[0].ep);
+        if (mods_refuse_now()) return;   // the same check right before the Hello (begin / join send it)
         if (g.host) {
             g.mh.reset(new jpsm::Host(*g.link, g.ev, g.caps, 0));
             if (g.mh->begin(g.plan.session_id, 0b11, g.plan.session_id ^ 0x5eedull, t) != jpsm::Reason::None) { pump_fail("settings handshake: cannot begin"); return; }
@@ -592,7 +608,7 @@ extern "C" void jsp_net_game_install(void)
     // compare (Hello/Propose BuildMismatch, the re-psn room filter); with no gameplay digest it is exactly build_id(). Gameplay mods that
     // were listed but not all applied refuse rollback here, before any socket opens (jsp_mods.cpp logs why).
     uint32_t net_build = 0;
-    if (!jsp_mods_net_build(build_id(), &net_build)) { std::fprintf(stderr, "[net] rollback refused: the mod set does not run as listed (see the [mods] lines): off\n"); return; }
+    if (!jsp_mods_net_build(build_id(), &net_build)) { std::fprintf(stderr, "[net] rollback refused: %s: off\n", jmods::kModsNotAsListed); return; }
     char b[96] = {};
     const bool have_listen = jsp_setting_get("JSP_ROLLBACK_LISTEN", b, sizeof b) && b[0];
     char j[96] = {};

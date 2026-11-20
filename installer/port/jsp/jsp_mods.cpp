@@ -18,7 +18,10 @@
  * hdd0), once that copy is checked to have the planned size, header, TOC and alias bytes. Every copy the game can open (the disc copy and
  * <hdd0>/game/<folder>/USRDIR/data/PS3/<archive>) is checked at start: a copy of an archive a gameplay mod changes that differs makes the
  * set Refused (no rollback, no game online), since that copy would run stock under a digest that says modded. A copy first seen later that
- * differs is logged loudly and sets jsp_mods_copy_mismatch(). On Windows the archive name is matched without regard to case.
+ * differs (for an archive a gameplay mod changes) is logged loudly and sets jsp_mods_copy_mismatch(): jsp_net_game.cpp then stops a rollback
+ * session that has not sent its settings-handshake Hello (it checks before polling the rendezvous and again before the Hello); a session
+ * already past its Hello is not ended. A copy that differed is checked again when its size has changed since (an install being written).
+ * On Windows the archive name is matched without regard to case.
  * Logs: "[mods] ..." lines on stderr (play_stderr.txt).
  */
 #include "jsp_mods_glue.h"
@@ -272,7 +275,7 @@ struct Served {
     std::unique_ptr<std::atomic<bool>[]> logged;   // one "first read in override segment" line per override
     mutable std::atomic<uint64_t> short_reads{ 0 };   // logged at 1, 10, 100, ... (one line, with the count)
 };
-struct Verified { std::string why; bool logged = false; };   // why: "" = serves, else why the stock file is read
+struct Verified { std::string why; bool logged = false; uint64_t size = UINT64_MAX; };   // why: "" = serves, else why the stock file is read; size: the copy's size then (UINT64_MAX: unknown)
 struct State {
     ModsRoot root;
     bool root_ok = false;
@@ -348,11 +351,12 @@ private:
 struct View { const Served* s; std::string guest; };
 
 // "" when the copy at host_path is the planned one. Called once per host path (the result is kept).
-std::string check_copy(const Served& s, const char* host_path)
+std::string check_copy(const Served& s, const char* host_path, uint64_t* size_out = nullptr)
 {
     FILE* f = std::fopen(host_path, "rb");   // a second, read-only handle of our own, closed before open() returns
     if (!f) return "cannot open it";
     uint64_t size = 0;
+    if (size_out) *size_out = size64(f, size) ? size : UINT64_MAX;
     std::string why = size64(f, size) ? verify_copy(s.check, size, [f](uint64_t off, void* d, size_t n) { return file_read(f, off, d, n); })
                                       : "cannot read its size";
     std::fclose(f);
@@ -373,7 +377,13 @@ ps3_fs_vfile* v_open(const char* guest_path, const char* host_path)
         const std::string key = path_key(host_path, g_fold_case);
         auto v = st->verified.find(key);
         const bool late = v == st->verified.end();   // a copy the start-up check did not find
-        if (late) v = st->verified.emplace(key, Verified{ check_copy(s, host_path), false }).first;
+        if (late) { Verified r; r.why = check_copy(s, host_path, &r.size); v = st->verified.emplace(key, r).first; }
+        else if (!v->second.why.empty()) {   // a copy that differed: checked again when its size changed since (an install still being written)
+            FILE* f = std::fopen(host_path, "rb");
+            uint64_t now = UINT64_MAX;
+            if (f) { if (!size64(f, now)) now = UINT64_MAX; std::fclose(f); }
+            if (now != v->second.size) { Verified r; r.why = check_copy(s, host_path, &r.size); v->second = r; }
+        }
         why = v->second.why;
         if (!v->second.logged) {
             v->second.logged = true;
@@ -520,8 +530,10 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
                 if (!f) continue;   // no copy here
                 std::fclose(f);
                 ++found;
-                const std::string why = check_copy(s, path.c_str());
-                st->verified[path_key(path.c_str(), g_fold_case)] = Verified{ why, false };
+                Verified r;
+                r.why = check_copy(s, path.c_str(), &r.size);
+                const std::string why = r.why;
+                st->verified[path_key(path.c_str(), g_fold_case)] = r;
                 if (why.empty()) { ++ok; continue; }
                 logl(fmt("[mods] check %s: the copy %s is not the one the mods were planned on (%s): it is read stock%s", s.plan.archive.c_str(), path.c_str(),
                          why.c_str(), s.gameplay ? ", and a gameplay mod changes this archive" : ""));
