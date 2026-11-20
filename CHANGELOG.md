@@ -1,15 +1,17 @@
 # Changelog
 
-What changed in each version, newest first. Each version has two parts: **For players** is the release notes in plain words, and **Technical changes** is the full record. Versions are `X.Y.Z` (`installer/VERSION`); 0.1.0 to 0.6.0 are pre-releases, and the first full release will be 1.0.0. The technical part follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). How to write an entry, with a template: `CONTRIBUTING.md`.
+What changed in each version, newest first. Each version has two parts: **For players** is the release notes in plain words, and **Technical changes** is the full record. Versions are `X.Y.Z` (`installer/VERSION`); 0.1.0 to 0.6.1 are pre-releases, and the first full release will be 1.0.0. The technical part follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). How to write an entry, with a template: `CONTRIBUTING.md`.
 
 ## [Unreleased]
+
+## [0.6.1] - 2026-11-20
 
 ### For players
 
 **Fixed**
 
-- **Rollback over re-psn: the two games now wait up to 2 minutes for each other.** Before, the joining game looked for the host's room only once and gave up at once if it was not there yet, and each game stopped waiting after 30 seconds. Now the joining game keeps looking until the host's room appears, and either game can start first: start both at about the same time, because each one waits 2 minutes after it has finished starting up. While it waits, the main menu's top list shows what it is doing; if the two games do not meet, it says why and what to check, with the build number both players should compare. The on-screen messages have not been seen in a game yet.
-- The launcher's Online tab no longer lets you switch on re-psn or a community server while rollback is on (that made the game refuse to start any online play). It says so and keeps the tab on Off; Server and Online name can now be filled in and saved while Off is chosen, so rollback setup no longer needs re-psn switched on first.
+- **Rollback over re-psn: the two games now wait up to 2 minutes for each other.** Before, the joining game looked for the host's room only once and gave up at once if it was not there yet, and each game stopped waiting after 30 seconds. Now the joining game keeps looking until the host's room appears, and either game can start first: start both at about the same time, because each one waits 2 minutes after it has finished starting up. Both players need the same version and region (a 0.6.0 game and a 0.6.1 game cannot meet each other) and the same gameplay mods, or none. While it waits, the main menu's top list shows what it is doing; if the two games do not meet, it says why and what to check, with the build number both players should compare. Not seen in a game yet: neither the waiting nor the on-screen messages have been run with two games.
+- **Launcher:** the Online tab refuses to save re-psn or a community server while rollback is on (that made the game refuse to start any online play) and says why; nothing is written. If one of them was already saved, the tab only points it out, and the game refuses as before. Server and Online name can now be filled in and saved while Off is chosen, so rollback setup no longer needs re-psn switched on first. The window itself has not been seen on Windows yet.
 
 ### Technical changes
 
