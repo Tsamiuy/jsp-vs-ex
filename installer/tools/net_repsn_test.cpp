@@ -1,7 +1,10 @@
 // net_repsn_test.cpp -- host test of the re-psn rendezvous (jsp_net_repsn.h) with a FAKE psnr transport and real loopback UDP (two UdpMux): room list filtering, version
-// refusal before joining and at join, roles and player index, punch then the HELO/PLAN start, relay only when allowed and offered. Build and run: installer/tools/net_repsn_test.sh.
+// refusal before joining and at join, roles and player index, punch then the HELO/PLAN start, relay only when allowed and offered; the rendezvous window (a joiner that starts
+// before the host keeps reading the room list at the poll interval and joins when the room appears; either side gives up at the window with the text that says what to do;
+// the host's room stays listed while it waits; progress every 10 s). Build and run: installer/tools/net_repsn_test.sh.
 #include "jsp_net_repsn.h"
 #include <cstdio>
+#include <functional>
 #include <thread>
 
 using namespace jspnet;
@@ -15,11 +18,12 @@ struct FakeServer {
 struct FakeClient : IPsnrTransport {
     FakeServer& sv; uint32_t user; Endpoint ep; bool is_ready = true;
     std::vector<PsnrEvent> ev; int punches = 0, joins = 0, leaves = 0; FakeClient* peers[2] = { nullptr, nullptr };
+    int searches = 0; std::vector<uint64_t> search_at; std::function<uint64_t()> clock;   // every room-list request, at the fake time
     FakeClient(FakeServer& s, uint32_t u, const Endpoint& e) : sv(s), user(u), ep(e) {}
     bool ready() override { return is_ready; }
     uint32_t self_user() override { return user; }
     bool relay_offered() override { return sv.relay; }
-    bool search(std::vector<PsnrRoom>& out) override { out.clear(); for (auto& r : sv.rooms) out.push_back(r.r); return true; }
+    bool search(std::vector<PsnrRoom>& out) override { searches++; if (clock) search_at.push_back(clock()); out.clear(); for (auto& r : sv.rooms) out.push_back(r.r); return true; }
     void create_room(uint32_t flags, const std::string& external, const std::string& data) override {
         FakeServer::Room r; r.r.id = sv.next_room++; r.r.flags = flags; r.r.external = external; r.r.owner = user; r.r.members = 1; r.r.max_members = 2;
         r.members.push_back(PsnrMember{ user, sv.next_member++, ep, data });
@@ -41,6 +45,7 @@ struct FakeClient : IPsnrTransport {
 
 struct Side {
     UdpMux mux; std::unique_ptr<MessageHub> hub; std::unique_ptr<FakeClient> cl; std::unique_ptr<RePsnRendezvous> rz; uint64_t clock = 1000; Path last = Path::None; int relay_calls = 0;
+    std::vector<std::string> progress; std::string n1, n2;   // on_progress lines and the last notice
     void init(FakeServer& sv, uint32_t user, RePsnRendezvous::Config c) {
         std::string err; CHECK(mux.open(0, &err));
         Endpoint ep; char b[32]; std::snprintf(b, sizeof b, "127.0.0.1:%u", (unsigned)mux.local_port()); CHECK(parse_endpoint(b, ep));
@@ -48,7 +53,11 @@ struct Side {
         rz.reset(new RePsnRendezvous(*cl, mux, *hub, c));
         rz->now_ms = [this] { return clock; };
         rz->on_path = [this](Path p, uint32_t) { last = p; };
+        rz->on_progress = [this](const std::string& l, const std::string& a, const std::string& b) { progress.push_back(l); n1 = a; n2 = b; };
+        cl->clock = [this] { return clock; };
     }
+    // polls this side alone for `ms` of fake time in `step` ms steps; the result of the last poll (stops at a decision)
+    int run_alone(uint64_t ms, uint64_t step = 50) { int r = 0; for (uint64_t e = 0; e < ms && r == 0; e += step) { clock += step; r = rz->poll(); } return r; }
 };
 // drives both sides until both are decided or `steps` run out; each step advances the fake clock 50 ms and sleeps 2 ms so the real loopback UDP can deliver
 static void drive(Side& a, Side& b, int steps, int* ra, int* rb)
@@ -89,10 +98,63 @@ int main()
       CHECK(h.cl->punches > 0 && c.cl->punches > 0);                         // PUNCH went out before the session started
       CHECK(sv.rooms.size() == 1 && (sv.rooms[0].r.flags & kRoomFlagRollback) && sv.rooms[0].r.external == make_record(B) && sv.rooms[0].members[0].data == make_record(B)); }
 
-    // ---- version mismatch is refused BEFORE joining (room list) ----
+    // ---- version mismatch: never joined (room list); the joiner keeps looking, and its give-up names the build it saw ----
     { FakeServer sv; Side h, c; h.init(sv, 11, cfg(true, B + 1)); c.init(sv, 22, cfg(false, B)); h.cl->peers[0] = c.cl.get();
-      int rh = 0, rc = 0; for (int i = 0; i < 4; i++) { h.rz->poll(); rc = c.rz->poll(); }
-      CHECK(rc == -1 && c.cl->joins == 0 && c.rz->error().find("no rollback room for this build") != std::string::npos && c.cl->leaves == 1); (void)rh; }
+      int rc = 0; for (int i = 0; i < 4; i++) { h.rz->poll(); rc = c.rz->poll(); }
+      CHECK(rc == 0 && c.cl->joins == 0);
+      rc = c.run_alone(130000);
+      CHECK(rc == -1 && c.cl->joins == 0 && c.cl->leaves == 1);
+      CHECK(!c.progress.empty() && c.progress.back().find(" room lists read; seen: a rollback room with build a1b2c3d5)") != std::string::npos);   // one level of parentheses
+      CHECK(c.rz->error() == "re-psn: no host with this version found within 2 minutes (seen: a rollback room with build a1b2c3d5): start both games at about the same time "
+                             "(the host first is best; each waits 2 minutes after its own start-up); both need the same version (build a1b2c3d4) and the same gameplay mods (or none)"); }
+
+    // ---- the rendezvous window ----
+    CHECK(kRendezvousWindowMs == 120000 && RePsnRendezvous::Config().give_up_ms == kRendezvousWindowMs && RePsnRendezvous::Config().lookup_every_ms == 2000);
+    CHECK(window_words(120000) == "2 minutes" && window_words(60000) == "1 minute" && window_words(20000) == "20 seconds" && window_words(1000) == "1 second" && window_words(90000) == "90 seconds");
+    { uint32_t b = 0; CHECK(record_build("rb=1;ver=0a1b2c3d", &b) && b == 0x0a1b2c3du && !record_build("rb=1;ver=0A1B2C3D", &b) && !record_build("rb=1;ver=0a1b2c3", &b) && !record_build("", &b)); }
+    // the joiner starts first: it reads the room list every 2 s (never faster), and joins when the host's room appears 60 s later; they meet
+    { FakeServer sv; Side h, c; c.init(sv, 22, cfg(false, B)); h.init(sv, 11, cfg(true, B)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
+      CHECK(c.run_alone(60100) == 0 && c.cl->joins == 0 && sv.rooms.empty());
+      CHECK(c.cl->searches >= 29 && c.cl->searches <= 31 && c.rz->lookups == (uint64_t)c.cl->searches);
+      bool spaced = true; for (size_t i = 1; i < c.cl->search_at.size(); i++) if (c.cl->search_at[i] - c.cl->search_at[i - 1] < 2000) spaced = false;
+      CHECK(spaced);
+      CHECK(c.progress[0].find("re-psn: looking for a host with build a1b2c3d4 (0 s of 120 s, ") == 0);   // already connected: never "connecting"
+      CHECK(c.progress.size() == 7 && c.progress[6].find("re-psn: looking for a host with build a1b2c3d4 (60 s of 120 s, ") == 0 && c.progress[6].find("room lists read") != std::string::npos);
+      CHECK(c.n1 == "Rollback: looking for the host's room (60 s of 120 s)." && c.n2 == "Both need the same version (build a1b2c3d4) and the same gameplay mods (or none).");
+      int rh, rc; drive(h, c, 400, &rh, &rc);
+      CHECK(rh == 1 && rc == 1 && c.cl->joins == 1 && h.rz->path() == Path::Direct && c.rz->plan().session_id == h.rz->room_id()); }
+    // the host starts first and waits 100 s with its room listed the whole time; a joiner that starts then still meets it
+    { FakeServer sv; Side h, c; h.init(sv, 11, cfg(true, B)); c.init(sv, 22, cfg(false, B)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
+      CHECK(h.run_alone(100100) == 0 && sv.rooms.size() == 1 && h.cl->leaves == 0);
+      CHECK(h.progress[0] == "re-psn: room open, waiting for a player with build a1b2c3d4 (0 s of 120 s)");
+      CHECK(h.progress.size() == 11 && h.progress[10] == "re-psn: room open, waiting for a player with build a1b2c3d4 (100 s of 120 s)");
+      CHECK(h.n1 == "Rollback: room open, waiting for the other player (100 s of 120 s).");
+      int rh, rc; drive(h, c, 400, &rh, &rc);
+      CHECK(rh == 1 && rc == 1 && c.cl->searches == 1); }
+    // the host gives up at the window (not before), leaves its room, and says what to do
+    { FakeServer sv; Side h; h.init(sv, 11, cfg(true, B));
+      const uint64_t t0 = h.clock;
+      CHECK(h.run_alone(119900) == 0 && h.cl->leaves == 0);
+      const int r = h.run_alone(1000);
+      CHECK(r == -1 && h.clock - t0 > 120000 && h.clock - t0 <= 120100 && h.cl->leaves == 1);
+      CHECK(h.rz->error() == "re-psn: no player with this version joined within 2 minutes: start both games at about the same time (the host first is best; each waits 2 minutes after its own start-up); "
+                             "both need the same version (build a1b2c3d4) and the same gameplay mods (or none)");
+      CHECK(h.rz->notice1() == "Rollback could not start: no player with this version joined within 2 minutes.");
+      CHECK(h.rz->notice2() == "Start both games at about the same time (the host first is best; each waits 2 minutes after its own start-up); both need the same version (build a1b2c3d4) and the same gameplay mods (or none).");
+      CHECK(h.progress.size() == 13); }
+    // the joiner gives up at the window when no host appears
+    { FakeServer sv; Side c; c.init(sv, 22, cfg(false, B));
+      const uint64_t t0 = c.clock;
+      const int r = c.run_alone(125000);
+      CHECK(r == -1 && c.clock - t0 > 120000 && c.clock - t0 <= 120100 && c.cl->joins == 0 && c.cl->searches >= 60 && c.cl->searches <= 61);
+      CHECK(c.rz->notice1() == "Rollback could not start: no host with this version found within 2 minutes." && c.rz->error().find("(build a1b2c3d4)") != std::string::npos); }
+    // a server that never answers HELLO: the window names that instead
+    { FakeServer sv; Side c; c.init(sv, 22, cfg(false, B)); c.cl->is_ready = false;
+      CHECK(c.run_alone(1000) == 0 && c.progress.size() == 1 && c.progress[0] == "re-psn: connecting to the server (0 s of 120 s, build a1b2c3d4)");
+      CHECK(c.run_alone(125000) == -1 && c.rz->error().find("re-psn: the re-psn server did not answer within 2 minutes: ") == 0 && c.cl->searches == 0); }
+    // a shorter window from the config is used in the texts
+    { FakeServer sv; Side c; auto cc = cfg(false, B); cc.give_up_ms = 20000; c.init(sv, 22, cc);
+      CHECK(c.run_alone(30000) == -1 && c.rz->error().find("found within 20 seconds: start both games at about the same time (the host first is best; each waits 20 seconds after its own start-up)") != std::string::npos); }
     // a named room that is gone / another build: refused too
     { FakeServer sv; Side h, c; h.init(sv, 11, cfg(true, B)); auto cc = cfg(false, B); cc.join_room = 999; c.init(sv, 22, cc);
       h.rz->poll(); int rc = c.rz->poll(); CHECK(rc == -1 && c.cl->joins == 0); }
@@ -139,6 +201,18 @@ int main()
     { FakeServer sv; Side h, c; h.init(sv, 11, cfg(true, B)); c.init(sv, 22, cfg(false, B)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get(); dead(h); dead(c);
       h.rz->poll(); c.rz->poll(); for (int i = 0; i < 6; i++) { h.clock += 50; h.rz->poll(); }
       PsnrEvent e; e.kind = PsnrEvent::MemberLeft; e.user = 22; h.cl->ev.push_back(e); int r = h.rz->poll(); CHECK(r == -1 && h.rz->error().find("left") != std::string::npos); }
+
+    // ---- the notice store (jsp_net_game.cpp): every end of the wait leaves it right ----
+    { RendezvousNotice n; std::string a, b; const unsigned g0 = n.gen();
+      CHECK(!n.read(a, b));
+      n.waiting("Rollback: room open, waiting for the other player (40 s of 120 s).", "Both need ...");
+      CHECK(n.read(a, b) && a.find("waiting") != std::string::npos && n.gen() == g0 + 1);
+      n.waiting("Rollback: room open, waiting for the other player (40 s of 120 s).", "Both need ..."); CHECK(n.gen() == g0 + 1);   // the same text: no redraw
+      n.ended();   // another part ended the session before the games met (a mods refusal during the wait): the waiting band must go
+      CHECK(!n.read(a, b) && n.gen() == g0 + 2);
+      n.waiting("w", "x"); n.failed("Rollback could not start: x.", "Start ...");
+      CHECK(n.read(a, b) && a == "Rollback could not start: x." && b == "Start ..." && n.gen() == g0 + 4);
+      n.waiting("w", "x"); n.met(); CHECK(!n.read(a, b) && n.gen() == g0 + 6); }
 
     if (g_fail) { std::printf("%d of %d checks FAILED\n", g_fail, g_n); return 1; }
     std::printf("net repsn: all %d checks passed\n", g_n);

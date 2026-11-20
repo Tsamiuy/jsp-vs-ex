@@ -4,6 +4,18 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### For players
+
+**Fixed**
+
+- **Rollback over re-psn: the two games now wait up to 2 minutes for each other.** Before, the joining game looked for the host's room only once and gave up at once if it was not there yet, and each game stopped waiting after 30 seconds. Now the joining game keeps looking until the host's room appears, and either game can start first: start both at about the same time, because each one waits 2 minutes after it has finished starting up. While it waits, the main menu's top list shows what it is doing; if the two games do not meet, it says why and what to check, with the build number both players should compare. The on-screen messages have not been seen in a game yet.
+
+### Technical changes
+
+#### Fixed
+
+- **Rollback over re-psn, rendezvous:** the joiner no longer fails on its first room list (`re-psn: no rollback room for this build` came from the first empty search, `jsp_net_repsn.h`); it reads the list again every 2 s (`kLookupEveryMs`, one request in flight) until its window ends. The window is 120 s for both roles (`kRendezvousWindowMs`, was 30 s) and covers finding the other player only; the punch keeps its own `punch_ms`. The host's room stays listed until it gives up. Both sides log `[net] re-psn: looking for a host ...` / `[net] re-psn: room open, waiting ...` every 10 s. The give-up text names what happened, the window, the 8-hex build word and what to check (`re-psn: no host with this version found within 2 minutes: start both games at about the same time (the host first is best; each waits 2 minutes after its own start-up); both need the same version (build xxxxxxxx) and the same gameplay mods (or none)`), and any rollback room of another build that was seen. The waiting state and every re-psn rendezvous failure go on the existing top-menu notice (`jsp_net_notice`, re-read through the new `jsp_net_notice_gen` whenever the text changes); the bottom message line stays empty for them, so it does not clear that shared overlay layer (a player away from the top list sees them when it comes up again). Another end before the games meet (a mods refusal during the wait) clears the waiting band (`RendezvousNotice::ended`). The first progress line comes after the connect step, so a connected game never reports "connecting". Build-word inputs and the wire protocol are unchanged: a 0.6.1 joiner also finds a 0.6.0 host's room only when the build words match, which they do not across versions. Tested: `installer/tools/net_repsn_test.sh` (fake transport: joiner first and host 60 s later, host waiting 100 s with its room listed, give-up of either side at the window with the exact texts, the 2 s list interval, the progress lines, the other-build hint, the notice store's waiting / ended / failed / met sequence; real transport against the fake wire-format server: joiner first then host, build mismatch until the window), MinGW-w64 g++ `tools/ci/port_syntax_check.py`, `tools/ci/repo_checks.py`. Not tested: a game run (no two-copy or two-PC run with this build; the notice has not been seen on screen).
+
 ## [0.6.0] - 2026-11-20
 
 ### For players

@@ -24,6 +24,7 @@
 extern "C" void jsp_net_game_install(void) {}
 extern "C" void jsp_net_env_part(int) {}
 extern "C" int jsp_net_notice(char*, int, char*, int) { return 0; }
+extern "C" unsigned jsp_net_notice_gen(void) { return 0; }
 #else
 
 #include <atomic>
@@ -106,6 +107,9 @@ jpno::Rendezvous g_rv;                // constant-initialized (no constructor): 
 // Plain atomics (constant-initialized): decide_env may run from another translation unit's static constructor, before this file's dynamic initializers.
 std::atomic<int> g_refusal{0}, g_refusal_src{0};
 void note_off(jpno::Refusal r) { g_refusal_src.store(jsp_online_source()); g_refusal.store(static_cast<int>(r)); }
+// ENHANCEMENT (display only, default on): the re-psn rendezvous on the same notice (waiting for the other player, refreshed every 10 s; why the two games
+// did not meet). Written by the pump thread (RePsnRendezvous::on_progress, the failure), read by jsp_net_notice; the generation tells the menu to re-read it.
+RendezvousNotice g_rdv;
 void decide_env()
 {
     std::string why; jpno::Refusal code = jpno::Refusal::None;
@@ -218,7 +222,8 @@ struct State {
     std::mutex txt_mu; std::string fail_text;          // fail_text / m2_text: written by the pump thread or main, under txt_mu
     std::atomic<Phase> phase{Phase::Off};
     std::atomic<bool> m2_started{false}, m2_ended{false}, evidence_ready{false};
-    std::string m2_text; uint32_t base = 0;
+    std::string m2_text, m2_display; uint32_t base = 0;   // m2_display: what the message line shows instead of m2_text ("" with m2_quiet: the menu notice carries it)
+    bool m2_quiet = false;
     NetSession sess; jsx::Stepper stepper; std::unique_ptr<Glue> glue;
     ppu_context* ctx = nullptr; uint32_t done_now = 0;
     uint64_t cancel_since = 0;
@@ -271,7 +276,7 @@ void log(const char* what, const std::string& s) { std::fprintf(stderr, "[net] %
 std::string take_text() { std::lock_guard<std::mutex> lk(g.txt_mu); return g.fail_text; }
 void set_text(const std::string& t) { std::lock_guard<std::mutex> lk(g.txt_mu); g.fail_text = t; }
 // The match is over (session failure, Cancel, disconnect, End match): the local settings come back (handshake end_match / match_ended), the pad hook goes, the fight runs on locally.
-void end_with(const std::string& text)
+void end_with(const std::string& text, bool quiet = false)
 {
     jsp_snapshot_ext_set_idle_hook(nullptr);   // the gate must not call into a finished session
     jsp_snapshot_ext_guard_summary();
@@ -283,7 +288,8 @@ void end_with(const std::string& text)
     jsp_stepper_abort();
     jsp_stepper_net_disable();
     { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host && g.mh) g.mh->end_match(); else if (!g.host && g.mc) g.mc->match_ended(); }
-    log("ended", text); show(text);
+    log("ended", text);
+    if (quiet) set_text(""); else show(text);   // quiet: the rendezvous texts are on the main menu's notice (jsp_net_notice); the message line stays empty so it does not clear that layer
 }
 // After a local failure the peer is told WHY by a handshake Cancel (Gekko's disconnect alone would show it only 'Opponent disconnected'). The peer waits a moment for it.
 void send_failure_cancel()
@@ -314,7 +320,14 @@ bool mods_refuse_now()
     pump_fail(std::string("rollback refused: ") + why);
     return true;
 }
-void pump_fail(const std::string& t) { log("settings layer / rendezvous ended", t); { std::lock_guard<std::mutex> lk(g.txt_mu); if (!g.m2_ended.load()) g.m2_text = t; } g.m2_ended = true; }   // the main thread acts on it (boundary)
+void pump_fail(const std::string& t, bool quiet)
+{
+    log("settings layer / rendezvous ended", t);
+    if (!quiet && g.rrz && !g.plan_ready) g_rdv.ended();   // ended before the games met by another path (a mods refusal, the startup-evidence wait): no "waiting" band is left behind
+    { std::lock_guard<std::mutex> lk(g.txt_mu); if (!g.m2_ended.load()) { g.m2_text = t; g.m2_quiet = quiet; } }
+    g.m2_ended = true;   // the main thread acts on it (boundary)
+}
+void pump_fail(const std::string& t) { pump_fail(t, false); }
 
 uint64_t random_session_id()
 {
@@ -363,8 +376,13 @@ void pump_tick(uint64_t t)
         // no longer runs the set its build word names: no rendezvous and no Hello from then on. A session already past its Hello is not ended here.
         if (mods_refuse_now()) return;
         const int r = g.rz->poll();
-        if (r < 0) { pump_fail("rendezvous failed: " + g.rz->error()); return; }
+        if (r < 0) {
+            if (g.rrz && !g.rrz->notice1().empty()) { g_rdv.failed(g.rrz->notice1(), g.rrz->notice2()); pump_fail("rendezvous failed: " + g.rz->error(), true); }   // on the menu notice
+            else pump_fail("rendezvous failed: " + g.rz->error());
+            return;
+        }
         if (r == 0) return;
+        if (g.rrz) g_rdv.met();   // met: the waiting notice goes
         g.plan = g.rz->plan();
         g.link->set_peer(g.host ? 1 : 0, g.plan.remotes[0].ep);
         if (mods_refuse_now()) return;   // the same check right before the Hello (begin / join send it)
@@ -520,9 +538,9 @@ void boundary(ppu_context* c)
     Phase ph = g.phase;
     if (ph == Phase::Off) return;
     if (g.m2_ended.load() && ph != Phase::Ended) {   // a Cancel / failure of the settings layer while waiting, armed or in the match: the match ends on this side too
-        std::string t; { std::lock_guard<std::mutex> lk(g.txt_mu); t = g.m2_text; }
+        std::string t; bool quiet = false; { std::lock_guard<std::mutex> lk(g.txt_mu); t = g.m2_text; quiet = g.m2_quiet; }
         if (ph == Phase::Running) g.sess.abort("settings layer ended: " + t);
-        end_with(t); return;
+        end_with(t, quiet); return;
     }
     if (ph == Phase::Handshake && g.m2_started.load()) { g.phase = Phase::Armed; ph = Phase::Armed; log("phase", "armed (settings agreed, waiting for the first fight tick)"); }
     // done >= 1 already implies the camera anchor (g_done counts only after it is set; the hash tap needs the cameras), so tick `done` has a raw hash. ts.anc_set is the PRESS anchor and is never set here.
@@ -658,6 +676,10 @@ extern "C" void jsp_net_game_install(void)
         g.rp.reset(new PsnrClientTransport(g.mux, rid));
         RePsnRendezvous::Config rc; rc.host = repsn_host; rc.build = g.caps.build; rc.allow_relay = repsn_relay; rc.local_count = 1;
         g.rrz = new RePsnRendezvous(*g.rp, g.mux, *g.hub, rc);
+        g.rrz->on_progress = [](const std::string& line, const std::string& n1, const std::string& n2) {   // runs inside rz->poll() (the pump thread): every 10 s while waiting
+            std::fprintf(stderr, "[net] %s\n", line.c_str());
+            g_rdv.waiting(n1, n2);
+        };
         g.rrz->on_path = [](Path p, uint32_t peer_user) {   // runs inside rz->poll() (the pump thread)
             g.rp->set_peer_user(peer_user);
             g.rp->set_relay_mode(p == Path::Relay);   // Relay: every datagram to the peer goes through the server from now on, until the session ends
@@ -684,16 +706,24 @@ extern "C" void jsp_net_game_install(void)
 // Called by jsp_online.cpp's boot when the online files and --psnr have been applied; EnvInit reports through the same rendezvous.
 extern "C" void jsp_net_env_part(int part) { g_rv.arrive(part, decide_env); }
 
-// ENHANCEMENT (display only): the two lines of the refused-rollback notice (jpno::notice_text), for jsp_port_menu.cpp. 1 = there is one, 0 = rollback was not refused
-// (not requested, or it started). Any thread; the code is written before main() or by jsp_net_game_install, before the menu exists.
+// ENHANCEMENT (display only): the two lines of the refused-rollback notice (jpno::notice_text), else of the re-psn rendezvous notice (waiting / why the games did not meet),
+// for jsp_port_menu.cpp. 1 = there is one, 0 = none (rollback not requested, or it started and the rendezvous is not waiting or failed). Any thread; the code is written before main() or by jsp_net_game_install, before the menu exists.
 extern "C" int jsp_net_notice(char* line1, int n1, char* line2, int n2)
 {
     const int c = g_refusal.load();
-    if (c <= 0 || c >= static_cast<int>(jpno::Refusal::Count)) return 0;
+    if (c <= 0 || c >= static_cast<int>(jpno::Refusal::Count)) {   // not refused: the re-psn rendezvous notice, if any (waiting, or why the games did not meet)
+        std::string a, b;
+        if (!g_rdv.read(a, b)) return 0;
+        std::snprintf(line1, (size_t)n1, "%s", a.c_str()); std::snprintf(line2, (size_t)n2, "%s", b.c_str());
+        return 1;
+    }
     const jpno::Notice t = jpno::notice_text(static_cast<jpno::Refusal>(c), g_refusal_src.load());
     if (!t.any()) return 0;
     std::snprintf(line1, (size_t)n1, "%s", t.line1.c_str()); std::snprintf(line2, (size_t)n2, "%s", t.line2.c_str());
     return 1;
 }
+
+// Changes whenever the rendezvous notice text changes (jsp_port_menu.cpp re-reads jsp_net_notice while the top list is up). Any thread.
+extern "C" unsigned jsp_net_notice_gen(void) { return g_rdv.gen(); }
 
 #endif  // JSP_ROLLBACK_BUILD

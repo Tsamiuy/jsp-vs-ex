@@ -14,7 +14,9 @@
 
 #include "jsp_net_session.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <functional>
 #include <set>
@@ -27,6 +29,43 @@ constexpr uint32_t kRoomFlagRollback = 0x40000000u;
 // The record in the external blob and in member data: "rb=1;ver=<8 hex digits of the build id>". Exactly this shape; anything else does not match.
 inline std::string make_record(uint32_t build) { char b[40]; std::snprintf(b, sizeof b, "rb=1;ver=%08x", (unsigned)build); return b; }
 inline bool record_matches(const std::string& blob, uint32_t build) { return blob == make_record(build); }
+// The build word of a well-formed record (for the "another version was seen" hint); false for anything else.
+inline bool record_build(const std::string& blob, uint32_t* build)
+{
+    if (blob.size() != 17 || blob.compare(0, 9, "rb=1;ver=") != 0) return false;
+    uint32_t v = 0;
+    for (size_t i = 9; i < 17; i++) {
+        const char ch = blob[i];
+        const int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
+        if (d < 0) return false;
+        v = v << 4 | (uint32_t)d;
+    }
+    *build = v; return true;
+}
+
+// The rendezvous window, the same for both roles, counted by each side from its own first poll (after its startup evidence). 120 s: the two PCs
+// reach that point at very different times (a cold pipeline cache adds tens of seconds; the startup-evidence wait alone may take up to 240 s) and
+// the players start by hand, often while talking in another program; 30 s (0.6.0) failed in the field. Both sides keep their re-psn connection
+// alive the whole time (psnr_poll's heartbeat), so the server's 90 s silence limit does not apply. Longer would only delay the message that says
+// what to do. The two games meet when they start looking at most this far apart, in either order.
+constexpr int kRendezvousWindowMs = 120000;
+// The joiner reads the room list again this long after a list without a matching room (one request in flight at a time): at most 60 lists in a window.
+constexpr int kLookupEveryMs = 2000;
+// One progress line (and on-screen notice update) this often while waiting for the other player.
+constexpr int kProgressEveryMs = 10000;
+// "2 minutes", "1 minute", "20 seconds": the window in the player-facing texts.
+inline std::string window_words(int ms)
+{
+    if (ms >= 60000 && ms % 60000 == 0) { const int m = ms / 60000; return std::to_string(m) + (m == 1 ? " minute" : " minutes"); }
+    const int s = (ms + 999) / 1000; return std::to_string(s) + (s == 1 ? " second" : " seconds");
+}
+inline std::string build_hex(uint32_t build) { char b[12]; std::snprintf(b, sizeof b, "%08x", (unsigned)build); return b; }
+// What to check when the two games did not meet (the second line of the on-screen notice; the tail of the one-line text).
+inline std::string meet_advice(uint32_t build, int window_ms)
+{
+    return "start both games at about the same time (the host first is best; each waits " + window_words(window_ms) + " after its own start-up); both need the same version (build " + build_hex(build) +
+           ") and the same gameplay mods (or none)";
+}
 
 // Field widths follow re-psn docs/api.md "Rooms" (v0.8.0): room ids are u64, member ids u16, user ids u32. ROOM_LIST names the owner by online id (no user id).
 struct PsnrRoom { uint64_t id = 0; uint32_t flags = 0; std::string external; uint32_t owner = 0 /* user id when known, 0 from ROOM_LIST */; uint8_t members = 0, max_members = 0; std::string owner_name; };
@@ -77,6 +116,22 @@ public:
 enum class Path { None, Punch, Direct, Relay };
 inline const char* path_name(Path p) { return p == Path::Direct ? "direct" : p == Path::Relay ? "relay" : p == Path::Punch ? "punching" : "-"; }
 
+// ENHANCEMENT (display only): the rendezvous text of the on-screen notice (jsp_net_game.cpp jsp_net_notice; jsp_port_menu.cpp re-reads it when gen() changes).
+// Written by the pump thread, read by the menu: one mutex, and a generation that counts every change. Every way the wait can end must leave it right:
+// met() and ended() clear it (another part ended the session before the games met: its own text is on the message line), failed() replaces it.
+class RendezvousNotice {
+public:
+    void waiting(const std::string& a, const std::string& b) { set(a, b); }
+    void failed(const std::string& a, const std::string& b) { set(a, b); }
+    void met() { set(std::string(), std::string()); }
+    void ended() { set(std::string(), std::string()); }
+    bool read(std::string& a, std::string& b) const { std::lock_guard<std::mutex> lk(mu_); if (l1_.empty()) return false; a = l1_; b = l2_; return true; }
+    unsigned gen() const { return gen_.load(); }
+private:
+    void set(const std::string& a, const std::string& b) { { std::lock_guard<std::mutex> lk(mu_); if (a == l1_ && b == l2_) return; l1_ = a; l2_ = b; } gen_.fetch_add(1); }
+    mutable std::mutex mu_; std::string l1_, l2_; std::atomic<unsigned> gen_{0};
+};
+
 class RePsnRendezvous : public IRendezvous {
 public:
     struct Config {
@@ -86,12 +141,17 @@ public:
         bool allow_relay = false;       // the player's choice
         uint8_t local_count = 1;
         int punch_ms = 4000;            // direct/punch window before relay is considered
-        int give_up_ms = 30000;         // the whole rendezvous
+        int give_up_ms = kRendezvousWindowMs;   // finding the other player (connect, room list / room, until its endpoint is known); the punch has its own windows
+        int lookup_every_ms = kLookupEveryMs;   // joiner: the pause between two room lists without a matching room
+        int progress_every_ms = kProgressEveryMs;
     };
     RePsnRendezvous(IPsnrTransport& t, UdpMux& mux, MessageHub& hub, const Config& c) : t_(t), mux_(mux), hub_(hub), c_(c) {}
     // when the path changes: Relay means the mux must send through the server from now on (psnr_relay_wrap / psnr_relay_unwrap_from); the glue sets that up
     std::function<void(Path, uint32_t peer_user)> on_path;
     std::function<uint64_t()> now_ms = [] { return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    // While waiting for the other player (before the punch), every progress_every_ms and once at the start: one line for the log (`line`) and the
+    // two lines of the on-screen notice. Runs inside poll().
+    std::function<void(const std::string& line, const std::string& notice1, const std::string& notice2)> on_progress;
 
     int poll() override
     {
@@ -99,20 +159,26 @@ public:
         if (state_ == kFailed) return -1;
         const uint64_t t = now_ms();
         if (!t0_) t0_ = t;
-        if (t - t0_ > (uint64_t)c_.give_up_ms) return fail("re-psn: timed out waiting for the other player");
+        // The window covers finding the other player only: once its endpoint is known the punch (and the relay, if allowed) has its own bound (punch_ms).
+        if (state_ < kPunch && t - t0_ > (uint64_t)c_.give_up_ms) return give_up();
         if (const char* f = t_.failure()) return fail(f);   // the connection failed for good, or a lookup was refused: end now, not at the give-up
-        if (state_ == kConnect) { if (!t_.ready()) return 0; state_ = kLookup; }
+        if (state_ == kConnect && t_.ready()) state_ = kLookup;
+        if (state_ < kPunch) progress(t);   // after the connect step: a game that is already connected never reports "connecting"
+        if (state_ == kConnect) return 0;
         if (state_ == kLookup) {
-            if (c_.host) { t_.create_room(kRoomFlagRollback, make_record(c_.build), make_record(c_.build)); state_ = kRoom; }
+            if (c_.host) { t_.create_room(kRoomFlagRollback, make_record(c_.build), make_record(c_.build)); state_ = kRoom; }   // listed until the host leaves (give-up, failure or the end)
             else {
+                if (next_lookup_ && t < next_lookup_) return 0;   // the last list had no room for us: wait before asking again
                 std::vector<PsnrRoom> all;
-                if (!t_.search(all)) return 0;
+                if (!t_.search(all)) return 0;                     // one request in flight; the answer comes on a later poll
+                ++lookups;
+                note_other_builds(all);
                 const std::vector<PsnrRoom> ok = filter_rooms(all, c_.build);
                 uint64_t pick = 0;
                 if (c_.join_room) { for (const auto& r : ok) if (r.id == c_.join_room) pick = r.id;
                     if (!pick) return fail("re-psn: that room is gone, full, or from another build"); }
                 else if (!ok.empty()) pick = ok.front().id;
-                else return fail("re-psn: no rollback room for this build");
+                else { next_lookup_ = t + (uint64_t)c_.lookup_every_ms; return 0; }   // no host yet (it may start later): keep looking until the window ends
                 t_.join_room(pick, make_record(c_.build)); room_ = pick; state_ = kRoom;
             }
         }
@@ -169,9 +235,57 @@ public:
     int local_index() const { return local_index_; }   // by member-id order (the owner joined first: 0)
     uint64_t room_id() const { return room_; }
     uint64_t rejected_members = 0;                    // members whose record did not match (the host side)
+    uint64_t lookups = 0;                             // room lists read (the joiner)
+    // The failure as the two lines of the on-screen notice (what happened / what to do); line 2 is empty when error() says it all.
+    const std::string& notice1() const { return n1_; }
+    const std::string& notice2() const { return n2_; }
 private:
     enum { kConnect = 0, kLookup, kRoom, kPunch, kDone, kFailed };
-    int fail(const std::string& why) { err_ = why; state_ = kFailed; t_.leave_room(); return -1; }
+    int fail(const std::string& why) { err_ = why; n1_ = "Rollback could not start: " + why; n2_.clear(); state_ = kFailed; t_.leave_room(); return -1; }
+    // The window ended before the other player was found. One line for the log and the screen, with the build word so the players can compare.
+    int give_up()
+    {
+        std::string what;
+        if (state_ == kConnect) what = "the re-psn server did not answer within " + window_words(c_.give_up_ms);
+        else if (!c_.host && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (other_builds_.empty() ? std::string() : " (" + other_builds_text() + ")");
+        else if (c_.host) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
+        else what = "the host's room did not answer within " + window_words(c_.give_up_ms);
+        const std::string advice = meet_advice(c_.build, c_.give_up_ms);
+        fail("re-psn: " + what + ": " + advice);
+        n1_ = "Rollback could not start: " + what + ".";
+        n2_ = advice + "."; if (n2_[0] >= 'a' && n2_[0] <= 'z') n2_[0] = (char)(n2_[0] - 'a' + 'A');
+        return -1;
+    }
+    void note_other_builds(const std::vector<PsnrRoom>& all)
+    {
+        for (const PsnrRoom& x : all) { uint32_t b = 0; if ((x.flags & kRoomFlagRollback) && record_build(x.external, &b) && b != c_.build) other_builds_.insert(b); }
+    }
+    std::string other_builds_text() const
+    {
+        if (other_builds_.empty()) return std::string();
+        std::string s = "seen: a rollback room with build";
+        size_t i = 0; for (uint32_t b : other_builds_) { if (i == 3) { s += ", ..."; break; } s += (i ? ", " : " ") + build_hex(b); ++i; }
+        return s;
+    }
+    void progress(uint64_t t)
+    {
+        if (last_progress_ && t - last_progress_ < (uint64_t)c_.progress_every_ms) return;
+        last_progress_ = t;
+        if (!on_progress) return;
+        const std::string w = std::to_string((t - t0_) / 1000) + " s of " + std::to_string(c_.give_up_ms / 1000) + " s";
+        const std::string b = "build " + build_hex(c_.build);
+        std::string line, n1, n2;
+        if (state_ == kConnect) { line = "re-psn: connecting to the server (" + w + ", " + b + ")"; n1 = "Rollback: connecting to the re-psn server (" + w + ")."; }
+        else if (c_.host) {
+            line = "re-psn: room open, waiting for a player with " + b + " (" + w + (rejected_members ? ", " + std::to_string(rejected_members) + " with another version refused" : "") + ")";
+            n1 = "Rollback: room open, waiting for the other player (" + w + ").";
+        } else if (state_ == kLookup) {
+            line = "re-psn: looking for a host with " + b + " (" + w + ", " + std::to_string(lookups) + " room lists read" + (other_builds_.empty() ? std::string() : "; " + other_builds_text()) + ")";
+            n1 = "Rollback: looking for the host's room (" + w + ").";
+        } else { line = "re-psn: joined room " + std::to_string((unsigned long long)room_) + ", waiting for the host (" + w + ", " + b + ")"; n1 = "Rollback: joined the host's room, waiting for it (" + w + ")."; }
+        n2 = "Both need the same version (build " + build_hex(c_.build) + ") and the same gameplay mods (or none).";
+        on_progress(line, n1, n2);
+    }
     void Path_(Path p) { path_ = p; if (on_path) on_path(p, peer_user_); }
     void start_inner()
     {
@@ -182,7 +296,8 @@ private:
         else inner_.reset(new DirectRendezvous(mux_, hub_, c_.local_count, peer_.ep));
     }
     IPsnrTransport& t_; UdpMux& mux_; MessageHub& hub_; Config c_;
-    int state_ = kConnect; uint64_t t0_ = 0, punch_start_ = 0, last_punch_ = 0;
+    int state_ = kConnect; uint64_t t0_ = 0, punch_start_ = 0, last_punch_ = 0, next_lookup_ = 0, last_progress_ = 0;
+    std::set<uint32_t> other_builds_; std::string n1_, n2_;
     uint64_t room_ = 0; uint32_t owner_ = 0, peer_user_ = 0; int local_index_ = -1; bool relay_ = false;
     std::vector<PsnrMember> members_; PsnrMember peer_; std::set<uint32_t> rejected_;
     std::unique_ptr<DirectRendezvous> inner_; SessionPlan plan_; std::string err_; MessageChannel* ch_ = nullptr; Path path_ = Path::None;

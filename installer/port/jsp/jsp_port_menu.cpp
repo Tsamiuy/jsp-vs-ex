@@ -89,7 +89,8 @@ extern "C" int jsp_online_edit_method(void);                      // ENHANCEMENT
 extern "C" void jsp_online_edit_set_method(int m);
 extern "C" int jsp_online_edit_check(char* why, int n);            // 0 the working copy can be saved, 1 not (reason in why)
 extern "C" void jsp_setting_set_live(const char* key, const char* value);        // jsp_settings.cpp
-extern "C" int jsp_net_notice(char* line1, int n1, char* line2, int n2);          // jsp_net_game.cpp: the refused-rollback notice (1 = there is one)
+extern "C" int jsp_net_notice(char* line1, int n1, char* line2, int n2);          // jsp_net_game.cpp: the refused-rollback notice, else the re-psn rendezvous notice (1 = there is one)
+extern "C" unsigned jsp_net_notice_gen(void);                                     // jsp_net_game.cpp: changes when the rendezvous notice text changes
 #include <chrono>
 namespace jps { std::string io_path(); bool io_load(std::string& text, std::string& note); bool io_save(const std::string& text, std::string& err); }
 #endif
@@ -858,7 +859,8 @@ int g_ver_state = -1;                   // panel state at the last panel update
 bool g_net_watch = false;               // set at install: JSP_ROLLBACK or JSP_NET_REFUSED is on, so a notice may exist (read lazily: jsp_net_game_install may decide later)
 jpno::Notice g_note;                    // the text, read when the top list comes up
 bool g_note_vis = false;
-uint64_t g_note_since = 0;              // ms: the top list last came up
+uint64_t g_note_since = 0;              // ms: the top list last came up, or the notice text last changed while it was up
+unsigned g_note_gen = 0;                // jsp_net_notice_gen() at the last read
 uint64_t mono_ms() { return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 bool top_items() { return g_ver.any() || g_net_watch; }
 
@@ -891,12 +893,16 @@ void ver_refresh()
     }
     if (g_net_watch) {   // the notice: re-read and re-armed each time the top list comes up, dropped after jpno::kNoticeMs
         const uint64_t t = mono_ms();
-        if (vis && !g_ver_vis) {
+        const unsigned gen = jsp_net_notice_gen();
+        bool text_changed = false;
+        if (vis && (!g_ver_vis || gen != g_note_gen)) {   // the top list came up, or the rendezvous text changed while it is up (re-armed for kNoticeMs)
             char l1[200] = "", l2[200] = "";
-            g_note = jsp_net_notice(l1, sizeof l1, l2, sizeof l2) ? jpno::Notice{ l1, l2 } : jpno::Notice{};
-            g_note_since = t;
+            const jpno::Notice n = jsp_net_notice(l1, sizeof l1, l2, sizeof l2) ? jpno::Notice{ l1, l2 } : jpno::Notice{};
+            text_changed = n.line1 != g_note.line1 || n.line2 != g_note.line2;
+            g_note = n; g_note_since = t; g_note_gen = gen;
         }
         const bool nv = jpno::notice_visible(g_note.any(), vis, g_note_since, t);
+        if (nv && g_note_vis && text_changed && vis == g_ver_vis) { draw_page(); return; }   // only the text changed (the waiting time, or the failure)
         if (nv != g_note_vis) {
             g_note_vis = nv;
             if (nv) std::fprintf(stderr, "[net] notice on the top menu: %s / %s\n", g_note.line1.c_str(), g_note.line2.c_str());
