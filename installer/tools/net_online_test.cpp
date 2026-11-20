@@ -78,6 +78,10 @@ int main()
       auto set = [&](const char* k, const char* v) { if (v && *v) env[k] = v; else env.erase(k); };   // "" / null remove, as _putenv_s does
       CHECK(resolve_env(get, set, &own, &why) == Boot::NotRequested && env.empty() && own.empty());
       env["JSP_ROLLBACK"] = "0"; env["PS3_NET_ONLINE"] = "1"; CHECK(resolve_env(get, set, &own, &why) == Boot::NotRequested && env.size() == 2);   // JSP_ROLLBACK=0 is off, online untouched
+      // JSP_ROLLBACK=0 with a join address left in the settings: still not requested, and nothing is written (no set() call)
+      { int sets = 0; auto counted = [&](const char* k, const char* v) { sets++; set(k, v); };
+        env.clear(); own.clear(); env["JSP_ROLLBACK"] = "0"; env["JSP_ROLLBACK_JOIN"] = "192.0.2.1:36200";
+        CHECK(resolve_env(get, counted, &own, &why) == Boot::NotRequested && sets == 0 && env.size() == 2 && own.empty()); }
       // the pair, with PS3_NET_ONLINE = "1" and = "0" (the runtime counts any value)
       for (const char* pv : { "1", "0" }) {
           env.clear(); own.clear(); env["JSP_ROLLBACK"] = "1"; env["JSP_ROLLBACK_LISTEN"] = "36200"; env["PS3_NET_ONLINE"] = pv; env["PSNR_SERVER"] = "example.invalid";
