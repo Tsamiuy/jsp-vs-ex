@@ -24,7 +24,9 @@ Your antivirus or SmartScreen may flag the unsigned files and the on-PC build; a
 
 ## 2. Host or join
 
-Both players: start the game, then Main Menu > **Online Battle** > **Friendly Match**.
+Both players: start the game, then Main Menu > **Battle Modes** > **Online Battle** > **Friendly Match**. (With the two-page menu
+turned off, `MENU_PAGES=0`, Online Battle is on the Main Menu itself, the fifth row.) Online fights are **2 vs 2**: each player picks a
+partner and a Support, as in the game's own online. The 3 vs 3 choice is only for offline Free Battle.
 
 - **Host:** pick **Create a Room**.
 - **Join:** pick **Search for a Room** and join the host's room.
@@ -41,8 +43,9 @@ Good to know:
   the game; it may show up in the server's logs.
 - **F9** is kept for the rollback cancel key. Do not bind it to a game button.
 - The first fights on a new install can hitch once per new effect while the game builds its graphics programs; that goes away.
-  **Tip:** before your first online match, play one offline Free Battle (any characters). It builds most of the fight's graphics
-  ahead of time, so your online fights are smooth from the first second.
+  **Tip:** before your first online match, play one offline Free Battle (Battle Modes > Free Battle > 1 Player, pick **2 vs 2**
+  in the team size window, any characters). It builds most of the fight's graphics ahead of time, so your online fights are smooth
+  from the first second.
 
 ## 3. What to report
 
@@ -72,7 +75,7 @@ Settings window, **Online** tab:
 - untick **Rollback netcode for Online Battle fights** to play Online Battle with the game's own netcode;
 - or choose **Off** to stop online play.
 
-The in-game **Port Settings > Online** page has the same choices (Netcode: Off, Delay, Rollback, Online Battle + rollback). Changes
+The in-game **Options > Port Settings > Online** page (Options is on the Main Menu's first page) has the same choices (Netcode: Off, Delay, Rollback, Online Battle + rollback). Changes
 apply on the next start.
 
 ## Known limits
@@ -80,7 +83,8 @@ apply on the next start.
 - Experimental, and not yet tried between two Windows PCs over the internet. Expect bugs.
 - Both players need the same build of the game (the same release and the same gameplay mods, or none). Two different builds cannot
   pair for rollback; the log says so.
-- Rollback pairs a room with exactly two players. It is meant for Friendly Match; Rank Match is not tested.
+- Rollback pairs a room with exactly two players, one per PC, 2 vs 2 (each with a CPU partner). It is meant for Friendly Match; Rank
+  Match is not tested. 3 vs 3 is offline only: a rollback match never runs the 3v3 code.
 - Gameplay mods turn the game's own online off for the session.
 - Rollback needs the US disc (BLUS31519). On an EU disc it falls back automatically: Online Battle uses the game's own netcode.
 - If the two games cannot connect for rollback, they try again (three times per room); the reason is in the log and in the menu

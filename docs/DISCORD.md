@@ -64,7 +64,8 @@ room emulation (toolkit patch 7924), read only.
   Join request goes to Discord's own prompt, which asks the host. `JSP_DISCORD_AUTO_ACCEPT=1` accepts it automatically instead
   while the room has space (a full room always goes to the prompt).
 - **Joiner, game running.** No restart. The game checks that the host's re-psn server is its own, then points its room search at
-  that one room: Online Battle > Friendly Match > Search lists only the friend's room until the join is done (at most 3 minutes).
+  that one room: Battle Modes > Online Battle > Friendly Match > Search lists only the friend's room until the join is done (at most
+  3 minutes).
   The online-menu autopilot takes those steps by itself; without it, open the search and pick the one room. The autopilot gives
   the controller back at once when you press anything, after 60 seconds in any case, when a Yes/No box is in its way, or when the
   join is dropped, and it never joins a room from an unfiltered list.

@@ -26,7 +26,9 @@ struct JspPresenceRaw {
     // +0x20 3 = a CPU. Only units whose team word matches their list are kept.
     int units = 0;          // units read (0 = no battle world that could be trusted)
     int u_chr[6] = {0}, u_team[6] = {0}, u_role[6] = {0}, u_cpu[6] = {0};
-    int menu_row = -1;      // the main menu's cursor 0x00956550 (stays on the entry that was opened: 0 J-Adventure, 3 Free Battle), -1 unknown
+    int menu_row = -1;      // the main menu's cursor 0x00956550 (stays on the entry that was opened: 0 J-Adventure, 3 Free Battle), -1 unknown. FIX
+                            // (two-page Main Menu, feat_menu_pages.cpp): every fight starts from the Battle Modes page, whose rows 0..4 keep these
+                            // numbers (Training / Impossible Mode open Free Battle's row 3); on the top page 0 is Battle Modes, but no fight starts there
     int ko[2] = {-1, -1};   // KOs scored by red (team 0) / blue (team 1), from the KO counter objects when jsp_game.cpp found them; -1 unknown
 };
 

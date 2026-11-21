@@ -35,7 +35,8 @@ To turn online off again, choose **Off**.
 
 ## 3. Play
 
-1. Main Menu > **Online Battle** > **Friendly Match**.
+1. Main Menu > **Battle Modes** > **Online Battle** > **Friendly Match** (with the two-page menu off, `MENU_PAGES=0`: Main Menu >
+   **Online Battle**). Online fights are 2 vs 2; 3 vs 3 is offline Free Battle only.
 2. One player picks **Create a Room**; the others pick **Search for a Room** and join it.
 3. When everyone is in the room, start the battle.
 
@@ -66,7 +67,7 @@ Limits:
 The same re-psn server can also arrange a match for the port's experimental rollback netcode instead of the game's own
 online. The two are separate methods and only one can be on: for rollback, `repsn.ini` keeps the server and your online
 name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The full recipe is in
-[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Port Settings > Online
+[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Options > Port Settings > Online
 (on by default) writes the same files.
 
 ## If it does not work

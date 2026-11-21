@@ -247,7 +247,8 @@ Or add to the settings file (see above) of each player:
     PS3_NP_ONLINE_ID=yourname
 
 `PSNR_SERVER` is the server's address and port; `PS3_NP_ONLINE_ID` is the name other players see (up to 16 characters).
-Then Main Menu > Online Battle > Friendly Match: one player uses Create a Room, the others Search for a Room.
+Then Main Menu > Battle Modes > Online Battle > Friendly Match (Main Menu > Online Battle with `MENU_PAGES=0`): one player uses
+Create a Room, the others Search for a Room. Online fights are 2 vs 2.
 
 Two copies on one PC need a second settings file with another name and `PS3_NET_P2P_PORT=3659` (the default is 3658),
 started with `jsp-launcher.exe --settings <file>`, and their own save data: `PS3_GAMEDATA_ROOT=<folder>` in that file,

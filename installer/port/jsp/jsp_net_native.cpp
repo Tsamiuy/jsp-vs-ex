@@ -19,6 +19,10 @@
  *   Tokens, separated by spaces:
  *     menu              wait for the main menu list (Left / Cross in turn meanwhile, as AUTO_FIGHT does)
  *     rowN              move the main menu cursor to row N
+ *     battle            FIX (two-page Main Menu, feat_menu_pages.cpp): onto the Battle Modes page (Up to its top row Battle Modes, then
+ *                       Cross); nothing with MENU_PAGES=0. The game's row numbers (0x00956550) of J-Adventure .. Online Battle (0..4)
+ *                       are the same on that page and on the one-page menu, so "battle row4" reaches Online Battle either way; on the
+ *                       top page row 4 is Port Settings / Options.
  *     X O T Q S U D L R one press (Cross Circle Triangle Square Start Up Down Left Right), then 700 ms
  *     wN                wait N ms
  *     B~COND            press B every AUTO_ONLINE_EVERY ms (default 5000) until COND
@@ -34,7 +38,7 @@
  *   autopilot never writes the pad (the steps still advance): the rollback owns the fight's input.
  *   Each step logs "[auto-online] step N ..." and a stall line every 30 s on one step.
  * JSP_DISCORD_AUTO_NAV (ENHANCEMENT, on unless 0; only with the game's own online on and JSP_DISCORD not 0): a Discord Join
- *   (jsp_discord_take_join) runs "home row4 X~sub4@7000 w2500 D w1000 X w4000 D w1000 J end" for the player: home = Circle back to the
+ *   (jsp_discord_take_join) runs "home battle row4 X~sub4@7000 w2500 D w1000 X w4000 D w1000 J end" for the player: home = Circle back to the
  *   main menu list, J = Cross every 5 s until jsp_discord_join_state says joined (one more search on a failure, then it gives up).
  *   FIX: it hands the pad back on the player's own input, after 60 s in any case, when Circle does not reach the main menu in 15 s (a
  *   Yes/No box: it never answers one) and when the join is dropped (state 0: no Cross on an unfiltered room list); between its presses the
@@ -68,6 +72,9 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" int (*g_ppu_icall_hook)(uint32_t target, uint64_t* gpr);                                  /* 0500 */
 extern "C" void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly); /* 6501 */
 extern "C" uint32_t cellGcm_flip_request_count(void);
+/* FIX (two-page Main Menu): feat_menu_pages.cpp, read only here: the pages are on (MENU_PAGES, default on), the page shown (0 top, 1 Battle Modes),
+ * a page change or the Port Settings screen is under way */
+bool mp_on(); int mp_page_now(); bool mp_busy();
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 /* libs/network/sysNet.c (guest addresses passed as pointers, as its own handlers do) */
 extern "C" int32_t sys_net_bnet_socket(int32_t domain, int32_t type, int32_t protocol);
@@ -418,9 +425,9 @@ const unsigned long long k_nav_limit_ms = 60000;
  * Online Battle repeats every 7 s until the submenu is up: after a killed online fight the game first shows "The last battle did
  * not end normally" (counted as a disconnect). */
 const char* k_host_script =
-    "menu row4 X~sub4@7000 w2500 D w1000 X w3000 X~tg2C619C@2500 w6000 X~fight ?p1 units end";
+    "menu battle row4 X~sub4@7000 w2500 D w1000 X w3000 X~tg2C619C@2500 w6000 X~fight ?p1 units end";
 const char* k_join_script =
-    "menu row4 X~sub4@7000 w2500 D w1000 X w4000 D w1000 X~fight ?p1 units end";
+    "menu battle row4 X~sub4@7000 w2500 D w1000 X w4000 D w1000 X~fight ?p1 units end";
 
 uint16_t button_of(char c)
 {
@@ -534,9 +541,17 @@ void auto_pad(uint16_t* b, uint16_t* lx, uint16_t* ly)
     } else if (s == "menu") {
         if (main_list_open()) { g_press_until = 0; next_step(now); }
         else if (now - g_t0 > 3000 && now - g_press_t >= 1000) { press(g_sub & 1 ? 0x0080 : 0x4000, now, 120); g_sub++; }
+    } else if (s == "battle") {   /* FIX (two-page Main Menu): the Battle Modes page first (its rows 0..4 are the game's own rows 0..4) */
+        if (!mp_on()) next_step(now);
+        else if (mp_busy()) {}   /* the list slides between pages: wait */
+        else if (mp_page_now() == 1) { if (main_list_open() && now - g_press_t > 400) next_step(now); }
+        else if (main_list_open() && now - g_step_t > 400) {
+            if (vm_read32(0x00956550u) != 0) { if (now - g_press_t >= 300) press(0x0010, now, 80); }   /* Up to Battle Modes (top row) */
+            else if (now - g_press_t >= 1000) press(0x4000, now, 120);   /* Cross: feat_menu_pages.cpp turns the page (it sees the press, see pad()) */
+        }
     } else if (s.compare(0, 3, "row") == 0) {
         const int row = std::atoi(s.c_str() + 3);
-        if (main_list_open() && now - g_step_t > 400) {
+        if (main_list_open() && now - g_step_t > 400 && !(mp_on() && mp_busy())) {
             if ((int)vm_read32(0x00956550u) == row) { if (now - g_press_t > 400) next_step(now); }
             else if (now - g_press_t >= 300) press(0x0040, now, 80);
         }
@@ -606,7 +621,7 @@ std::vector<std::string> split_steps(const std::string& script)
 /* JSP_DISCORD_AUTO_NAV (on unless 0): a Discord Join (jsp_discord.h) drives the menus from wherever the player is to Friendly Match >
  * Search for a Room, joins the one room the search lists (the runtime's join target, patch 7924) and hands the pad back. */
 bool g_discord_nav = false;
-const char* k_discord_script = "home row4 X~sub4@7000 w2500 D w1000 X w4000 D w1000 J end";
+const char* k_discord_script = "home battle row4 X~sub4@7000 w2500 D w1000 X w4000 D w1000 J end";
 void discord_poll(unsigned long long now, uint16_t held, bool stick_centred)
 {
     static unsigned long long last = 0;
@@ -623,13 +638,18 @@ void discord_poll(unsigned long long now, uint16_t held, bool stick_centred)
     NLOG("[auto-online] discord join request (room %llX on %s): %s\n", (unsigned long long)room, srv, k_discord_script);
 }
 
+/* FIX (two-page Main Menu): the scripted presses are written BEFORE the filters this one chains behind (jsp_game.cpp's game_pad_filter with
+ * feat_menu_pages.cpp's mp_pad, and the rest), so the port's menu code sees them as it sees a player's. Written after them (as before), a
+ * Cross on the top page's Battle Modes row reached the game as its row 0 (J-Adventure), and Down to row 4 there opened Online Battle under a
+ * Port Settings / Options highlight. The player's pad that auto_pad reads to hand the pad back is now the raw one (no filter ate a press). */
 void pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
+    if (port == 0) {
+        if (g_role) rb_phase_watch();   /* ENHANCEMENT (post-fight phase): the over / run counts of the AUTO_ONLINE script */
+        if (!g_auto_on && g_discord_nav) discord_poll(now_ms(), *b, std::abs((int)*lx - 128) <= 48 && std::abs((int)*ly - 128) <= 48);
+        if (g_auto_on) auto_pad(b, lx, ly);
+    }
     if (g_prev_pad) g_prev_pad(port, b, lx, ly);
-    if (port != 0) return;
-    if (g_role) rb_phase_watch();   /* ENHANCEMENT (post-fight phase): the over / run counts of the AUTO_ONLINE script */
-    if (!g_auto_on && g_discord_nav) discord_poll(now_ms(), *b, std::abs((int)*lx - 128) <= 48 && std::abs((int)*ly - 128) <= 48);
-    if (g_auto_on) auto_pad(b, lx, ly);
 }
 
 }  // namespace

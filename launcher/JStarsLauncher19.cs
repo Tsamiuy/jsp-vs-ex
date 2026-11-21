@@ -1620,7 +1620,8 @@ namespace JStarsLauncher
             if (m == 1 && rollbackBox.Checked)
             {
                 onlineState.ForeColor = Color.FromArgb(0, 110, 40);
-                onlineState.Text = "Online Battle + rollback. In the game: Online Battle > Friendly Match; one player Creates a Room, the other Searches for it. Rollback runs the fight.";
+                // FIX (two-page Main Menu, on by default): Online Battle sits on its Battle Modes page; the fights are 2 vs 2
+                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: Battle Modes > Online Battle > Friendly Match; one player Creates a Room, the other Searches for it.";
             }
             else if (m == 1) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Online Battle with the game's own netcode (rollback off)."; }
             else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }

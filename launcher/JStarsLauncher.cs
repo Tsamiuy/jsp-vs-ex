@@ -729,7 +729,7 @@ namespace JStarsLauncher
 
             // MENU_PAGES for the game: the two-page Main Menu, which also brings 3v3 Free Battle. On by default; unticked writes MENU_PAGES=0.
             menuBox = new CheckBox { Text = "Two-page Main Menu and 3v3", Location = P(16, y), AutoSize = true, Checked = true };
-            menuBox.CheckedChanged += delegate { SaveIfReady(); };
+            menuBox.CheckedChanged += delegate { SaveIfReady(); if (onlineState != null) ShowOnlineState(); };   // FIX: the Online tab's menu path follows it
             p.Controls.Add(menuBox);
             p.Controls.Add(new Label {
                 Text = "Off = the game's own Main Menu, and no 3v3.",
@@ -1620,7 +1620,10 @@ namespace JStarsLauncher
             if (m == 1 && rollbackBox.Checked)
             {
                 onlineState.ForeColor = Color.FromArgb(0, 110, 40);
-                onlineState.Text = "Online Battle + rollback. In the game: Online Battle > Friendly Match; one player Creates a Room, the other Searches for it. Rollback runs the fight.";
+                // FIX (two-page Main Menu): Online Battle sits on its Battle Modes page; the fights are 2 vs 2 (3 vs 3 is offline Free Battle only)
+                bool pages = menuBox == null || menuBox.Checked;
+                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: " + (pages ? "Battle Modes > " : "") +
+                    "Online Battle > Friendly Match; one player Creates a Room, the other Searches for it.";
             }
             else if (m == 1) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Online Battle with the game's own netcode (rollback off)."; }
             else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }
