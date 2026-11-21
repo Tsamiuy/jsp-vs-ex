@@ -10,6 +10,10 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 - **2 Players split screen runs faster.** A 2 Players 2 vs 2 fight on a busy stage ran at about 18 to 24 frames per second on one Windows PC and now runs at about 28 to 30 with the default settings; 1 Player is the same as before. It uses 16 MB more graphics upload memory. Measured on one PC only.
 
+**Fixed**
+
+- **Port overlay pictures no longer flicker back.** A picture the port draws over the game and changes every frame (an animation) could show an older picture for a frame or two instead of the new one. It now waits for the new picture. Seen in test runs on one Windows PC only.
+
 ### Technical changes
 
 #### Added
@@ -19,6 +23,10 @@ What changed in each version, newest first. Each version has two parts: **For pl
 #### Changed
 
 - **Graphics:** toolkit patch 2933 (2 Players split screen, vertex pulling in `rsx_d3d12_backend.c`): the per-frame index buffer of indexed vertex-pulled draws holds 1<<22 indices (was 1<<21, 16 MB more upload memory), because a 2 Players frame needs about 1.6 million indices and every frame was cut in two batches with a GPU wait between them (`[MIDFLUSH]` on every frame, now naming which buffer was full); and a batch the sparse check would send to the CPU path (a few vertices of a big mesh, as each split screen view uses) copies only the vertices it uses, one after the other, with its indices counted from 0 (up to 1<<20 vertices, tables of 12 MB allocated on first use; `VPULL_GATHER=0` turns it off; the `[VPULL]` report counts them as gathered). Tested: 2 Players 2 vs 2 on Hidden Leaf with two-thread drawing, median 18-24 FPS before and 28-30 after, pulled draws 81% to 100%, pictures checked in the test shots; 1 Player unchanged at 30.0; the 141 toolkit patches export (`export_toolkit.py`). Not tested: a 60 Hz monitor, other graphics cards, 3 or 4 player screens, online play. (#239)
+
+#### Fixed
+
+- **Graphics:** toolkit patch 2990: `jov_gpu_present` waits for an edit in progress on the overlay (at most about 8 ms, edits are short) and shows the new picture; before, it showed this frame index's last copy at once, so an overlay edited every frame showed a picture two or three edits old and an animation flickered back. Only after the wait does it fall back to the old copy; a closed overlay costs nothing, as before. Tested: the patch applies on its own and the 141 toolkit patches export (`export_toolkit.py`); animation seen without the flicker-back in test runs on one Windows PC. Not tested: other graphics cards, a 60 Hz monitor, online play. (#240)
 
 ## [0.6.1] - 2026-11-20
 

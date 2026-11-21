@@ -1,0 +1,35 @@
+The overlay present waits for an edit in progress. When jov_gpu_present finds the overlay locked by an edit it used to
+show this frame index's last copy at once; an overlay that is edited every frame (an animation) then showed a picture
+two or three edits old and the animation flickered back. It now waits for the edit (at most about 8 ms, edits are
+short) and shows the new picture; only after that does it fall back to the old copy. A closed overlay costs nothing,
+as before.
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b55dde2..ba11bd0 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6969,9 +6969,22 @@ static void jov_gpu_present(u32 fi)
+ {
+     if (!jov.active) return;                          /* the whole cost of a closed overlay */
+     if (fi >= FRAME_COUNT || !jov.px || !jov_gpu_init()) return;
+-    if (!jov_try_lock()) {                            /* an edit is open: keep showing this frame's last copy, if any */
+-        if (!s_jov_fr[fi].tex) return;
+-        goto draw;
++    if (!jov_try_lock()) {                            /* an edit is open */
++        /* An animated overlay is edited every frame; showing this frame index's last copy then shows a picture that is
++         * two or three edits old: the animation flickers back (Kori 2026-11-19, the Port Settings slide). Edits are short,
++         * so wait for this one (at most about 8 ms) and show the new picture; only then fall back to the old copy. */
++        LARGE_INTEGER q0, q1, qf; int got = 0;
++        QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
++        for (;;) {
++            if (jov_try_lock()) { got = 1; break; }
++            QueryPerformanceCounter(&q1);
++            if ((q1.QuadPart - q0.QuadPart) * 1000 / qf.QuadPart >= 8) break;
++            SwitchToThread();
++        }
++        if (!got) {
++            if (!s_jov_fr[fi].tex) return;
++            goto draw;
++        }
+     }
+     {
+         JovFrame* f = &s_jov_fr[fi];

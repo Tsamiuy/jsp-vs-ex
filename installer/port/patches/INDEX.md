@@ -105,6 +105,7 @@ Applied in name order to the pinned toolkit by installer/tools/export_toolkit.py
 | 2919 | experiment | NV308A inline transfers (cellGcmSetInlineTransfer: data words on methods 0x0400..0x1FFC of subchannel 4 or 5) went | cellGcmSys.c | nv3089_blit, gcm_rsx_process_fifo_unlocked | GCM2D_RUN | J-Stars |
 | 2920 | experiment | A title port can tint rectangles of the finished frame: g_rsx_tint_rects gives up to 8 rectangles {x, y, w, h} in guest | rsx_d3d12_backend.c | oskp_draw |  | J-Stars |
 | 2933 | experiment | Split screen (2 Players) drawing, two changes in the vertex pulling path: | rsx_d3d12_backend.c | vpull_copy, upload_vpull, vpull_report, vp_flush_if_full | VPULL_GATHER | J-Stars |
+| 2990 | experiment | The overlay present waits for an edit in progress. When jov_gpu_present finds the overlay locked by an edit it used to | rsx_d3d12_backend.c | jov_gpu_present |  | J-Stars |
 | 3001 | fix | AUDIO_NBLOCK=16/32 opens a bigger cellAudio ring than the title asked for (opt-in). | cellAudio.c | cellAudioPortOpen | AUDIO_NBLOCK | J-Stars |
 | 3002 | fix | VDEC_ALPHA=<0-255> overrides the alpha a title asks cellVdecGetPicture for (unset or negative: the title's). | cellVdec.c | cellVdecGetPicItem | VDEC_ALPHA | J-Stars |
 | 3003 | fix | cellVdecDecodeAu keeps AUs that arrive while the picture queue is full (VDEC_DEFER=0 restores BUSY). | cellVdec.c | vdec_now_ms, vdec_queue_clear, vdec_idle_thread, cellVdecEndSeq, cellVdecDecodeAu, cellVdecGetPicture ... | VDEC_DEFER | J-Stars |
