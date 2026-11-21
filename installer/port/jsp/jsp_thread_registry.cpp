@@ -5,7 +5,7 @@
 //   * jsp_thread_registry_seed(): threads that existed before the callback ran or that never deliver an attach notification are added from one Toolhelp
 //     listing at snapshot init (marked seeded; retired when their thread ends).
 //   * jsp_thread_registry_audit(): a Toolhelp listing compared with the registry (baseline and every N ticks, outside any freeze). A live thread that is not
-//     registered after 20 ms of re-checks fails the run loudly (THREAD-NOT-REGISTERED, with its start address module) instead of being left unfrozen.
+//     registered after 200 ms of re-checks fails the run loudly (THREAD-NOT-REGISTERED, with its start address module) instead of being left unfrozen.
 // ASSUMPTION (Wine/Proton, not run): exe TLS callbacks receive DLL_THREAD_ATTACH/DETACH for every thread the process creates, including threads created
 // by Wine's own DLLs (wasapi, the threadpool); a thread created with THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH is the known exception, which the audit names.
 #include "jsp_thread_registry.h"
@@ -120,7 +120,7 @@ unsigned jsp_thread_registry_seed()
     return n;
 }
 
-// 0 = every live thread of the process is registered (LIVE, or DEAD and still ending, or gone/ended after 20 ms of re-checks); else 1 and `why` names the first one that is not.
+// 0 = every live thread of the process is registered (LIVE, or DEAD and still ending, or gone/ended after 200 ms of re-checks); else 1 and `why` names the first one that is not.
 int jsp_thread_registry_audit(char* why, size_t n, unsigned* listed, unsigned* rechecked)
 {
     *listed = 0; *rechecked = 0;
@@ -137,7 +137,8 @@ int jsp_thread_registry_audit(char* why, size_t n, unsigned* listed, unsigned* r
     CloseHandle(s);
     for (unsigned i = 0; i < nm; i++) {   // a thread inside its own attach notification registers within microseconds; one that ended is fine
         bool ok = false;
-        for (int tries = 0; tries < 20 && !ok; tries++) {
+        // 200 ms (was 20): two copies on one loaded PC once took longer than 20 ms to run a new pool thread up to its attach notification
+        for (int tries = 0; tries < 200 && !ok; tries++) {
             if (g_reg.has_any(missing[i])) { ok = true; break; }
             HANDLE h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, missing[i]);
             if (!h) { ok = true; break; }   // gone
@@ -146,9 +147,18 @@ int jsp_thread_registry_audit(char* why, size_t n, unsigned* listed, unsigned* r
             (*rechecked)++;
             Sleep(1);
         }
-        if (!ok) {
+        if (!ok) {   // FIX (rollback): a thread that never delivers an attach notification (Windows' own pool / loader workers, start ntdll.dll+0x24990, were seen
+                     // mid-match on two copies) is adopted as seeded, like the threads that existed before the callback ran: it is frozen with the others
+            HANDLE h = OpenThread(kAccess, FALSE, missing[i]);
+            if (!h) continue;   // ended meanwhile
+            if (g_reg.add(missing[i], h, reg_wait, true) >= 0) {
+                char mod[160]; start_module(missing[i], mod, sizeof mod);
+                std::fprintf(stderr, "[snap] thread registry: adopted tid=%lu start=%s (no attach notification within 200 ms)\n", missing[i], mod);
+                continue;
+            }
+            CloseHandle(h);
             char mod[160]; start_module(missing[i], mod, sizeof mod);
-            std::snprintf(why, n, "tid=%lu start=%s (alive, no attach notification seen after 20 ms)", missing[i], mod);
+            std::snprintf(why, n, "tid=%lu start=%s (alive, no attach notification seen after 200 ms)", missing[i], mod);
             return 1;
         }
     }

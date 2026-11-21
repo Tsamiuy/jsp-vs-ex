@@ -8,9 +8,11 @@
 // every part runs in both ring modes (Copy2 = two copies per committed page, PagePtr = one copy and a page-index swap); the random test
 // also checks the arena accounting (free + entry pages + shadow pages == arena, no page owned twice) after every operation.
 #include "../port/jsp/jsp_snapshot_ring.h"
+#include "../port/jsp/jsp_snapshot_sync.h"   // the gate precheck (test_gate_precheck)
 #include <chrono>
 #include <cstdio>
 #include <deque>
+#include <map>
 using namespace jss;
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -61,7 +63,25 @@ static void test_pagemap()
 
 static const char* mname(RingMode m) { return m == RingMode::PagePtr ? "ptr" : "copy2"; }
 
-static void test_random(uint64_t seed, uint32_t depth, size_t pool, uint32_t max_n, int ticks, RingMode mode)
+// ENHANCEMENT (parallel page copy): a copier that checks the batch contract (no op writes a page another op reads or writes; an op's second copy may read its
+// own first destination) and then runs the ops in REVERSE order, so a ring whose result depended on the serial order would fail the byte checks below.
+static uint64_t g_batches = 0, g_batch_ops = 0, g_batch_bad = 0;
+static void reverse_copier(void*, const PageCopy* ops, size_t n)
+{
+    std::map<const uint8_t*, size_t> dst;
+    for (size_t i = 0; i < n; i++) {
+        if (!dst.emplace(ops[i].d1, i).second) g_batch_bad++;
+        if (ops[i].d2 && (ops[i].d2 == ops[i].d1 || !dst.emplace(ops[i].d2, i).second)) g_batch_bad++;
+    }
+    for (size_t i = 0; i < n; i++) {
+        auto a = dst.find(ops[i].s1); if (a != dst.end() && a->second != i) g_batch_bad++;
+        if (ops[i].d2) { auto b = dst.find(ops[i].s2); if (b != dst.end() && b->second != i) g_batch_bad++; }
+    }
+    for (size_t i = n; i-- > 0;) { std::memcpy(ops[i].d1, ops[i].s1, kPage); if (ops[i].d2) std::memcpy(ops[i].d2, ops[i].s2, kPage); }
+    g_batches++; g_batch_ops += n;
+}
+
+static void test_random(uint64_t seed, uint32_t depth, size_t pool, uint32_t max_n, int ticks, RingMode mode, bool batched = false)
 {
     const size_t mem_n = 0x200000;   // 2 MB "guest" space, saved set with gaps
     std::vector<uint8_t> mem(mem_n), outside(mem_n);
@@ -70,6 +90,7 @@ static void test_random(uint64_t seed, uint32_t depth, size_t pool, uint32_t max
     outside = mem;
     const std::vector<Range> set = {{0x10000, 64 * kPage}, {0x80000, 200 * kPage}, {0x190000, 50 * kPage}};
     DeltaRing R; R.reset(set, depth, pool, sizeof(uint64_t), mode);
+    if (batched) R.set_copier(reverse_copier, nullptr);
     const PageMap& m = R.map();
     std::deque<Ref> refs;
     int audits = 0;
@@ -121,8 +142,8 @@ static void test_random(uint64_t seed, uint32_t depth, size_t pool, uint32_t max
         CHECK(R.depth_now() <= depth);
         CHECK(R.pool_used() <= pool);
     }
-    std::printf("random %s seed=%llx depth=%u pool=%zu max_n=%u ticks=%d: rollbacks=%d (deep %d) refused=%d overflows=%d evicted=%llu final depth=%u audits=%d\n",
-                mname(mode), (unsigned long long)seed, depth, pool, max_n, ticks, rollbacks, deep, refused_ok, overflow_seen,
+    std::printf("random %s%s seed=%llx depth=%u pool=%zu max_n=%u ticks=%d: rollbacks=%d (deep %d) refused=%d overflows=%d evicted=%llu final depth=%u audits=%d\n",
+                mname(mode), batched ? " batched-reverse" : "", (unsigned long long)seed, depth, pool, max_n, ticks, rollbacks, deep, refused_ok, overflow_seen,
                 (unsigned long long)R.stats().evicted_entries, R.depth_now(), audits);
     CHECK(rollbacks > 0);
 }
@@ -137,7 +158,7 @@ static void test_edges(RingMode mode)
     uint32_t s1[] = {1}; w(1, 11); b = 11; CHECK(R.commit(11, mem.data(), s1, 1, &b));
     uint32_t s2[] = {2, 3}; w(2, 12); w(3, 12); b = 12; CHECK(R.commit(12, mem.data(), s2, 2, &b));
     CHECK(R.oldest() == 10 && R.depth_now() == 2 && R.pool_used() == 3);
-    CHECK(!R.commit(14, mem.data(), s1, 1, &b));        // not newest+1
+    CHECK(!R.commit(12, mem.data(), s1, 1, &b) && !R.commit(11, mem.data(), s1, 1, &b));   // not after newest (a later tick with a gap is allowed: the gap test)
     uint32_t s3[] = {4, 5}; w(4, 13); w(5, 13); b = 13; CHECK(R.commit(13, mem.data(), s3, 2, &b));   // needs 2, pool has 1 free: evicts 10
     CHECK(R.oldest() == 11 && R.pool_used() == 4);       // 10 evicted; 11's page (the pre-image of 10) freed with it: 2 + 2 pages
     uint32_t ob = 0;
@@ -224,13 +245,14 @@ static void timing(uint32_t per_tick, uint32_t ticks, uint32_t depth, size_t poo
 
 // The saved set grows mid-session (demand-committed memory). Memory is zero outside the set at the start; the new range is written only after the growth. Every tick's
 // reference is taken over the whole current set; a rollback to a tick before the growth must give the old pages back and ZERO the new ones, and the shadow audit must hold.
-static void test_extend(uint64_t seed, int ticks, int grow_at)
+static void test_extend(uint64_t seed, int ticks, int grow_at, bool batched = false)
 {
     Rng g{seed};
     const size_t N = 64 * kPage;
     std::vector<uint8_t> mem(N, 0);
     std::vector<Range> base = {{0, 8 * kPage}, {16 * kPage, 4 * kPage}}, add1 = {{32 * kPage, 4 * kPage}}, add2 = {{40 * kPage, 2 * kPage}, {48 * kPage, kPage}};
     DeltaRing r; r.reset(base, 12, 4096, 8, RingMode::Copy2);
+    if (batched) r.set_copier(reverse_copier, nullptr);
     CHECK(!r.extend(add1));   // no baseline yet
     for (size_t i = 0; i < N; i++) mem[i] = 0;
     for (uint32_t s = 0; s < r.map().pages(); s++) mem[r.map().addr_of(s)] = (uint8_t)(s + 1);
@@ -273,16 +295,108 @@ static void test_extend(uint64_t seed, int ticks, int grow_at)
     CHECK(!p.extend(add1));   // PagePtr cannot extend: the caller re-baselines
 }
 
+// ENHANCEMENT (rollback latency, jsy::Cfg::precheck_us): a fake world for jsy::gate(). `busy_unfrozen` = presamples that still see the mutex held, `busy_frozen`
+// = frozen samples that see it held (a condition the unfrozen read misses). The frozen judge must still decide: a clean precheck never skips a refused freeze.
+struct FakeGateOps {
+    int busy_unfrozen = 0, busy_frozen = 0, suspends = 0, resumes = 0, spins = 0, presamples = 0; bool frozen = false, sampled_frozen_only = true;
+    bool suspend() { suspends++; frozen = true; return true; }
+    bool resume() { resumes++; frozen = false; return true; }
+    void sample(jsy::View* v) { *v = jsy::View{}; if (!frozen) sampled_frozen_only = false; if (busy_frozen > 0) { busy_frozen--; v->mtx_held = 1; } }
+    void yield() { if (busy_unfrozen > 0) busy_unfrozen--; }
+    void presample(jsy::View* v) { *v = jsy::View{}; presamples++; if (frozen) sampled_frozen_only = false; if (busy_unfrozen > 0) v->mtx_held = 1; }
+    void spin() { spins++; if (busy_unfrozen > 0) busy_unfrozen--; }
+};
+static void test_gate_precheck()
+{
+    jsy::Cfg off; jsy::Cfg on; on.precheck_us = 50000;
+    {   // off: the earlier gate, one refused freeze per busy frozen sample, no presample
+        FakeGateOps o; o.busy_frozen = 2;
+        const jsy::GateResult g = jsy::gate(o, jsy::Mode::Wait, nullptr, 100, off);
+        CHECK(g.ok && g.freezes == 3 && o.presamples == 0 && o.spins == 0 && g.first_reasons == (unsigned)jsy::MutexHeld);
+    }
+    {   // on: the precheck waits out the unfrozen condition, then ONE freeze passes
+        FakeGateOps o; o.busy_unfrozen = 5; o.busy_frozen = 0;
+        const jsy::GateResult g = jsy::gate(o, jsy::Mode::Wait, nullptr, 100, on);
+        CHECK(g.ok && g.suspended && g.freezes == 1 && o.spins == 5 && g.prechecks == 6 && g.wakes == 5 && o.frozen && o.sampled_frozen_only);
+    }
+    {   // on: a condition only the frozen sample sees is still refused (the frozen judge decides), and the gate retries as before
+        FakeGateOps o; o.busy_unfrozen = 0; o.busy_frozen = 2;
+        const jsy::GateResult g = jsy::gate(o, jsy::Mode::Wait, nullptr, 100, on);
+        CHECK(g.ok && g.freezes == 3 && g.first_reasons == (unsigned)jsy::MutexHeld && o.resumes == 2 && o.sampled_frozen_only);
+    }
+    {   // on, budget used up: a precheck that never clears stops waiting after precheck_us and the frozen loop goes on (here the frozen sample is clean)
+        FakeGateOps o; o.busy_unfrozen = 1 << 30; jsy::Cfg b = on; b.precheck_us = 2000;
+        const jsy::GateResult g = jsy::gate(o, jsy::Mode::Wait, nullptr, 100, b);
+        CHECK(g.ok && g.freezes == 1 && o.spins > 0);
+    }
+    {   // Log mode: one freeze, no precheck
+        FakeGateOps o; o.busy_unfrozen = 3;
+        const jsy::GateResult g = jsy::gate(o, jsy::Mode::Log, nullptr, 100, on);
+        CHECK(g.ok && g.freezes == 1 && o.presamples == 0);
+    }
+    std::printf("gate precheck: off/on/frozen-only/budget/log cases checked\n");
+}
+
+// FIX (same-link rematch): two rollback sessions in one process. The second session's ticks restart at 1: without invalidate() its first commit is
+// refused (t <= newest()), which ended every rematch at once ("commit failed"). After invalidate() the next session baselines afresh and commits /
+// rolls back exactly as the first one (checked against full copies).
+static void test_two_sessions(RingMode mode)
+{
+    const size_t mem_n = 0x100000;
+    std::vector<uint8_t> mem(mem_n);
+    Rng g{0x2E5E5510ull};
+    for (auto& b : mem) b = (uint8_t)g.next();
+    DeltaRing R; R.reset({{0x10000, 32 * kPage}, {0x60000, 32 * kPage}}, 8, 1024, sizeof(uint64_t), mode);
+    const PageMap& m = R.map();
+    for (int session = 0; session < 2; session++) {
+        uint64_t blob = 1;
+        if (session == 1) {
+            std::vector<uint32_t> none(1, 0);
+            CHECK(!R.commit(1, mem.data(), none.data(), 0, &blob));   // the old bug: the first session's ring refuses tick 1
+            R.invalidate();
+            CHECK(!R.valid());
+        }
+        R.baseline(1, mem.data(), &blob);
+        CHECK(R.valid() && R.newest() == 1);
+        std::map<uint32_t, Ref> refs; refs.emplace(1, take(m, mem.data(), 1, blob));
+        const uint32_t last = session == 0 ? 60 : 30;
+        for (uint32_t t = 2; t <= last; t++) {
+            std::vector<uint32_t> ww; tick_writes(g, m, mem.data(), mem_n, 1 + g.below(20), &ww, nullptr);
+            blob = 0xA000 + t + 1000u * (uint32_t)session;
+            CHECK(R.commit(t, mem.data(), ww.data(), ww.size(), &blob));
+            refs.emplace(t, take(m, mem.data(), t, blob));
+        }
+        std::vector<uint32_t> ww; tick_writes(g, m, mem.data(), mem_n, 5, &ww, nullptr);   // written after the last commit
+        uint64_t ob = 0;
+        const uint32_t to = last - 5;
+        CHECK(R.rollback(to, mem.data(), ww.data(), ww.size(), &ob));
+        CHECK(same(m, mem.data(), refs.at(to)) && ob == refs.at(to).blob);
+        CHECK(R.audit());
+    }
+    std::printf("two sessions (%s): second session baselined at tick 1 after invalidate, commits and rollback ok\n", mname(mode));
+}
+
 int main()
 {
+    test_two_sessions(RingMode::Copy2); test_two_sessions(RingMode::PagePtr);
+    test_gate_precheck();
     test_pagemap();
     test_extend(0xE17E0001ull, 400, 20); test_extend(0xE17E0002ull, 400, 3); test_extend(0xE17E0003ull, 600, 150);
+    test_extend(0xE17E0001ull, 400, 20, true); test_extend(0xE17E0003ull, 600, 150, true);   // the ring growth with batched (reverse-order) copies
     for (RingMode mode : {RingMode::Copy2, RingMode::PagePtr}) {
         test_edges(mode);
         test_random(0xC0FFEE01ull, 8, 4096, 120, 4000, mode);   // ample pool: depth-limited
         test_random(0x5EED0002ull, 10, 300, 120, 4000, mode);   // small pool: bursts evict
         test_random(0x5EED0003ull, 8, 100, 400, 3000, mode);    // bursts larger than the pool: overflows
     }
+    // ENHANCEMENT (parallel page copy): the same random runs with the copies handed out as batches and run in reverse (Copy2; PagePtr ignores the copier).
+    for (RingMode mode : {RingMode::Copy2, RingMode::PagePtr}) {
+        test_random(0xC0FFEE01ull, 8, 4096, 120, 4000, mode, true);
+        test_random(0x5EED0002ull, 10, 300, 120, 4000, mode, true);
+        test_random(0x5EED0003ull, 8, 100, 400, 3000, mode, true);
+    }
+    CHECK(g_batches > 1000 && g_batch_bad == 0);
+    std::printf("batched copier: %llu batches, %llu page ops, %llu contract violations\n", (unsigned long long)g_batches, (unsigned long long)g_batch_ops, (unsigned long long)g_batch_bad);
     // Rollback mode: the eviction signal. After a rollback of >= 2 ticks the SPAN is below the depth until the ring refills (the entry capacity is depth + 1 and a
     // rollback drops the newer entries): a span check gives false alarms. pool_evicted is the right signal: 0 for capacity eviction and rollbacks, > 0 when the pool is short.
     for (RingMode mode : {RingMode::Copy2, RingMode::PagePtr}) {
@@ -318,6 +432,47 @@ int main()
             else bad++;
         }
         CHECK(bad == 0 && r.stats().pool_evicted == 0);
+    }
+    // ENHANCEMENT (rollback latency: saves of final frames take no snapshot): commits skip ticks (0..3 between two snapshots, written pages accumulate in
+    // between); a rollback to a saved tick restores it exactly (mem, blob, shadow); a skipped tick, or one outside the window, is refused and touches nothing.
+    for (RingMode mode : {RingMode::Copy2, RingMode::PagePtr}) {
+        Rng g{0x5EED5u + (uint64_t)mode};
+        const size_t mem_n = 1 << 20; std::vector<uint8_t> mem(mem_n, 0), outside(mem_n, 0);
+        DeltaRing r; r.reset({{0x10000, 64 * kPage}, {0x60000, 32 * kPage}}, 10, 4096, 8, mode);
+        const PageMap& m = r.map();
+        uint32_t t = 1; uint64_t blob = 1; std::vector<Ref> refs;
+        r.baseline(t, mem.data(), &blob); refs.push_back(take(m, mem.data(), t, blob));
+        int restored = 0, skipped_refused = 0;
+        for (int i = 0; i < 600; i++) {
+            std::vector<uint32_t> ww;
+            const uint32_t gap = g.below(4);
+            for (uint32_t j = 0; j <= gap; j++) tick_writes(g, m, mem.data(), mem_n, 1 + g.below(12), &ww, &outside);
+            t += gap + 1; blob = t * 7919u;
+            CHECK(r.commit(t, mem.data(), ww.data(), ww.size(), &blob));
+            CHECK(!r.commit(t, mem.data(), ww.data(), 0, &blob));   // the same tick again: refused (t <= newest)
+            refs.push_back(take(m, mem.data(), t, blob));
+            while (!refs.empty() && refs.front().tick < r.oldest()) refs.erase(refs.begin());
+            CHECK(!refs.empty() && refs.front().tick == r.oldest() && refs.back().tick == r.newest());
+            if (g.below(3) == 0) {
+                std::vector<uint32_t> pend; tick_writes(g, m, mem.data(), mem_n, 1 + g.below(6), &pend, &outside);   // the tick in progress
+                if (refs.size() >= 2 && refs[refs.size() - 1].tick - refs[refs.size() - 2].tick > 1) {   // a skipped tick: refused, nothing touched
+                    const std::vector<uint8_t> before = mem; uint64_t ob = 0;
+                    CHECK(!r.has(refs.back().tick - 1));
+                    CHECK(!r.rollback(refs.back().tick - 1, mem.data(), pend.data(), pend.size(), &ob) && mem == before);
+                    skipped_refused++;
+                }
+                const size_t pick = refs.size() - 1 - g.below((uint32_t)std::min<size_t>(refs.size(), 4));
+                uint64_t ob = 0;
+                CHECK(r.has(refs[pick].tick));
+                CHECK(r.rollback(refs[pick].tick, mem.data(), pend.data(), pend.size(), &ob));
+                CHECK(same(m, mem.data(), refs[pick]) && ob == refs[pick].blob && r.verify(mem.data()) == 0 && r.newest() == refs[pick].tick);
+                for (size_t a = 0; a < mem_n; a++) if (m.slot_of((uint32_t)a) == kNoSlot && mem[a] != outside[a]) { CHECK(!"outside byte changed"); break; }
+                refs.resize(pick + 1); t = refs.back().tick; restored++;
+            }
+            CHECK(r.audit());
+        }
+        CHECK(restored > 100 && skipped_refused > 20 && r.stats().overflows == 0);
+        std::printf("gaps %s: %d rollbacks to saved ticks, %d to skipped ticks refused\n", mname(mode), restored, skipped_refused);
     }
     for (RingMode mode : {RingMode::Copy2, RingMode::PagePtr}) {
         timing(27, 400, 10, 10 * 2048, 0, mode);

@@ -71,13 +71,27 @@ def run_checks(rel):
     check("per-game keys never touched", not any(k in cs for k in ("comm_id", "p2p_port", "report_rtt")))
     ro = cs[cs.index("bool RollbackOn()"):]
     ro = ro[:ro.index("\n        }\n")]
-    check("rollback on refuses re-psn and Community (the error path stops Start Game too)",
-          re.search(r"if \(m != 0 && RollbackOn\(\)\)\s*return \"Rollback is on \(Port Settings > Online\)\.", save) is not None
+    # ENHANCEMENT (Online Battle + rollback): only rollback WITH a role key conflicts; re-psn with the box ticked is the lobby start and removes the role keys
+    check("rollback with a role key refuses Community (the error path stops Start Game too)",
+          re.search(r"if \(m == 2 && RollbackOn\(\) && RollbackRoleKey\(\)\)\s*return \"Rollback is on \(Port Settings > Online\)\.", save) is not None
           and save.index("RollbackOn()") < save.index("OnlineIni.Load(RepsnPath()"))
+    check("role keys are LISTEN, JOIN, VIA and BENCH",
+          '{ "JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH" }' in cs)
     check("RollbackOn only reads JSP_ROLLBACK (0 or empty is off) and never writes",
           'StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)' in ro and 'TrimEnd(\' \', \'\\r\', \'\\n\')' in ro
           and "v.Length != 0 && v[0] != '0'" in ro and "break" not in ro and "WriteAll" not in ro and "File.Replace" not in ro)
-    check("the launcher never writes JSP_ROLLBACK", [l for l in cs.splitlines() if "JSP_ROLLBACK" in l and not l.strip().startswith("//")] == [l for l in cs.splitlines() if 'StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)' in l])
+    # the rollback lines are written only by the Online tab's save, through otherLines and SaveSettings (never a file write of its own), after both ini files
+    writes = [l.strip() for l in cs.splitlines() if "OtherSet(" in l and "void OtherSet" not in l]
+    check("JSP_ROLLBACK is written only by the Online tab's save",
+          all(l in save for l in writes) and 'OtherSet("JSP_ROLLBACK", rollbackBox.Checked ? "1" : "0");' in save
+          and 'OtherSet("JSP_ROLLBACK_RELAY", relayBox.Checked ? "1" : "0");' in save
+          and save.index('OtherSet("JSP_ROLLBACK"') > save.index("err = ri.Save()") and "SaveSettings();" in save)
+    check("Off or Community turns only a lobby rollback off", 'else if (RollbackOn() && !RollbackRoleKey()) { OtherSet("JSP_ROLLBACK", "0"); SaveSettings(); }' in save)
+    check("first start fills the public server and a random Player name (no user name)",
+          "onlineFresh = !ri.Exists && !ci.Exists" in cs and 'repsnServerBox.Text = onlineFresh ? PublicServer' in cs
+          and '"Player" + new Random().Next(1000, 10000)' in cs and "UserName" not in cs and "onlineDirty = true;" in cs)
+    check("the public server is the one IP the launcher names", 'const string PublicServer = "107.175.17.162:36100";' in cs
+          and [x for x in re.findall(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", cs) if x != "255.255.255.255"] == ["107.175.17.162"])
     load = cs[cs.index("void LoadOnline()"):cs.index("string SaveOnline()")]
     check("a file with both on, or one on beside rollback, shows a note",
           "RollbackOn()" in load and "Both files were switched on" in load and "note + \" \" + rn" in load)

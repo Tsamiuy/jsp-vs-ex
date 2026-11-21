@@ -191,6 +191,13 @@ int main()
     // a direct path never asks for the relay even when allowed and offered
     { FakeServer sv; sv.relay = true; Side h, c; h.init(sv, 11, cfg(true, B, true)); c.init(sv, 22, cfg(false, B, true)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
       int rh, rc; drive(h, c, 400, &rh, &rc); CHECK(rh == 1 && rc == 1 && h.rz->path() == Path::Direct && c.rz->path() == Path::Direct); }
+    // TEST ONLY force_relay: the relay at once, though the direct path works (one-PC relay tests); never without allow_relay
+    for (int allow = 0; allow < 2; allow++) { FakeServer sv; sv.relay = true; auto ch = cfg(true, B, allow), cc = cfg(false, B, allow); ch.force_relay = cc.force_relay = true;
+      Side h, c; h.init(sv, 11, ch); c.init(sv, 22, cc); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
+      h.rz->on_path = [&](Path p, uint32_t) { if (p == Path::Relay) h.relay_calls++; }; c.rz->on_path = [&](Path p, uint32_t) { if (p == Path::Relay) c.relay_calls++; };
+      int rh, rc; drive(h, c, 400, &rh, &rc); CHECK(rh == 1 && rc == 1);
+      if (allow) CHECK(h.rz->path() == Path::Relay && c.rz->path() == Path::Relay && h.relay_calls >= 1 && c.relay_calls >= 1);
+      else CHECK(h.rz->path() == Path::Direct && c.rz->path() == Path::Direct && h.relay_calls == 0); }
     // a stranger that knows the host's UDP port sends a well-formed HELO first: the host's session is with the room's other player, never with the stranger
     { FakeServer sv; Side h, c, x; h.init(sv, 11, cfg(true, B)); c.init(sv, 22, cfg(false, B)); x.init(sv, 33, cfg(false, B)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
       MessageChannel* ch = x.hub->open(h.cl->ep); const uint8_t hello[5] = { 'H', 'E', 'L', 'O', 1 };
@@ -201,6 +208,56 @@ int main()
     { FakeServer sv; Side h, c; h.init(sv, 11, cfg(true, B)); c.init(sv, 22, cfg(false, B)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get(); dead(h); dead(c);
       h.rz->poll(); c.rz->poll(); for (int i = 0; i < 6; i++) { h.clock += 50; h.rz->poll(); }
       PsnrEvent e; e.kind = PsnrEvent::MemberLeft; e.user = 22; h.cl->ev.push_back(e); int r = h.rz->poll(); CHECK(r == -1 && h.rz->error().find("left") != std::string::npos); }
+
+    // ---- ENHANCEMENT (native-room pairing): the pair key (the game's own room id) in the record and the room filter ----
+    { const uint64_t P = 0x00000001deadbeefull, Q = 0x00000001deadbef0ull;
+      CHECK(make_record(B, 0) == make_record(B) && make_record(B, P) == "rb=1;ver=a1b2c3d4;pair=00000001deadbeef");
+      CHECK(record_matches(make_record(B, P), B, P) && !record_matches(make_record(B, P), B, Q) && !record_matches(make_record(B, P), B) && !record_matches(make_record(B), B, P));
+      uint32_t b = 0; uint64_t k = 7;
+      CHECK(record_build(make_record(B, P), &b, &k) && b == B && k == P);
+      CHECK(record_build(make_record(B), &b, &k) && b == B && k == 0);
+      CHECK(!record_build("rb=1;ver=a1b2c3d4;pair=00000001DEADBEEF", &b) && !record_build("rb=1;ver=a1b2c3d4;pair=0000000000000000", &b) && !record_build("rb=1;ver=a1b2c3d4;pairs=0000001deadbeef", &b));
+      std::vector<PsnrRoom> all(5);
+      all[0] = { 9, kRoomFlagRollback, make_record(B, P), 1, 1, 2 };      // our native room's rollback room
+      all[1] = { 4, kRoomFlagRollback, make_record(B, Q), 1, 1, 2 };      // another native room's (older)
+      all[2] = { 5, kRoomFlagRollback, make_record(B), 1, 1, 2 };         // a plain (lobby / start-up) rollback room
+      all[3] = { 6, kRoomFlagRollback, make_record(B + 1, P), 1, 1, 2 };  // our key, another build: refused
+      all[4] = { 7, kRoomFlagRollback, make_record(B, P), 1, 2, 2 };      // our key, full
+      auto f = filter_rooms(all, B, P); CHECK(f.size() == 1 && f[0].id == 9);
+      f = filter_rooms(all, B, Q); CHECK(f.size() == 1 && f[0].id == 4);
+      f = filter_rooms(all, B); CHECK(f.size() == 1 && f[0].id == 5);   // a plain joiner never takes a paired room
+      CHECK(rollback_name("Player1") == "Player1-rb" && rollback_name("abcdefghijklm") == "abcdefghijklm-rb");
+      const std::string l1 = rollback_name("abcdefghijklmnop"), l2 = rollback_name("abcdefghijklmnoq");
+      CHECK(l1.size() == 16 && l2.size() == 16 && l1 != l2 && l1.compare(0, 12, "abcdefghijk-") == 0);
+      CHECK(rollback_comm_id("NPWR08138_00") == "NPWR08138_RB"); }
+    // two native rooms, each with its own pair key: every joiner meets the host of ITS room (the older room of the other key is skipped); the owner hosts (slot 0)
+    { FakeServer sv; const uint64_t P = 0x1111, Q = 0x2222;
+      auto pc = [&](bool host, uint64_t pair) { auto c = cfg(host, B); c.pair = pair; return c; };
+      Side hq, hp, cp, cq; hq.init(sv, 11, pc(true, Q)); hp.init(sv, 12, pc(true, P)); cp.init(sv, 21, pc(false, P)); cq.init(sv, 22, pc(false, Q));
+      cp.cl->peers[0] = hp.cl.get(); cp.cl->peers[1] = hq.cl.get(); cq.cl->peers[0] = hq.cl.get(); cq.cl->peers[1] = hp.cl.get();
+      hq.rz->poll(); hp.rz->poll();   // Q's room is created first (the oldest): a joiner without the key filter would take it
+      CHECK(sv.rooms.size() == 2 && sv.rooms[0].r.external == make_record(B, Q) && sv.rooms[1].r.external == make_record(B, P) && sv.rooms[1].members[0].data == make_record(B, P));
+      int rh, rc; drive(hp, cp, 400, &rh, &rc);
+      CHECK(rh == 1 && rc == 1 && cp.rz->room_id() == hp.rz->room_id() && cp.rz->plan().session_id == hp.rz->room_id() && cp.cl->joins == 1);
+      CHECK(hp.rz->local_index() == 0 && cp.rz->local_index() == 1 && hp.rz->plan().host && !cp.rz->plan().host);
+      drive(hq, cq, 400, &rh, &rc);
+      CHECK(rh == 1 && rc == 1 && cq.rz->room_id() == hq.rz->room_id() && cq.rz->room_id() != hp.rz->room_id() && cq.cl->joins == 1); }
+    // a joiner whose native room has no rollback room yet keeps looking (a room of another key is never taken) and gives up at the window
+    { FakeServer sv; Side h, c; auto ch = cfg(true, B); ch.pair = 0x3333; auto cc = cfg(false, B); cc.pair = 0x4444; h.init(sv, 11, ch); c.init(sv, 22, cc); h.cl->peers[0] = c.cl.get();
+      h.rz->poll();
+      CHECK(c.run_alone(10000) == 0 && c.cl->joins == 0 && c.cl->searches >= 4);
+      CHECK(c.run_alone(125000) == -1 && c.cl->joins == 0 && c.rz->error().find("no host with this version found") != std::string::npos); }
+    // wrong pair key at join (the room list said ours, the owner's member data has another key): the joiner refuses; a host refuses a member with another key
+    { FakeServer sv; Side h, c; auto ch = cfg(true, B); ch.pair = 0x5555; auto cc = ch; cc.host = false; h.init(sv, 11, ch); c.init(sv, 22, cc); h.cl->peers[0] = c.cl.get();
+      h.rz->poll(); sv.rooms[0].members[0].data = make_record(B, 0x6666);
+      int rc = 0; for (int i = 0; i < 4; i++) rc = c.rz->poll();
+      CHECK(rc == -1 && c.rz->error().find("does not match") != std::string::npos); }
+    { FakeServer sv; Side h, c; auto ch = cfg(true, B); ch.pair = 0x5555; auto cc = ch; cc.host = false; h.init(sv, 11, ch); c.init(sv, 22, cc);
+      h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
+      h.rz->poll(); c.rz->poll();
+      for (auto& e : h.cl->ev) for (auto& m : e.members) if (m.user == 22) m.data = make_record(B, 0x6666);
+      int r = 0; for (int i = 0; i < 5; i++) { h.clock += 50; r = h.rz->poll(); }
+      CHECK(r == 0 && h.rz->rejected_members == 1 && h.rz->path() == Path::None); }
 
     // ---- the notice store (jsp_net_game.cpp): every end of the wait leaves it right ----
     { RendezvousNotice n; std::string a, b; const unsigned g0 = n.gen();

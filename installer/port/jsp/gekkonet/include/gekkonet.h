@@ -248,6 +248,10 @@ GEKKONET_API GekkoSessionEvent** gekko_session_events(GekkoSession* session, int
 // the amount of frames this session runs ahead of its slowest remote player, input delays included.
 GEKKONET_API float gekko_frames_ahead(GekkoSession* session);
 
+// jsp-vs-ex local addition (PIN.md): game sessions: every later load event targets this frame or a later one, so the saved states of
+// earlier frames are never loaded again. -1 = none yet, and for other session kinds.
+GEKKONET_API int gekko_final_frame(GekkoSession* session);
+
 // spectator sessions: received frames not played yet. 0 for other sessions.
 GEKKONET_API int gekko_spectator_buffered_frames(GekkoSession* session);
 

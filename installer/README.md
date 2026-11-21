@@ -6,7 +6,8 @@ copy, see RPCS3 and its documentation), copies the port's sources, a
 pinned compiler and a Python to the install folder, and then builds the port there (`installer/tools/firstrun.py`: lift,
 SPU jobs, compile). You need no Visual Studio: the compiler (llvm-mingw, with CMake and Ninja) is in the package. The
 installer and the program contact no server: no update check, no crash report, no telemetry. The one exception is
-Online Battle (experimental), which is off unless you turn it on and give a re-psn server, see
+Online Battle (experimental): the first run turns it on with the project's public re-psn server unless online settings already exist
+(the game talks to that server only for Online Battle); the settings window's Online tab turns it off. See
 [Online Battle](#online-battle-experimental).
 
 **The compile step has not been run on a real Windows PC.** See the table.
@@ -213,19 +214,26 @@ Quick start for players: [docs/ONLINE.md](../docs/ONLINE.md).
 The game's own Online Battle can run against a [re-psn](https://github.com/undecuple/re-psn) server instead of PSN: a small
 matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
 match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in
-the installer's only tree (`--tree current`, see above); the retired legacy tree (tag `legacy-v15`) never had them. Online is off unless these settings are
-present. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
+the installer's only tree (`--tree current`, see above); the retired legacy tree (tag `legacy-v15`) never had them.
+**Online defaults:** at the end of a full run, `firstrun.py` writes the shared `repsn.ini` (re-psn on, the project's public server
+`107.175.17.162:36100`, a random name `Player` + 4 digits) when neither `repsn.ini` nor `community.ini` exists in the shared or the
+game folder, and adds `JSP_ROLLBACK=1` and `JSP_ROLLBACK_RELAY=1` to the settings file unless it already has a `JSP_ROLLBACK` line or a
+rollback role key. That is "Online Battle + rollback": the game's own Online Battle > Friendly Match pairs the players and rollback
+runs the fight. Existing files are never changed. `--no-online-defaults` (or `JSP_ONLINE_DEFAULTS=0`) skips the step. Tester guide:
+[docs/TESTING_ONLINE.md](../docs/TESTING_ONLINE.md). Without these files and settings, online is off. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.
 
 The settings window's Online tab (the same tab is also in `launcher/JStarsLauncher19.cs`) sets this up without editing files: Off, re-psn (server and online name) or Community server
 (a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
-not work on a community server). Choosing one turns the other off in the same save. It writes `repsn.ini` and
+not work on a community server). With re-psn the tab also has **Public server** (fills the project's server), **Rollback netcode for
+Online Battle fights** (`JSP_ROLLBACK=1` without a role key in `play_settings.txt`, on by default; untick it for the game's own netcode)
+and **Allow the server's relay** (`JSP_ROLLBACK_RELAY`), and a line at the top says what the next start does. Choosing one turns the other off in the same save. It writes `repsn.ini` and
 `community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a
 portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. On the re-psn choice, **Find on LAN** broadcasts one small UDP request (port 36100) and fills the Server field from a server that
 answers; the host starts re-psn with `-discover` (a build with LAN discovery; see [docs/ONLINE.md](../docs/ONLINE.md#playing-on-the-same-network-lan)).
 It fills a normal `host:port`; nothing else is saved. Keys that belong to the game itself
-are never changed by the launcher. The launcher sets no online environment variable; the game reads the files at
+are never changed by the launcher. The launcher sets no online environment variable other than the two rollback lines above; the game reads the files at
 startup (`installer/port/jsp/jsp_online.cpp`, logging each decision on `[online]` lines) and sets the runtime's
 variables from them. Re-psn and community on together: online is refused. Community on: no client yet, offline. The
 game's own `repsn.ini` (in the install folder when portable, else `%APPDATA%\JSP Fan Revival\`) can also hold

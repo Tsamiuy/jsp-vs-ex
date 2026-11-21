@@ -132,11 +132,20 @@ int main(int argc, char** argv)
         std::memcpy(&plan.remotes[0].ep, raw, sizeof(Endpoint));
     }
 
+    // ENHANCEMENT (lobby: sessions opened and closed at runtime): --rounds N plays N matches one after another with the SAME NetSession object, mux and
+    // message channel (as the game reuses its one NetSession for every lobby and match): NetSession::stop(), a ROUND barrier on the channel, start() again (the
+    // GekkoNet adapter singleton must rebind). Each round prints its SUMMARY line (round=K/N); the tick log and recording are the last round's. The loop body
+    // below is not re-indented, to keep the diff small.
+    const int rounds = std::max(1, atoi(arg(argc, argv, "--rounds", "1")));
+    NetSession s;
+    for (int round = 1;; round++) {
     SessionConfig cfg; cfg.input_size = 8; cfg.max_prediction = (uint8_t)pred; cfg.ring_depth = (uint32_t)depth;
     if (const char* d = arg(argc, argv, "--delays")) { for (const char* p = d; *p;) { cfg.local_delay.push_back((uint8_t)atoi(p)); while (*p && *p != ',') p++; if (*p) p++; } }
     cfg.disconnect_timeout_ms = (uint32_t)atoi(arg(argc, argv, "--timeout-ms", "3000"));
     cfg.keepalive_stale_ms = (uint32_t)atoi(arg(argc, argv, "--keepalive-ms", "250"));   // 0 = no keepalive thread (negative control)
-    NetSession s;
+    cfg.limited_saving = atoi(arg(argc, argv, "--limited", "0")) != 0;   // ENHANCEMENT (rollback latency A/B): GekkoNet's sparse saving
+    const char* recf = arg(argc, argv, "--record", nullptr);   // ENHANCEMENT (replays): write the session's recording here at the end (net_replay_test plays it back)
+    if (recf) { cfg.record = true; const std::string ud = "test " + role; cfg.record_user_data.assign(ud.begin(), ud.end()); cfg.record_copy_every = 7; }
     if (!s.start(mux, plan, cfg)) { std::printf("SUMMARY role=%s start refused: %s\n", role.c_str(), s.error().c_str()); return 6; }
 
     const unsigned players = plan.total_players;
@@ -158,12 +167,18 @@ int main(int argc, char** argv)
         bool commit(uint32_t t, uint32_t* h, uint32_t* k) override { return c(t, h, k); }
         bool rollback(uint32_t t) override { return r(t); }
         void local_pad(uint8_t n, uint8_t* w) override { lp(n, w); }
+        // ENHANCEMENT (rollback latency, --skip-final 1): the checksum without a stored state; the tick is ERASED from the fake ring, so a Load of it fails the run
+        bool hash_only(uint32_t t, uint32_t* h) override { if (!hp) return false; return hp(t, h); }
+        std::function<bool(uint32_t, uint32_t*)> hp;
     } tg;
+    const bool skip_final = atoi(arg(argc, argv, "--skip-final", "0")) != 0;
+    if (skip_final) tg.hp = [&](uint32_t tick, uint32_t* h) { ring.erase(tick); *h = fold(cur); return true; };
     tg.d = [&] { return done; };
     tg.c = [&](uint32_t tick, uint32_t* h, uint32_t* k) { ring[tick] = cur; commits++; *h = fold(cur); *k = ++serial; while (ring.size() > 64) ring.erase(ring.begin()); return true; };
     tg.r = [&](uint32_t tick) { auto it = ring.find(tick); if (it == ring.end()) return false; cur = it->second; done = tick; return true; };
     tg.lp = [&](uint8_t n, uint8_t* wire) { const jsi::Pad p = pad_for(seed, plan.local_first + n, frame); pad_pack_to_wire(p.pack().data(), wire); };
     Glue glue(s, stepper, tg);
+    glue.set_skip_final(skip_final);
     // One iteration = ONE call of glue.iteration(); a Run executes the granted tick. Rate bookkeeping for --min-rate (see below).
     int poll_stall_at = -1, poll_stall_ms = 0; bool poll_stalled = false; if (const char* ps = arg(argc, argv, "--poll-stall", "")) std::sscanf(ps, "%d,%d", &poll_stall_at, &poll_stall_ms);   // --poll-stall TICK,MS: from that tick the loop only polls (as a long commit gate does) for MS
     // --busy-stall TICK,MS: from that tick the loop sleeps for MS WITHOUT calling the session (a replay or a slow render on the game thread); only the keepalive thread can keep the peer alive
@@ -198,7 +213,7 @@ int main(int argc, char** argv)
         if (!s.failed()) one_iteration();
         for (const SessionEvent& e : s.take_events()) {
             char b[200];
-            const char* k[] = {"syncing", "connected", "started", "disconnected", "desync", "failed"};
+            const char* k[] = {"syncing", "connected", "started", "disconnected", "desync", "failed", "replay-finished"};
             std::snprintf(b, sizeof b, " %s(h=%d t=%d)", k[(int)e.kind], e.handle, e.tick);
             if (e.kind != SessionEventKind::Syncing) { if (evlog.size() < 600) evlog += b; }
         }
@@ -249,6 +264,13 @@ int main(int argc, char** argv)
                 }
             }
     }
+    if (recf) {
+        std::vector<uint8_t> rec;
+        const bool ok = s.recording(rec);
+        FILE* f = ok ? std::fopen(recf, "wb") : nullptr;
+        if (f) { std::fwrite(rec.data(), 1, rec.size(), f); std::fclose(f); }
+        std::printf("RECORD bytes=%zu written=%d\n", rec.size(), f != nullptr);
+    }
     if (outf) {
         FILE* f = std::fopen(outf, "w");
         if (f) { for (auto& kv : hash_after) std::fprintf(f, "%u %016llx\n", kv.first, (unsigned long long)kv.second); std::fclose(f); }
@@ -260,12 +282,26 @@ int main(int argc, char** argv)
     const double min_rate = atof(arg(argc, argv, "--min-rate", "0")), min_all = atof(arg(argc, argv, "--min-all-rate", "0"));
     const SessionStats st = s.stats();
     std::printf("SUMMARY role=%s slots=%u..%u/%u maxtick=%u rollbacks=%u maxdepth=%u resim=%llu saves=%llu loads=%llu stalls=%u deferred=%llu desync=%d failed=%s "
-                "ref_ticks=%d ref_bad=%d tail_neutral=%d rate=%.3f all_rate=%.3f iters=%llu paced=%llu paced_ms=%llu keepalive_polls=%llu sent=%llu dropped=%llu events:%s\n",
+                "ref_ticks=%d ref_bad=%d tail_neutral=%d rate=%.3f all_rate=%.3f iters=%llu paced=%llu paced_ms=%llu keepalive_polls=%llu sent=%llu dropped=%llu skipped=%llu round=%d/%d events:%s\n",
                 role.c_str(), plan.local_first, plan.local_first + plan.local_count - 1, plan.total_players, max_tick, st.rollbacks, st.max_rollback_frames,
                 (unsigned long long)st.resimulated, (unsigned long long)st.saves, (unsigned long long)st.loads, st.stalls, (unsigned long long)st.deferred,
                 s.first_desync_tick(), s.failed() ? s.failure().c_str() : "-", ref_n, ref_bad, tail_neutral, rate, all_rate, (unsigned long long)iters_after_first_run, (unsigned long long)paced_n, (unsigned long long)paced_ms, (unsigned long long)st.keepalive_polls, (unsigned long long)mux.sent,
-                (unsigned long long)mux.dropped, evlog.c_str());
-    if (s.failed()) return 4;
-    if ((min_rate > 0 && rate < min_rate) || (min_all > 0 && all_rate < min_all)) return 7;   // two rules: live ticks per iteration (sparse inputs) and Runs (live + replay) per iteration
-    return ref_bad ? 5 : 0;
+                (unsigned long long)mux.dropped, (unsigned long long)glue.skipped(), round, rounds, evlog.c_str());
+    std::fflush(stdout);
+    // two rules for 7: live ticks per iteration (sparse inputs) and Runs (live + replay) per iteration
+    const int rc = s.failed() ? 4 : ((min_rate > 0 && rate < min_rate) || (min_all > 0 && all_rate < min_all)) ? 7 : ref_bad ? 5 : 0;
+    if (rc || round >= rounds) return rc;
+    // ENHANCEMENT (lobby): the next round on the same objects. stop() must leave nothing of this session behind (no events, not synced, not failed, no stats).
+    s.stop();
+    { const SessionStats z = s.stats();
+      if (s.running() || s.synced() || s.failed() || !s.take_events().empty() || z.advances || z.saves || z.rollbacks) { std::printf("SUMMARY role=%s stop() left session state behind (round %d)\n", role.c_str(), round); return 8; } }
+    {   // both peers have stopped before either starts again (stragglers of the old session carry its magic and are dropped by the new one)
+        const std::string m = "ROUND" + std::to_string(round + 1);
+        ch->send((const uint8_t*)m.data(), m.size());
+        std::vector<uint8_t> in; bool got = false; const int until = since() + 15000;
+        while (!got && since() < until) { hub.pump(); if (ch->recv(in)) got = std::string(in.begin(), in.end()) == m; else sleep_ms(2); }
+        if (!got) { std::printf("SUMMARY role=%s round barrier timeout (round %d)\n", role.c_str(), round + 1); return 2; }
+        while (!ch->idle() && since() < until) { hub.pump(); sleep_ms(2); }
+    }
+    }   // rounds
 }

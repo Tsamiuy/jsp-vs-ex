@@ -283,6 +283,55 @@ def units():
     check("settings window: changed source is stale", firstrun.settings_window_stale(sw))
     (sw / "tools" / "jsp-settings.cs").unlink()
     check("settings window: missing source counts as stale (and the build then does nothing)", firstrun.settings_window_stale(sw))
+    # online defaults (the tester default): seeded once when no online file exists; present files and a player's JSP_ROLLBACK line are kept
+    import random
+    od = tmp / "od"
+    env = {"APPDATA": str(od / "roaming")}
+    inst = od / "inst"
+    inst.mkdir(parents=True)
+    lines = firstrun.online_defaults(inst, False, env, random.Random(7))
+    rep = od / "roaming" / "PS3Recomp" / "repsn.ini"
+    ps = od / "roaming" / firstrun.APPDIR / "play_settings.txt"
+    rt = rep.read_text() if rep.is_file() else ""
+    check("online defaults: repsn.ini on the public server", "enabled=1" in rt and f"server={firstrun.ONLINE_SERVER}" in rt, " | ".join(lines))
+    nm = [l[5:].strip() for l in rt.splitlines() if l.startswith("name=")]
+    check("online defaults: a random Player name (no user name)", len(nm) == 1 and len(nm[0]) == 10 and nm[0].startswith("Player") and nm[0][6:].isdigit())
+    pt = ps.read_text() if ps.is_file() else ""
+    check("online defaults: rollback lobby start + relay in the AppData settings file", pt.splitlines() == ["JSP_ROLLBACK=1", "JSP_ROLLBACK_RELAY=1"], repr(pt))
+    check("online defaults: no role key written", not any(k in pt for k in firstrun.ONLINE_ROLE_KEYS))
+    again = firstrun.online_defaults(inst, False, env, random.Random(8))
+    check("online defaults: a second run changes nothing", rep.read_text() == rt and ps.read_text() == pt and "already present" in again[0])
+    # a player who chose Off (a repsn.ini with enabled=0) keeps it; a community.ini alone counts too
+    od2 = tmp / "od2"; env2 = {"APPDATA": str(od2)}
+    (od2 / "PS3Recomp").mkdir(parents=True); (od2 / "PS3Recomp" / "community.ini").write_text("[community]\nenabled=0\n")
+    firstrun.online_defaults(od2 / "inst", False, env2)
+    check("online defaults: an existing community.ini blocks the seeding", not (od2 / "PS3Recomp" / "repsn.ini").exists())
+    # portable: shared folder and settings file in the install folder; a JSP_ROLLBACK line of the player and a role key are respected
+    pr = tmp / "port"; pr.mkdir()
+    (pr / "play_settings.txt").write_text("RES_SCALE=2\nJSP_ROLLBACK=0\n")
+    firstrun.online_defaults(pr, True, {})
+    check("online defaults: portable shared folder", (pr / "shared" / "repsn.ini").is_file())
+    check("online defaults: the player's JSP_ROLLBACK=0 is kept", (pr / "play_settings.txt").read_text() == "RES_SCALE=2\nJSP_ROLLBACK=0\n")
+    pr2 = tmp / "port2"; pr2.mkdir()
+    (pr2 / "play_settings.txt").write_text("JSP_ROLLBACK_LISTEN=36200")
+    firstrun.online_defaults(pr2, True, {})
+    check("online defaults: a role key blocks the rollback line", "JSP_ROLLBACK=" not in (pr2 / "play_settings.txt").read_text())
+    pr3 = tmp / "port3"; pr3.mkdir()
+    (pr3 / "play_settings.txt").write_bytes(b"RES_SCALE=2")
+    firstrun.online_defaults(pr3, True, {})
+    check("online defaults: appended on a new line", (pr3 / "play_settings.txt").read_text().splitlines()[:2] == ["RES_SCALE=2", "JSP_ROLLBACK=1"])
+    # FIX (region): an EU disc keeps re-psn on (public server, a name) but gets no JSP_ROLLBACK line (the takeover is US-disc only); US as before
+    pr4 = tmp / "port4"; pr4.mkdir()
+    eu = firstrun.online_defaults(pr4, True, {}, random.Random(9), region="EU")
+    rt4 = (pr4 / "shared" / "repsn.ini").read_text() if (pr4 / "shared" / "repsn.ini").is_file() else ""
+    check("online defaults (EU): re-psn on the public server with a name", "enabled=1" in rt4 and f"server={firstrun.ONLINE_SERVER}" in rt4 and "name=Player" in rt4, " | ".join(eu))
+    check("online defaults (EU): rollback not turned on", "JSP_ROLLBACK" not in ((pr4 / "play_settings.txt").read_text() if (pr4 / "play_settings.txt").is_file() else "")
+          and any("US-disc only" in l for l in eu), " | ".join(eu))
+    pr5 = tmp / "port5"; pr5.mkdir()
+    firstrun.online_defaults(pr5, True, {}, random.Random(9), region="US")
+    check("online defaults (US): rollback lobby start + relay", (pr5 / "play_settings.txt").read_text().splitlines() == ["JSP_ROLLBACK=1", "JSP_ROLLBACK_RELAY=1"])
+    check("online defaults: JSP_ONLINE_DEFAULTS=0 skips", "skipped" in firstrun.online_defaults(tmp / "nope", True, {"JSP_ONLINE_DEFAULTS": "0"})[0]
+          and not (tmp / "nope").exists())
     print("RESULT:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 

@@ -1,0 +1,192 @@
+Patch 7924: a read-only view of the Matching2 room and a join target, for Discord Rich Presence and Join with the game's own online menus.
+
+Why: the port shows the online state on the player's Discord profile (in a room, members, host or not, the other player's online name)
+and lets a friend join from Discord. The game's own Online Battle menus create, search and join the rooms; the port must neither
+read the emulation's private state nor change the game's room requests.
+
+Now: ps3_np_matching2_room() returns whether a started context is outside a room (1) or in one (2), with the room id, member count,
+slots, whether this game owns it and the first other member's online name; any thread, under the state lock only, nothing logged.
+ps3_np_matching2_set_join_target(room) makes every SearchRoom answer list that one room only (when it also passes the title's own
+filters), and ps3_np_matching2_join_target() says what became of it: pending, listed, joined, gone, full, not in this search, or the
+join failed. 0 clears it. Without a target nothing changes.
+
+diff --git a/libs/network/sceNpMatching2.c b/libs/network/sceNpMatching2.c
+index 63d16f9..f48fd1b 100644
+--- a/libs/network/sceNpMatching2.c
++++ b/libs/network/sceNpMatching2.c
+@@ -188,6 +188,9 @@ static m2_ctx s_ctx[SCE_NP_MATCHING2_CTX_MAX + 1];   /* ids are 1-based */
+ /* Never reset with the context: includes stop/start and term/init ownership. */
+ static u64 s_owner[SCE_NP_MATCHING2_CTX_MAX + 1];
+ static u8 s_exhausted[SCE_NP_MATCHING2_CTX_MAX + 1];
++/* J-Stars patch 7924: the room a Discord join asked for (0 = none) and what became of it (PS3_M2_JOIN_*). Under the state lock. */
++static u64 s_join_target;
++static int s_join_state;
+ static u32    s_next_req = 1;
+ static u32    s_next_key = 1;
+ 
+@@ -279,6 +282,8 @@ typedef struct {
+     /* SetRoomDataInternal: what changed, for the owner's own update event */
+     u32 prev_flags;
+     u8  flags_changed, bins_changed;
++    /* JoinRoom: the room asked for (patch 7924) */
++    u64 join_room;
+ } m2_op;
+ 
+ static m2_ctx* op_current(const m2_op* op)
+@@ -1120,6 +1125,11 @@ static void on_search(void* user, const psnr_msg* m)
+     }
+     const u8 *p = m->data + 4, *end = m->data + m->len;
+     u16 count = psnr_get16(m->data + 2);
++    /* Patch 7924: while a join target is set, the search lists that one room only (when it passes the title's own filters). */
++    STATE_LOCK();
++    const u64 target = s_join_target;
++    STATE_UNLOCK();
++    int t_seen = 0, t_full = 0, t_kept = 0;
+ 
+     /* SceNpMatching2SearchRoomResponse { Range { startIndex, total, size }; u32 roomDataExternal } */
+     rb_t img = {0};
+@@ -1138,6 +1148,8 @@ static void on_search(void* user, const psnr_msg* m)
+ 
+         m2_attrs ext;
+         attrs_unpack(&ext, ext_p, l);
++        if (target && room_id != target) continue;
++        if (target) { t_seen = 1; t_full = cur >= max; }
+         if ((flags & op->flag_filter) != (op->flag_attr & op->flag_filter)) continue;
+         int ok = 1;
+         for (int f = 0; f < op->nifl && ok; f++) {
+@@ -1145,6 +1157,7 @@ static void on_search(void* user, const psnr_msg* m)
+             ok = a && a->kind == 0 && int_match(op->ifl[f].op, a->num, op->ifl[f].num);
+         }
+         if (!ok) continue;
++        if (target) t_kept = 1;
+         if (++matched < op->start || listed >= op->max) continue;
+ 
+         /* SceNpMatching2RoomDataExternal                                   88 bytes
+@@ -1192,6 +1205,14 @@ static void on_search(void* user, const psnr_msg* m)
+     rb_32(&img, o + 4, matched);
+     rb_32(&img, o + 8, listed);
+     printf("[sceNpMatching2] SearchRoom: %u of %u rooms match, %u listed\n", matched, count, listed);
++    if (target) {
++        const int st = !t_seen ? PS3_M2_JOIN_NOT_FOUND : t_full ? PS3_M2_JOIN_FULL : t_kept ? PS3_M2_JOIN_LISTED : PS3_M2_JOIN_FILTERED;
++        STATE_LOCK();
++        if (s_join_target == target && s_join_state != PS3_M2_JOIN_JOINED) s_join_state = st;
++        STATE_UNLOCK();
++        printf("[sceNpMatching2] SearchRoom: join target room %llu: %s\n", (unsigned long long)target,
++               st == PS3_M2_JOIN_LISTED ? "listed" : st == PS3_M2_JOIN_FULL ? "full" : st == PS3_M2_JOIN_FILTERED ? "not in this search" : "gone");
++    }
+     answer_current(op, 0, &img);
+     free(op);
+ }
+@@ -1245,10 +1266,15 @@ static void on_joined(void* user, const psnr_msg* m)
+     if (!c) goto finished;
+     M2_TEST_PAUSE("reply-commit");
+     if (m->type != PSNR_ROOM_JOINED || parse_joined(&c->room, m) != 0) {
+-        answer(op, psnr_error_to_m2(m), NULL);
++        const s32 err = psnr_error_to_m2(m);
++        if (op->join_room && op->join_room == s_join_target)   /* patch 7924 */
++            s_join_state = err == (s32)SCE_NP_MATCHING2_SERVER_ERROR_ROOM_FULL ? PS3_M2_JOIN_FULL
++                         : err == (s32)SCE_NP_MATCHING2_SERVER_ERROR_NO_SUCH_ROOM ? PS3_M2_JOIN_NOT_FOUND : PS3_M2_JOIN_FAILED;
++        answer(op, err, NULL);
+         goto finished;
+     }
+     m2_room* r = &c->room;
++    if (s_join_target && r->id == s_join_target) s_join_state = PS3_M2_JOIN_JOINED;   /* patch 7924 */
+     rb_t img = {0};
+     u32 o = rb_alloc(&img, 4, 8);
+     rb_ptr(&img, o, rb_room_internal(&img, r));
+@@ -1308,6 +1334,9 @@ s32 sceNpMatching2JoinRoom(u16 ctxId, u32 req, u32 opt, u32 reqId)
+     u8* p = psnr_put64(body, vm_read64(req));
+     u32 l = attrs_pack(&mine, p + 2); psnr_put16(p, (u16)l); p += 2 + l;
+     m2_op* op = op_new(c, ctxId, EV_JoinRoom, opt, reqId);
++    op->join_room = vm_read64(req);   /* patch 7924 */
++    if (s_join_target && op->join_room != s_join_target)
++        printf("[sceNpMatching2] JoinRoom: room %llu is not the join target %llu\n", (unsigned long long)op->join_room, (unsigned long long)s_join_target);
+     STATE_UNLOCK();
+     u32 sent = np_psnr_request(PSNR_JOIN_ROOM, body, (u32)(p - body), on_joined, op);
+     free(body);
+@@ -1504,6 +1533,59 @@ s32 sceNpMatching2AbortRequest(u16 ctxId, u32 reqId)
+  * Signaling
+  * -----------------------------------------------------------------------*/
+ 
++/* ---------------------------------------------------------------------------
++ * J-Stars patch 7924 (port, Discord Rich Presence and Join): a read-only view
++ * of the room and a join target. Any thread; each takes the state lock alone.
++ * -----------------------------------------------------------------------*/
++
++int ps3_np_matching2_room(u64* room, int* members, int* max, int* is_owner, char* peer, int peer_n)
++{
++    int r = 0;
++    if (room) *room = 0;
++    if (members) *members = 0;
++    if (max) *max = 0;
++    if (is_owner) *is_owner = 0;
++    if (peer && peer_n > 0) peer[0] = 0;
++    STATE_LOCK();
++    for (int i = 1; s_init && i <= SCE_NP_MATCHING2_CTX_MAX; i++) {
++        const m2_ctx* c = &s_ctx[i];
++        if (!c->in_use || !c->started) continue;
++        r = 1;
++        if (!c->room.in) continue;
++        r = 2;
++        if (room) *room = c->room.id;
++        if (members) *members = c->room.n;
++        if (max) *max = c->room.max;
++        if (is_owner) *is_owner = c->room.owner == c->room.me;
++        for (int k = 0; peer && peer_n > 0 && k < c->room.n; k++)
++            if (c->room.m[k].id != c->room.me) { snprintf(peer, (size_t)peer_n, "%s", c->room.m[k].online_id); break; }
++        break;
++    }
++    STATE_UNLOCK();
++    return r;
++}
++
++void ps3_np_matching2_set_join_target(u64 room)
++{
++    STATE_LOCK();
++    s_join_target = room;
++    s_join_state = room ? PS3_M2_JOIN_PENDING : PS3_M2_JOIN_NONE;
++    for (int i = 1; room && s_init && i <= SCE_NP_MATCHING2_CTX_MAX; i++)
++        if (s_ctx[i].in_use && s_ctx[i].started && s_ctx[i].room.in && s_ctx[i].room.id == room) s_join_state = PS3_M2_JOIN_JOINED;
++    STATE_UNLOCK();
++    if (room) printf("[sceNpMatching2] join target: room %llu\n", (unsigned long long)room);
++    else printf("[sceNpMatching2] join target cleared\n");
++}
++
++int ps3_np_matching2_join_target(u64* room)
++{
++    STATE_LOCK();
++    if (room) *room = s_join_target;
++    const int st = s_join_state;
++    STATE_UNLOCK();
++    return st;
++}
++
+ s32 sceNpMatching2SignalingGetConnectionStatus(u16 ctxId, u64 roomId, u16 memberId,
+                                                u32 connStatus, u32 peerAddr, u32 peerPort)
+ {
+diff --git a/libs/network/sceNpMatching2.h b/libs/network/sceNpMatching2.h
+index ae115bb..14508f9 100644
+--- a/libs/network/sceNpMatching2.h
++++ b/libs/network/sceNpMatching2.h
+@@ -94,6 +94,21 @@ s32 sceNpMatching2JoinLobby(u16 ctxId, u64 lobbyId, u32 opt, u32 reqId);
+ s32 sceNpMatching2LeaveLobby(u16 ctxId, u32 reqId);
+ s32 sceNpMatching2CreateRoom(u16 ctxId, u32 opt, u32 reqId);
+ 
++/* J-Stars patch 7924 (port, Discord Rich Presence and Join). Not SDK exports.
++ * ps3_np_matching2_room: 0 no started context, 1 a started context outside a
++ * room, 2 in a room (its id, member count, slots, whether this game owns it,
++ * and the online name of the first other member, "" when alone).
++ * ps3_np_matching2_set_join_target(room): while set, a SearchRoom answer lists
++ * that one room only (if it also passes the title's own filters); 0 clears.
++ * ps3_np_matching2_join_target: the PS3_M2_JOIN_* state of the target. */
++enum {
++    PS3_M2_JOIN_NONE = 0, PS3_M2_JOIN_PENDING = 1, PS3_M2_JOIN_LISTED = 2, PS3_M2_JOIN_JOINED = 3,
++    PS3_M2_JOIN_NOT_FOUND = -1, PS3_M2_JOIN_FULL = -2, PS3_M2_JOIN_FILTERED = -3, PS3_M2_JOIN_FAILED = -4
++};
++int  ps3_np_matching2_room(u64* room, int* members, int* max, int* is_owner, char* peer, int peer_n);
++void ps3_np_matching2_set_join_target(u64 room);
++int  ps3_np_matching2_join_target(u64* room);
++
+ #ifdef __cplusplus
+ }
+ #endif

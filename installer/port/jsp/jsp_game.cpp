@@ -59,6 +59,7 @@
 #include "ps3emu/error_codes.h"
 #include "ppu_recomp.h"     /* ppu_context, vm_base */
 #include "jsp_lod_lifetime.h"
+#include "jsp_discord.h"   /* ENHANCEMENT (Discord Rich Presence): jsp_game_presence */
 
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name,
                                      void (*fn)(ppu_context*));
@@ -446,6 +447,7 @@ void pc_text_put(int image_id, uint32_t ea, uint32_t size)
  * it read 5 in Options and something outside 0x10-0x14 in the maintainer's Training fight
  * (10-30: no refill and no log in that fight). */
 volatile unsigned long long g_hud_ms = 0;
+extern "C" { volatile uint32_t g_hud_calls = 0; }   // calls of the fight HUD draw func_00085CEC (jsp_net_game.cpp: the match session's start)
 bool fight_hud_up() { return GetTickCount64() - g_hud_ms < 500; }
 
 bool in_menu_scene()
@@ -591,6 +593,7 @@ void exit_label_patch(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
  * included.
  * -----------------------------------------------------------------------*/
 volatile bool g_training_mode = false;
+volatile int g_presence_stage = -1;   // ENHANCEMENT (Discord presence): the chosen stage's list index when stage select was last up, -1 unknown (presence_stage)
 
 /* The port's own screen tracking. The menu objects are on the heap and move
  * (after Online Mode the main menu was at 0x48FEF150 instead of 0x48FAD1A0, pv1;
@@ -986,6 +989,16 @@ volatile bool g_ko_fb = false;
 volatile int g_imp_mode = 0;
 volatile bool g_imp_no_partner = false;
 volatile uint32_t g_ko_counter[2] = { 0, 0 };   /* the fight's two KO counter objects, red first (lower address), from the heap search */
+/* ENHANCEMENT (online match end): jsp_net_game.cpp turns on g_ko_track for a rollback match so the KO counters are found even with the
+ * default KO count; jsp_fight_ko_winner (jsp_fight_hash.cpp) reads them through g_ko_counter_addr. */
+extern "C" { volatile int g_ko_track = 0; }   /* same form as g_hud_calls (inside this file's namespace) */
+extern "C" { uint32_t g_ko_counter_addr(int side) { return side >= 0 && side < 2 ? g_ko_counter[side] : 0u; } }
+/* FIX (online rematch): the heap search's state (was static in the scan), so a reset can clear it with the addresses. */
+int g_ko_found = 0;
+unsigned long long g_ko_last_scan = 0;
+/* FIX (online rematch): forget the last fight's KO counters (addresses and search state), so a rematch finds its own and never reads the old
+ * fight's (jsp_fight_hash_reset_fight calls it; main thread, between fights). */
+extern "C" { void jsp_ko_counters_reset(void) { g_ko_counter[0] = 0; g_ko_counter[1] = 0; g_ko_found = 0; g_ko_last_scan = 0; } }
 volatile int g_ko_limit_now = 0;                 /* the limit written this fight (0 = the game's own) */
 volatile unsigned long long g_vs_screen_ms = 0;  /* the VS loading screen after Stage Select (classes 0x00882220, 0x008822C8, 0x00882378): last call */
 int imp_bits_for(uint32_t unit_index, uint32_t team)
@@ -2596,9 +2609,14 @@ void impossible_icall(uint32_t target, uint64_t* gpr)
      * the lower address. The Impossible fight is fixed: red needs 1 KO, blue 2 (the AI must knock the players out twice).
      * KO_LOG=1 (test only): the counters and every KO. */
     static const bool ko_log = std::getenv("KO_LOG") != nullptr;
-    const bool ko_imp = g_imp_mode != 0 && g_ko_fb;
-    const int ko_limit = ko_imp ? 0 : (g_ko_fb && g_ko_win != 3 ? g_ko_win : 0);
-    if (heap && (target == 0x00139E04u || target == 0x00139F84u) && vm_read32(o) == 0x0087A2E0u && g_ko_limit_now >= 4 && vm_read32(o + 0x14) == 3u) {
+    /* FIX (rollback determinism): in a rollback match (g_ko_track) the search below is READ-ONLY and the custom limit is off. The limit was written
+     * into the guest's +0x28 once, from a scan timed by the wall clock (a different tick on each PC), and a rollback to before that write restored the
+     * old limit with nothing to write it again: the two PCs could play to different KO counts. The option itself is a local Stage Select choice (L1 /
+     * R1, Free Battle only), not something the two PCs share, so in a match the game's own limit applies on both; one line per fight says so. */
+    const bool ko_rb = g_ko_track != 0;
+    const bool ko_imp = !ko_rb && g_imp_mode != 0 && g_ko_fb;
+    const int ko_limit = ko_rb || ko_imp ? 0 : (g_ko_fb && g_ko_win != 3 ? g_ko_win : 0);
+    if (heap && !ko_rb && (target == 0x00139E04u || target == 0x00139F84u) && vm_read32(o) == 0x0087A2E0u && g_ko_limit_now >= 4 && vm_read32(o + 0x14) == 3u) {
         /* both the bar's update (func_00139E04) and its draw (func_00139F84) run its logic, and the game writes the real
          * count and limit into it between them: with only one of them given the 3-segment view, the bar went back and
          * forth between "one KO left" and not, and played that sound every frame (4 or 5 KOs to win) */
@@ -2612,11 +2630,13 @@ void impossible_icall(uint32_t target, uint64_t* gpr)
         const int shown = count - (g_ko_limit_now - 3);
         vm_write32(o + 0x48, 0); vm_write32(o + 0x40, 3); vm_write32(o + 0x3C, (uint32_t)(shown < 0 ? 0 : shown > 3 ? 3 : shown));
     }
-    if ((ko_limit > 0 || ko_imp || ko_log) && target == 0x00085CECu) {
-        static unsigned long long last_scan = 0, last_hud = 0; static int found = 0;
+    if ((ko_limit > 0 || ko_imp || ko_log || g_ko_track) && target == 0x00085CECu) {
+        static unsigned long long last_hud = 0;
+        unsigned long long& last_scan = g_ko_last_scan; int& found = g_ko_found;   /* FIX: file scope, jsp_ko_counters_reset clears them */
         static int32_t last_cnt[2] = { -1, -1 };
         const unsigned long long now = GetTickCount64();
-        if (now - last_hud > 5000) { found = 0; last_cnt[0] = last_cnt[1] = -1; }   /* a new fight */
+        if (now - last_hud > 5000) { found = 0; last_cnt[0] = last_cnt[1] = -1;   /* a new fight */
+            if (ko_rb && g_ko_fb && (g_ko_win != 3 || g_imp_mode != 0)) { std::printf("[ko] rollback match: the custom KOs to win is off (the game's own limit on both PCs)\n"); std::fflush(stdout); } }
         last_hud = now;
         g_ko_limit_now = ko_limit;
         if ((ko_log || ko_imp) && found >= 2) for (int s = 0; s < 2; s++) {
@@ -2639,12 +2659,12 @@ void impossible_icall(uint32_t target, uint64_t* gpr)
                 for (uint32_t a = (from + 3u) & ~3u; a + 0x30u < region_end; a += 4) {
                     if (vm_read32(a) != 0x00876558u) continue;
                     const int32_t cnt = (int32_t)vm_read32(a + 0x24), lim = (int32_t)vm_read32(a + 0x28);
-                    if (cnt < 0 || cnt > 20 || lim < 1 || lim > 20) continue;
+                    if (cnt < 0 || cnt > 20 || lim < 1 || lim > 20 || cnt > lim) continue;   /* FIX: +0x24 (scored) at most +0x28 (limit) */
                     const int want = ko_imp ? (found == 0 ? 1 : 2) : ko_limit;
                     if (found < 2) g_ko_counter[found] = a;
                     found++;
                     if (ko_log) { std::printf("[ko] counter %08X count %d limit %d -> %d%s\n", a, cnt, lim, want > 0 ? want : lim, ko_imp ? " (Impossible fight: fixed)" : ""); std::fflush(stdout); }
-                    if (want > 0 && lim != want) vm_write32(a + 0x28, (uint32_t)want);
+                    if (!ko_rb && want > 0 && lim != want) vm_write32(a + 0x28, (uint32_t)want);   /* FIX: never a guest write in a rollback match (want is 0 there anyway) */
                 }
             }
         }
@@ -2781,6 +2801,7 @@ int training_icall(uint32_t target, uint64_t* gpr)
     }
     if (target == 0x00085CECu) {
         g_hud_ms = GetTickCount64();
+        g_hud_calls = g_hud_calls + 1;   // FIX (rollback start): counted, not timed: the net layer starts a match session at the first tick the game draws the fight HUD
         /* SIX_PROBE: a fighter's health object and its class (vtable), and the TOC entries that hold that vtable,
          * so its constructor -- run once per fighter while the match loads -- can be found by r2 offset. Once. */
         { static const bool sp = exp_env("SIX_PROBE") != nullptr; static bool done = false;
@@ -3119,6 +3140,19 @@ bool on_stagesel()
 
 uint32_t stage_focus() { return vm_read32(g_seen_stage.obj + 0x58); }
 uint32_t stage_time() { return vm_read32(g_seen_stage_time.obj + 0x40); }
+/* FIX (Discord presence): the stage for the presence. stage_focus() is the focused BOX, not a stage. The screen's chosen stage is +0x6C
+ * (GAME_MAP.md: 0 Namek, 1 Hidden Leaf, 6 Temple of Athena, 11 Yoshiwara, tested; not list order). Only those confirmed ids are turned
+ * into the list index of STAGES.md (jdp::stage_name); any other id gives -1, so the presence shows no stage rather than a wrong one. */
+int presence_stage()
+{
+    switch (vm_read32(g_seen_stage.obj + 0x6C)) {
+    case 11: return 0;   /* Yoshiwara Paradise */
+    case 6: return 3;    /* Temple of Athena */
+    case 0: return 6;    /* Planet Namek */
+    case 1: return 7;    /* Hidden Leaf Village */
+    default: return -1;
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * Impossible AI, the Impossible fight and KOs to win: Character Select and Stage Select (see g_imp_slot, g_imp_mode,
@@ -3634,7 +3668,11 @@ void auto_fight(uint16_t* b, uint16_t* lx, uint16_t* ly)
     if (g_auto.step >= 3 && std::getenv("AUTO_FB")) {
         static int p1cpu = -1;
         if (p1cpu < 0) { const char* p1 = std::getenv("AUTO_FB_P1"); p1cpu = (p1 && p1[0] == '1') ? 0 : 1; }
-        if (p1cpu) { vm_write32(setup_field(0, 0x00), 2);
+        /* The setup word only until the first fight HUD: the pilot's host-side state is not rolled back, so a write in or after a rollback
+         * match's fight lands at a different tick on each peer (a loopback match "desynced" on the setup table when the fight ended, 2026-11-21). */
+        static bool fb_fought = false;
+        if (fight_hud_up()) fb_fought = true;
+        if (p1cpu) { if (!fb_fought) vm_write32(setup_field(0, 0x00), 2);
                      if (g_auto.step >= 4) {   /* battle world unit 0 +0x20: 1 on Player 1's unit, 3 on the CPU units (six dump) */
                          const uint32_t w = vm_read32(vm_read32(0x008D3888u - 0x7A90u));
                          if (w > 0x10000u && w < 0xF0000000u && vm_read32(w + 0x60u + 0x20u) == 1u) vm_write32(w + 0x60u + 0x20u, 3u);
@@ -4007,6 +4045,7 @@ static void tex_patch_all(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
+    if (port == 0 && on_stagesel()) g_presence_stage = presence_stage();   /* ENHANCEMENT (Discord presence): the stage chosen when the screen closes (read only; FIX: +0x6C, not the focused box) */
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
     else if (port == 1 && !g_two_players) {
         static const bool always = [] { const char* e = std::getenv("PAD_P2_ALWAYS"); return e && *e == '1'; }();
@@ -4304,6 +4343,74 @@ extern "C" int jsp_on_charsel(void) { return on_charsel() ? 1 : 0; }
 extern "C" int jsp_on_stagesel(void) { return on_stagesel() ? 1 : 0; }
 extern "C" int jsp_training_active(void) { return training_active() ? 1 : 0; }
 extern "C" int jsp_training_fight_scene(void) { return training_fight_scene() ? 1 : 0; }
+/* ENHANCEMENT (Discord Rich Presence, jsp_discord.cpp): the screen, the picks and the fight's units, read only, from any thread (racy
+ * plain reads of flags and guest words; a stale value shows for one 2 s update at most). */
+static bool presence_readable(uint32_t ea, uint32_t n)   /* [ea, ea+n) is committed, readable guest memory */
+{
+    if (!vm_base) return false;
+    for (uint64_t a = ea, end = (uint64_t)ea + n; a < end; ) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery(vm_base + a, &mi, sizeof mi) || mi.State != MEM_COMMIT || (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+        const uint64_t next = (uint64_t)((uint8_t*)mi.BaseAddress - vm_base) + mi.RegionSize;
+        if (next <= a) return false;
+        a = next;
+    }
+    return true;
+}
+extern "C" void jsp_game_presence(JspPresenceRaw* r)
+{
+    *r = JspPresenceRaw{};
+    const bool hud = fight_hud_up();
+    r->fight = hud ? 1 : 0;
+    r->menu = !hud && in_menu_scene() ? 1 : 0;
+    r->title = !hud && vm_read32(0x0094DEC4u) == 3u && !main_list_open() ? 1 : 0;
+    r->charsel = on_charsel() ? 1 : 0;
+    r->stagesel = on_stagesel() ? 1 : 0;
+    r->training = g_training_mode ? 1 : 0;
+    r->stage_focus = g_presence_stage;
+    for (int k = 0; k < 6; k++) {
+        r->kind[k] = (int)vm_read32(setup_field(k, 0x00));
+        r->part[k] = (int)vm_read32(setup_field(k, 0x08));
+        r->chr[k] = (int)vm_read32(setup_field(k, 0x0C));
+    }
+    { const uint32_t row = vm_read32(0x00956550u); r->menu_row = row <= 8u ? (int)row : -1; }
+    if (!hud) return;
+    /* FIX (Discord presence, wrong names): who fights comes from the battle world's units, not the setup records above. Those are
+     * the menus' picks: the native online fight never writes them (all zero, which reads as Luffy four times), and their team is the
+     * record's +0x10, not its slot. The units are what the battle was built from, in every mode. Heap words, so each range is checked
+     * as committed first; an id without a name is dropped later (jsp_discord_state.h). */
+    const uint32_t w0 = vm_read32(0x008D3888u - 0x7A90u);
+    const uint32_t world = (w0 >= 0x00010000u && w0 < 0x01000000u && !(w0 & 3u)) ? vm_read32(w0) : 0u;
+    if (world >= 0x10000000u && world < 0x60000000u && !(world & 3u) && presence_readable(world, 0x60u + 6u * 0x94u)) {
+        int n = 0;
+        bool seen[6] = {};
+        for (uint32_t t = 0; t < 2; t++)
+            for (uint32_t k = 0; k < 4 && n < 6; k++) {
+                const int32_t u = (int32_t)vm_read32(world + 0x34u + t * 0x18u + k * 4u);
+                if (u < 0 || u > 5 || seen[u]) continue;
+                const uint32_t rec = world + 0x60u + 0x94u * (uint32_t)u;
+                const uint32_t team = vm_read32(rec + 0x0Cu), role = vm_read32(rec + 0x08u);
+                if (team != t || role < 1u || role > 3u) continue;   /* the list and the unit disagree: not trusted */
+                seen[u] = true;
+                r->u_chr[n] = (int)(vm_read32(rec) >> 16);
+                r->u_team[n] = (int)team;
+                r->u_role[n] = (int)role;
+                r->u_cpu[n] = vm_read32(rec + 0x20u) == 3u ? 1 : 0;
+                n++;
+            }
+        r->units = n;
+    }
+    /* the KO score, when the KO counters were found (KO tracking: online rollback, a KO count other than 3, KO_LOG) */
+    int ko[2] = { -1, -1 };
+    for (int s = 0; s < 2; s++) {
+        const uint32_t a = g_ko_counter[s];
+        if (a < 0x10000000u || a >= 0x20000000u || (a & 3u) || !presence_readable(a, 0x2Cu) || vm_read32(a) != 0x00876558u) break;
+        const int32_t cnt = (int32_t)vm_read32(a + 0x24u), lim = (int32_t)vm_read32(a + 0x28u);
+        if (cnt < 0 || cnt > 20 || lim < 1 || lim > 20 || cnt > lim) break;
+        ko[s] = cnt;
+    }
+    if (ko[0] >= 0 && ko[1] >= 0) { r->ko[0] = ko[0]; r->ko[1] = ko[1]; }
+}
 
 /* Impossible AI: entry/leave hooks from port/lift_game_hooks.json (lifter --fn-hooks, with the LOD hooks).
  * Hit receivers (vtable 0x00875108): +0x18 the battle unit index; some fighters have a second receiver with the same

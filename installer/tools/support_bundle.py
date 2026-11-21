@@ -59,6 +59,7 @@ TEXT_KINDS = {".log", ".txt", ".ini", ".cmd"}
 DENIED_KINDS = {".elf", ".bin", ".sfo", ".psarc", ".edat", ".self", ".sprx", ".sav"}
 DENIED_DIRS = {"hdd0", "dev_hdd0", "dev_flash", "savedata", "shadercache", "shader_cache", "shaders"}
 SETTINGS_NAMES = ("play_settings.txt", "settings_here.txt")
+REPORTS_KEPT = 10   # newest match reports taken from game\run\reports
 NOTE = "[support_bundle: the oldest {n} lines ({b} bytes) of this file were cut to keep the bundle under {cap} MB]\n"
 
 
@@ -116,6 +117,13 @@ def collect(app, appdata=None, temp=None):
         for p in sorted(run.iterdir()):
             if p.is_file() and not p.is_symlink():
                 offer(f"game/run/{p.name}", p)
+    # ENHANCEMENT (testers): the match reports of the rollback netcode (jsp_net_game.cpp: one small text file per match that ended on a desync or a
+    # failure, in "reports" under the game's working folder, jsp-match-report-<time>.txt); the newest REPORTS_KEPT
+    rep = run / "reports"
+    if rep.is_dir():
+        reps = [p for p in rep.glob("jsp-match-report-*.txt") if p.is_file() and not p.is_symlink()]
+        for p in sorted(reps, key=lambda f: f.stat().st_mtime, reverse=True)[:REPORTS_KEPT]:
+            offer(f"game/run/reports/{p.name}", p)
     if appdata:
         d = pathlib.Path(appdata) / APPDIR
         for n in SETTINGS_NAMES:
@@ -600,8 +608,15 @@ def net_mode(s):
     if _flag(p.get("JSP_ROLLBACK", "")):
         listen, join = p.get("JSP_ROLLBACK_LISTEN", ""), p.get("JSP_ROLLBACK_JOIN", "")
         role = p.get("JSP_ROLLBACK_ROLE", "").lower()
-        if net_online:
-            mode = "Rollback refused: PS3_NET_ONLINE is set too (the game's own online), so neither runs"
+        role_key = any(p.get(k) for k in ("JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH"))   # jpno::role_keys
+        if not role_key and net_online:   # ENHANCEMENT (native-room pairing): the lobby start next to the game's own online (jpno NC_NATIVE)
+            mode = ("Online Battle + rollback (the game's Friendly Match room pairs the players; rollback runs the fight), relay allowed: "
+                    + ("yes" if _flag(p.get("JSP_ROLLBACK_RELAY", "")) else "no")
+                    + (", room pairing off (JSP_ROLLBACK_NATIVE=0)" if p.get("JSP_ROLLBACK_NATIVE", "") and not _flag(p.get("JSP_ROLLBACK_NATIVE", "")) else ""))
+        elif not role_key:
+            mode = "Rollback lobby: no session at start (the game's own online is off, so no Online Battle room to pair with)"
+        elif net_online:
+            mode = "Rollback refused: PS3_NET_ONLINE is set too (the game's own online) with a rollback role key, so neither runs"
         elif p.get("JSP_ROLLBACK_VIA", "").lower() == "repsn":
             if role not in ("host", "join"):
                 mode = "Rollback re-psn refused: JSP_ROLLBACK_ROLE is not host or join"
@@ -738,6 +753,7 @@ def net_scrub(text, secrets=None):
 # lines with an address or a name; the field is replaced by its placeholder. Any other [net] line: net_scrub() of the text after the tag.
 _RESOLVE_WHY = (   # jpno::resolve_env's refusal reasons (jsp_net_online.h)
     "JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs",
+    "JSP_ROLLBACK=1 with a role key (LISTEN, JOIN, VIA or BENCH) and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs",
     "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off",
     "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off",
     "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off",

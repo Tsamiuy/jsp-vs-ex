@@ -178,6 +178,10 @@ __pycache__/
 !/installer/tools/version_line_test.sh
 !/installer/tools/net_badge_test.cpp
 !/installer/tools/net_badge_test.sh
+!/installer/tools/native_fight_test.cpp
+!/installer/tools/native_fight_test.sh
+!/installer/tools/discord_test.cpp
+!/installer/tools/discord_test.sh
 !/installer/tools/settings_test.cpp
 !/installer/tools/settings_test.sh
 !/installer/tools/port_overlay_test.c
@@ -192,8 +196,14 @@ __pycache__/
 !/installer/tools/net_m2_link_test.cpp
 !/installer/tools/net_session_test.cpp
 !/installer/tools/net_session_test.sh
+!/installer/tools/net_replay_test.cpp
+!/installer/tools/replay_dump.cpp
 !/installer/tools/net_online_test.cpp
 !/installer/tools/net_online_test.sh
+!/installer/tools/net_postgame_test.cpp
+!/installer/tools/net_postgame_test.sh
+!/installer/tools/net_report_test.cpp
+!/installer/tools/net_report_test.sh
 !/installer/tools/net_repsn_test.cpp
 !/installer/tools/net_repsn_client_test.cpp
 !/installer/tools/net_repsn_test.sh

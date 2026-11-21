@@ -227,6 +227,7 @@ add_executable(${PROJECT_NAME}
     jsp_autopilot.cpp  # test auto-pilot (AUTO_FIGHT / AUTO_MENU), off unless set
     jsp_game.cpp       # the v0.15 jstars_game.cpp: PC text, Exit Game, menus, HUD size, FPS counter, Training
     jsp_net_probe.cpp  # experimental default-off socket-call discovery
+    jsp_net_native.cpp # test only: trace of the game's own online (JSP_NATIVE_TRACE=1) and its auto-pilot (AUTO_ONLINE=host|join)
     jsp_online.cpp     # ENHANCEMENT: reads repsn.ini / community.ini at startup, sets the runtime's online environment
     jsp_unlock.cpp     # ENHANCEMENT: unlock-everything cheat, JSP_UNLOCK_ALL=1 (the launcher's Cheats tab)
     jsp_port_menu.cpp  # ENHANCEMENT: in-game Port Settings page, on by default, JSP_PORT_MENU=0 turns it off (needs toolkit patches 2516-2518 and 6501; US build only)
@@ -234,6 +235,7 @@ add_executable(${PROJECT_NAME}
     jsp_session_startup.cpp # ENHANCEMENT: actual startup state; no session/ACK activation
     jsp_lod_lifetime.cpp # verified emitted entries + actual loader-buffer identity
     jsp_roster.cpp # ENHANCEMENT: roster section of mod.json (added fighters on the character select), only with a roster mod
+    jsp_discord.cpp    # ENHANCEMENT: Discord Rich Presence and Join/Invite over the local Discord app's IPC pipe (JSP_DISCORD=0 off)
     jsp_mods.cpp       # ENHANCEMENT: the mods folder (mods.txt, JSP_MODS_LIST/JSP_MODS_DIR, JSP_MODS=0 off): virtual CPK archives through toolkit patch 6502
     feat_menu_pages.cpp  # ENHANCEMENT: two-page main menu, on by default (MENU_PAGES=0 off); Battle Modes page with Training Mode and Impossible Mode rows
     feat_3v3.cpp  # ENHANCEMENT: 3v3 Free Battle, on by default with the two-page menu (SIX=0 or MENU_PAGES=0 off); the team size window, 3v3 Character Select, six fighters in the fight
@@ -245,6 +247,7 @@ add_executable(${PROJECT_NAME}
     jsp_snapshot.cpp   # the write-watched snapshot ring the session saves to and rolls back with (toolkit patches 7910-7917)
     jsp_thread_registry.cpp # thread table for the snapshot's freeze (TLS callback in every build; it registers threads only with JSP_ROLLBACK=1 or JSP_SNAPSHOT_THREADS=registry)
     jsp_fight_hash.cpp # fight tick counter and per-tick state hash (the session's tick number and checksum)
+    jsp_net_native_fight.cpp # the rollback takes over the game's own online fight (pad take, share pad, net errors); pass-through until armed
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}

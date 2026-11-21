@@ -1,0 +1,81 @@
+Patch 2072: a job of the async pipeline queue (patch 2057) owns a private copy of its vertex shader bytes instead of a
+reference to the drawing thread's blob.
+
+d3dcompiler_47's ID3DBlob AddRef/Release are plain increments, not interlocked (host test blobrc2/blobrc3: four threads
+doing AddRef+Release on a blob of count 1000 end at 978-998; at count 1 the test process dies with 0xC0000374). 2057
+AddRef'd the vp_vs slot's blob on the drawing thread and every worker Released it after making the pipeline, so workers
+finishing jobs for the same vertex shader raced on one count. A lost decrement leaked; a lost increment freed the blob
+under the slot and under the jobs still holding it (use after free in vp_fp_make_pso, then a double free). Seen as heap
+corruption 0xC0000374 detected in D3DCompile's free on vp_fp_async_worker (bench runs F and H), in rollback sessions,
+where hundreds of programs are queued at once ([FPA] freed 512 untaken builds eight times in run C). With PSO_ASYNC=0 no
+blob reference count is touched off the drawing thread (the 2005 batch workers borrow j->vsb without AddRef/Release).
+
+The copy (a few KB, D3DCreateBlob + memcpy) is made on the drawing thread when the job is queued, handed to one worker
+through the slot's state word and released by that worker; a job that is not queued releases it on the drawing thread.
+Host-side drawing only: guest memory and the rollback checksum are not touched.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4120,7 +4120,8 @@
+                 pb->lpVtbl->Release(pb);
+                 a->k.status = 2;
+             }
+-            if (a->k.vsb) a->k.vsb->lpVtbl->Release(a->k.vsb);
++            if (a->k.vsb) a->k.vsb->lpVtbl->Release(a->k.vsb);   /* 2072: the job's own copy, no other thread holds it */
++            a->k.vsb = NULL;
+             MemoryBarrier();
+             a->st = 3;
+             break;
+@@ -4150,14 +4151,33 @@
+     }
+     return 0;
+ }
++/* Patch 2072: a queued job owns a private copy of the vertex shader bytes. d3dcompiler_47's ID3DBlob AddRef/Release are
++ * not atomic (host test: four threads doing AddRef+Release on one blob of count 1000 end at 978-998, and at count 1 the
++ * process dies with 0xC0000374). 2057 took an AddRef on the drawing thread's blob (the vp_vs slot's, or vp_vs_blob) and
++ * each worker Released it, so four workers finishing jobs for the same VS raced on one count: a lost decrement left a
++ * leak, a lost increment freed the blob under the slot and the jobs still holding it (use after free, then a double
++ * free): heap corruption seen in D3DCompile's free on vp_fp_async_worker, most often in rollback sessions, where
++ * hundreds of programs are queued at once. The copy is made here, it is touched only by the worker it is handed to
++ * and released there; the drawing thread's blob is never shared. */
++static ID3DBlob* fpa_vs_copy(ID3DBlob* vsb)
++{
++    ID3DBlob* c = NULL;
++    if (!vsb) return NULL;
++    const SIZE_T n = vsb->lpVtbl->GetBufferSize(vsb);
++    if (FAILED(D3DCreateBlob(n, &c)) || !c) return NULL;
++    memcpy(c->lpVtbl->GetBufferPointer(c), vsb->lpVtbl->GetBufferPointer(vsb), n);
++    return c;
++}
+ static int fp_async_queue(const FPJob* key, char* hlsl)
+ {
+     fp_async_start();
++    ID3DBlob* vc = fpa_vs_copy(key->vsb);
++    if (key->vsb && !vc) return 0;   /* no memory for the copy: build inline, as with a full queue */
+     for (int i = 0; i < FP_ASYNC_MAX; i++) {
+         FPAsync* a = &s_fpa[i];
+         if (a->st) continue;
+         a->k = *key; a->k.status = 0; a->k.pso = NULL; a->hlsl = hlsl;
+-        if (a->k.vsb) a->k.vsb->lpVtbl->AddRef(a->k.vsb);
++        a->k.vsb = vc;   /* 2072: the job's own copy (was an AddRef on the shared blob) */
+         MemoryBarrier();
+         a->st = 1;
+         ReleaseSemaphore(s_fpa_sem, 1, NULL);
+@@ -4187,7 +4207,7 @@
+                 FPAsync* a = &s_fpa[i];
+                 if (a->st) continue;
+                 a->k = *key; a->k.status = 0; a->k.pso = NULL; a->hlsl = hlsl;
+-                if (a->k.vsb) a->k.vsb->lpVtbl->AddRef(a->k.vsb);
++                a->k.vsb = vc;   /* 2072 */
+                 MemoryBarrier();
+                 a->st = 1;
+                 ReleaseSemaphore(s_fpa_sem, 1, NULL);
+@@ -4195,6 +4215,7 @@
+             }
+         }
+     } else { static int said = 0; if (!said) { said = 1; fprintf(stderr, "[FPA] queue full: building inline%c", 10); } }
++    if (vc) vc->lpVtbl->Release(vc);   /* 2072: not handed to a worker; only this thread ever saw it */
+     return 0;   /* queue full: build inline */
+ }
+ 

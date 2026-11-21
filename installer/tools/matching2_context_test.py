@@ -22,7 +22,7 @@ CASES = (
        "tick", "tick-stale", "current", "commit", "search-default", "search-explicit",
        "search-error", "search-disconnect", "done-disconnect", "fail-join", "fail-leave",
        "fail-search", "transport-reentry", "sysutil-reentry", "endpoint-order",
-       "reply-before-return", "tick-member", "join-error", "done-error", "search-commit", "repeat-start"]
+       "reply-before-return", "tick-member", "join-error", "done-error", "search-commit", "repeat-start", "join-target"]
 )
 
 

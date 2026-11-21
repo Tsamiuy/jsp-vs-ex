@@ -1,0 +1,61 @@
+Patch 7920 (experimental, rollback netcode): a guest memory layout generation counter.
+
+runtime/memory/vm.h gains g_vm_layout_gen (defined in runtime/ppu/ppu_sysprx.cpp) and vm_layout_bump(), called after every commit
+(vm_commit) or protection change (vm_protect) of guest memory; the SPU DMA commit in runtime/spu/spu_dma.h bumps it too. The rollback
+snapshot (installer/port/jsp/jsp_snapshot.cpp, JSP_SNAPSHOT_LAYOUT_GEN=1) skips its per-tick walk of the committed set while the
+generation is unchanged, and the lwmutex census's page cache (patch 7921) drops entries cached under an older generation.
+No behaviour change: one atomic increment per commit or protection change. Applies after 7919.
+
+diff --git a/runtime/memory/vm.h b/runtime/memory/vm.h
+--- a/runtime/memory/vm.h
++++ b/runtime/memory/vm.h
+@@ -298,6 +298,11 @@
+  * Memory region commit / protect
+  * -----------------------------------------------------------------------*/
+ 
++/* Guest memory layout generation: bumped after every commit or protection change of guest memory (vm_commit, vm_protect, the SPU DMA commit).
++ * A title port's snapshot code skips its per-tick re-walk of the committed set while it is unchanged (defined in ppu_sysprx.cpp). */
++extern volatile uint32_t g_vm_layout_gen;
++static inline void vm_layout_bump(void) { __atomic_fetch_add(&g_vm_layout_gen, 1u, __ATOMIC_SEQ_CST); }
++
+ static inline int32_t vm_commit(uint32_t addr, uint32_t size)
+ {
+     if (!VM_READY) return CELL_EFAULT;
+@@ -306,6 +311,7 @@
+ #ifdef _WIN32
+     if (!VirtualAlloc(vm_base + addr, size, MEM_COMMIT, PAGE_READWRITE))
+         return CELL_ENOMEM;
++    vm_layout_bump();
+ #else
+     if (vm__mprotect_pages(addr, size, PROT_READ | PROT_WRITE) != 0)
+         return CELL_ENOMEM;
+@@ -330,6 +336,7 @@
+     DWORD old;
+     if (!VirtualProtect(vm_base + addr, size, prot, &old))
+         return CELL_EFAULT;
++    vm_layout_bump();
+ #else
+     int prot = PROT_NONE;
+     if (read)  prot |= PROT_READ;
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -66,6 +66,7 @@
+           if (VirtualQuery(p, &mbi, sizeof mbi) == 0) return 0;
+           if (mbi.State != MEM_COMMIT) {
+               if (!VirtualAlloc(p, 0x10000, MEM_COMMIT, PAGE_READWRITE)) return 0;
++              { extern volatile uint32_t g_vm_layout_gen; __atomic_fetch_add(&g_vm_layout_gen, 1u, __ATOMIC_SEQ_CST); }   /* vm.h: guest layout generation */
+           } else if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) {
+               return 0;
+           }
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -420,6 +420,7 @@
+ #define LWM_RD_SLOTS 128
+ static struct { uint32_t page, epoch; uint8_t ok; } s_lwm_rd[LWM_RD_SLOTS];
+ static uint32_t s_lwm_rd_epoch = 1;
++extern "C" { volatile uint32_t g_vm_layout_gen = 0; }   /* runtime/memory/vm.h: guest layout generation */
+ extern "C" void ps3_lwm_census_invalidate(void) { s_lwm_rd_epoch++; }
+ static int lwm_census_readable(uint32_t a)
+ {

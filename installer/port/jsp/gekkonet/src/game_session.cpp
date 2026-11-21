@@ -260,6 +260,26 @@ GekkoSessionEvent** Gekko::GameSession::Events(i32* count)
     return _msg.session_events.GetRecentEvents().data();
 }
 
+// jsp-vs-ex local addition (PIN.md): the latest frame whose saved state no later rollback can go back past. A rollback loads the frame before the
+// first incorrect one, and an incorrect frame is never a confirmed one, except while its rollback is still pending (inputs received by a poll
+// between updates): that load target counts too. Every load from now on targets this frame or a later one.
+i32 Gekko::GameSession::FinalFrame()
+{
+    if (!_started) {
+        return GameInput::NULL_FRAME;
+    }
+
+    // not capped at the current frame: with an input delay the confirmed frame runs ahead of it, and then even the live frame's save is never loaded
+    Frame final_frame = GetConfirmedFrame();
+    const Frame incorrect = _sync.GetMinIncorrectFrame();
+
+    if (incorrect != GameInput::NULL_FRAME) {
+        final_frame = std::min(final_frame, incorrect - 1);
+    }
+
+    return final_frame;
+}
+
 f32 Gekko::GameSession::FramesAhead()
 {
     if (!_started) {

@@ -22,7 +22,12 @@
 
 namespace jpno {
 
-enum Netcode { NC_CONFLICT = -1, NC_OFF = 0, NC_DELAY = 1, NC_ROLLBACK = 2 };
+// NC_NATIVE (ENHANCEMENT, the tester default): the game's own Online Battle menus over re-psn (repsn.ini enabled=1) WITH JSP_ROLLBACK=1 in the lobby start (no role key):
+// players meet in a Friendly Match room and our rollback takes over the fight (native-room pairing, jsp_net_game.cpp). JSP_ROLLBACK must be in the process
+// environment from the start (jsp_thread_registry.cpp reads it at process attach), so it is a play_settings.txt line: installer/tools/firstrun.py writes it with
+// the online defaults and the settings window's Online tab shows and changes it. JSP_ROLLBACK=0 (or no line) with re-psn on is Delay.
+enum Netcode { NC_CONFLICT = -1, NC_OFF = 0, NC_DELAY = 1, NC_ROLLBACK = 2, NC_NATIVE = 3 };
+static const int kNetcodeChoices = 4;   // the Netcode row cycles Off, Delay, Rollback, Online Battle + rollback
 
 // Row ids of the Online page. 0..5 are the page's older rows (jsp_port_menu.cpp: method, server, name, preset, save, discard).
 enum : int { R_METHOD = 0, R_SERVER = 1, R_NAME = 2, R_PRESET = 3, R_SAVE = 4, R_DISCARD = 5, R_NETCODE = 6, R_ROLE = 7, R_PORT = 8, R_JOIN = 9, R_CONN = 10, R_RELAY = 11 };
@@ -33,6 +38,10 @@ static const char* const kKeyJoin = "JSP_ROLLBACK_JOIN";
 static const char* const kKeyVia = "JSP_ROLLBACK_VIA";       // "repsn": the session is arranged through a re-psn room (jsp_net_repsn.h); absent or "direct": direct IP (LISTEN / JOIN)
 static const char* const kKeyRole = "JSP_ROLLBACK_ROLE";     // re-psn only: "host" (create the room) or "join"
 static const char* const kKeyRelay = "JSP_ROLLBACK_RELAY";   // re-psn only: 1 = the player allows the server's relay when a direct path fails
+// ENHANCEMENT (rollback bench, test tooling): JSP_ROLLBACK=1 with JSP_ROLLBACK_BENCH=N (1..8) runs the fight through a LOCAL stress session that rolls back N ticks on every
+// tick, with no peer and no socket; it logs the cost (jsp_net_game.cpp, bench_report). It replaces the role keys: with LISTEN, JOIN or VIA also set it is refused.
+static const char* const kKeyBench = "JSP_ROLLBACK_BENCH";
+inline int bench_depth(const char* v) { return (v && v[0] >= '1' && v[0] <= '8' && !v[1]) ? v[0] - '0' : 0; }
 // The real psnr transport (PsnrClientTransport over the re-psn v0.8.0 client, jsp_net_repsn_client.h) is wired into jsp_net_game.cpp: a re-psn start is allowed.
 static const bool kRepsnWired = true;
 static const char* const kKeyModsOff = "JSP_MODS_ONLINE_OFF";   // set to 1 by jsp_online.cpp when a gameplay mod set turned the game's own online off (ENHANCEMENT, mods)
@@ -44,7 +53,22 @@ inline bool flag_on(const char* v) { return v && *v && v[0] != '0'; }
 
 inline const char* name_of(int nc)
 {
-    return nc == NC_OFF ? "Off" : nc == NC_DELAY ? "Delay (the game's own online)" : nc == NC_ROLLBACK ? "Rollback (experimental)" : "Conflict";
+    return nc == NC_OFF ? "Off" : nc == NC_DELAY ? "Delay (the game's own online)" : nc == NC_ROLLBACK ? "Rollback (experimental)"
+         : nc == NC_NATIVE ? "Online Battle + rollback" : "Conflict";
+}
+
+// A rollback ROLE key is set (a start-up session: direct LISTEN / JOIN, VIA=repsn, or the bench). Without one, JSP_ROLLBACK=1 is the lobby start, which may run
+// next to the game's own online (NC_NATIVE). Get: const char*(const char*) (std::getenv or a fake).
+template <class Get> bool role_keys(Get get)
+{
+    for (const char* k : { kKeyListen, kKeyJoin, kKeyVia, kKeyBench }) { const char* v = get(k); if (v && *v) return true; }
+    return false;
+}
+inline bool role_keys(const jps::File& f)
+{
+    std::string v;
+    for (const char* k : { kKeyListen, kKeyJoin, kKeyVia, kKeyBench }) if (f.get(k, v) && !v.empty()) return true;
+    return false;
 }
 
 inline bool valid_port(const std::string& p)
@@ -120,13 +144,22 @@ struct Rollback {
         if (host) { f.set(kKeyListen, port); f.erase(kKeyJoin); }
         else { f.set(kKeyJoin, join); f.erase(kKeyListen); }
     }
+    // NC_NATIVE: JSP_ROLLBACK=1 with no role key (the lobby start; the game's own room pairs the players) and the relay choice. LISTEN, JOIN, VIA and ROLE are
+    // removed: a role key with the game's own online on is refused at start.
+    void store_native(jps::File& f) const
+    {
+        f.set(kKeyOn, "1"); f.set(kKeyRelay, relay ? "1" : "0");
+        f.erase(kKeyVia); f.erase(kKeyRole); f.erase(kKeyListen); f.erase(kKeyJoin);
+    }
 };
 
 // what the saved files hold: method = the backend's saved method (0 off, 1 re-psn, 2 community)
+// With re-psn (method 1): JSP_ROLLBACK=1 without a role key is NC_NATIVE; with a role key it is the refused pair.
 inline int saved_netcode(const jps::File& f, int method)
 {
     std::string v;
     const bool rb = f.get(kKeyOn, v) && flag_on(v.c_str());
+    if (rb && method == 1 && !role_keys(f)) return NC_NATIVE;
     if (rb && method != 0) return NC_CONFLICT;
     return rb ? NC_ROLLBACK : method != 0 ? NC_DELAY : NC_OFF;
 }
@@ -136,7 +169,7 @@ template <class Get> int running_netcode(Get get)
     // the runtime's own tests (cellNetCtl.c netctl_online, np_psnr.c np_psnr_enabled): ANY value of PS3_NET_ONLINE, even "0", is on; JSP_ROLLBACK is jsp_net_game.cpp's flag_on
     if (flag_on(get(kKeyRefused))) return NC_CONFLICT;   // a refused pair (resolve_env) cleared both: the page still tells why nothing runs
     const bool rb = flag_on(get(kKeyOn)), delay = get("PS3_NET_ONLINE") != nullptr;
-    if (rb && delay) return NC_CONFLICT;
+    if (rb && delay) return role_keys(get) ? NC_CONFLICT : NC_NATIVE;
     return rb ? NC_ROLLBACK : delay ? NC_DELAY : NC_OFF;
 }
 
@@ -145,6 +178,7 @@ inline std::vector<int> rows_for(int nc, bool host, bool repsn = false)
 {
     std::vector<int> r{ R_NETCODE };
     if (nc == NC_DELAY) { r.push_back(R_METHOD); r.push_back(R_SERVER); r.push_back(R_NAME); r.push_back(R_PRESET); }
+    else if (nc == NC_NATIVE) { r.push_back(R_SERVER); r.push_back(R_NAME); r.push_back(R_RELAY); }   // always re-psn (the community method has no client)
     else if (nc == NC_ROLLBACK) {
         r.push_back(R_CONN); r.push_back(R_ROLE);
         if (repsn) r.push_back(R_RELAY); else r.push_back(host ? R_PORT : R_JOIN);
@@ -171,7 +205,8 @@ inline std::string row_text(int row, int nc, const Rollback& rb)
 // the one-line statement of the exclusion rule for the working choice (shown under the rows)
 inline const char* exclusion_line(int nc)
 {
-    return nc == NC_ROLLBACK ? "Rollback replaces Delay: the game's own online is off once saved."
+    return nc == NC_NATIVE ? "Online Battle > Friendly Match over re-psn; rollback runs the fight."
+         : nc == NC_ROLLBACK ? "Rollback replaces Delay: the game's own online is off once saved."
          : nc == NC_DELAY ? "Delay is the game's own online: Rollback is off once saved."
          : "Online play is off. Only one netcode can be on at a time.";
 }
@@ -179,7 +214,7 @@ inline const char* exclusion_line(int nc)
 // "This session: X. Saved: Y." and whether a restart is needed (the saved choice differs from what this process started with)
 inline std::string status_line(int running, int saved, bool* restart)
 {
-    auto nm = [](int n) { return n == NC_CONFLICT ? "refused" : n == NC_ROLLBACK ? "Rollback" : n == NC_DELAY ? "Delay" : "Off"; };
+    auto nm = [](int n) { return n == NC_CONFLICT ? "refused" : n == NC_NATIVE ? "Online Battle + rollback" : n == NC_ROLLBACK ? "Rollback" : n == NC_DELAY ? "Delay" : "Off"; };
     if (restart) *restart = running != saved;
     return std::string("This session: ") + nm(running) + ".  Saved: " + nm(saved) + (running != saved ? ".  Restart to apply." : ".");
 }
@@ -205,6 +240,26 @@ static const KV kDefaults[] = {
     {"JSP_SNAPSHOT_THREADS", "registry"}, {"JSP_SNAPSHOT_QUIESCE", "2"}, {"JSP_SNAPSHOT_GATE", "poll"}, {"JSP_SNAPSHOT_GATE_JOBSERVER", "1"},
     // The commit gate gives up after 15 s of gate time between two session updates; the frozen-write check stays off.
     {"JSP_SNAPSHOT_SYNC_MS", "15000"}, {"JSP_SNAPSHOT_FROZEN_WRITES", "0"},
+    // Save cost (measured with JSP_ROLLBACK_BENCH, docs/ROLLBACK.md): the lwmutex census keeps its page-readability cache while the layout is unchanged;
+    // the per-tick layout walk is skipped while the toolkit's layout generation (patch 7920) is unchanged; a frozen sample whose job words block is
+    // refused before the full census, with no unfrozen wait; the thread audit's Toolhelp listing runs on its own thread (no 45 ms save every 2 s).
+    {"JSP_SNAPSHOT_LWM_CACHE", "keep"}, {"JSP_SNAPSHOT_LAYOUT_GEN", "1"}, {"JSP_SNAPSHOT_QUICK", "1"},
+    {"JSP_SNAPSHOT_AUDIT_ASYNC", "1"},
+    // 2026-11-21, replay-driven depth 2, same build: before the freeze the save waits UNFROZEN (up to 20 ms) for the job words to go idle, instead of
+    // freezing, finding them busy and retrying (each try ~1.75 ms and it halts the jobs it waits for); the frozen layout walk (~2 ms per freeze) runs every
+    // 30th gate while the layout generation is unchanged. Together: 13.1 -> 16.1 ticks/s, save 12.9 -> 8.3 ms, restore 16.4 -> 12.7 ms, 0 desyncs.
+    {"JSP_SNAPSHOT_QUICK_WAIT_US", "20000"}, {"JSP_SNAPSHOT_FROZEN_WALK_EVERY", "30"},
+    // Saves GekkoNet can never load again (frames below its final frame: gekko_final_frame) take no snapshot, only the checksum (jsp_net_glue.h). Host tests:
+    // the skip_final_* scenarios (loss, blackout, cheat at exactly 300, replays). Two copies over a 66 ms link: 58% / 8% of the saves skipped, 301 rollbacks.
+    {"JSP_ROLLBACK_SKIP_FINAL", "1"},
+    // A restore waits (at most JSP_SNAPSHOT_SITE_MS, 50 ms) until every helper thread is parked where it was at the target's save (jsp_snapshot_sync.h, SiteMoved). Soak
+    // 2026-11-21 (replay-driven depth 2, ~3,200 restores): a CRI loader worker was caught inside its file read at a restore; 0 desyncs, restore 10.7 ms avg (no cost).
+    {"JSP_SNAPSHOT_SITE", "1"},
+    // WORKAROUND TO REPLACE (crash, 2026-11-21): with the D3D12 backend's asynchronous fragment-program builds on (PSO_ASYNC, 4 workers), every depth-2 bench
+    // run on a cold pipeline cache ended in heap corruption (0xC0000374, detected in D3DCompile's free on vp_fp_async_worker) within 15-60 s; with PSO_ASYNC=0
+    // two runs of 14 windows (~200 s) did not. The writer is not found yet. Off in rollback until it is: a new program is built on the drawing thread (a hitch
+    // once per program; the pipeline cache on disk removes it the next time).
+    {"PSO_ASYNC", "0"},
 };
 enum class Boot { NotRequested, Go, Refused };
 
@@ -215,12 +270,15 @@ enum class Refusal : int {
     BothOn,           // JSP_ROLLBACK=1 and the game's own online (PS3_NET_ONLINE) both on: neither runs
     RepsnNoRole,      // JSP_ROLLBACK_VIA=repsn without JSP_ROLLBACK_ROLE=host or join
     BadListen,        // JSP_ROLLBACK_LISTEN is not a port from 1 to 65535
-    RoleKeys,         // direct IP: not exactly one of JSP_ROLLBACK_LISTEN / JSP_ROLLBACK_JOIN
+    RoleKeys,         // direct IP: both JSP_ROLLBACK_LISTEN and JSP_ROLLBACK_JOIN (neither is the lobby start, see resolve_env); a bench with a role key or a bad depth
     BadJoin,          // JSP_ROLLBACK_JOIN is not IP:PORT
     NotWired,         // a build without the re-psn transport
     RepsnNoIdentity,  // over re-psn: repsn.ini has no valid server= or name=
     RepsnLongName,    // over re-psn: the online name is longer than 16 characters
     NoSocket,         // the UDP socket could not be opened
+    // FIX (region): not a US 1.00 disc (jsp_native_fight_supported() == 0): the Online Battle + rollback takeover is off and the game's own netcode plays.
+    // jsp_net_native_fight.cpp turns native-room pairing off itself; jsp_net_game.cpp sets this code for the notice (note_off) when it reads that.
+    NativeUsOnly,
     Count
 };
 // Where the game's own online came from (jsp_online.cpp's start-up reading), for the BothOn text.
@@ -237,17 +295,18 @@ inline Notice notice_text(Refusal r, int src = SRC_REPSN_INI)
     case Refusal::BothOn:
         if (src == SRC_PSNR_FLAG) put("the --psnr launch option turns on the game's own online.", "Remove --psnr to use rollback. Only one online method can be on.");
         else if (src == SRC_ENVIRONMENT) put("PSNR_SERVER is set (the game's own online).", "Remove PSNR_SERVER to use rollback. Only one online method can be on.");
-        else if (src == SRC_REPSN_INI) put("repsn.ini has enabled=1 (the game's own online).", "Set enabled=0 in repsn.ini to use rollback (keep server= and name=).");
+        else if (src == SRC_REPSN_INI) put("repsn.ini has enabled=1 (the game's own online) and a rollback role key is set.", "Remove JSP_ROLLBACK_LISTEN/JOIN/VIA for Online Battle + rollback, or set enabled=0 in repsn.ini.");
         else put("the game's own online (PS3_NET_ONLINE) is on too.", "Turn the game's own online off to use rollback. Only one online method can be on.");
         break;
     case Refusal::RepsnNoRole: put("JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join.", "Add JSP_ROLLBACK_ROLE=host or join to play_settings.txt, or Port Settings > Online."); break;
     case Refusal::BadListen: put("JSP_ROLLBACK_LISTEN is not a port from 1 to 65535.", "Set JSP_ROLLBACK_LISTEN=36200 (any free port) in play_settings.txt, or Port Settings > Online."); break;
-    case Refusal::RoleKeys: put("set exactly one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).", "Keep only one of the two lines in play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::RoleKeys: put("set at most one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).","Keep only one of the two lines in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Set JSP_ROLLBACK_JOIN=IP:PORT of the host in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::NotWired: put("this build cannot reach re-psn rooms.", "Use a direct IP connection (JSP_ROLLBACK_LISTEN or JSP_ROLLBACK_JOIN)."); break;
     case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set server= and name= in repsn.ini (keep enabled=0 for rollback), or Port Settings > Online."); break;
     case Refusal::RepsnLongName: put("the online name in repsn.ini is longer than 16 characters.", "Use a shorter name= in repsn.ini."); break;
     case Refusal::NoSocket: put("the UDP port could not be opened.", "Close the program that uses it, or pick another JSP_ROLLBACK_LISTEN port."); break;
+    case Refusal::NativeUsOnly: put("the rollback takeover is US-disc only (BLUS31519).", "Online Battle uses the game's own netcode on this disc."); break;
     default: break;
     }
     return n;
@@ -263,15 +322,20 @@ inline bool notice_visible(bool have_notice, bool top_up, uint64_t up_since_ms, 
 
 // ONE place decides whether a rollback start happens, and it runs after the online files were applied (so PS3_NET_ONLINE is final):
 //   - JSP_ROLLBACK off: nothing.
-//   - the game's own online on (PS3_NET_ONLINE set to anything, the runtime's test) too: REFUSED, neither runs (one multiplayer method at a time):
+//   - the game's own online on (PS3_NET_ONLINE set to anything, the runtime's test) AND a role key: REFUSED, neither runs (one multiplayer method at a time):
 //     JSP_ROLLBACK is set to 0, PS3_NET_ONLINE removed, JSP_NET_REFUSED=1 for the page.
-//   - not exactly one valid role key (LISTEN port or JOIN IP:port): REFUSED the same way for Rollback only (the game's own online is not on, nothing else changes).
+//   - an invalid role (both LISTEN and JOIN, a bad port or address, VIA=repsn without ROLE): REFUSED the same way for Rollback only (the game's own online is
+//     not on, nothing else changes).
+//   - ENHANCEMENT (lobby): NO role key at all (no LISTEN, no JOIN, no VIA=repsn, no BENCH): Go with *lobby = true: rollback-capable (the defaults are set and the hooks
+//     are installed, exactly as for a match start) but no session yet; the in-game lobby opens one at runtime (jsp_net_lobby.h). Before the lobby this was the
+//     RoleKeys refusal. The game's own online may be on too (NC_NATIVE: its Online Battle room pairs the players, jsp_net_game.cpp native_poll).
 //   - else Go: the defaults above are set, `own` collects the names this call set.
 // Get: const char*(const char*); Set: void(const char* key, const char* value or nullptr = remove).
 template <class Get, class Set>
-Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* why, Refusal* code = nullptr)
+Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* why, Refusal* code = nullptr, bool* lobby = nullptr)
 {
     if (code) *code = Refusal::None;
+    if (lobby) *lobby = false;
     if (!flag_on(get(kKeyOn))) return Boot::NotRequested;
     auto refuse = [&](Refusal c, const char* w) {
         const bool conflict = c == Refusal::BothOn;
@@ -282,11 +346,18 @@ Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* w
         if (conflict) set("PS3_NET_ONLINE", nullptr);
         return Boot::Refused;
     };
-    if (get("PS3_NET_ONLINE") != nullptr)
-        return refuse(Refusal::BothOn, "JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs");
     const char* l = get(kKeyListen); const char* j = get(kKeyJoin);
     const bool hl = l && *l, hj = j && *j;
     const char* via = get(kKeyVia);
+    // ENHANCEMENT (native-room pairing, NC_NATIVE): the lobby start (no role key) runs NEXT to the game's own online: the game's Online Battle room pairs the
+    // players and rollback takes over the fight. A start-up role session (a role key) with the game's own online on is still refused: neither runs.
+    if (get("PS3_NET_ONLINE") != nullptr && role_keys(get))
+        return refuse(Refusal::BothOn, "JSP_ROLLBACK=1 with a role key (LISTEN, JOIN, VIA or BENCH) and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs");
+    if (const char* bn = get(kKeyBench); flag_on(bn)) {   // ENHANCEMENT (rollback bench): a local test, no role
+        if (hl || hj || (via && *via)) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK_BENCH is a local test without a peer: remove JSP_ROLLBACK_LISTEN, JOIN and VIA: rollback off");
+        if (!bench_depth(bn)) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK_BENCH must be 1 to 8 (the ticks rolled back on every tick): rollback off");
+        goto defaults;
+    }
     if (via && jps::ieq(via, "repsn")) {
         const char* role = get(kKeyRole);
         if (!role || !(jps::ieq(role, "host") || jps::ieq(role, "join"))) return refuse(Refusal::RepsnNoRole, "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off");
@@ -294,7 +365,8 @@ Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* w
         if (!kRepsnWired) return refuse(Refusal::NotWired, "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off");
         goto defaults;
     }
-    if (hl == hj) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off");
+    if (!hl && !hj) { if (lobby) *lobby = true; goto defaults; }   // ENHANCEMENT (lobby): no role key: rollback-capable, the session is opened at runtime
+    if (hl == hj) return refuse(Refusal::RoleKeys,"JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off");
     if (hl ? !valid_port(l) : !valid_join(j)) return refuse(hl ? Refusal::BadListen : Refusal::BadJoin, hl ? "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off" : "JSP_ROLLBACK_JOIN is not IP:PORT: rollback off");
 defaults:
     for (const KV& e : kDefaults) {

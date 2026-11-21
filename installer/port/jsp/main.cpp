@@ -88,6 +88,7 @@ void     ppu_fs_register(void);               /* cellFs over the real game direc
 void     lv2_init_syscalls(void);             /* the lv2 syscall table */
 void     cellGame_init_from_paramsfo(const char* sfo_path);   /* libs/system/cellGame.c */
 const char* cellGame_get_title_id(void);                      /* libs/system/cellGame.c: PARAM.SFO's TITLE_ID */
+extern "C" void jsp_discord_start(void);   /* jsp_discord.cpp (ENHANCEMENT, Discord Rich Presence) */
 void     jsp_mods_init(const char* vfs_root, const char* eboot, const char* title_id);   /* jsp_mods.cpp (ENHANCEMENT, the mods folder) */
 void     cellfs_add_path_mapping(const char* ps3_prefix, const char* host_path);   /* libs/filesystem/cellFs.c */
 int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
@@ -239,7 +240,9 @@ static DWORD WINAPI frame_clock(LPVOID)
 
     int turbo_left = 0, turbo_reset = 0;
     for (;;) {
-        if (jsp_rollback_clock_turbo(rsx_ok)) { turbo_left = 1; continue; }
+        { const int tr = jsp_rollback_clock_turbo(rsx_ok);
+          if (tr == 1) { turbo_left = 1; continue; }
+          if (tr == 2) { turbo_left = 1; goto outer_cadence; } }   /* the lockstep clock of a rollback match: present / drain / pump below */
         if (turbo_left) {   /* leaving a replay: restart both clocks from now, or the grid fires its missed ticks in a burst */
             turbo_left = 0;
             QueryPerformanceCounter(&qn);
@@ -623,6 +626,16 @@ int main(int argc, char** argv)
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
+    {   /* Windows 11 drops a process's timer resolution back to ~15.6 ms while its window is covered or minimized (power throttling), so every
+         * Sleep(1) of the game and of the rollback gate would take a whole timer tick. Opt out of that (the call fails harmlessly on older Windows). */
+        /* Looked up at run time: SetProcessInformation and its power-throttling types are Windows 8+/10+ declarations, missing
+         * from the headers at the toolkit's default _WIN32_WINNT (the CI syntax check). Values from processthreadsapi.h:
+         * ProcessPowerThrottling = 4, PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1, ..._IGNORE_TIMER_RESOLUTION = 0x4. */
+        struct { ULONG Version, ControlMask, StateMask; } pt = { 1u, 0x4u, 0u };   /* StateMask 0 = never throttle the timer resolution */
+        using SetProcInfo = BOOL (WINAPI*)(HANDLE, int, LPVOID, DWORD);
+        if (const auto set = (SetProcInfo)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetProcessInformation"))
+            set(GetCurrentProcess(), 4, &pt, (DWORD)sizeof pt);
+    }
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
     /* from jsp-vs-ex jstars/port/main.cpp: sound with a 16-block cellAudio ring (the game asks for 8) and CRI
      * keeping 12 blocks (64 ms) ahead instead of 5, which rides out the late ticks of its sound server (v0.15:
@@ -689,6 +702,7 @@ int main(int argc, char** argv)
      * virtual-file hook; with no list or JSP_MODS=0 it registers nothing. Before the PPU table and jsp_rollback_after_table: the rollback
      * build word folds in the mod set, and a gameplay set switches the game's own online off before the guest can start it. */
     jsp_mods_init(ppu_vfs_root, argv[1], cellGame_get_title_id());
+    jsp_discord_start();   /* ENHANCEMENT (Discord Rich Presence, jsp_discord.cpp): JSP_DISCORD=0 turns it off */
 
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */

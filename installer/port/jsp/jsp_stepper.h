@@ -73,6 +73,9 @@ public:
     void allow_runahead(bool on) { allow_ra_ = on; }
     bool replaying() const { return replay_; }           // the fast clock / no-present / effect gate is wanted now
     size_t queued() const { return queue_.size(); }
+    // ENHANCEMENT (rollback latency): the Commit just returned for `tick` took no snapshot (its state can never be loaded: Glue, final frame). It is no
+    // rollback target: a Load naming it fails loudly (StaleToken) instead of restoring a state nobody saved.
+    void forget(uint32_t tick) { saved_.erase(tick); }
 
     Op boundary(uint32_t done)
     {

@@ -185,13 +185,21 @@ def main():
         dj = S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_JOIN": "198.51.100.4:7000"})
         check("mode: Rollback direct join" in dj and "join address: set" in dj and "198.51.100.4" not in dj, "net mode: direct join, address only as set")
         check("mode: Rollback direct host" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: direct host")
-        check("mode: Rollback direct refused: not exactly one" in S({"JSP_ROLLBACK": "1"}), "net mode: no role key is refused")
+        check("mode: Rollback lobby: no session at start" in S({"JSP_ROLLBACK": "1"}), "net mode: no role key and no online is the lobby start")
+        check("mode: Rollback direct refused: not exactly one" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000", "JSP_ROLLBACK_JOIN": "198.51.100.4:7000"}),
+              "net mode: both role keys are refused")
         check("mode: Off" in S({"JSP_ROLLBACK": "0", "JSP_ROLLBACK_LISTEN": "7000"}), "net mode: JSP_ROLLBACK=0 is off")
         rep_on = {"repsn": {"enabled": "1", "server": "x.example:1", "name": "abc"}}
         check("mode: Delay (re-psn)" in S({}, rep_on), "net mode: Delay over re-psn")
         check("both enabled" in S({}, {**rep_on, "community": {"enabled": "1"}}), "net mode: re-psn and community both on")
         check("mode: Off (community server enabled: no client yet" in S({}, {"community": {"enabled": "1"}}), "net mode: a community server keeps the game offline")
-        check("mode: Rollback refused: PS3_NET_ONLINE is set too" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}, rep_on), "net mode: rollback and Delay both on are refused")
+        check("mode: Rollback refused: PS3_NET_ONLINE is set too" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000"}, rep_on), "net mode: rollback with a role key and Delay both on are refused")
+        # ENHANCEMENT (native-room pairing): the tester default, re-psn on + JSP_ROLLBACK=1 without a role key, is Online Battle + rollback
+        nat = S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_RELAY": "1"}, rep_on)
+        check("mode: Online Battle + rollback (the game's Friendly Match room pairs the players; rollback runs the fight), relay allowed: yes" in nat
+              and "pairing off" not in nat, "net mode: the tester default")
+        check("relay allowed: no, room pairing off (JSP_ROLLBACK_NATIVE=0)" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_NATIVE": "0"}, rep_on), "net mode: native pairing off is named")
+        check("mode: Rollback refused" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "repsn", "JSP_ROLLBACK_ROLE": "host"}, rep_on), "net mode: a re-psn role start with Delay on is refused")
         # jsp_online.cpp: PSNR_SERVER in the environment wins over the files and does not set PS3_NET_ONLINE; resolve_env refuses only on PS3_NET_ONLINE
         ps = S({"PSNR_SERVER": "h.example:36100"}, rep_on)
         check("mode: Off: PSNR_SERVER is set in play_settings.txt without PS3_NET_ONLINE" in ps, "net mode: PSNR_SERVER alone is no Delay (and the files are not used)")
@@ -455,6 +463,17 @@ def main():
         z12 = zipfile.ZipFile(zp12)
         check(not any(n.endswith(".bin") for n in z12.namelist()), "the cache files themselves are not in the zip")
         z12.close()
+
+        # ENHANCEMENT (testers): the rollback match reports in game\run\reports, newest REPORTS_KEPT only; other files there are not taken
+        app14 = t / "app14"
+        for i in range(sb.REPORTS_KEPT + 2):
+            p14 = app14 / f"game/run/reports/jsp-match-report-20261121-1200{i:02d}.txt"
+            w(p14, f"report {i}\n")
+            os.utime(p14, (1_700_000_000 + i, 1_700_000_000 + i))
+        w(app14 / "game/run/reports/other.txt", "not a report\n")
+        got14 = sorted(n for n in sb.collect(app14)[0] if n.startswith("game/run/reports/"))
+        check(len(got14) == sb.REPORTS_KEPT and "game/run/reports/jsp-match-report-20261121-120000.txt" not in got14
+              and f"game/run/reports/jsp-match-report-20261121-1200{sb.REPORTS_KEPT + 1:02d}.txt" in got14, f"match reports: the newest {sb.REPORTS_KEPT}: {got14}")
 
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")

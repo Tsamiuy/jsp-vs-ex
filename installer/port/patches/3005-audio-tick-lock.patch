@@ -1,0 +1,96 @@
+Patch 3005: cellAudio tick-locked mode for rollback matches.
+
+Symptom (two-copy rollback tests): the match desynced 30-35 s into every fight. The game's sound library advances on the audio
+device clock (one block of 256 samples per notify event, paced by WASAPI or the performance counter), and the game acts on it:
+a voice line that ends starts the next sound, and the pre-fight intro camera waits for one. Two PCs reached those points on ticks
+1-4 apart, so the per-tick checksums differed although every input was the same.
+
+Now: g_ps3_audio_lock_target (-1 = off, the default: paced as before) is the total number of blocks the mix thread may have mixed.
+The port's rollback layer sets it to 6.25 blocks per game tick (48000 / 256 / 30) and waits for ps3_audio_lock_idle (every block
+mixed, every notify queue drained and its receiver back in the receive) before the next tick runs, so the guest's audio progress is
+a function of the tick on every PC. Blocks mixed for rollback re-runs are not sent to the device (g_ps3_audio_lock_mute), and
+ps3_audio_lock_rewind moves every running port's read index back with a rollback (the guest memory itself is restored by the
+snapshot). When the lock ends the mix thread re-bases its clock and paces on the device again. While it has
+mixed every block it may, the mix thread waits on an event (ps3_audio_lock_set_target wakes it): it runs at TIME_CRITICAL, and a
+Sleep(0) spin there starved a new pool thread past the snapshot thread audit (THREAD-NOT-REGISTERED, two-copy test).
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 09c7590..56ad6a0 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -23,6 +23,7 @@
+ #include "ps3emu/log_first.h"
+ #include "audio_wasapi_recover.h"
+ #include "ps3emu/thread_name.h"
++#include "../../runtime/syscalls/sys_event.h"   /* patch 3005: g_sys_event_queues (ps3_audio_lock_idle) */
+ 
+ /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
+  * rather than including sys_event.h to avoid pulling PPU context/syscall
+@@ -728,6 +729,49 @@ static void audio_dump_mix(void)
+     if (wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, wf);
+ }
+ 
++/* J-Stars patch 3005 (rollback): tick-locked audio. While a rollback match runs, the game thread decides how many blocks the mix thread may have
++ * mixed in total (g_ps3_audio_lock_target, -1 = off: paced on the device as before), 6.25 per game tick at 30 ticks/s, and waits (ps3_audio_lock_idle) until
++ * every block is mixed and the game's audio thread took its notify event before the next tick runs. The guest's audio progress (and every sound that ends
++ * and starts another) is then a function of the tick on every PC, not of the PC's audio clock. Blocks of rollback re-runs are mixed with the output muted
++ * (g_ps3_audio_lock_mute). ps3_audio_lock_rewind moves the ports' read index back with a rollback (the guest memory is restored by the snapshot). */
++volatile long long g_ps3_audio_lock_target = -1;
++volatile long long g_ps3_audio_lock_done = 0;
++volatile int g_ps3_audio_lock_mute = 0;
++#ifdef _WIN32
++static HANDLE s_lock_wake = NULL;   /* the mix thread sleeps on it while it has mixed every block it may (never a spin: it runs at TIME_CRITICAL) */
++#endif
++/* Sets the total the mix thread may have mixed and wakes it. */
++void ps3_audio_lock_set_target(long long blocks)
++{
++    g_ps3_audio_lock_target = blocks;
++#ifdef _WIN32
++    if (s_lock_wake) SetEvent(s_lock_wake);
++#endif
++}
++/* 1 when the lock's blocks are all mixed and every notify queue is drained with its receiver back in the receive. */
++int ps3_audio_lock_idle(void)
++{
++    if (g_ps3_audio_lock_target < 0) return 1;
++    if (g_ps3_audio_lock_done < g_ps3_audio_lock_target) return 0;
++    for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
++        if (!s_notify_queues[i].in_use) continue;
++        const uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
++        if (!qid || qid > SYS_EVENT_QUEUE_MAX) continue;
++        const sys_event_queue_info* q = &g_sys_event_queues[qid - 1];
++        if (q->active && (q->count > 0 || q->waiters < 1)) return 0;
++    }
++    return 1;
++}
++/* Called only while the mix thread is idle (done == target): the read index of every running port and the counters move to `blocks`. */
++void ps3_audio_lock_rewind(long long blocks)
++{
++    const long long d = g_ps3_audio_lock_done - blocks;
++    mutex_lock(&s_audio_mutex);
++    for (int p = 0; p < CELL_AUDIO_PORT_MAX; p++) if (s_ports[p].in_use) s_ports[p].read_index -= (u64)d;
++    mutex_unlock(&s_audio_mutex);
++    g_ps3_audio_lock_done = blocks; g_ps3_audio_lock_target = blocks;
++}
++
+ #ifdef _WIN32
+ static unsigned long long g_audio_underruns;
+ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -756,7 +800,17 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+      * With no device, pace on the performance counter instead. */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
++    if (!s_lock_wake) s_lock_wake = CreateEventW(NULL, FALSE, FALSE, NULL);   /* patch 3005 */
+     while (s_mix_thread_running) {
++        if (g_ps3_audio_lock_target >= 0) {   /* patch 3005: tick-locked (see ps3_audio_lock_idle) */
++            if (g_ps3_audio_lock_done >= g_ps3_audio_lock_target) { WaitForSingleObject(s_lock_wake, 2); continue; }
++            audio_mix_one_block();
++            if (!g_ps3_audio_lock_mute) { const int rm = audio_backend_room(); if (rm < 0 || rm >= CELL_AUDIO_BLOCK_SAMPLES) audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES); }
++            g_ps3_audio_lock_done++;
++            audio_notify_event_queues();
++            QueryPerformanceCounter(&q0); blocks = 0;   /* back on the clock from here when the lock ends */
++            continue;
++        }
+         const int room = audio_backend_room();
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+ #if AUDIO_BACKEND_WASAPI

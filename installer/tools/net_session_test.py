@@ -89,7 +89,8 @@ def logs(tmp):
 
 
 # The kinds whose checks compare the two tick logs: each needs both logs with ticks in them, or a hash comparison over nothing would pass.
-LOG_KINDS = ("agree", "agree_rb", "agree_paced", "busy_ok", "cheat", "leave")
+LOG_KINDS = ("agree", "agree_rb", "agree_paced", "busy_ok", "cheat", "cheat_limited", "leave", "replay")
+REPLAY_EXE = None   # --replay-exe: net_replay_test (the "replay" kind plays both peers' recordings back with it)
 
 
 def agree(tmp, upto):
@@ -137,7 +138,42 @@ SCENARIOS = {
     "refuse_pred_ge_depth": (["--local", "2", "--pred", "10", "--depth", "10"], ["--local", "2", "--max-ms", "4000"], "refuse"),
     # the stepper's ring is shallower than GekkoNet's window: a real eviction -> the stepper refuses the load, the session ends, the peer learns at once
     "ring_too_shallow": (["--local", "2", "--timeout-ms", "30000", "--max-ms", "12000"] + ADV, ["--local", "2", "--stepper-depth", "3", "--timeout-ms", "30000"] + ADV, "shallow"),
+    # ENHANCEMENT (replays): both peers record a lossy match ({tmp} = the scenario's folder); each recording must play back with every replayed tick's hash equal to
+    # the live run's, a state flipped at tick 300 must be reported at exactly 300, and broken files must be refused
+    # ENHANCEMENT (rollback latency A/B): the same lossy matches with GekkoNet's limited (sparse) saving: equal hashes, rollbacks, a planted cheat found by the health checks
+    "limited_adv_20pct_loss": (["--local", "2", "--limited", "1"] + ADV, ["--local", "2", "--limited", "1"] + ADV, "agree_rb"),
+    "limited_split_1_3": (["--local", "1", "--limited", "1"] + ADV, ["--local", "3", "--limited", "1"] + ADV, "agree_rb"),
+    "limited_blackout_resume": (["--local", "2", "--limited", "1", "--blackout", "1000,2500", "--timeout-ms", "8000"], ["--local", "2", "--limited", "1", "--blackout", "1000,2500", "--timeout-ms", "8000"], "agree_rb"),
+    "limited_cheat": (["--local", "2", "--limited", "1"], ["--local", "2", "--limited", "1", "--cheat", "300"], "cheat_limited"),
+    "limited_record_replay": (["--local", "1", "--limited", "1", "--record", "{tmp}/h.gkrp"] + ADV, ["--local", "1", "--limited", "1", "--record", "{tmp}/c.gkrp"] + ADV, "replay"),
+    "record_replay": (["--local", "1", "--record", "{tmp}/h.gkrp"] + ADV, ["--local", "1", "--record", "{tmp}/c.gkrp"] + ADV, "replay"),
+    # ENHANCEMENT (rollback latency): saves of frames below GekkoNet's final frame take no snapshot (--skip-final 1; the fake ring ERASES those ticks, so a Load of
+    # one ends the run). Same results as the full-saving runs: equal hashes under loss and blackouts, the cheat found at exactly 300, replays equal; and some saves skipped
+    "skip_final_adv_20pct_loss": (["--local", "2", "--skip-final", "1"] + ADV, ["--local", "2", "--skip-final", "1"] + ADV, "agree_rb"),
+    "skip_final_delay3": (["--local", "2", "--skip-final", "1", "--delays", "3,3"] + ADV, ["--local", "2", "--skip-final", "1", "--delays", "3,3"] + ADV, "agree_rb"),
+    "skip_final_split_1_3": (["--local", "1", "--skip-final", "1"] + ADV, ["--local", "3", "--skip-final", "1"] + ADV, "agree_rb"),
+    "skip_final_blackout_resume": (["--local", "2", "--skip-final", "1", "--blackout", "1000,2500", "--timeout-ms", "8000"], ["--local", "2", "--skip-final", "1", "--blackout", "1000,2500", "--timeout-ms", "8000"], "agree_rb"),
+    "skip_final_cheat": (["--local", "2", "--skip-final", "1"], ["--local", "2", "--skip-final", "1", "--cheat", "300"], "cheat"),
+    "skip_final_record_replay": (["--local", "1", "--skip-final", "1", "--record", "{tmp}/h.gkrp"] + ADV, ["--local", "1", "--skip-final", "1", "--record", "{tmp}/c.gkrp"] + ADV, "replay"),
+    # ENHANCEMENT (lobby): three matches in a row in ONE process per peer, on the same NetSession object, socket and message channel: start, stop, start, stop,
+    # start (NetSession::stop and the GekkoNet adapter singleton rebinding). Every round must agree like impaired_2x2 (equal hashes, rollbacks, no desync).
+    "restart_3_rounds": (["--local", "2", "--rounds", "3"] + IMP, ["--local", "2", "--rounds", "3"] + IMP, "agree_rounds"),
 }
+ROUNDS_EXPECTED = {"restart_3_rounds": 3}
+
+
+def rounds_check(name, ho, co, T):
+    """agree_rounds: every round's SUMMARY of both peers is there, in order, and clean (the last round also had the full agree_rb check on its tick logs)."""
+    f, n = [], ROUNDS_EXPECTED[name]
+    for who, out in (("host", ho), ("client", co)):
+        lines = [l for l in out.splitlines() if l.startswith("SUMMARY")]
+        got = [num(l, "round") for l in lines]
+        if got != list(range(1, n + 1)): f.append(f"{who}: rounds {got}, expected 1..{n}")
+        for l in lines:
+            if "failed=-" not in l or num(l, "desync", 0) != -1 or num(l, "ref_bad", 1) != 0: f.append(f"{who}: a round did not run clean: " + l[:200])
+            if num(l, "maxtick", 0) < T: f.append(f"{who}: a round stopped early: " + l[:200])
+            f += once_per_handle(l, who, 2)
+    return f
 
 
 def once_per_handle(s, who, remotes, kinds=("connected",)):
@@ -199,6 +235,13 @@ def check(kind, hs, cs, hr, cr, tmp, T):
             if d != 300: f.append(f"{n}: first desync tick {d}, expected exactly 300")
         n, bad = agree(tmp, 295)
         if bad: f.append(f"hashes differ before the cheat: {bad}")
+    elif kind == "cheat_limited":
+        # limited saving: desync detection runs on GekkoNet's health frames (every 16 ticks), so the cheat at tick 300 is reported at the first health tick at or after it
+        for n, s in (("host", hs), ("client", cs)):
+            d = num(s, "desync", -1)
+            if not (300 <= d <= 300 + 17): f.append(f"{n}: first desync tick {d}, expected 300..317 (the first health frame after the cheat)")
+        n, bad = agree(tmp, 295)
+        if bad: f.append(f"hashes differ before the cheat: {bad}")
     elif kind == "leave":
         f += once_per_handle(hs, "host", 2, ("connected", "disconnected"))
         if "disconnected" not in hs: f.append("host saw no disconnect: " + hs[-160:])
@@ -213,6 +256,28 @@ def check(kind, hs, cs, hr, cr, tmp, T):
         if hr != 6 or "equal" not in hs and "ring depth" not in hs: f.append(f"host should refuse to start (exit 6): exit={hr} {hs[:200]}")
     elif kind == "refuse_client":
         if cr != 6 or "equal" not in cs: f.append(f"client should refuse to start (exit 6): exit={cr} {cs[:200]}")
+    elif kind == "replay":
+        f += check("agree_rb", hs, cs, hr, cr, tmp, T)
+        if not REPLAY_EXE: return f + ["no --replay-exe given"]
+        live_h, live_c = logs(tmp)
+        for w, live in (("h", live_h), ("c", live_c)):
+            rec, out = tmp / f"{w}.gkrp", tmp / f"{w}.replay.log"
+            if not rec.exists(): f.append(f"{w}: no recording written"); continue
+            p = subprocess.run([REPLAY_EXE, "--mode", "replay", "--replay", str(rec), "--out", str(out)], capture_output=True, text=True, timeout=60)
+            if p.returncode: f.append(f"{w}: replay exit {p.returncode}: {p.stdout[-300:]}"); continue
+            t = out.read_text().split()
+            rp = {int(t[i]): t[i + 1] for i in range(0, len(t), 2)}
+            if len(rp) < T - 40: f.append(f"{w}: the replay ran {len(rp)} ticks, expected at least {T - 40}")
+            # The last ticks are not compared: the recording holds inputs confirmed by the final network poll, which the live game ended before rolling back
+            # to (its log keeps the predicted value). Every tick the live run settled must match.
+            settled = max(rp) - 10 if rp else 0
+            bad = [k for k in rp if k <= settled and live.get(k) != rp[k]]
+            if bad: f.append(f"{w}: replayed hashes differ from the live run at ticks {bad[:3]}")
+        for extra in (["--mode", "replay", "--cheat", "300"], ["--mode", "bad-replay"]):
+            p = subprocess.run([REPLAY_EXE, "--replay", str(tmp / "h.gkrp")] + extra, capture_output=True, text=True, timeout=60)
+            if p.returncode: f.append(f"{' '.join(extra)}: exit {p.returncode}: {p.stdout[-300:]}")
+    elif kind == "agree_rounds":   # the last round's logs and SUMMARY as agree_rb; every round's SUMMARY in rounds_check (main)
+        f += check("agree_rb", hs, cs, hr, cr, tmp, T)
     elif kind == "shallow":
         if cr != 4 or "rollback-deeper-than-the-ring" not in cs: f.append(f"client should fail on the ring depth: exit={cr} {cs[:220]}")
         if "disconnected" not in hs: f.append("host was not told at once (30 s timeout, no disconnect event): " + hs[-200:])
@@ -224,7 +289,10 @@ def main():
     ap.add_argument("--exe", required=True, help="the net_session_test binary (net_session_test.sh builds it and passes it here)")
     ap.add_argument("--only"); ap.add_argument("--ticks", type=int, default=600)
     ap.add_argument("--deadline", type=float, default=DEADLINE_S, help="seconds per scenario, both processes together (default %(default)s)")
+    ap.add_argument("--replay-exe", help="the net_replay_test binary (the record_replay scenario)")
     a = ap.parse_args()
+    global REPLAY_EXE
+    REPLAY_EXE = a.replay_exe
     fails = 0
     for name, (ha, ca, kind) in SCENARIOS.items():
         if a.only and a.only != name: continue
@@ -232,9 +300,14 @@ def main():
             tmp = pathlib.Path(td)
             ex = ["--ticks", str(a.ticks), "--seed", "5"]
             t0 = time.monotonic()
-            hr, ho, cr, co, problems = run(a.exe, ha + ex, ca + ex, tmp, a.deadline)
+            sub = lambda args: [x.replace("{tmp}", str(tmp)) for x in args]
+            hr, ho, cr, co, problems = run(a.exe, sub(ha) + ex, sub(ca) + ex, tmp, a.deadline)
             hs, cs = summary(ho), summary(co)
             fl = problems or check(kind, hs, cs, hr, cr, tmp, a.ticks)
+            if not problems and kind == "agree_rounds": fl += rounds_check(name, ho, co, a.ticks)
+            if not fl and name.startswith("skip_final"):   # the switch must have skipped saves on both peers, or the scenario tested nothing
+                for n_, s_ in (("host", hs), ("client", cs)):
+                    if num(s_, "skipped", 0) <= 0: fl.append(f"{n_}: no save was skipped (skipped={num(s_, 'skipped', -1)})")
             print(f"{'PASS' if not fl else 'FAIL'} {name} ({time.monotonic() - t0:.1f} s)", flush=True)
             for s in (hs, cs): print("   ", s[:330])
             for x in fl: print("   !", x)

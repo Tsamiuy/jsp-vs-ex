@@ -27,21 +27,53 @@ namespace jspnet {
 constexpr uint32_t kRoomFlagRollback = 0x40000000u;
 
 // The record in the external blob and in member data: "rb=1;ver=<8 hex digits of the build id>". Exactly this shape; anything else does not match.
-inline std::string make_record(uint32_t build) { char b[40]; std::snprintf(b, sizeof b, "rb=1;ver=%08x", (unsigned)build); return b; }
-inline bool record_matches(const std::string& blob, uint32_t build) { return blob == make_record(build); }
-// The build word of a well-formed record (for the "another version was seen" hint); false for anything else.
-inline bool record_build(const std::string& blob, uint32_t* build)
+// ENHANCEMENT (native-room pairing, jsp_net_game.cpp native_poll): an optional pair key, the id of the game's own Online Battle room (Matching2) both players are in,
+// appended as ";pair=<16 hex digits>". A record with a pair key matches only the same build AND the same key: a joiner takes only the rollback room of ITS native room,
+// a host refuses a member from another native room. pair 0 = the plain record (the start-up and lobby paths, unchanged).
+inline std::string make_record(uint32_t build, uint64_t pair = 0)
 {
-    if (blob.size() != 17 || blob.compare(0, 9, "rb=1;ver=") != 0) return false;
-    uint32_t v = 0;
-    for (size_t i = 9; i < 17; i++) {
-        const char ch = blob[i];
+    char b[64];
+    if (pair) std::snprintf(b, sizeof b, "rb=1;ver=%08x;pair=%016llx", (unsigned)build, (unsigned long long)pair);
+    else std::snprintf(b, sizeof b, "rb=1;ver=%08x", (unsigned)build);
+    return b;
+}
+inline bool record_matches(const std::string& blob, uint32_t build, uint64_t pair = 0) { return blob == make_record(build, pair); }
+namespace detail {
+inline bool lower_hex(const std::string& s, size_t from, size_t n, uint64_t* out)
+{
+    uint64_t v = 0;
+    for (size_t i = from; i < from + n; i++) {
+        const char ch = s[i];
         const int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
         if (d < 0) return false;
-        v = v << 4 | (uint32_t)d;
+        v = v << 4 | (uint64_t)d;
     }
-    *build = v; return true;
+    *out = v; return true;
 }
+}  // namespace detail
+// The build word (and the pair key, 0 for a plain record) of a well-formed record (for the "another version was seen" hint); false for anything else.
+inline bool record_build(const std::string& blob, uint32_t* build, uint64_t* pair = nullptr)
+{
+    const bool plain = blob.size() == 17, paired = blob.size() == 39 && blob.compare(17, 6, ";pair=") == 0;
+    if ((!plain && !paired) || blob.compare(0, 9, "rb=1;ver=") != 0) return false;
+    uint64_t v = 0, k = 0;
+    if (!detail::lower_hex(blob, 9, 8, &v) || (paired && (!detail::lower_hex(blob, 23, 16, &k) || !k))) return false;
+    *build = (uint32_t)v; if (pair) *pair = k;
+    return true;
+}
+// ENHANCEMENT (native-room pairing): the rollback link opens its OWN re-psn client next to the game's own one (np_psnr, the Online Battle menus) on the same server.
+// The server refuses a second client with the same online name (PSNR_E_NAME_TAKEN), so the rollback client takes a derived name of at most 16 characters: the name
+// plus "-rb" when it fits, else its first 11 characters, "-" and 4 hex digits of the whole name's FNV-1a (two long names that share 11 characters still differ).
+inline std::string rollback_name(const std::string& name)
+{
+    if (name.size() + 3 <= 16) return name + "-rb";
+    uint32_t h = 2166136261u; for (char ch : name) { h ^= (uint8_t)ch; h *= 16777619u; }
+    char t[8]; std::snprintf(t, sizeof t, "-%04x", (unsigned)(h & 0xFFFFu));
+    return name.substr(0, 11) + t;
+}
+// ... and a communication id of its own (the title's id with its last two characters "RB"), so the game's own room search does not list the rollback rooms.
+// ASSUMPTION: re-psn keeps rooms per communication id, like PSN. jsp_net_game.cpp: JSP_ROLLBACK_NATIVE_COMM=same keeps the title's id, any other value replaces it.
+inline std::string rollback_comm_id(const std::string& comm) { return comm.size() < 3 ? comm : comm.substr(0, comm.size() - 2) + "RB"; }
 
 // The rendezvous window, the same for both roles, counted by each side from its own first poll (after its startup evidence). 120 s: the two PCs
 // reach that point at very different times (a cold pipeline cache adds tens of seconds; the startup-evidence wait alone may take up to 240 s) and
@@ -72,11 +104,12 @@ struct PsnrRoom { uint64_t id = 0; uint32_t flags = 0; std::string external; uin
 struct PsnrMember { uint32_t user = 0; uint16_t member_id = 0; Endpoint ep; std::string data; };
 
 // ROOM_LIST entries a rollback client may join: the flag bit, the same build record, and not full. Sorted by room id (the first is the oldest).
-inline std::vector<PsnrRoom> filter_rooms(const std::vector<PsnrRoom>& all, uint32_t build)
+// pair != 0 (native-room pairing): only the rooms whose record carries that pair key (another native room's rollback room is never joined).
+inline std::vector<PsnrRoom> filter_rooms(const std::vector<PsnrRoom>& all, uint32_t build, uint64_t pair = 0)
 {
     std::vector<PsnrRoom> r;
     for (const PsnrRoom& x : all)
-        if ((x.flags & kRoomFlagRollback) && record_matches(x.external, build) && x.members < x.max_members) r.push_back(x);
+        if ((x.flags & kRoomFlagRollback) && record_matches(x.external, build, pair) && x.members < x.max_members) r.push_back(x);
     std::sort(r.begin(), r.end(), [](const PsnrRoom& a, const PsnrRoom& b) { return a.id < b.id; });
     return r;
 }
@@ -138,9 +171,12 @@ public:
         bool host = true;
         uint64_t join_room = 0;         // client: 0 = the oldest matching room, else that room (it must still match)
         uint32_t build = 0;
+        uint64_t pair = 0;              // ENHANCEMENT (native-room pairing): the game's own room id both players are in (0 = none: the plain record); see make_record
         bool allow_relay = false;       // the player's choice
         uint8_t local_count = 1;
         int punch_ms = 4000;            // direct/punch window before relay is considered
+        bool force_relay = false;       // TEST ONLY (JSP_ROLLBACK_FORCE_RELAY=1 with debug allowed): skip the direct try and use the relay at once (when allowed and offered),
+                                        // so the relay path can be tested from one PC, where the direct path always works
         int give_up_ms = kRendezvousWindowMs;   // finding the other player (connect, room list / room, until its endpoint is known); the punch has its own windows
         int lookup_every_ms = kLookupEveryMs;   // joiner: the pause between two room lists without a matching room
         int progress_every_ms = kProgressEveryMs;
@@ -166,20 +202,20 @@ public:
         if (state_ < kPunch) progress(t);   // after the connect step: a game that is already connected never reports "connecting"
         if (state_ == kConnect) return 0;
         if (state_ == kLookup) {
-            if (c_.host) { t_.create_room(kRoomFlagRollback, make_record(c_.build), make_record(c_.build)); state_ = kRoom; }   // listed until the host leaves (give-up, failure or the end)
+            if (c_.host) { t_.create_room(kRoomFlagRollback, make_record(c_.build, c_.pair), make_record(c_.build, c_.pair)); state_ = kRoom; }   // listed until the host leaves (give-up, failure or the end)
             else {
                 if (next_lookup_ && t < next_lookup_) return 0;   // the last list had no room for us: wait before asking again
                 std::vector<PsnrRoom> all;
                 if (!t_.search(all)) return 0;                     // one request in flight; the answer comes on a later poll
                 ++lookups;
                 note_other_builds(all);
-                const std::vector<PsnrRoom> ok = filter_rooms(all, c_.build);
+                const std::vector<PsnrRoom> ok = filter_rooms(all, c_.build, c_.pair);
                 uint64_t pick = 0;
                 if (c_.join_room) { for (const auto& r : ok) if (r.id == c_.join_room) pick = r.id;
                     if (!pick) return fail("re-psn: that room is gone, full, or from another build"); }
                 else if (!ok.empty()) pick = ok.front().id;
                 else { next_lookup_ = t + (uint64_t)c_.lookup_every_ms; return 0; }   // no host yet (it may start later): keep looking until the window ends
-                t_.join_room(pick, make_record(c_.build)); room_ = pick; state_ = kRoom;
+                t_.join_room(pick, make_record(c_.build, c_.pair)); room_ = pick; state_ = kRoom;
             }
         }
         PsnrEvent ev;
@@ -197,7 +233,7 @@ public:
             // every OTHER member's record is checked; a mismatching member is refused (never played with). The host waits for the first match, the client looks at the owner.
             for (const PsnrMember& m : members_) {
                 if (m.user == t_.self_user()) continue;
-                if (!record_matches(m.data, c_.build)) {
+                if (!record_matches(m.data, c_.build, c_.pair)) {
                     if (!c_.host) return fail("re-psn: the host's build or settings record does not match (refused)");
                     if (!rejected_.count(m.user)) { rejected_.insert(m.user); ++rejected_members; t_.kick(m.user); }   // never played with, and removed from the room so it cannot hold the slot
                     continue;
@@ -209,6 +245,7 @@ public:
             if (peer_user_) {
                 local_index_ = player_index(members_, t_.self_user());
                 Path_(Path::Punch);
+                if (c_.force_relay && c_.allow_relay && t_.relay_offered()) { relay_ = true; Path_(Path::Relay); }   // TEST ONLY: see Config::force_relay
                 start_inner(); punch_start_ = t; last_punch_ = 0; state_ = kPunch;
             }
         }

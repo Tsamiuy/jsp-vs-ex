@@ -74,6 +74,12 @@ struct RingStats {
 
 enum class RingMode : uint8_t { Copy2 = 0, PagePtr = 1 };
 
+// ENHANCEMENT (rollback latency, Copy2 only): one page's copies of a commit or a rollback, d1 <- s1 then d2 <- s2 (d2 null: none). Every op of one batch writes
+// pages no other op of the batch reads or writes (distinct slots; pool pages of distinct positions), so a batch may run in any order or in parallel and leaves
+// the same bytes as the serial loop. The ring lists the ops, then hands the whole batch to the copier (set_copier; none = the serial loop, as before).
+struct PageCopy { uint8_t* d1; const uint8_t* s1; uint8_t* d2; const uint8_t* s2; };
+using CopyFn = void (*)(void* ctx, const PageCopy* ops, size_t n);
+
 class DeltaRing {
 public:
     // ranges: the saved set (page-aligned); depth: the furthest rollback in ticks; pool_pages: undo capacity of all entries together;
@@ -93,6 +99,7 @@ public:
         stamp_.assign(map_.pages(), 0);
         ent_.assign(cap_, Entry());
         blob_.assign(cap_ * (blob_n_ ? blob_n_ : 1), 0);
+        ops_.clear(); ops_.reserve(np + pool_n_ + kGrowPages);   // a commit lists at most pool_n_ ops, a rollback at most one per page: never reallocated while frozen
         gen_ = 0; count_ = 0; first_ = 0; head_ = 0; used_ = 0; st_ = RingStats(); valid_ = false;
     }
     // The saved set grew by `add` (memory that was demand-committed after the baseline: it was zero-filled and unmapped at every tick before now). Copy2 only. The new
@@ -111,13 +118,20 @@ public:
         stamp_.resize(np, 0);
         return true;
     }
+    // ENHANCEMENT (rollback latency): the copies of a Copy2 commit / rollback go to fn as one batch (it must run every op before it returns). nullptr = the serial loop.
+    void set_copier(CopyFn fn, void* ctx) { copier_ = fn; copier_ctx_ = ctx; }
     const PageMap& map() const { return map_; }
     RingMode mode() const { return mode_; }
     size_t bytes() const { return arena_.size(); }
     bool valid() const { return valid_; }
+    // FIX (same-link rematch): the session ended. The next session's first commit takes a full baseline again (its ticks restart at 1, and commit()
+    // refuses t <= newest(): a second session in one process failed its first commit). The storage is kept; baseline() / reset() refill it.
+    void invalidate() { valid_ = false; }
     uint32_t newest() const { return ent(count_ - 1).tick; }
     uint32_t oldest() const { return ent(0).tick; }
     uint32_t depth_now() const { return valid_ ? newest() - oldest() : 0; }
+    // True when tick t has an entry (a rollback target). Every tick in oldest()..newest() when every tick was committed.
+    bool has(uint32_t t) const { return index_of(t) != kNone; }
     size_t pool_used() const { return used_; }
     const RingStats& stats() const { return st_; }
 
@@ -131,12 +145,14 @@ public:
         valid_ = true;
     }
 
-    // Commit tick t = newest()+1. slots = the pages written since the previous commit (write watch output; duplicates and kNoSlot are
+    // Commit tick t > newest(): usually newest()+1. ENHANCEMENT (rollback latency): a later tick when the ticks in between took no snapshot (states the
+    // rollback session can never load again, jsp_net_glue.h): the entry then holds the pages written since the previous ENTRY, with their pre-images at that
+    // entry, and the skipped ticks are no rollback target. slots = the pages written since the previous commit (write watch output; duplicates and kNoSlot are
     // skipped). Returns false when this tick alone needs more than the whole pool: the shadow is still brought up to date, the ring is
     // reset to {t} (depth 0) and stats().overflows counts it.
     bool commit(uint32_t t, const uint8_t* mem, const uint32_t* slots, size_t n, const void* blob)
     {
-        if (!valid_ || t != newest() + 1) return false;
+        if (!valid_ || t <= newest()) return false;
         const uint32_t g = next_gen();
         uint32_t d = 0;
         for (size_t i = 0; i < n; i++) if (slots[i] < map_.pages() && stamp_[slots[i]] != g) { stamp_[slots[i]] = g; d++; }
@@ -159,6 +175,8 @@ public:
         const size_t start = head_;
         const uint32_t g2 = next_gen();
         size_t k = start;
+        const bool batch = copier_ && mode_ == RingMode::Copy2;
+        if (batch) ops_.clear();
         for (size_t i = 0; i < n; i++) {
             const uint32_t s = slots[i];
             if (s >= map_.pages() || stamp_[s] == g2) continue;
@@ -167,6 +185,9 @@ public:
                 const uint32_t nw = free_.back(); free_.pop_back();
                 std::memcpy(page(nw), mem + map_.addr_of(s), kPage);     // state at t
                 pre_[k] = sp_[s]; sp_[s] = nw;                           // the old shadow page is the pre-image (state at t-1)
+            } else if (batch) {
+                uint8_t* sh = page(sp_[s]);
+                ops_.push_back({page(pre_[k]), sh, sh, mem + map_.addr_of(s)});   // the same two copies, in the same order, run by the copier
             } else {
                 uint8_t* sh = page(sp_[s]);
                 std::memcpy(page(pre_[k]), sh, kPage);                   // pre-image (state at t-1)
@@ -175,6 +196,7 @@ public:
             pool_slot_[k] = s;
             k = k + 1 == pool_n_ ? 0 : k + 1;
         }
+        if (batch && !ops_.empty()) copier_(copier_ctx_, ops_.data(), ops_.size());
         head_ = k; used_ += d;
         push(t, start, d, blob);
         return true;
@@ -185,10 +207,13 @@ public:
     // so the next commit is to+1. blob_out (blob_bytes) receives tick `to`'s blob. False (nothing touched) when `to` is outside the window.
     bool rollback(uint32_t to, uint8_t* mem, const uint32_t* pending, size_t np, void* blob_out)
     {
-        if (!valid_ || to < oldest() || to > newest()) { st_.refused++; return false; }
+        const size_t at = index_of(to);
+        if (at == kNone) { st_.refused++; return false; }   // outside the window, or a tick that took no snapshot
         const uint32_t g = next_gen();
         uint32_t w = 0;
-        const size_t keep = (size_t)(to - oldest()) + 1;           // entries 0..keep-1 stay
+        const size_t keep = at + 1;                                 // entries 0..keep-1 stay
+        const bool batch = copier_ && mode_ == RingMode::Copy2;    // every op below writes its own slot's mem and shadow page and reads a pool page or that shadow page
+        if (batch) ops_.clear();
         for (size_t e = keep; e < count_; e++) {                    // oldest dropped entry first: its pre-image is the state at `to`
             const Entry& x = ent(e);
             for (uint32_t i = 0; i < x.n; i++) {
@@ -197,6 +222,7 @@ public:
                 if (stamp_[s] == g) { if (mode_ == RingMode::PagePtr) free_.push_back(pre_[k]); continue; }   // a later pre-image of a page already restored
                 stamp_[s] = g; w++;
                 const uint8_t* old = page(pre_[k]);
+                if (batch) { ops_.push_back({mem + map_.addr_of(s), old, page(sp_[s]), old}); continue; }
                 std::memcpy(mem + map_.addr_of(s), old, kPage);
                 if (mode_ == RingMode::PagePtr) { free_.push_back(sp_[s]); sp_[s] = pre_[k]; }   // the pre-image page is the shadow again
                 else std::memcpy(page(sp_[s]), old, kPage);
@@ -206,8 +232,10 @@ public:
             const uint32_t s = pending[i];
             if (s >= map_.pages() || stamp_[s] == g) continue;
             stamp_[s] = g; w++;
+            if (batch) { ops_.push_back({mem + map_.addr_of(s), page(sp_[s]), nullptr, nullptr}); continue; }
             std::memcpy(mem + map_.addr_of(s), page(sp_[s]), kPage);
         }
+        if (batch && !ops_.empty()) copier_(copier_ctx_, ops_.data(), ops_.size());
         if (keep < count_) { head_ = ent(keep).start; for (size_t e = keep; e < count_; e++) used_ -= ent(e).n; }
         count_ = keep;
         if (blob_out && blob_n_) std::memcpy(blob_out, blob_ptr(keep - 1), blob_n_);
@@ -262,6 +290,16 @@ public:
     size_t free_pages() const { return mode_ == RingMode::PagePtr ? free_.size() : pool_n_ - used_; }
 
 private:
+    static constexpr size_t kNone = ~(size_t)0;
+    // Entry index of tick t (entries are in ascending tick order): the direct position when no tick was skipped, else a search (at most cap_ entries).
+    size_t index_of(uint32_t t) const
+    {
+        if (!valid_ || !count_ || t < oldest() || t > newest()) return kNone;
+        const size_t d = (size_t)(t - oldest());
+        if (d < count_ && ent(d).tick == t) return d;
+        for (size_t e = 0; e < count_; e++) if (ent(e).tick == t) return e;
+        return kNone;
+    }
     struct Entry { uint32_t tick = 0; size_t start = 0; uint32_t n = 0; };
     const Entry& ent(size_t i) const { return ent_[(first_ + i) % cap_]; }
     Entry& ent(size_t i) { return ent_[(first_ + i) % cap_]; }
@@ -304,6 +342,8 @@ private:
     std::vector<uint32_t> sp_, pre_, free_;     // sp_[slot]: the shadow page; pre_[k]: pool position k's pre-image page; free_: PagePtr free pages
     std::vector<uint32_t> pool_slot_, stamp_;
     std::vector<Entry> ent_;
+    std::vector<PageCopy> ops_;                  // the batch handed to copier_ (capacity reserved at reset())
+    CopyFn copier_ = nullptr; void* copier_ctx_ = nullptr;
     static constexpr size_t kGrowPages = 4096;   // spare arena capacity for extend() (16 MB)
     size_t np0_ = 0;                             // pages at reset()
     size_t cap_ = 1, pool_n_ = 1, blob_n_ = 0, count_ = 0, first_ = 0, head_ = 0, used_ = 0;
