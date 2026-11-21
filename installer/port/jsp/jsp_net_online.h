@@ -205,7 +205,7 @@ inline std::string row_text(int row, int nc, const Rollback& rb)
 // the one-line statement of the exclusion rule for the working choice (shown under the rows)
 inline const char* exclusion_line(int nc)
 {
-    return nc == NC_NATIVE ? "Online Battle > Friendly Match over re-psn; rollback runs the fight."
+    return nc == NC_NATIVE ? "Online Battle > Friendly Match (2 vs 2) on the online server; rollback runs the fight."
          : nc == NC_ROLLBACK ? "Rollback replaces Delay: the game's own online is off once saved."
          : nc == NC_DELAY ? "Delay is the game's own online: Rollback is off once saved."
          : "Online play is off. Only one netcode can be on at a time.";
@@ -304,9 +304,9 @@ inline Notice notice_text(Refusal r, int src = SRC_REPSN_INI)
     case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Set JSP_ROLLBACK_JOIN=IP:PORT of the host in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::NotWired: put("this build cannot reach re-psn rooms.", "Use a direct IP connection (JSP_ROLLBACK_LISTEN or JSP_ROLLBACK_JOIN)."); break;
     case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set server= and name= in repsn.ini (keep enabled=0 for rollback), or Port Settings > Online."); break;
-    case Refusal::RepsnLongName: put("the online name in repsn.ini is longer than 16 characters.", "Use a shorter name= in repsn.ini."); break;
+    case Refusal::RepsnLongName: put("the online name is longer than 16 characters.", "Pick a shorter online name: settings window, Online tab (or name= in repsn.ini)."); break;
     case Refusal::NoSocket: put("the UDP port could not be opened.", "Close the program that uses it, or pick another JSP_ROLLBACK_LISTEN port."); break;
-    case Refusal::NativeUsOnly: put("the rollback takeover is US-disc only (BLUS31519).", "Online Battle uses the game's own netcode on this disc."); break;
+    case Refusal::NativeUsOnly: put("rollback needs the US disc (BLUS31519).", "Online Battle still works on this disc, with the game's own netcode."); break;
     default: break;
     }
     return n;

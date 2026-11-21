@@ -283,7 +283,7 @@ private:
     int give_up()
     {
         std::string what;
-        if (state_ == kConnect) what = "the re-psn server did not answer within " + window_words(c_.give_up_ms);
+        if (state_ == kConnect) what = "the online server did not answer within " + window_words(c_.give_up_ms);
         else if (!c_.host && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (other_builds_.empty() ? std::string() : " (" + other_builds_text() + ")");
         else if (c_.host) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
         else what = "the host's room did not answer within " + window_words(c_.give_up_ms);
@@ -312,7 +312,7 @@ private:
         const std::string w = std::to_string((t - t0_) / 1000) + " s of " + std::to_string(c_.give_up_ms / 1000) + " s";
         const std::string b = "build " + build_hex(c_.build);
         std::string line, n1, n2;
-        if (state_ == kConnect) { line = "re-psn: connecting to the server (" + w + ", " + b + ")"; n1 = "Rollback: connecting to the re-psn server (" + w + ")."; }
+        if (state_ == kConnect) { line = "re-psn: connecting to the server (" + w + ", " + b + ")"; n1 = "Rollback: connecting to the online server (" + w + ")."; }
         else if (c_.host) {
             line = "re-psn: room open, waiting for a player with " + b + " (" + w + (rejected_members ? ", " + std::to_string(rejected_members) + " with another version refused" : "") + ")";
             n1 = "Rollback: room open, waiting for the other player (" + w + ").";

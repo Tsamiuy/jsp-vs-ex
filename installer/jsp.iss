@@ -947,7 +947,8 @@ begin
     if SkipBuild then
       WizardForm.FinishedLabel.Caption := 'The files are in place; the build step was skipped (test switch), so the game does not start yet.'
     else if BuildRc = 0 then
-      WizardForm.FinishedLabel.Caption := 'The game was built on this PC. Start it from the shortcut. The first start installs the game data from your disc, which takes a few minutes.'
+      WizardForm.FinishedLabel.Caption := 'The game was built on this PC. Start it from the shortcut. The first start installs the game data from your disc, which takes a few minutes.' +
+        #13#10#13#10 + 'To play online: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2). One player picks Create a Room, the other Search for a Room.'
     else
       WizardForm.FinishedLabel.Caption := 'The build did not finish (code ' + IntToStr(BuildRc) + '). Read the newest file in ' + ExpandConstant('{app}') +
         '\logs for the step that stopped. Fix it, then run "Build again" from the Start menu: finished steps are kept.';

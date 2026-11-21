@@ -477,7 +477,7 @@ still waiting (for example a gameplay mod refusal), the waiting band goes and th
 | `re-psn: no host with this version found within 2 minutes: ...` | The joining game read the room list for 2 minutes and found no room from the same build with rollback: the host's game had not started, had already given up, or runs another version or other gameplay mods. When it saw a rollback room of another build it says so: `(seen: a rollback room with build xxxxxxxx)` | Start both games at about the same time; compare the build numbers |
 | `re-psn: no player with this version joined within 2 minutes: ...` | The host's room was open for 2 minutes and nobody with the same build joined (a player with another build is refused and counted) | The same |
 | `re-psn: the host's room did not answer within 2 minutes: ...` | The joining game joined a room but the host's details for a direct link never came within 2 minutes | Start both games again |
-| `re-psn: the re-psn server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
+| `re-psn: the online server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
 
 Each of these lines ends with what to check: `start both games at about the same time (the host first is best; each waits
 2 minutes after its own start-up); both need the same version (build xxxxxxxx) and the same gameplay mods (or none)`. Version 0.6.0 used a 30 second window

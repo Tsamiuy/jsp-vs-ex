@@ -151,7 +151,7 @@ int main()
     // a server that never answers HELLO: the window names that instead
     { FakeServer sv; Side c; c.init(sv, 22, cfg(false, B)); c.cl->is_ready = false;
       CHECK(c.run_alone(1000) == 0 && c.progress.size() == 1 && c.progress[0] == "re-psn: connecting to the server (0 s of 120 s, build a1b2c3d4)");
-      CHECK(c.run_alone(125000) == -1 && c.rz->error().find("re-psn: the re-psn server did not answer within 2 minutes: ") == 0 && c.cl->searches == 0); }
+      CHECK(c.run_alone(125000) == -1 && c.rz->error().find("re-psn: the online server did not answer within 2 minutes: ") == 0 && c.cl->searches == 0); }
     // a shorter window from the config is used in the texts
     { FakeServer sv; Side c; auto cc = cfg(false, B); cc.give_up_ms = 20000; c.init(sv, 22, cc);
       CHECK(c.run_alone(30000) == -1 && c.rz->error().find("found within 20 seconds: start both games at about the same time (the host first is best; each waits 20 seconds after its own start-up)") != std::string::npos); }

@@ -1331,7 +1331,7 @@ namespace JStarsLauncher
             p.Controls.Add(rbOnOff); p.Controls.Add(rbOnRepsn); p.Controls.Add(rbOnComm);
             y += 26;
             p.Controls.Add(new Label {
-                Text = "Only one is used. Choosing one turns the other off when you save.",
+                Text = "re-psn is the online server for Online Battle. Only one is used; choosing one turns the other off when you save.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 24;
             onlineState = new Label { Location = P(16, y), Size = Z(700, 36), Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
@@ -1339,7 +1339,7 @@ namespace JStarsLauncher
             y += 44;
 
             repsnPanel = new Panel { Location = P(0, y), Size = Z(730, 214) };
-            repsnPanel.Controls.Add(new Label { Text = "re-psn server", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            repsnPanel.Controls.Add(new Label { Text = "Online server (re-psn)", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             repsnPanel.Controls.Add(new Label { Text = "Server", Location = P(16, 28), Size = Z(110, 20) });
             repsnServerBox = new TextBox { Location = P(130, 25), Width = S(260), MaxLength = 260 };
             repsnServerBox.TextChanged += delegate { OnlineChanged(); };
@@ -1357,11 +1357,11 @@ namespace JStarsLauncher
             publicSrvBtn = new Button { Text = "Public server", Location = P(130, 126), Size = Z(110, 28) };
             publicSrvBtn.Click += delegate { repsnServerBox.Text = PublicServer; PresetMsg("Server set to the project's public server. Not saved yet."); };
             repsnPanel.Controls.Add(publicSrvBtn);
-            repsnPanel.Controls.Add(new Label { Text = "the project's server for testers (relay on)", Location = P(250, 132), AutoSize = true, ForeColor = SystemColors.GrayText });
+            repsnPanel.Controls.Add(new Label { Text = "the project's public server for testers", Location = P(250, 132), AutoSize = true, ForeColor = SystemColors.GrayText });
             rollbackBox = new CheckBox { Text = "Rollback netcode for Online Battle fights (recommended)", Location = P(16, 162), AutoSize = true };
             rollbackBox.CheckedChanged += delegate { OnlineChanged(); };
             repsnPanel.Controls.Add(rollbackBox);
-            relayBox = new CheckBox { Text = "Allow the server's relay when a direct link fails", Location = P(16, 186), AutoSize = true };
+            relayBox = new CheckBox { Text = "If the two PCs cannot connect directly, pass the match through the server (relay)", Location = P(16, 186), AutoSize = true };
             relayBox.CheckedChanged += delegate { OnlineChanged(); };
             repsnPanel.Controls.Add(relayBox);
             p.Controls.Add(repsnPanel);
@@ -1621,7 +1621,7 @@ namespace JStarsLauncher
             {
                 onlineState.ForeColor = Color.FromArgb(0, 110, 40);
                 // FIX (two-page Main Menu, on by default): Online Battle sits on its Battle Modes page; the fights are 2 vs 2
-                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: Battle Modes > Online Battle > Friendly Match; one player Creates a Room, the other Searches for it.";
+                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: Battle Modes > Online Battle > Friendly Match; one player picks Create a Room, the other Search for a Room.";
             }
             else if (m == 1) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Online Battle with the game's own netcode (rollback off)."; }
             else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }
@@ -1675,7 +1675,7 @@ namespace JStarsLauncher
             if (onlineFresh)
             {
                 onlineDirty = true;
-                onlineMsg.Text = "First start: re-psn on the project's public server with a random online name (change it if you like). Saved with Start Game.";
+                onlineMsg.Text = "First start: online is on, with the project's public server and a random online name (change it if you like). Saved with Start Game.";
             }
             loading = was;
         }
@@ -1752,7 +1752,7 @@ namespace JStarsLauncher
             else if (RollbackOn() && !RollbackRoleKey()) { OtherSet("JSP_ROLLBACK", "0"); SaveSettings(); }
             LoadOnline();
             onlineMsg.ForeColor = SystemColors.GrayText;
-            onlineMsg.Text = m == 0 ? "Saved. Online is off." : m == 1 ? (rollbackBox.Checked ? "Saved. re-psn is on, with rollback for Online Battle." : "Saved. re-psn is on (the game's own netcode).") : "Saved. The community server is on.";
+            onlineMsg.Text = m == 0 ? "Saved. Online is off." : m == 1 ? (rollbackBox.Checked ? "Saved. Online is on, with rollback for Online Battle." : "Saved. Online is on (the game's own netcode).") : "Saved. The community server is on.";
             return null;
         }
 

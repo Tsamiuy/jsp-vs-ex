@@ -1215,6 +1215,9 @@ def main(argv=None, ask=input):
         else:   # no C# compiler of Windows: build_settings_window said so above
             say("Start the game with jsp-launcher.exe in this folder (the settings window could not be built, see above). "
                 "The first start installs the game data from your disc.")
+        if not a.no_online_defaults:
+            say("Online is ready: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2); "
+                "one player picks Create a Room, the other Search for a Room.")
     return 0
 
 

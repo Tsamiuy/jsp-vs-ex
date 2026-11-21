@@ -920,7 +920,7 @@ void pump_tick(uint64_t t)
         g.plan_ready = true;
         if (g.rrz && g.rrz->room_id()) g.presence_room = g.rrz->room_id();
         log("rendezvous", to_string(g.plan.remotes[0].ep) + (g.rrz ? std::string(" via re-psn, path ") + path_name(g.rrz->path()) + ", room " + std::to_string((unsigned long long)g.rrz->room_id()) : std::string()));
-        if (g.rrz) g.path_line = std::string("re-psn: ") + path_name(g.rrz->path()) + (g.rrz->path() == Path::Relay ? " (through the server)" : "");
+        if (g.rrz) g.path_line = g.rrz->path() == Path::Relay ? std::string("Rollback on: connected through the server") : std::string("Rollback on: ") + path_name(g.rrz->path()) + " connection";   // FIX (player wording): no "re-psn" jargon on screen
         g.path_kind = !g.rrz ? 1 : g.rrz->path() == Path::Direct ? 1 : g.rrz->path() == Path::Relay ? 2 : 0;   // direct IP is always direct
         return;
     }
