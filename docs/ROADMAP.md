@@ -36,6 +36,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 
 ## 3. Modes and match options (opt-in)  🔧
 
+- ✅ **Two-page Main Menu** (on by default): the top page has Battle Modes, J-Customize, J-Point Shop, Gallery and Options; Battle Modes opens a second page with the game's battle rows plus Training Mode and Impossible Mode ([details](FEATURES.md#main-menu-pages))
 - ✅ **Training Mode** in Free Battle: a standing dummy, no KO with health refill, unlimited time ([details](FEATURES.md#training-mode))
 - 🔧 Training options: Unlimited Stamina, Free Camera and Hide HUD are in; infinite support and unlimited Victory Burst are planned ([details](FEATURES.md#training-options))
 - 📋 Two local players in Training ([details](FEATURES.md#training-2p))
@@ -64,7 +65,7 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
   room and played into the fight. Play testers report online matches on their Windows PCs since 0.1.0 (no logs yet); the EU build, two real PCs with different settings or versions, and the Impossible mode online are not tried
 - 🔧 **Online matches with rollback netcode** (experimental, opt-in; how to try it: [ROLLBACK.md, section 5](ROLLBACK.md#5-try-it-experimental-direct-ip-rollback)):
   a Free Battle fight between two PCs connected by IP address, one player per PC, tested as two copies on one PC and in one fight between two PCs on one home network (test-harness settings; slow, cause not known yet); no complete match has run yet.
-  Then 2v2, and 3v3 if the engine allows it (see section 3); lobbies over re-psn ([details](FEATURES.md#online-rollback))
+  Then 2v2 and 3v3 (3v3 Free Battle works offline, see section 3; not tried online); lobbies over re-psn ([details](FEATURES.md#online-rollback))
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
 - 📋 Lobbies, matchmaking, ranked ([details](FEATURES.md#lobbies-ranked))
 - 📋 Online Training for up to 4 players ([details](FEATURES.md#online-training))
