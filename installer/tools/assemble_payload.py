@@ -62,8 +62,8 @@ NOTICE = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental): setup turns it on with the project's public online server and rollback, and keeps online settings you
-already have. ONLINE-GUIDE.md says how to play online; the settings window's Online tab turns it off.
+(experimental): setup turns it on with rollback and a public test server (re-psn, not run by this project), and keeps
+online settings you already have. ONLINE-GUIDE.md says how to play online; the settings window's Online tab turns it off.
 
 The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
 Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.19.0 with this project's patches).

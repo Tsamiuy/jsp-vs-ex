@@ -209,6 +209,20 @@ public:
                 if (!t_.search(all)) return 0;                     // one request in flight; the answer comes on a later poll
                 ++lookups;
                 note_other_builds(all);
+                // FIX (two PCs, another version): with a pair key the host's rollback room is known exactly (same native room). When it is there with
+                // another build, waiting 2 minutes (then 3 retries) cannot help and the fight meanwhile starts on the game's own netcode with no word on
+                // screen: say so at once, with both build numbers. The host learns it from its own give-up (it never sees a member join).
+                if (c_.pair && !c_.join_room)
+                    for (const PsnrRoom& x : all) {
+                        uint32_t b = 0; uint64_t k = 0;
+                        if ((x.flags & kRoomFlagRollback) && record_build(x.external, &b, &k) && k == c_.pair && b != c_.build) {
+                            const std::string what = "the other player runs another version (build " + build_hex(b) + ", yours " + build_hex(c_.build) + ")";
+                            fail("re-psn: " + what);
+                            n1_ = "Rollback could not start: " + what + ".";
+                            n2_ = "Both players need the same download and the same gameplay mods (or none). The main menu corner shows the version.";
+                            return -1;
+                        }
+                    }
                 const std::vector<PsnrRoom> ok = filter_rooms(all, c_.build, c_.pair);
                 uint64_t pick = 0;
                 if (c_.join_room) { for (const auto& r : ok) if (r.id == c_.join_room) pick = r.id;

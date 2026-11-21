@@ -5,8 +5,8 @@ Online fights are **2 vs 2** for now.
 
 ## Play online in 5 steps
 
-1. **Download** `jsp-setup.exe` (or the portable zip) from the `0.7.0-test1` pre-release on the Releases page of the fork the person who
-   invited you linked, not from the main project's releases. Both players need this same download.
+1. **Download** `jsp-setup.exe` (or the portable zip) from the project's Releases page (or build it yourself). Both players need the
+   same build.
 2. **Run setup.** It asks for your disc folder and your `EBOOT.elf` (see [What setup needs](#what-setup-needs)), then builds the game on
    your PC. This can take a long time, for example 10-30 minutes; let it finish. Online is set up for you at the end.
 3. **Start the game** from the Start menu or desktop shortcut (Start Game). The first start installs the game data from your disc,
@@ -15,15 +15,18 @@ Online fights are **2 vs 2** for now.
 5. One player picks **Create a Room**. The other picks **Search for a Room** and joins it. Start the battle as usual.
 
 When the fight runs on rollback, the game shows `Connecting to opponent...` as the fight starts, then `Rollback on: direct connection` (or
-`Rollback on: connected through the server`) for a few seconds. If you see neither, the fight runs on the game's own netcode (see below).
+`Rollback on: connected through the server`) for a few seconds. For the whole fight, the ping in ms under the timer (bottom right, for
+example `62 ms`) also shows that rollback is on: it is the round trip to the other player (through the server when the match uses the
+relay), green below 100 ms, yellow below 180 ms, red above. It appears shortly after the fight starts. If you see none of these, the fight
+runs on the game's own netcode (see below). `JSP_ROLLBACK_PING=0` in `play_settings.txt` hides the ping.
 
 No IP addresses and no port forwarding. After a match you can play again in the same room.
 
-**Same build:** the main menu shows the build in its lower right corner, for example `J-Stars Victory VS-EX 0.7.0-test1`. Both
+**Same build:** the main menu shows the build in its lower right corner, for example `J-Stars Victory VS-EX 0.6.1`. Both
 players must see the same text there and use the same gameplay mods (or none).
 
 **Leave and quit:** after a match, back out of the room with the game's own menus (Circle) to reach the Main Menu. **Esc** quits the
-game. During a rollback fight, holding **F9** for 2 seconds ends the match.
+game. During a rollback fight, holding **F9** for 1.5 seconds ends the match.
 
 ## What setup needs
 
@@ -45,7 +48,8 @@ to do. Read it before you make a room.
 | **`Connecting to opponent...` stays on screen.** | Wait: after 45 seconds the match ends with `Opponent did not reach the fight: match ended`. Make a new room. If it happens every time, send both support bundles. |
 | **`Reconnecting... N s (F9 held: end match)`** during a fight. | The connection dropped for a moment. Wait a few seconds, or hold F9 to end the match. |
 | **`Opponent disconnected`.** | The other player left or lost the connection. Make a new room when they are back. |
-| **Stutter in the first fights.** | Normal on a new install: the game builds each new effect's graphics once. Before your first online match, play one offline Free Battle (Battle Modes > Free Battle > 1 Player, **2 vs 2**, any characters). It builds most of them ahead of time. |
+| **Stutter in the first fights.** | Normal on a new install: the game builds each new effect's graphics once, and while one PC builds, the other PC's screen waits too. Before your first online match, **both** players play one offline Free Battle (Battle Modes > Free Battle > 1 Player, **2 vs 2**), with the characters you plan to use online. It builds most of them ahead of time. |
+| **Windows asks "Allow access?" for the game** (the first time you open Online Battle; the box can hide behind the full-screen game, so press Alt+Tab if the game seems stuck). | Click **Allow access**. If you clicked Cancel, online still works, but more often through the server (`Rollback on: connected through the server`), which adds delay. Setup's **Allow online play through Windows Firewall** box sets this up so the question never comes. |
 | **The band says `the online name is taken`.** | Every player on the server needs a different online name. Change yours in the settings window's **Online** tab (3 to 16 letters, digits, `-` or `_`, starting with a letter). Do not end it in `-rb`: the game uses `<your name>-rb` for its hidden rollback connection. |
 | **EU disc:** the **Online** tab says "Online Battle with the game's own netcode (rollback off).", or the band says `Rollback is off: rollback needs the US disc (BLUS31519).` | Rollback needs the US disc. Online Battle still works, with the game's own netcode. |
 | **"Windows protected your PC"** (SmartScreen) when you start `jsp-setup.exe`. | Click **More info**, then **Run anyway**. The files are not code-signed. To check the download first, compare its hash with the `SHA256SUMS` file on the release page (PowerShell: `Get-FileHash .\jsp-setup.exe -A SHA256`). |
@@ -55,7 +59,7 @@ to do. Read it before you make a room.
 
 At the end of the build, setup turns online on:
 
-- the project's public server (`107.175.17.162:36100`); when the two PCs cannot connect directly, it passes the match through
+- a public test server (re-psn, `107.175.17.162:36100`); when the two PCs cannot connect directly, it passes the match through
   itself (the relay);
 - a random online name such as `Player1234`;
 - rollback netcode for Online Battle fights (US disc only).
@@ -93,12 +97,13 @@ After a session, tell us:
 
 ## Known limits
 
-- Experimental, and not yet tried between two Windows PCs over the internet. Expect bugs.
+- Experimental. Tried with two copies on one Windows 11 PC; not tried between two PCs. Expect bugs.
 - Two different builds cannot pair for rollback; the log says so.
 - Rollback pairs a room with exactly two players, one per PC, 2 vs 2 (each with a CPU partner). It is meant for Friendly Match; Rank
   Match is not tested. 3 vs 3 is offline only: a rollback match never runs the 3v3 code.
 - Gameplay mods turn the game's own online off for the session.
 - Each game opens a second, hidden connection to the server for rollback, named `<your online name>-rb`. It may show up in the
   server's logs.
-- The public server is run by the project for testing. It may be down or restarted; your online name is not reserved.
+- The default server is a public re-psn test server; this project does not run it. It may be down or restarted; your online name is
+  not reserved. Any other re-psn server can be typed in the **Online** tab.
 - The relay adds some delay.

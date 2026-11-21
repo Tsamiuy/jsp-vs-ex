@@ -12,9 +12,10 @@ game's Rich Presence works); it sends nothing anywhere else. Without the Discord
 JSP_DISCORD=0
 ```
 
-turns it off. `JSP_DISCORD_APP_ID=<the application id>` shows the presence under another Discord application (Discord Developer
-Portal, Applications, New Application; the name you give it is the game name your profile shows) instead of the project's own,
-1573573702514384977. The log (`game\run\play_stderr.txt`) says `[discord] Rich Presence on` and `[discord] connected to the Discord app`.
+turns it off. The default application id, 1573573702514384977, is a Discord application registered by the contributor who added
+this feature, not by the project. To use your own, create one (Discord Developer Portal, Applications, New Application; the name you
+give it is the game name your profile shows), upload the pictures below to it and set `JSP_DISCORD_APP_ID=<its application id>`.
+The log (`game\run\play_stderr.txt`) says `[discord] Rich Presence on` and `[discord] connected to the Discord app`.
 
 ## What it shows
 
@@ -29,7 +30,7 @@ Portal, Applications, New Application; the name you give it is the game name you
 
 The fighters come from the fight's own battle units (the battle world the game builds the fight from), in every mode: offline,
 Training and the online fight. The menus' pick records are not used for the fight: the online fight never fills them (they read as
-Luffy four times there, which is what older builds showed). An id with no known name is left out; when a team has no known fighter
+Luffy four times there). An id with no known name is left out; when a team has no known fighter
 the first line is just "In battle". Character ids: fighters 0 to 41 (the game offers 39 of them; 19, 20 and 21 are not on its list),
 Supports 200 to 213 (Neuro 200, Kumagawa, Rukia, Chitoge, Hisoka, Edajima, Kagura & Sadaharu, Jaguar, Yoh, Kuroko, SKET Dance,
 Lala, Allen, Hinata 213; [Support.md](balance/Support.md)).
@@ -50,8 +51,8 @@ Assets), with exactly these names, in lower case:
 
 A key with no picture shows none; nothing else changes. Discord can take some minutes to show a newly uploaded picture. No picture
 is part of this repository. The game name in "Playing ..." on the profile is the Discord application's name, set in the Developer
-Portal, not in the game; the pictures must be uploaded to the application whose id the game uses (`JSP_DISCORD_APP_ID`, default
-1573573702514384977).
+Portal, not in the game; the pictures must be uploaded to the application whose id the game uses (`JSP_DISCORD_APP_ID`; the
+default, 1573573702514384977, belongs to the contributor who added this feature).
 
 ## Join and Invite
 
@@ -73,5 +74,5 @@ room emulation (toolkit patch 7924), read only.
   (`HKCU\Software\Classes`); `JSP_DISCORD_REGISTER=0` skips that. Discord delivers the join once the game is connected, and it
   goes the same way. `JSP_DISCORD_JOIN=<secret>` in the game's environment does the same at start.
 - **When a join is refused.** The log line `[discord] join: ...` gives the reason: no re-psn server or online name here, the host
-  is on another server, the host's game is an older build (`jsp1` / `jsp2`), already in that room, or (from the search) the room is
-  gone, full, or not a Friendly Match room.
+  is on another server, the join secret is not one this build reads, already in that room, or (from the search) the room is gone,
+  full, or not a Friendly Match room.

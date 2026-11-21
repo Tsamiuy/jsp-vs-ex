@@ -6,8 +6,8 @@ re-psn is a small matchmaking server that one player, or anyone else, hosts.
 - **Peer to peer:** the match itself goes directly between the players' games. If a direct link fails, it goes through
   the server's relay, but only when the host turned the relay on.
 
-Online is experimental. **Since the tester build it is on after install:** the first run writes `repsn.ini` with re-psn on, the
-project's public server (`107.175.17.162:36100`, relay on) and a random name such as `Player1234`, and turns rollback on for
+Online is experimental. **It is on after install:** the first run writes `repsn.ini` with re-psn on, a
+public re-psn test server `107.175.17.162:36100` (relay on; this project does not run it) and a random name such as `Player1234`, and turns rollback on for
 Online Battle (the game's Friendly Match room pairs the players, rollback runs the fight). Nothing else to set up: see
 [TESTING_ONLINE.md](TESTING_ONLINE.md). An install that already had online settings keeps them. To host your own server instead,
 follow the steps below. It needs the installer's only tree (`--tree current`; the earlier legacy tree is retired, tag `legacy-v15`), which builds the port on ps3recomp v0.19.0; see [installer/README.md](../installer/README.md#online-battle-experimental)).
@@ -64,11 +64,19 @@ Limits:
 
 ## Rollback over re-psn (experimental)
 
-The same re-psn server can also arrange a match for the port's experimental rollback netcode instead of the game's own
-online. The two are separate methods and only one can be on: for rollback, `repsn.ini` keeps the server and your online
-name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The full recipe is in
-[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Options > Port Settings > Online
-(on by default) writes the same files.
+By default the game's own online and the port's experimental rollback netcode run together: `repsn.ini` says `enabled=1`
+and `play_settings.txt` has `JSP_ROLLBACK=1` with no role key (plus `JSP_ROLLBACK_RELAY`). The players meet in a Friendly
+Match room as usual; once the room has both players, each game opens a second, hidden re-psn connection as
+`<online name>-rb`, and the two meet in a rollback room keyed by the Friendly Match room's id (the room owner hosts). Rollback
+then runs the fight, directly or through the server's relay when the direct link fails and the relay is allowed. US 1.00 disc
+only; on another disc Online Battle plays on the game's own netcode. The settings window's Online tab (**Rollback netcode
+for Online Battle fights**) and Options > Port Settings > Online (**Online Battle + rollback**) turn it on and off; see
+[TESTING_ONLINE.md](TESTING_ONLINE.md).
+
+The older rollback starts with a role key (`JSP_ROLLBACK_VIA=repsn` with `JSP_ROLLBACK_ROLE`, or direct IP) are a separate
+method for tests: with a role key the game's own online must be off (`enabled = 0` in `repsn.ini`, which keeps the server and
+online name), or the start is refused. The recipe is in
+[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn).
 
 ## If it does not work
 

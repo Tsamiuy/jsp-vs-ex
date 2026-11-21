@@ -184,7 +184,7 @@ namespace {
 // One vblank the guest OBSERVES: the pump coalesces back-to-back ticks into one pending bit, so wait until it delivered this one. Returns false when both
 // clocks are off (the run ended meanwhile). Outside a match (the bench, the offline tests) a guest that did not take it within kAckMs of waiting turns the
 // replay clock OFF (counted, logged once) and the normal frame clock takes over: a loud fail-safe, not a pacing mechanism (ack_timeouts must stay 0).
-// FIX (rollback determinism, review: a 2 s ack timeout turned the lockstep clock off for the rest of the match on ONE PC): in a match (lockstep clock on)
+// FIX (rollback determinism: a 2 s ack timeout turned the lockstep clock off for the rest of the match on ONE PC): in a match (lockstep clock on)
 // the wait NEVER switches a clock off. Off, that PC ran on the 60 Hz grid with timing-dependent vblanks per flip (a desync) and no time-sync stretch / owed
 // vblanks. Now: (1) the time inside the FIFO drains is not waiting time (a cold pipeline compile holds one drain ~2 s while the guest would take the vblank
 // right after), (2) delivery is re-checked after every drain, (3) a long wait logs every kAckLogMs and goes on waiting, (4) after kAckFailMs of real waiting
@@ -301,7 +301,7 @@ static void lockstep_take_flip()
     g_ls_last = now.QuadPart;
     g_ls_second = 1; g_ls_flips++; g_ls_wait_logs = 0;
 }
-// FIX (review: never off mid-match): a vblank of the lockstep clock the guest has not taken yet comes before anything else (no second tick, no grid), and the
+// FIX (lockstep clock never off mid-match): a vblank of the lockstep clock the guest has not taken yet comes before anything else (no second tick, no grid), and the
 // step it belongs to goes on from where it stopped. Also called from a replay pass (a replay can start while one is open, as when the wait blocked).
 static int lockstep_resume(int rsx_ok)
 {
@@ -331,7 +331,7 @@ static int lockstep_pass(int rsx_ok)
     }
     cellGcm_fifo_kick_wait(1);
     QueryPerformanceCounter(&now);
-    // FIX (rollback determinism, review: the idle vblank was wall-clock timed): a vblank with no flip goes ONLY to a guest that is provably in its frame
+    // FIX (rollback determinism: the idle vblank was wall-clock timed): a vblank with no flip goes ONLY to a guest that is provably in its frame
     // pacing step 3 (main thread in an HLE wait at lr 0x006508A0, the vblank counter below N) with no flip outstanding (queued = reached = completed, no
     // direct flip), the test owed_vblank_pass uses; one per pass, each observed, until the counter reaches N and step 3 lets go. Before, any 500 ms without a
     // flip gave one, and a FIFO drain over 500 ms on one PC (a cold pipeline compile) gave that PC an extra vblank in the middle of a busy tick.
@@ -472,7 +472,7 @@ extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
     if (in_match && now - lf >= 100 && !g_rr_stall_logged) { g_rr_stall_logged = 1; log_rerun_stall("100 ms", now - lf); }
     // FIX (rollback determinism): in a match (lockstep clock on) a re-run's idle vblank comes after 500 ms, not 20: a slow re-run tick is not a guest waiting
     // for a vblank, and an extra vblank there is counted by the game (replays logged idle_vblanks 1-2 on 19 and 8 of ~460 replays on two copies).
-    // FIX (review: wall-clock idle vblank): the 500 ms was still time, and a drain over 500 ms on one PC gave its re-run an extra vblank. In a match it now
+    // FIX (re-run idle vblank was wall-clock timed): the 500 ms was still time, and a drain over 500 ms on one PC gave its re-run an extra vblank. In a match it now
     // follows the lockstep clock's rule (lockstep_pass): only a guest provably in step 3 with no flip outstanding gets one, so a re-run sees what its first
     // run saw; any other wait keeps waiting (the 100 ms stall line above names it).
     if (in_match ? (now - lf > 20u && guest_in_step3_without_flip()) : now - lf > 20u) {

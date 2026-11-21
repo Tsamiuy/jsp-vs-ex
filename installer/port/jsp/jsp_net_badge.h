@@ -76,4 +76,50 @@ struct Every {
     }
 };
 
+// ---- ENHANCEMENT (ping counter, default ON): the round trip in ms, small, under the game's fight timer (bottom right) while an online rollback match runs,
+// so players see what kind of connection they are in. JSP_ROLLBACK_PING=0 in play_settings.txt hides it (unset, empty or any other value: shown).
+// The value is GekkoNet's averaged round trip to the other player (SessionStats::ping_ms, the one adapt_delay reads). Over a relay it is the round trip through
+// the server. It carries up to one tick (33 ms) of answer wait (GekkoNet answers a ping at its next poll), so a 30 ms link reads about 60-95 ms.
+inline constexpr const char* kPingKey = "JSP_ROLLBACK_PING";
+inline constexpr uint32_t kPingRefreshMs = 500;    // the text is rebuilt at most twice a second (no flicker)
+
+inline bool ping_key_on(const char* v) { return !(v && v[0] == '0'); }   // default on: only a value starting with '0' hides it
+
+// "62 ms"; "999+ ms" above 999; "" (nothing drawn) while the round trip is not known yet (ping_ms < 0, or not a number).
+inline std::string ping_text(float ms)
+{
+    if (!(ms >= 0.0f)) return std::string();
+    if (ms >= 999.5f) return "999+ ms";
+    return std::to_string((int)(ms + 0.5f)) + " ms";
+}
+
+// Quality tint (the overlay colour modulates the font atlas, 0xAABBGGRR; the black rim stays black). The edges follow adapt_delay with no jitter:
+// below 100 ms the input delay settles on 1 tick (green), below 180 ms on 2 (yellow), above that on 3 or more (red).
+enum class PingQuality { Good, Fair, Poor };
+inline PingQuality ping_quality(float ms) { return ms < 99.5f ? PingQuality::Good : ms < 179.5f ? PingQuality::Fair : PingQuality::Poor; }
+inline uint32_t ping_rgba(float ms)
+{
+    switch (ping_quality(ms)) {
+    case PingQuality::Good: return 0xFF78FF78u;   // green   (120, 255, 120)
+    case PingQuality::Fair: return 0xFF5AE6FFu;   // yellow  (255, 230,  90)
+    default:                return 0xFF646EFFu;   // red     (255, 110, 100)
+    }
+}
+
+// Layout in the 1280x720 overlay space, right-aligned under the timer. MEASURED on fight screenshots (640x360, scaled by 2: build/bench/runs native-rm5
+// 0343/0401, native-rm1 0128): the timer digits span x 1082..1206, y 628..656; the timer bar's lower rule y 672..675, x 912..1208; the minimap sits above the
+// bar (x ~1000..1180, y <= 640) and the player panel is bottom left (x < 600). Below the rule, y 676..720, nothing of the HUD is drawn.
+// At scale 0.5 the ink (rim 24 above and 9 below the baseline at scale 1, baseline = y + 21 * scale) spans y 682.5 .. 699; the dark box spans y 680 .. 704.
+// The text's right edge is the digits' right edge (x 1204); the box reaches 6 px either side.
+inline constexpr float kPingRight = 1204.0f, kPingY = 684.0f, kPingScale = 0.5f;
+inline constexpr int kPingBoxY = 680, kPingBoxH = 24, kPingBoxPad = 6;
+inline constexpr float kHudRuleBottom = 675.0f;   // the timer bar's lower rule (measured, see above)
+inline constexpr float kGlyphMax = 18.8125f;      // the widest glyph advance at scale 1 (menu_font.jmf): the width when the atlas reports none
+
+// The text's left x for a measured width (jsp_overlay_text_width at kPingScale; 0 or less = unknown, the widest-glyph estimate is used).
+inline float ping_width(const std::string& t, float measured) { return measured > 0 ? measured : (float)t.size() * kGlyphMax * kPingScale; }
+inline float ping_x(const std::string& t, float measured) { return kPingRight - ping_width(t, measured); }
+inline int ping_box_x(const std::string& t, float measured) { return (int)(ping_x(t, measured)) - kPingBoxPad; }
+inline int ping_box_w(const std::string& t, float measured) { return (int)(ping_width(t, measured) + 0.999f) + 2 * kPingBoxPad; }
+
 }  // namespace jpnb

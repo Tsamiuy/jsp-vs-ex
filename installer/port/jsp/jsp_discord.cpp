@@ -1,5 +1,5 @@
 // ENHANCEMENT (Discord Rich Presence and Join/Invite; on by default, JSP_DISCORD=0 turns it off; JSP_DISCORD_APP_ID=<id> uses another
-// Discord application than the project's own, jdp::kDefaultAppId).
+// Discord application than the default one, jdp::kDefaultAppId, which the contributor who added this feature registered).
 //
 // What it does: a background thread connects to the LOCAL Discord app over its IPC pipe (\\.\pipe\discord-ipc-0..9, the documented RPC
 // transport of the Discord client; no network access of our own, no SDK DLL) and keeps the player's activity up to date every 2 s

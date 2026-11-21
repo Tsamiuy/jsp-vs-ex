@@ -896,16 +896,17 @@ def step_place(c):
 # ---------------------------------------------------------------- online defaults (ENHANCEMENT, the tester default)
 # A friend installs, starts the game and plays Online Battle > Friendly Match with rollback, with no setup. On the first run with no online
 # settings anywhere (no repsn.ini or community.ini in the shared folder, no repsn.ini of the game), this writes the shared repsn.ini: re-psn on,
-# the project's public server, a random online name "Player" + 4 digits (never the PC's user name; changed in the settings window's Online tab).
+# a public re-psn test server (ONLINE_SERVER; this project does not run it), a random online name "Player" + 4 digits (never the PC's user name;
+# changed in the settings window's Online tab).
 # Then the settings file the launcher reads gets JSP_ROLLBACK=1 (the lobby start: no role key, so the game's own Online Battle room pairs the
 # players and rollback runs the fight; jsp_net_online.h NC_NATIVE) and JSP_ROLLBACK_RELAY=1 (the server's relay when a direct path fails), unless it
 # already has a JSP_ROLLBACK line or a rollback role key. JSP_ROLLBACK is a settings line, not a game-side default: the thread registry reads it at
 # process attach (jsp_thread_registry.cpp), before any code of the game runs. Present files are never changed: a player who chose Off keeps it.
 # Off switch for this step: --no-online-defaults or JSP_ONLINE_DEFAULTS=0.
 # FIX (region): the rollback takeover of the game's own fight hooks US 1.00 addresses (jsp_net_native_fight.cpp; INSN_PATCHES are US only). On another
-# disc (EU) the defaults still turn re-psn on with the public server and a name, but add no JSP_ROLLBACK line: rollback stays off and Online Battle
+# disc (EU) the defaults still turn re-psn on with the test server and a name, but add no JSP_ROLLBACK line: rollback stays off and Online Battle
 # plays on the game's own netcode (the game refuses the takeover on that disc anyway).
-ONLINE_SERVER = "107.175.17.162:36100"   # the project's public re-psn server (relay on)
+ONLINE_SERVER = "107.175.17.162:36100"   # a public re-psn test server (relay on), not run by this project
 ONLINE_ROLE_KEYS = ("JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH")
 
 
@@ -955,7 +956,7 @@ def online_defaults(root, portable, env=None, rng=None, region=None):
                                                "[repsn]", "enabled=1", f"server={ONLINE_SERVER}", f"name={name}", ""]), encoding="ascii", newline="")
     except OSError as e:
         return [f"[online] defaults: repsn.ini could not be written ({e.__class__.__name__}); online stays off"]
-    out = [f"[online] defaults: re-psn on, the public test server, online name {name} (change it in the settings window, Online tab)"]
+    out = [f"[online] defaults: online on, a public test server (re-psn), online name {name} (change it in the settings window, Online tab)"]
     ps = settings_file(root, portable, env)
     try:
         text = ps.read_text(encoding="utf-8-sig", errors="replace") if ps.is_file() else ""
@@ -1126,7 +1127,7 @@ def main(argv=None, ask=input):
     ap.add_argument("--allow-unknown-eboot", action="store_true", help="opt in: go on with an EBOOT.elf this port does not know (check E3 "
                     "becomes a WARN, the build is unsupported); the other region's known EBOOT is still refused")
     ap.add_argument("--portable", action="store_true", help="saves and settings in the install folder (jsp-install.ini portable=1)")
-    ap.add_argument("--no-online-defaults", action="store_true", help="do not seed the online defaults (re-psn on the public server, "
+    ap.add_argument("--no-online-defaults", action="store_true", help="do not seed the online defaults (re-psn on a public test server, "
                     "rollback for Online Battle) when no online settings exist yet")
     a = ap.parse_args(argv)
     a.root = os.path.abspath(a.root or str(pathlib.Path(__file__).resolve().parent))   # CMake is run from other folders: absolute paths only

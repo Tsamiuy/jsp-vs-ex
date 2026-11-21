@@ -88,6 +88,11 @@ Name: "portable"; Description: "&Portable: saves and settings in the install fol
 Name: "unlock"; Description: "&Unlock everything (cheat): all cards, characters, titles and more, when you press Start Game"; Flags: unchecked
 Name: "unlock\testsave"; Description: "Use a separate TEST save for the unlocked play (recommended; your normal save is not touched)"; Flags: exclusive
 Name: "unlock\normalsave"; Description: "Apply it to the normal save (the launcher asks, and copies the save to a dated backup first)"; Flags: exclusive unchecked
+; ENHANCEMENT (online, checked by default): one inbound UDP allow rule for game\jsp.exe, so Windows does not show its "Allow access?" box over the
+; fullscreen game the first time Online Battle opens a UDP socket. It needs administrator rights (this setup runs without them), so Windows asks
+; once (UAC); saying No only skips the rule. The command first deletes any rule for that program, including a Block rule Windows made when an
+; earlier box was cancelled. Online also works without the rule (both games send first, so replies pass, and the relay covers the rest).
+Name: "firewall"; Description: "Allow online play through Windows Firewall (Windows asks for administrator permission once)"
 
 [INI]
 Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "portable"; String: "1"; Tasks: portable
@@ -922,10 +927,27 @@ begin
   if not SkipBuild and (BuildRc <> 0) then Result := 10;
 end;
 
+{ ENHANCEMENT (online): the firewall task. The rule names the program path, which need not exist yet (the build makes it). A refused UAC
+  prompt or a failed netsh only goes to the log: the game still works online without the rule. }
+procedure AddFirewallRule;
+var
+  Exe, Params: String;
+  Rc: Integer;
+begin
+  Exe := ExpandConstant('{app}\game\jsp.exe');
+  Params := '/C netsh advfirewall firewall delete rule name=all program="' + Exe + '" >nul 2>&1 & ' +
+            'netsh advfirewall firewall add rule name="{#AppDirName} online play" dir=in action=allow protocol=UDP profile=private,public program="' + Exe + '" enable=yes';
+  if ShellExec('runas', ExpandConstant('{cmd}'), Params, '', SW_HIDE, ewWaitUntilTerminated, Rc) then
+    Log('firewall: rule command ran, exit ' + IntToStr(Rc))
+  else
+    Log('firewall: not added (UAC refused or failed, code ' + IntToStr(Rc) + '); Windows will ask on the first online start');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
     SaveImportRun;
+    if WizardIsTaskSelected('firewall') and not WizardSilent then AddFirewallRule;
     RunBuildStep;
   end;
 end;
@@ -994,9 +1016,13 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Data: String;
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then begin
     WasPortable := GetIniInt('install', 'portable', 0, 0, 1, ExpandConstant('{app}\jsp-install.ini')) = 1;
+    { ENHANCEMENT (online): remove the firewall task's rule; only when it exists (reading rules needs no admin), so most uninstalls see no UAC prompt }
+    if Exec(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall show rule name="{#AppDirName} online play"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
+      ShellExec('runas', ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="{#AppDirName} online play"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exit;
   end;
   if CurUninstallStep <> usPostUninstall then Exit;

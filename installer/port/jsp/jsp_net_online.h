@@ -300,7 +300,7 @@ inline Notice notice_text(Refusal r, int src = SRC_REPSN_INI)
         break;
     case Refusal::RepsnNoRole: put("JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join.", "Add JSP_ROLLBACK_ROLE=host or join to play_settings.txt, or Port Settings > Online."); break;
     case Refusal::BadListen: put("JSP_ROLLBACK_LISTEN is not a port from 1 to 65535.", "Set JSP_ROLLBACK_LISTEN=36200 (any free port) in play_settings.txt, or Port Settings > Online."); break;
-    case Refusal::RoleKeys: put("set at most one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).","Keep only one of the two lines in play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::RoleKeys: put("set at most one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).", "Keep only one of the two lines in play_settings.txt, or Options > Port Settings > Online."); break;
     case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Set JSP_ROLLBACK_JOIN=IP:PORT of the host in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::NotWired: put("this build cannot reach re-psn rooms.", "Use a direct IP connection (JSP_ROLLBACK_LISTEN or JSP_ROLLBACK_JOIN)."); break;
     case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set server= and name= in repsn.ini (keep enabled=0 for rollback), or Port Settings > Online."); break;
@@ -366,7 +366,7 @@ Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* w
         goto defaults;
     }
     if (!hl && !hj) { if (lobby) *lobby = true; goto defaults; }   // ENHANCEMENT (lobby): no role key: rollback-capable, the session is opened at runtime
-    if (hl == hj) return refuse(Refusal::RoleKeys,"JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off");
+    if (hl == hj) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off");
     if (hl ? !valid_port(l) : !valid_join(j)) return refuse(hl ? Refusal::BadListen : Refusal::BadJoin, hl ? "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off" : "JSP_ROLLBACK_JOIN is not IP:PORT: rollback off");
 defaults:
     for (const KV& e : kDefaults) {

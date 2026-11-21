@@ -1,6 +1,8 @@
-// jsp_net_lobby.h -- ENHANCEMENT (EXPERIMENTAL rollback netcode, lobby): open and close a rollback session at RUNTIME (for the future in-game lobby page),
-// instead of only at process start from play_settings.txt. Implemented in jsp_net_game.cpp; the same connection code serves the start-up paths
-// (JSP_ROLLBACK_LISTEN / JOIN, JSP_ROLLBACK_VIA=repsn + JSP_ROLLBACK_ROLE), so there is one implementation.
+// jsp_net_lobby.h -- ENHANCEMENT (EXPERIMENTAL rollback netcode, lobby): open and close a rollback session at RUNTIME instead of only at process start
+// from play_settings.txt. Implemented in jsp_net_game.cpp; the same connection code serves the start-up paths (JSP_ROLLBACK_LISTEN / JOIN,
+// JSP_ROLLBACK_VIA=repsn + JSP_ROLLBACK_ROLE) and native-room pairing (Online Battle + rollback: the game's own Friendly Match room pairs the players,
+// jsp_net_game.cpp native_poll opens the link and closes it with jsp_net_lobby_close), so there is one implementation. jsp_net_native.cpp reads
+// jsp_net_lobby_phase. No menu calls jsp_net_lobby_open yet.
 //
 // Needs a rollback-capable process: JSP_ROLLBACK=1 at start (the snapshot ring, the fight hash and the frame hooks are only set up then). With JSP_ROLLBACK=1 and
 // NO role key the start decision (jpno::resolve_env, the lobby outcome) installs everything and opens no session: this API opens one. A start-up role

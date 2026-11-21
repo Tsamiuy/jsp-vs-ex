@@ -195,7 +195,7 @@ bool plausible_obj(uint32_t r3) { return r3 >= 0x10000u && r3 < 0xF0000000u && !
 void per_second_and_scene();
 uint32_t share_pad_obj();
 
-/* ---- JSP_ONLINE_VERSUS_DEFAULT (off unless 1; only with the game's own online on): two humans fight each other ----
+/* ---- JSP_ONLINE_VERSUS_DEFAULT (on unless 0; only with the game's own online on): two humans fight each other ----
  * The Friendly Match battle settings (Square in the room) hold only character, stage and BGM; there is no team, COM-count or
  * 1v1 option: a fight is always 2v2 (4 fighter slots, empty ones COM). The room data R = *(0x0095839C) (0x14C bytes, ctor
  * 0x0029FB20) has one team byte a slot at R+0x56..0x59 (2 = not set) and 4 fighter records R+0x68 + 0x24*i (read by 0x0029ED60):
@@ -667,12 +667,12 @@ extern "C" void jsp_register_native_online(void)
         const char* dd = std::getenv("JSP_DISCORD");
         g_discord_nav = !(dn && dn[0] == '0') && !(dd && dd[0] == '0') && std::getenv("PS3_NET_ONLINE") != nullptr;
     }
-    {   /* players-versus safeguard: OFF unless JSP_ONLINE_VERSUS_DEFAULT=1 (only when the game's own online is on). The game already puts 2 humans on
-         * opposite teams (runs native-vs1/vs2: teams 0,1,0,1, humans 0 and 2), so the swap never fired; its human/COM reading (+0x1A) is unverified,
-         * so it stays off for testers until a run shows the one-team case it is meant for. */
+    {   /* players-versus safeguard: ON by default when the game's own online is on (JSP_ONLINE_VERSUS_DEFAULT=0 turns it off). FIX (2026-11-21):
+         * runs native-rm5 and native-gin3 put both humans on one team against two COMs in every match (4 of 4), so the swap is needed; the
+         * runs native-vs1/vs2 had them apart by chance. */
         const char* vd = std::getenv("JSP_ONLINE_VERSUS_DEFAULT");
-        g_versus = vd && vd[0] == '1' && std::getenv("PS3_NET_ONLINE") != nullptr;
-        if (g_versus) NLOG("[online] versus safeguard on: 2 humans in a Friendly Match fight each other, each with a COM partner (JSP_ONLINE_VERSUS_DEFAULT=1)\n");
+        g_versus = !(vd && vd[0] == '0') && std::getenv("PS3_NET_ONLINE") != nullptr;
+        if (g_versus) NLOG("[online] versus safeguard on: 2 humans in a Friendly Match fight each other, each with a COM partner (JSP_ONLINE_VERSUS_DEFAULT=0 turns it off)\n");
     }
     if (!g_trace && !g_role && !g_discord_nav && !g_versus) return;
     g_t0 = now_ms();

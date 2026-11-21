@@ -266,6 +266,8 @@ struct State {
     std::string shown;
     // ENHANCEMENT (status badge, JSP_ROLLBACK_BADGE=1): main-thread only (boundary, the glue's rollback, end_with). path_word is set once the plan exists.
     bool badge_on = false; std::string badge_shown; jpnb::Values bv; jpnb::Every badge_every, status_every;
+    // ENHANCEMENT (ping counter, default on; JSP_ROLLBACK_PING=0 hides it): the round trip under the fight timer (jsp_net_badge.h). Main thread only.
+    bool ping_on = true; std::string ping_shown; uint32_t ping_rgba = 0; jpnb::Every ping_every;
     std::atomic<uint64_t> presence_room{0};   // ENHANCEMENT (Discord Join): the re-psn room this game is in (host: the room it created), 0 = none; written by the pump thread
     char presence_srv[160] = {};               // the re-psn server (host:port), set once before the pump thread starts
     std::atomic<int> path_kind{0};   // 0 unknown, 1 direct, 2 relay: written by the pump thread when the rendezvous ends, read by the main thread
@@ -293,7 +295,7 @@ struct State {
     uint32_t match_k = 0; std::atomic<uint32_t> match_jump{0}; uint64_t beacon_next = 0;
     bool fresh_gate = false, last_end_ok = false;
 } g;
-// FIX (review item 1, a missed KO): the KO / time-up winner of EVERY saved tick (commit and hash_only, predicted or not), keyed by tick; a re-save after a
+// FIX (a missed KO): the KO / time-up winner of EVERY saved tick (commit and hash_only, predicted or not), keyed by tick; a re-save after a
 // rollback overwrites its entry and a rollback drops the entries after its target. The boundary ends the match on the earliest recorded winner whose tick is
 // confirmed (ko_scan). Before, only saves of ticks that were already final were read, so a tick saved while predicted (its prediction right, never saved
 // again) hid the KO on one PC: that PC stalled into "Opponent disconnected" while the other ended normally. Main thread; cleared by reset_match.
@@ -340,16 +342,22 @@ uint32_t build_id()
 #endif
 }
 
-// The glue's overlay layer holds the message line (bottom left) and, when on, the status badge (top left); a change of either redraws both.
+// The glue's overlay layer holds the message line (bottom left), when on the status badge (top left) and the ping counter (under the fight timer, bottom right);
+// a change of any redraws all.
 void redraw()
 {
-    const std::string& s = g.shown; const std::string& b = g.badge_shown;
-    if (s.empty() && b.empty()) { jsp_overlay_close(); return; }
+    const std::string& s = g.shown; const std::string& b = g.badge_shown; const std::string& p = g.ping_shown;
+    if (s.empty() && b.empty() && p.empty()) { jsp_overlay_close(); return; }
     if (!jsp_overlay_begin(1280, 720)) return;
     if (!b.empty()) {
         const float bw = jsp_overlay_text_width(b.c_str(), jpnb::kScale);
         jsp_overlay_fill_rect(jpnb::kBoxX, jpnb::kBoxY, (int)(bw > 0 ? bw : 360) + 2 * jpnb::kBoxPad, jpnb::kBoxH, JSP_RGBA(0, 0, 0, 160));
         jsp_overlay_text_style(jpnb::kX, jpnb::kY, b.c_str(), jpnb::kScale, JSP_RGBA(255, 255, 255, 255), 0);
+    }
+    if (!p.empty()) {
+        const float pw = jsp_overlay_text_width(p.c_str(), jpnb::kPingScale);
+        jsp_overlay_fill_rect(jpnb::ping_box_x(p, pw), jpnb::kPingBoxY, jpnb::ping_box_w(p, pw), jpnb::kPingBoxH, JSP_RGBA(0, 0, 0, 160));
+        jsp_overlay_text_style(jpnb::ping_x(p, pw), jpnb::kPingY, p.c_str(), jpnb::kPingScale, g.ping_rgba, 0);
     }
     if (!s.empty()) {
         const float w = jsp_overlay_text_width(s.c_str(), 1.0f);
@@ -360,6 +368,7 @@ void redraw()
 }
 void show(const std::string& s) { if (s == g.shown) return; g.shown = s; redraw(); }
 void badge(const std::string& b) { if (b == g.badge_shown) return; g.badge_shown = b; redraw(); }
+void ping_hide() { if (g.ping_shown.empty()) return; g.ping_shown.clear(); redraw(); }
 std::string path_word() { const int k = g.path_kind.load(); return k == 1 ? "direct" : k == 2 ? "relay" : ""; }
 // ENHANCEMENT (input lag, smoothness audit cause 2): ON by default since 2026-11-21 (JSP_INPUT_DELAY_AUTO=0 turns it off). On a good link (ping <= ~40 ms with little jitter) it settles on 1 tick (the start value is the
 // manifest's InputDelay, default 2), and it only goes higher when the trip needs it. The peers need not agree on it: GekkoNet stamps each input with its
@@ -371,7 +380,7 @@ std::string path_word() { const int k = g.path_kind.load(); return k == 1 ? "dir
 // JSP_INPUT_DELAY_AUTO_MIN..MAX (default 1..4). It goes up at once and down only after three readings in a row ask for less (no flapping). Each peer changes only its
 // own delay: inputs are stamped with their tick, so the two peers need not agree (the manifest's InputDelay is the start value).
 uint64_t g_ad_next = 0; int g_ad_down_votes = 0;   // per match (reset_match); the switches below are read once per process
-double g_ad_jit_ema = -1; int g_ad_up_votes = 0;     // FIX (review item 6): were function statics that a rematch inherited; per match now (reset_match)
+double g_ad_jit_ema = -1; int g_ad_up_votes = 0;     // FIX (rematch inherited delay state): were function statics that a rematch inherited; per match now (reset_match)
 void adapt_delay(uint64_t now)
 {
     static int on = -1, lo = 1, hi = 4, margin = 8; uint64_t& next = g_ad_next; int& down_votes = g_ad_down_votes;
@@ -527,7 +536,7 @@ void fs_find_threads()
     g_fs_n = 0;
     g_regs_allow = 0;
     for (uint32_t t = 1; t < 65; t++) { uint64_t o[5] = {}; char nm[64] = {}; if (!ps3_ppu_thread_view(t, o, nm)) continue;
-        if (!std::strncmp(nm, "CRI", 3)) g_regs_allow |= 1ull << t;   // the register save / restore covers the sound library's threads only (review: a shared wait wrapper)
+        if (!std::strncmp(nm, "CRI", 3)) g_regs_allow |= 1ull << t;   // the register save / restore covers the sound library's threads only (a shared wait wrapper)
         if (!std::strncmp(nm, "CRI FS", 6) && g_fs_n < 16) g_fs_tids[g_fs_n++] = t; }
     std::fprintf(stderr, "[net] sound library file threads: %d (guest tids", g_fs_n);
     for (int i = 0; i < g_fs_n; i++) std::fprintf(stderr, " %u", g_fs_tids[i]);
@@ -765,7 +774,7 @@ void reset_match()
     g.base = 0; g.fight_seen = false; g.hud_mark = g.hud_tick = 0; g.hud_seen = 0; g.hud_seen_set = false;
     g.skip_sim = g.skip_pad = g.was_replaying = false; g.cancel_since = 0;
     g.last_run_ms = g.started_ms = 0; g.settings_shown_ms = 0;   // started_ms = 0: the presence no longer counts a match
-    g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every();
+    g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every(); g.ping_every = jpnb::Every();
     g.record = false; g.match_winner = 0; ko_clear();
     g_ad_next = 0; g_ad_down_votes = 0; g_ad_jit_ema = -1; g_ad_up_votes = 0;
     g_audio_waits = g_audio_timeouts = 0; g_audio_wait_ms = 0;
@@ -798,7 +807,7 @@ void end_with(const std::string& text, bool quiet = false)
     jsp_snapshot_ext_set_idle_hook(nullptr);   // the gate must not call into a finished session
     jsp_snapshot_ext_guard_summary();
     if (g.started_ms) log_status();   // the session ran: its last status line
-    badge("");
+    badge(""); ping_hide();
     set_text(text); g.phase = Phase::Ended; g.skip_sim = g.skip_pad = false;
     if (g.was_replaying || g.stepper.replaying()) jsp_stepper_replay(0, g.done_now);   // an end during a replay: gate, clock and flag off
     g.was_replaying = false;
@@ -1004,7 +1013,7 @@ public:
         *token = ++serial_;
         regs_save(tick);
         if ((int)(tick - g.base) - 1 < g.sess.final_frame()) page_dump(tick);   // DIAGNOSTIC (JSP_NET_PAGE_DUMP): only a confirmed tick (its save frame is final)
-        ko_record(tick);   // FIX (review item 1): every save, predicted or not (ko_scan ends the match once the tick is confirmed)
+        ko_record(tick);   // FIX (a missed KO): every save, predicted or not (ko_scan ends the match once the tick is confirmed)
         g_rep.commit(tick - g.base, *hash, raw);
         if (!g.bench && tick_log()) std::fprintf(stderr, "[net] commit tick=%u hash=%08x raw=%08x\n", tick, *hash, raw);   // a two-instance test compares the LAST commit line per tick across the two peers (the bench: no per-tick lines, they would be timed)
         return true;
@@ -1035,11 +1044,11 @@ public:
         if (!ok) { log("snapshot rollback failed", std::to_string(tick)); return false; }
         jpnb::note_rollback(g.bv, (int64_t)g.done_now - (int64_t)tick);
         g_rep.rollback(g.done_now - g.base, g.done_now - tick);
-        // the audio goes back with the tick (the mix thread is idle here). FIX (review): the save of tick T is taken at the boundary BEFORE that boundary raises
+        // the audio goes back with the tick (the mix thread is idle here). FIX (audio rewind dropped blocks): the save of tick T is taken at the boundary BEFORE that boundary raises
         // the audio to blocks_at(T), so the snapshot holds the guest's audio at blocks_at(T - 1): rewinding to blocks_at(T) dropped 6-7 blocks per rollback
         // (voices ended later on the copy with more rollbacks). The boundary that follows mixes them again.
         if (g_ps3_audio_lock_target >= 0) ps3_audio_lock_rewind(tick > g.base ? audio_blocks_at(tick - 1) : 0);
-        for (KoRec& r : g_ko_ring) if (r.tick > tick) r = KoRec();   // FIX (review item 1): those ticks run again; their re-saves record them anew
+        for (KoRec& r : g_ko_ring) if (r.tick > tick) r = KoRec();   // FIX (a missed KO): those ticks run again; their re-saves record them anew
         regs_restore(tick);   // FIX (helper thread registers): back to what they held at that save   // the audio goes back with the tick (the mix thread is idle here)   // the ticks gone back and run again (status badge and status line)
         g.done_now = tick;
         if (!g.bench && tick_log()) std::fprintf(stderr, "[net] rollback to tick=%u (longest game-thread stretch without a session call since the last rollback: %u ms, keepalive polls so far: %llu)\n", tick, g.sess.take_max_gap_ms(), (unsigned long long)g.sess.keepalive_polls());
@@ -1076,7 +1085,7 @@ private:
     // ENHANCEMENT (online match end): the guest memory now holds a CONFIRMED tick's state (both PCs simulated it with the same inputs), so the KO counters read
     // here agree on both: the first confirmed tick with a winner ends the match (boundary, end_match_over). The counters are guest heap words and roll back
     // with the snapshot, so a predicted KO that a rollback undoes is never seen here. Time-up: the round result object (jsp_fight_end_state), also guest heap.
-    // FIX (review item 1): recorded on every save (the guest memory holds that tick's state, predicted or confirmed); ko_scan decides once the tick is final.
+    // FIX (a missed KO): recorded on every save (the guest memory holds that tick's state, predicted or confirmed); ko_scan decides once the tick is final.
     static void ko_record(uint32_t tick)
     {
         // not before this session saw the fight HUD drawn: jsp_game.cpp finds the KO counters at that draw, and until then the addresses may still name the
@@ -1089,7 +1098,7 @@ private:
     }
     uint32_t serial_ = 100;
 } g_game_glue;
-// FIX (review item 1): the earliest recorded winner whose tick is confirmed (its save frame is below GekkoNet's final frame, the test confirmed() used) ends the
+// FIX (a missed KO): the earliest recorded winner whose tick is confirmed (its save frame is below GekkoNet's final frame, the test confirmed() used) ends the
 // match: both PCs confirm the same ticks with the same inputs, so they end on the same tick whichever of them saved it while predicted. Main thread (boundary).
 void ko_scan()
 {
@@ -1103,7 +1112,7 @@ void ko_scan()
     g.match_winner = bw;
     std::fprintf(stderr, "[net] match over at confirmed tick %u (session-relative): %s\n", best - g.base, bw == 1 ? "red wins" : bw == 2 ? "blue wins" : "time up");
 }
-// The winner of any recorded tick (confirmed or not): a peer that disconnects after it ended its own match on that KO (review item 1). 0 = none.
+// The winner of any recorded tick (confirmed or not): a peer that disconnects after it ended its own match on that KO (a missed KO). 0 = none.
 int ko_any()
 {
     uint32_t best = 0; int bw = 0;
@@ -1423,7 +1432,7 @@ void match_poll();
 // Boundaries in a row without a fight HUD draw (g_hud_calls unchanged): the fight scene is not on screen. Main thread.
 uint32_t g_hud_last = 0, g_hud_idle = 0;
 constexpr uint32_t kHudIdleFrames = 45;   // about 1.5 s: never (re)open a link or let a re-armed match anchor while a fight is drawn
-constexpr uint64_t kSyncDeadlineMs = 45000;   // FIX (review item 5): the session must synchronize this long after it started on this PC
+constexpr uint64_t kSyncDeadlineMs = 45000;   // FIX (a peer that never reaches the fight): the session must synchronize this long after it started on this PC
 // ---- the boundary: BeginFrame entry, once per main-loop iteration ------------------------------------------------------------------------------------------------
 // DIAGNOSTIC (re-run stalls, jsp_stepper.cpp): the game's frame-pacing vblank counter *(*(TOC - 0x4A80)) (func_006507DC waits until it is >= N, then zeroes
 // it). The TOC is r2 at BeginFrame. Read by the frame clock thread for a log line only (a racy read of guest memory); -1 = not known yet.
@@ -1505,7 +1514,7 @@ void boundary(ppu_context* c)
         if (g.bench || !jsp_stepper_lockstep_stretch_us(us)) { if (const uint32_t ms = g.sess.pace_sleep_ms(33)) Sleep(ms); }
     }
     else g.sess.poll();   // replay / regrant / stall iterations: the network is still serviced
-    // FIX (rollback determinism, review): an iteration where no tick may run still ran the game's frame outside the simulation phases and flipped, and every
+    // FIX (rollback determinism: a render-only frame flipped): an iteration where no tick may run still ran the game's frame outside the simulation phases and flipped, and every
     // flip is 2 vblanks the game counts; how many such iterations a PC has depends on its timing. While the session is synchronized, the main thread now waits
     // here (polling, asking the session again every millisecond) for up to 400 ms before a render-only frame is let through (below the 500 ms idle vblank).
     if (op.kind != jsx::OpKind::Run && g.sess.synced() && !g.bench) {
@@ -1525,7 +1534,7 @@ void boundary(ppu_context* c)
         case SessionEventKind::Started: log("gekko session synchronized", ""); if (!g.path_line.empty()) { show(g.path_line); g.path_until = GetTickCount64() + 6000; } else show(""); break;
         case SessionEventKind::Disconnected:   // GekkoNet fires it after the disconnect timeout = the grace window: the match is over
             { std::string why; if (m2_cancelled_within(300, &why)) { g.sess.abort(why); end_with(why); return; } }   // the peer's handshake Cancel (a local failure there) names the reason
-            // FIX (review item 1): a KO was already recorded here: the other PC ended its match on it and its session went; this is a normal end, not a failure
+            // FIX (a missed KO): a KO was already recorded here: the other PC ended its match on it and its session went; this is a normal end, not a failure
             if (const int w = ko_any()) { g.sess.abort("match over (the opponent ended on the KO)"); std::fprintf(stderr, "[net] the opponent left after a recorded KO: match over, not a disconnect\n"); end_with(match_over_text(w), true); return; }
             g.sess.abort("opponent disconnected"); end_with("Opponent disconnected"); return;
         case SessionEventKind::Desync:   // includes a base-tick mismatch: the per-tick hash carries the tick number
@@ -1543,7 +1552,7 @@ void boundary(ppu_context* c)
     if (g.sess.failed()) { send_failure_cancel(); end_with("Rollback session ended: " + g.sess.failure()); return; }
     // FIX (frame clock stall): the lockstep clock gave up on the guest (no vblank taken for 60 s); end_with's jsp_stepper_lockstep(0) clears the flag
     if (jsp_stepper_lockstep_failed()) { g.sess.abort("frame clock stalled"); end_with("Match ended: the game stopped taking vblanks"); return; }
-    // FIX (review item 5): handover() switched the handshake's silence checks off, so a peer that never reaches its fight left this PC on "Connecting to
+    // FIX (a peer that never reaches the fight): handover() switched the handshake's silence checks off, so a peer that never reaches its fight left this PC on "Connecting to
     // opponent..." for good. GekkoNet's own disconnect timer only runs once the session is synchronized; until then this deadline ends the match.
     if (!g.bench && g.started_ms && !g.sess.synced() && GetTickCount64() - g.started_ms > kSyncDeadlineMs) {
         std::fprintf(stderr, "[net] the opponent's game did not join the fight within %u s of this one (no session sync)\n", (unsigned)(kSyncDeadlineMs / 1000));
@@ -1552,7 +1561,7 @@ void boundary(ppu_context* c)
     // ENHANCEMENT (online match end): a confirmed tick had a KO winner (GameGlue::confirmed). Ended quietly (no UI yet: the post-game menu is a later step) and
     // with NO abort: the GekkoNet session lingers kLingerMs and its keepalive thread keeps answering, so the other PC confirms the same tick and ends the same way
     // instead of seeing a disconnect. Without this end the boundary would wait for ticks forever once the fight scene goes and done stops.
-    ko_scan();   // FIX (review item 1): the earliest confirmed tick among the recorded winners
+    ko_scan();   // FIX (a missed KO): the earliest confirmed tick among the recorded winners
     if (g.match_winner > 0) { end_with(match_over_text(g.match_winner), true); return; }
     const uint64_t now = GetTickCount64();
     if (g.bench) g.bs.last_kind = op.kind != jsx::OpKind::Run ? 0 : op.replay ? 2 : 1;   // what this iteration runs (bench_iteration files its time at the next boundary)
@@ -1580,6 +1589,10 @@ void boundary(ppu_context* c)
     if (g.badge_every.due(now, jpnb::kRefreshMs)) {   // the status badge: at most four times a second; drawn again if another layer user closed the layer
         g.bv.path = path_word();
         if (g.badge_on) { const std::string b = jpnb::text(g.bv); if (b != g.badge_shown || !jsp_overlay_active()) { g.badge_shown = b; redraw(); } }
+    }
+    if (g.ping_on && !g.bench && g.ping_every.due(now, jpnb::kPingRefreshMs)) {   // the ping counter: at most twice a second; drawn again if the layer was closed
+        const float ms = g.sess.stats().ping_ms; const std::string pt = jpnb::ping_text(ms); const uint32_t col = jpnb::ping_rgba(ms);
+        if (pt != g.ping_shown || (!pt.empty() && (col != g.ping_rgba || !jsp_overlay_active()))) { g.ping_shown = pt; g.ping_rgba = col; redraw(); }
     }
     if (g.status_every.due(now, jpnb::kLogMs) && now - g.started_ms >= 1000) log_status();
     if (!g.bench) adapt_delay(now);   // not at the session's first iteration: the line at the end covers a short one
@@ -1688,6 +1701,7 @@ void install_process_wide()
         if (end != eq + 1 && vk == 0x78) { const std::string name(*e, (size_t)(eq - *e)); _putenv_s(name.c_str(), ""); std::fprintf(stderr, "[net] binding %s = F9 dropped (F9 is the rollback cancel key)\n", name.c_str()); e = environ - 1; }
     }
     { char bb[16] = {}; g.badge_on = jsp_setting_get(jpnb::kKey, bb, sizeof bb) && jpnb::key_on(bb); }
+    { char pb[16] = {}; g.ping_on = !jsp_setting_get(jpnb::kPingKey, pb, sizeof pb) || jpnb::ping_key_on(pb); }   // default on
     jsp_session_text_hook = session_text;
     jsp_native_fight_install();   // ENHANCEMENT (native fight takeover): the hooks, all pass-through until start_session arms them in an online fight
     install_all(std::make_integer_sequence<int, sizeof k_ents / sizeof k_ents[0]>());   // inert while the phase is Off (boundary returns, the phase hooks run the original)
@@ -1798,7 +1812,7 @@ void conn_close()
     g.listen_port = 0; g.join = Endpoint{};
     g.match_k = 0; g.match_jump = 0; g.beacon_next = 0; g.fresh_gate = false;   // ENHANCEMENT (same-link rematch): the counter belongs to the link
     g.phase = Phase::Off;
-    show(""); badge("");
+    show(""); badge(""); ping_hide();
 }
 
 // ---- ENHANCEMENT (native-room pairing): the rollback link follows the game's own Online Battle room ----------------------------------------------------------------
@@ -1874,7 +1888,7 @@ void native_poll()
     if (g_nat.link) {
         if (st == 2 && room == g_nat.room && members >= 2) g_nat.away_since = 0;
         else if (!g_nat.away_since) g_nat.away_since = now;
-        // FIX (review item 8): during a running match a brief matching2 reading (a re-psn hiccup) must not end a live fight: 10 s there (the rollback link's own
+        // FIX (a brief room-view gap ended a live fight): during a running match a brief matching2 reading (a re-psn hiccup) must not end a live fight: 10 s there (the rollback link's own
         // disconnect timer ends a match whose peer is really gone first); 1 s between matches, as before.
         const uint64_t away_ms = g.phase.load() == Phase::Running ? 10000 : 1000;
         if (g_nat.away_since && now - g_nat.away_since >= away_ms) { native_close(st != 2 ? "this game left the native room" : room != g_nat.room ? "this game is in another native room" : "the other player left the native room"); return; }

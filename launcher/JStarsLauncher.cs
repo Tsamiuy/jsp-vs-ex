@@ -1307,7 +1307,8 @@ namespace JStarsLauncher
         CheckBox rollbackBox, relayBox;
         Button publicSrvBtn;
         bool onlineFresh;   // neither file existed: the defaults below were filled in and are saved with Save or Start Game
-        // The project's public re-psn server (relay on). Filled in on the first start and by the "Public server" button; any other server can be typed.
+        // A public re-psn test server (relay on); this project does not run it. Filled in on the first start and by the "Public server" button; any
+        // other server can be typed.
         const string PublicServer = "107.175.17.162:36100";
         static readonly string[] RollbackRoleKeys = { "JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH" };
         readonly List<Preset> presets = new List<Preset>();
@@ -1356,9 +1357,9 @@ namespace JStarsLauncher
             repsnPanel.Controls.Add(lanBtn);
             repsnPanel.Controls.Add(new Label { Text = "looks for a re-psn server started with -discover on this network", Location = P(250, 98), AutoSize = true, ForeColor = SystemColors.GrayText });
             publicSrvBtn = new Button { Text = "Public server", Location = P(130, 126), Size = Z(110, 28) };
-            publicSrvBtn.Click += delegate { repsnServerBox.Text = PublicServer; PresetMsg("Server set to the project's public server. Not saved yet."); };
+            publicSrvBtn.Click += delegate { repsnServerBox.Text = PublicServer; PresetMsg("Server set to the public test server (re-psn). Not saved yet."); };
             repsnPanel.Controls.Add(publicSrvBtn);
-            repsnPanel.Controls.Add(new Label { Text = "the project's public server for testers", Location = P(250, 132), AutoSize = true, ForeColor = SystemColors.GrayText });
+            repsnPanel.Controls.Add(new Label { Text = "a public test server (re-psn), not run by this project", Location = P(250, 132), AutoSize = true, ForeColor = SystemColors.GrayText });
             rollbackBox = new CheckBox { Text = "Rollback netcode for Online Battle fights (recommended)", Location = P(16, 162), AutoSize = true };
             rollbackBox.CheckedChanged += delegate { OnlineChanged(); };
             repsnPanel.Controls.Add(rollbackBox);
@@ -1623,12 +1624,12 @@ namespace JStarsLauncher
                 onlineState.ForeColor = Color.FromArgb(0, 110, 40);
                 // FIX (two-page Main Menu): Online Battle sits on its Battle Modes page; the fights are 2 vs 2 (3 vs 3 is offline Free Battle only)
                 bool pages = menuBox == null || menuBox.Checked;
-                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: " + (pages ? "Battle Modes > " : "") +
+                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: Main Menu > " + (pages ? "Battle Modes > " : "") +
                     "Online Battle > Friendly Match; one player picks Create a Room, the other Search for a Room.";
             }
             else if (m == 1) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Online Battle with the game's own netcode (rollback off)."; }
             else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }
-            else { onlineState.ForeColor = SystemColors.GrayText; onlineState.Text = "Online play is off. Choose re-psn to play Online Battle."; }
+            else { onlineState.ForeColor = SystemColors.GrayText; onlineState.Text = "Online play is off. Choose Online server (re-psn) to play Online Battle."; }
         }
 
         // Reads both files into the controls. A file that cannot be used is reported and left alone.
@@ -1645,7 +1646,7 @@ namespace JStarsLauncher
             bool roleKey = RollbackRoleKey();
             if ((on1 || on2) && RollbackOn() && roleKey)
             {
-                string rn = "Rollback is on (Port Settings > Online) and so is this method; the game refuses to start both. Turn one of them off.";
+                string rn = "Rollback is on (Options > Port Settings > Online) and so is this method; the game refuses to start both. Turn one of them off.";
                 note = note == null ? rn : note + " " + rn;
             }
             // first start (neither file exists, e.g. firstrun.py was told not to seed them): the tester defaults, saved with Save or Start Game
@@ -1678,7 +1679,7 @@ namespace JStarsLauncher
             if (onlineFresh)
             {
                 onlineDirty = true;
-                onlineMsg.Text = "First start: online is on, with the project's public server and a random online name (change it if you like). Saved with Start Game.";
+                onlineMsg.Text = "First start: online is on, with a public test server (re-psn) and a random online name (change it if you like). Saved with Start Game.";
             }
             loading = was;
         }

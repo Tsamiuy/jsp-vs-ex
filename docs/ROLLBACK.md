@@ -1,11 +1,11 @@
 # Rollback netcode: how it works and how this port will do it
 
-Status: **experimental, opt-in.** A first version for two PCs connected by IP address is in the build, off unless you turn
-it on ([section 5](#5-try-it-experimental-direct-ip-rollback)). Turned off, the game runs exactly as before. Today's
-online play is still the game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server
-([ONLINE.md](ONLINE.md)). That uses the game's original peer-to-peer code, not rollback. This page explains rollback in
-general, then how this port adds it, what it is built on, and what we fall back to. The roadmap item is
-[ROADMAP.md, section 4](ROADMAP.md).
+Status: **experimental.** A new install turns it on for Online Battle: the players meet in the game's own Friendly Match room
+over a [re-psn](https://github.com/undecuple/re-psn) server and rollback runs the fight (US 1.00 disc only; [ONLINE.md](ONLINE.md),
+[TESTING_ONLINE.md](TESTING_ONLINE.md)). The settings window's Online tab turns it off, and Online Battle then uses the game's
+original peer-to-peer code. Turned off, the game runs exactly as before. The start-up paths for tests (direct IP, a re-psn room
+by role) are in [section 5](#5-try-it-experimental-direct-ip-rollback). This page explains rollback in general, then how this
+port adds it, what it is built on, and what we fall back to. The roadmap item is [ROADMAP.md, section 4](ROADMAP.md).
 
 ## 1. What rollback netcode is
 
@@ -167,8 +167,8 @@ flowchart LR
 | 6. Two PCs | Opt-in for testing ([section 5](#5-try-it-experimental-direct-ip-rollback)). One match has run on two PCs on one home network, meeting through a room on a re-psn server, with no desync (see [Tested so far](#tested-so-far)); a typed IP address has not been tried on two PCs |
 | 7 | Not started |
 
-What does not change: rollback play stays opt-in. The port connects only when you choose online play, and only to the
-players or server you pick. Every gameplay option in a match is the same for all players.
+What does not change: the port connects only for online play, and only to the server and players in the settings. Every
+gameplay option in a match is the same for all players.
 
 ## 5. Try it: experimental direct-IP rollback
 
@@ -193,6 +193,7 @@ Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice
 | Off | no online play | none |
 | Delay (the game's own online) | the game's own netcode over re-psn or a community server (`repsn.ini` / `community.ini`, as before) | Method (re-psn / Community server), Server, Online name, Community preset |
 | Rollback (experimental) | the rollback path of this section, two players, direct IP or through a re-psn room | Connection (Direct IP / re-psn), Role (Host / Join), then Port (host) or Host address (join) for direct IP, or Allow relay for re-psn |
+| Online Battle + rollback | the default after install: the game's own Online Battle over re-psn (`repsn.ini` `enabled=1`) with `JSP_ROLLBACK=1` and no role key; a Friendly Match room pairs the players and rollback runs the fight (US 1.00 disc only) | Server, Online name, Allow relay |
 
 Cross on Port, Host address, Server or Online name opens the pad letter picker the page already had. **Save (applies on
 the next start)** writes the choice; Discard changes reads the files again; Circle leaves without saving. Under the rows
@@ -220,8 +221,10 @@ the page says which method is on and what this session runs against what is save
   while `JSP_NET_REFUSED` is set writes `JSP_ROLLBACK=0` even with no line in the file, so the next start is not refused
   again. The same decision refuses Rollback alone when a role key is invalid (both `LISTEN` and `JOIN`, a bad port or
   address, `VIA=repsn` without `ROLE`; it also sets `JSP_NET_REFUSED`). `JSP_ROLLBACK=1` with no role key at all is the lobby
-  start (in progress, no lobby page yet): everything is set up as for a match, but no session opens until the game opens one
-  at runtime (`jsp_net_lobby.h`); until that page exists such a start shows no notice and plays offline. "Online on" is the
+  start: everything is set up as for a match, but no session opens at start. With the game's own online on (re-psn) it is
+  Online Battle + rollback, not a refused pair: once this game is in a Friendly Match room with exactly one other player, the
+  port opens a rollback link to that player through re-psn (`jsp_net_lobby.h`, native-room pairing in `jsp_net_game.cpp`; `JSP_ROLLBACK_NATIVE=0`
+  turns it off), and rollback runs the room's fights. Without the game's own online such a start plays offline. "Online on" is the
   runtime's own test: any value of `PS3_NET_ONLINE`, even `0`.
 - A refused start is shown on screen, not only in the log: see "If rollback does not start" below.
 - ASSUMPTION: the runtime reads `PS3_NET_ONLINE` lazily (after `main()`) and nothing in the jsp exe sets it later, so
@@ -314,6 +317,21 @@ badge has not been seen on screen yet:** no game was run with it. The place abov
 of the original HUD size; it was not checked against every stage, a smaller HUD size or the training screen. If another part of
 the port closes the overlay layer during the match, the badge is drawn again within a quarter of a second; a part that draws
 its own page on that layer while a match runs would lose it when the badge text changes (none is known to do so during a fight).
+
+### Ping counter
+
+On by default (display only; `JSP_ROLLBACK_PING=0` in `play_settings.txt` hides it, read once at start-up). While a rollback
+match runs, the round trip to the other player shows in small game-font text right under the fight timer, at the bottom right,
+for example `62 ms`, so players see what kind of connection they are in. The value is GekkoNet's averaged round trip, the one the
+adaptive input delay reads; over the relay it is the round trip through the server. It includes up to one tick (33 ms) of answer
+wait, so a 30 ms link reads about 60-95 ms. Nothing shows until the first measurement; above 999 ms it reads `999+ ms`. The
+tint follows the input delay the link needs: green below 100 ms (1 tick), yellow below 180 ms (2), red above. The text is
+rebuilt at most twice a second, on the same overlay layer as the badge and the match messages, and goes away when the match ends.
+
+The place (1280x720 overlay space: right edge x 1204, box y 680-704) was measured on fight screenshots below the timer bar's
+lower rule (y 675), clear of the minimap above it and the player panel at the bottom left. Text, rounding, clamping, tint,
+refresh and layout are in `installer/port/jsp/jsp_net_badge.h` with a host test (`bash installer/tools/net_badge_test.sh`).
+**Not seen on screen yet:** no game was run with it, and it was not checked against a smaller HUD size or every stage.
 
 ### Replays of rollback matches and the rollback bench
 
@@ -432,7 +450,7 @@ write watchpoint on the word or camera that split) and fixed in turn; the first 
 
 The playback count at `0x0094DEC4` (once taken for a scene step) is also out of the per-tick checksum. Diagnostics used, all off by default:
 `JSP_NET_TASK_WATCH` / `JSP_NET_CAM_WATCH` (watchpoints with the writer's call chain, symbolized with llvm-nm), `JSP_NET_CLOCK_DIAG` (who reads the
-clock), `JSP_NET_LOAD_DIAG`, `JSP_NET_PAGE_DUMP=N` with `build/bench/pagediff.py` (first guest pages that stop matching between two copies),
+clock), `JSP_NET_LOAD_DIAG`, `JSP_NET_PAGE_DUMP=N` (fingerprints of guest pages, to find the first that stop matching between two copies),
 `JSP_NET_TICK_LOG=1` (the per-tick commit / rollback lines the two-copy test compares; off in play, they are an unbuffered write each).
 
 Ruled out on the way: a session start at the first fight HUD draw (`JSP_ROLLBACK_START=fight`) gives each PC a different number of pre-session ticks,
@@ -442,6 +460,41 @@ and per-tick state the checksum does not cover drifts (the CPU opponent acted on
 **Match reports for testers.** A match that ends on a desync, a failure or a disconnect writes `reports/jsp-match-report-<date>-<time>.txt`
 (`JSP_NET_REPORT_DIR`): build, settings in effect, session facts, the last 120 confirmed-tick checksums and rollbacks, the end reason. IP addresses,
 the user's folders and the machine and user names are removed (`jsp_net_report.h`, host test `net_report_test`).
+
+### Switches
+
+Each is a `play_settings.txt` line (or an environment variable). Test-only switches are for two-copy and A/B runs, not for play.
+
+| Switch | What it does | Test-only |
+|---|---|---|
+| `JSP_ROLLBACK_NATIVE` | native-room pairing in the lobby start (Online Battle + rollback); on by default, `0` turns it off | no |
+| `JSP_ROLLBACK_RELAY` | allow the server's relay when the direct link fails (the defaults after install set `1`) | no |
+| `JSP_INPUT_DELAY_AUTO` | input delay follows the measured link: ceil((ping/2 + jitter + margin) / 33.3 ms) ticks; on by default, `0` keeps the start value | no |
+| `JSP_INPUT_DELAY_AUTO_MIN`, `_MAX`, `_MARGIN_MS` | its range (default 1 to 4 ticks) and margin (default 8 ms) | no |
+| `JSP_ROLLBACK_PING` | the [ping counter](#ping-counter) under the fight timer; on by default, `0` hides it | no |
+| `JSP_POSTGAME_IDLE_SECS` | after a fight, seconds without a locked pick before the side leaves (10 to 3600, default 180) | no |
+| `JSP_ROLLBACK_RECORD`, `JSP_ROLLBACK_RECORD_DIR` | save each match's confirmed inputs as a replay (off by default) | no |
+| `JSP_NET_REPORT_DIR` | folder of the match reports (default `reports`) | no |
+| `JSP_AUDIO_TICKLOCK`, `JSP_NET_GUEST_CLOCK`, `JSP_NET_CRI_LOCK`, `JSP_NET_THREAD_REGS` | the determinism fixes above; on in a match, `0` turns each off | A/B only |
+| `JSP_ROLLBACK_SKIP_FINAL`, `JSP_SNAPSHOT_COPY_THREADS` (3), `JSP_SNAPSHOT_PRECHECK_US` (20000), `JSP_SNAPSHOT_AUDIT_EXEMPT`, `JSP_SNAPSHOT_LWM_CACHE`, `JSP_SNAPSHOT_LAYOUT_GEN`, `JSP_SNAPSHOT_QUICK`, `JSP_SNAPSHOT_QUICK_WAIT_US`, `JSP_SNAPSHOT_FROZEN_WALK_EVERY`, `JSP_SNAPSHOT_AUDIT_ASYNC`, `JSP_SNAPSHOT_SITE`, `JSP_SNAPSHOT_SITE_MS` | snapshot speed-ups, set by default in rollback; `0` turns each off | A/B only |
+| `PSO_ASYNC` | rollback sets `0` (asynchronous shader builds crashed in bench runs; a workaround) | no |
+| `JSP_STEP_SKIP_DRAWS` | skip the draws of re-run frames (with `JSP_STEP_TURBO`; off by default) | no |
+| `JSP_NET_STICK_DEADZONE`, `JSP_NET_STICK_LEVELS` | send the sticks with a dead zone or fewer steps (off by default) | yes |
+| `JSP_ROLLBACK_LIMITED_SAVING`, `JSP_ROLLBACK_START=fight`, `JSP_NET_LOAD_NEUTRAL`, `JSP_PAD_PEEK`, `JSP_SNAPSHOT_PREWAIT`, `JSP_SNAPSHOT_QUICK_SLEEP` | alternatives that were tried; off by default | yes |
+| `JSP_FIGHT_HASH_SCENE`, `JSP_FIGHT_HASH_FIGHTER`, `JSP_FIGHT_HASH_CAM_CACHE` | `1` puts the playback count, the fighter part or the old camera range back into the checksum | yes |
+| `JSP_ROLLBACK_BENCH` | the local rollback bench (no peer) | yes |
+| `JSP_ROLLBACK_INPUTS`, `JSP_ROLLBACK_INPUTS_SKIP` | feed the local player from a recorded fight (`replay_dump` csv) | yes |
+| `JSP_NET_LINK` | simulated delay, jitter and loss on this copy's sends | yes |
+| `JSP_ROLLBACK_NATIVE_COMM` | `same` keeps the title's communication id for the rollback rooms | yes |
+| `JSP_ROLLBACK_ROOM` | join that rollback room id, not the oldest (set by a Discord Join) | internal |
+| `JSP_ROLLBACK_ALLOW_DEBUG` | turns off the handshake's debug-switch refusal and allows the test knobs below | yes |
+| `JSP_ROLLBACK_FORCE_RELAY` | skip the direct try and use the relay at once (only with `JSP_ROLLBACK_ALLOW_DEBUG=1`) | yes |
+| `JSP_ONLINE_VERSUS_DEFAULT` | `1`: with two humans in a Friendly Match, put them on opposite teams (off by default) | no |
+| `JSP_NATIVE_TRACE` | trace of the game's own online and an autopilot into a Friendly Match | yes |
+| `JSP_NET_TICK_LOG`, `JSP_NET_PAGE_DUMP`, `JSP_NET_TASK_WATCH`, `JSP_NET_CAM_WATCH`, `JSP_CAM_DUMP`, `JSP_NET_CLOCK_DIAG`, `JSP_NET_LOAD_DIAG`, `JSP_SNAPSHOT_CENSUS_PROF`, `JSP_SNAPSHOT_COST_WINDOW_S`, `JSP_SNAPSHOT_AUDIT_PERIOD_MS` | diagnostics and measurement lines | yes |
+
+The Discord switches (`JSP_DISCORD`, `JSP_DISCORD_APP_ID`, `JSP_DISCORD_AUTO_ACCEPT`, `JSP_DISCORD_AUTO_NAV`, `JSP_DISCORD_CHAR_ART`,
+`JSP_DISCORD_REGISTER`, `JSP_DISCORD_JOIN`) are in [DISCORD.md](DISCORD.md).
 
 ### Rollback over re-psn (experimental)
 
