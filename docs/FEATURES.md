@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 17 available, 12 in progress, 16 planned.
+Port features: 18 available, 12 in progress, 16 planned.
 
 ## 1. What the port adds
 
@@ -42,6 +42,7 @@ Port features: 17 available, 12 in progress, 16 planned.
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
 | <a id="exit-game"></a>Exit Game | In Options, the PSN-only Cross-Save entry is now Exit Game, with a Yes/No box | available | on | EXIT_OPTION=0 turns it off |
+| <a id="main-menu-pages"></a>Two-page Main Menu | ENHANCEMENT (on by default): the top page has Battle Modes, J-Customize, J-Point Shop, Gallery and Options; Battle Modes opens a second page with the game's battle rows plus Training Mode and Impossible Mode. The labels are drawn by the port in the game's look | available | on | MENU_PAGES=0 gives the game's own one-page menu. Tried in scripted runs on one Windows PC with a keyboard (top page, Battle Modes page, Free Battle list, Training and Impossible rows; Options opens and closes); not tried online or with a second pad. US 1.00 build |
 | <a id="training-mode"></a>Training Mode | Free Battle offers Free Battle or Training: the game's own character select, partner slots locked, a 0-star computer fighter stands still, nobody is KO'd and health refills 1 s after the combo number has gone away, unlimited time, no J-Points | available | opt-in (menu choice) | Scripted keyboard runs pass. Not tested yet: KOs in a normal Free Battle right after Training, a human Player 2, a mouse click on the Training box. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
 | <a id="training-options"></a>Training options | Unlimited Stamina and Free Camera are in the Training settings (Hide HUD has its own row); infinite support and unlimited Victory Burst are planned | in progress | opt-in (menu choice) | Scripted keyboard runs pass. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
 | <a id="hide-hud"></a>Hide HUD in Training | A “Hide HUD” row in the Training settings hides every HUD draw of the fight, name tags included, for screenshots; the HUD shows again while the pause menu is open | available | off | Scripted keyboard run passes. [TRAINING_MODE.md](notes/TRAINING_MODE.md) |
