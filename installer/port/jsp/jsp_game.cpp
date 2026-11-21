@@ -2584,7 +2584,13 @@ void impossible_icall(uint32_t target, uint64_t* gpr)
     static const bool ko_log = std::getenv("KO_LOG") != nullptr;
     const bool ko_imp = g_imp_mode != 0 && g_ko_fb;
     const int ko_limit = ko_imp ? 0 : (g_ko_fb && g_ko_win != 3 ? g_ko_win : 0);
-    if (heap && target == 0x00139E04u && vm_read32(o) == 0x0087A2E0u && g_ko_limit_now >= 4) {
+    if (heap && (target == 0x00139E04u || target == 0x00139F84u) && vm_read32(o) == 0x0087A2E0u && g_ko_limit_now >= 4 && vm_read32(o + 0x14) == 3u) {
+        /* both the bar's update (func_00139E04) and its draw (func_00139F84) run its logic, and the game writes the real
+         * count and limit into it between them: with only one of them given the 3-segment view, the bar went back and
+         * forth between "one KO left" and not, and played that sound every frame (4 or 5 KOs to win) */
+        /* only while the bar is in its normal state (+0x14 == 3): once the match is won (state 4, then 5) the game writes
+         * the real count and limit into +0x3C / +0x40 every frame, and overwriting them made the count flip each frame,
+         * which replayed the KO sound over and over (4 or 5 KOs to win). */
         /* 4 or 5 KOs: the KO bar (one per side, +0x38 the side) only has 1-3 KO layouts, so it shows the 3-KO layout
          * (+0x48 0, +0x40 3) filling on the last 3 KOs, full when the match ends (a two-bar look is still to come) */
         const uint32_t side = vm_read32(o + 0x38) & 1u, ctr = g_ko_counter[side];
@@ -4329,6 +4335,44 @@ extern "C" void jsp_jg_check_enter(ppu_context* ctx)
     }
 }
 extern "C" void jsp_jg_check_leave(ppu_context* ctx) { (void)ctx; }
+/* func_00138C3C, the KO bar's logic (one bar per side, class 0x0087A2E0; +0x3C KOs shown, +0x40 KOs to win, +0x48 the
+ * layout: 0 = 3 segments; +0x4C / +0x50 / +0x54 decide its sound 0x9E). The game writes the real count and limit into
+ * the bar each frame (e.g. 2 of 5), and the logic cuts the limit to the layout's 3: at 2 of 5 it then saw "one KO left"
+ * on one pass and not on the next, and played that sound every frame for the rest of the match (2026-11-19, testers
+ * on 5 KOs). With 4 or 5 KOs to win every pass now sees the same 3-segment view: the last three KOs fill it, so
+ * "one KO left" means one KO left. */
+extern "C" void jsp_kobar_logic_enter(ppu_context* ctx)
+{
+    const uint32_t o = (uint32_t)ctx->gpr[3];
+    if (g_ko_limit_now < 4 || o < 0x10000000u || o >= 0x20000000u || (o & 3) || vm_read32(o) != 0x0087A2E0u) return;
+    const uint32_t side = vm_read32(o + 0x38) & 1u, ctr = g_ko_counter[side];
+    if (ctr < 0x10000000u || ctr >= 0x20000000u || vm_read32(ctr) != 0x00876558u) return;
+    const int count = (int32_t)vm_read32(ctr + 0x24), shown = count - (g_ko_limit_now - 3);
+    vm_write32(o + 0x48, 0); vm_write32(o + 0x40, 3); vm_write32(o + 0x3C, (uint32_t)(shown < 0 ? 0 : shown > 3 ? 3 : shown));
+}
+extern "C" void jsp_kobar_logic_leave(ppu_context* ctx) { (void)ctx; }
+/* func_004897A8 (play a sound: r5 the sound id; it returns at once for an id past the bank's count). The KO bar calls it
+ * from 0x00138EC8 with sound 0x9E. With 4 or 5 KOs to win the game updates the bar from two places with different
+ * numbers (the real count and limit, and the 3-segment view), so the bar kept deciding its state had changed and played
+ * the sound every frame (2026-11-19: testers hear the KO sound repeat with 4 and 5 KOs). Here the sound plays once per
+ * KO a side really scores: a repeat with no new KO on that side's counter gets an id past the bank (0xFFFFFFFF), which
+ * the function skips. */
+static int32_t g_ko_sound_at[2] = { -1, -1 };
+static uint32_t g_ko_sound_ctr[2] = { 0, 0 };
+static void ko_sound_gate(ppu_context* ctx)
+{
+    if ((uint32_t)ctx->lr != 0x00138EC8u || g_ko_limit_now < 4) return;
+    const uint32_t o = (uint32_t)ctx->gpr[28];   /* the bar, in func_00138C3C */
+    if (o < 0x10000000u || o >= 0x20000000u || (o & 3) || vm_read32(o) != 0x0087A2E0u) return;
+    const uint32_t side = vm_read32(o + 0x38) & 1u, ctr = g_ko_counter[side];
+    if (ctr < 0x10000000u || ctr >= 0x20000000u || vm_read32(ctr) != 0x00876558u) return;
+    const int32_t count = (int32_t)vm_read32(ctr + 0x24);
+    if (g_ko_sound_ctr[side] != ctr) { g_ko_sound_ctr[side] = ctr; g_ko_sound_at[side] = 0; }   /* a new fight: none yet (the bar plays nothing at 0) */
+    if (count != g_ko_sound_at[side]) { g_ko_sound_at[side] = count; return; }   /* a real KO: the sound plays */
+    ctx->gpr[5] = 0xFFFFFFFFu;   /* the same KO again: skipped */
+}
+extern "C" void jsp_kosnd_enter(ppu_context* ctx) { ko_sound_gate(ctx); }
+extern "C" void jsp_kosnd_leave(ppu_context* ctx) { (void)ctx; }
 
 extern "C" void jsp_lod_initialize_enter(ppu_context* ctx)
 {
