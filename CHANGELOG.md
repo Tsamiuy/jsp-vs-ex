@@ -34,6 +34,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 #### Changed
 
 - **Graphics:** toolkit patch 2933 (2 Players split screen, vertex pulling in `rsx_d3d12_backend.c`): the per-frame index buffer of indexed vertex-pulled draws holds 1<<22 indices (was 1<<21, 16 MB more upload memory), because a 2 Players frame needs about 1.6 million indices and every frame was cut in two batches with a GPU wait between them (`[MIDFLUSH]` on every frame, now naming which buffer was full); and a batch the sparse check would send to the CPU path (a few vertices of a big mesh, as each split screen view uses) copies only the vertices it uses, one after the other, with its indices counted from 0 (up to 1<<20 vertices, tables of 12 MB allocated on first use; `VPULL_GATHER=0` turns it off; the `[VPULL]` report counts them as gathered). Tested: 2 Players 2 vs 2 on Hidden Leaf with two-thread drawing, median 18-24 FPS before and 28-30 after, pulled draws 81% to 100%, pictures checked in the test shots; 1 Player unchanged at 30.0; the 141 toolkit patches export (`export_toolkit.py`). Not tested: a 60 Hz monitor, other graphics cards, 3 or 4 player screens, online play. (#239)
+- **Docs:** the README, the roadmap, the feature list, `KNOWN_ISSUES.md` and `docs/notes/STATUS.md` now describe 3v3 Free Battle, the two-page Main Menu and the KO bar sound fix as done on `main` (they still listed 3v3 as planned or the third fighter as queued); two new rows in `KNOWN_ISSUES.md` list what is not tested. Docs only, nothing tested in a game. (#246)
 
 #### Fixed
 
