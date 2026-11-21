@@ -1,0 +1,157 @@
+Split screen (2 Players) drawing, two changes in the vertex pulling path:
+
+1. The per-frame index buffer of indexed vertex-pulled draws holds 1<<22 indices (was 1<<21; 16 MB more upload memory).
+   A J-Stars 2 Players frame needs about 1.6M indices, so with 1<<21 every split screen frame was cut in two batches
+   with a GPU wait between them ([MIDFLUSH] on every frame). The [MIDFLUSH] line now says which buffer was full.
+2. Gathered copies (VPULL_GATHER, default on; VPULL_GATHER=0 turns it off): a batch the sparse check would send to the
+   CPU path (it uses a few vertices of a big mesh, as each split screen view does) copies only the vertices it uses,
+   one after the other, and its indices count them from 0, as a record of its own. Up to 1<<20 vertices (tables of
+   12 MB, allocated on first use); the common strides are copied with fixed-size copies. The [VPULL] report counts
+   them as "gathered".
+
+J-Stars, 2 Players 2 vs 2 on Hidden Leaf, median frame rate: 18-24 before, 28-30 after with two-thread drawing
+(PIPE=1); pulled draws 81% -> 100%. 1 Player is unchanged (30.0). Pictures checked in the test runs' shots.
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 75a3361..b55dde2 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -65,7 +65,8 @@
+ #define FRAME_COUNT         2   /* double buffering */
+ #define MAX_VERTICES    393216  /* per-frame vertex buffer (dbgfont submits
+                                  * ~7.5k verts/frame; leave generous headroom) */
+-#define VP_MAX_INDICES  (1u << 21)  /* per-frame index buffer of indexed VP draws, x2 parity */
++#define VP_MAX_INDICES  (1u << 22)  /* per-frame index buffer of indexed VP draws, x2 parity; 1<<22 since 2026-11-20
++                                    * (2 Players split screen: ~1.6M indices a frame, every frame cut in two at 1<<21) */
+ #define VP_TEX_UNITS      16    /* RSX texture units: t0-t15 / s0-s15 end to end (upstream #600 sizes its tables 16) */
+ #define MAX_DRAWS         8192  /* 8192 since 2026-11-13 (was 4096): a 2 vs 2 on Hidden Leaf has 4,200-4,800 draws a
+                                  * frame, and at 4096 every such frame was cut in two batches (mid-frame flush).
+@@ -671,7 +672,7 @@ static struct {
+     u32* raw; u32 raw_cap;              /* the batch's guest indices (VPULL_NO = restart) */
+     u32* tri; u32 tri_cap;              /* its list, in guest indices */
+     /* [VPULL] window */
+-    u64 n_batch, n_rec, n_idx, vbytes, n_cpu, fb_layout, fb_sparse, fb_full, fb_vs, fb_prim, n_skip;
++    u64 n_batch, n_rec, n_idx, vbytes, n_cpu, fb_layout, fb_sparse, fb_full, fb_vs, fb_prim, n_skip, n_gather;
+     double t0;
+ } s_vpull = { .on = -1 };
+ static u32 s_vpull_gen = 1;   /* bumped whenever the ring restarts (patch 2050) */
+@@ -11412,6 +11413,18 @@ static void vpull_copy(u8* dst, u32 off, u32 len, u32 loc)
+  * appends only what lies above it (VPULL_ONCE=0: a new segment every batch).
+  * Returns the indices written (s_vpull.last_cont: it continued the open
+  * record), or VPULL_NO with nothing changed: the CPU path takes the call. */
++/* patch 2934: one vertex's bytes; the common strides as fixed-size copies (inlined), not a memcpy call each */
++static inline void vg_copy(u8* d, const u8* s, u32 n)
++{
++    switch (n) {
++    case 12: memcpy(d, s, 12); return;  case 16: memcpy(d, s, 16); return;  case 20: memcpy(d, s, 20); return;
++    case 24: memcpy(d, s, 24); return;  case 28: memcpy(d, s, 28); return;  case 32: memcpy(d, s, 32); return;
++    case 36: memcpy(d, s, 36); return;  case 40: memcpy(d, s, 40); return;  case 44: memcpy(d, s, 44); return;
++    case 48: memcpy(d, s, 48); return;  case 52: memcpy(d, s, 52); return;  case 56: memcpy(d, s, 56); return;
++    case 60: memcpy(d, s, 60); return;  case 64: memcpy(d, s, 64); return;
++    default: memcpy(d, s, n); return;
++    }
++}
+ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+ {
+     extern uint8_t* vm_base;
+@@ -11552,7 +11565,55 @@ static u32 upload_vpull(const rsx_state* st, u32 first, u32 count, u32 prim)
+      * may pay off anyway: VPULL_SPARSE=<factor> (default 8, 0 = never). */
+     static int sparse = -1;
+     if (sparse < 0) { const char* ev = getenv("VPULL_SPARSE"); sparse = ev ? atoi(ev) : 8; if (sparse < 0) sparse = 0; }
+-    if (!cont && sparse && span > 4096u && (u64)span > (u64)sparse * count) { s_vpull.fb_sparse++; return VPULL_NO; }
++    if (!cont && sparse && span > 4096u && (u64)span > (u64)sparse * count) {
++        /* patch 2934 (VPULL_GATHER, default on; 0 = off): such a batch copies only the vertices it uses, one after
++         * the other, and its indices count them from 0 (a record of its own, not extended). 2 Players split screen
++         * draws small pieces of big meshes for each view: 19% of its draws took the CPU path here (2026-11-20). */
++        static int gather = -1;
++        if (gather < 0) { const char* ev = getenv("VPULL_GATHER"); gather = (ev && *ev == '0') ? 0 : 1; }
++        /* vertices up to 1<<20 (the big stage meshes: the batches left on the CPU path after the first version had
++         * the most vertices, 9% of the drawing thread for 2% of the batches) */
++        static u32* s_vg_stamp = NULL; static u32* s_vg_map = NULL; static u32* s_vg_list = NULL; static u32 s_vg_gen = 0;
++        if (gather && !s_vg_stamp) {
++            s_vg_stamp = (u32*)calloc(1u << 20, sizeof(u32)); s_vg_map = (u32*)malloc((1u << 20) * sizeof(u32));
++            s_vg_list = (u32*)malloc((1u << 20) * sizeof(u32));
++            if (!s_vg_stamp || !s_vg_map || !s_vg_list) gather = 0;
++        }
++        if (gather && s_vpull.nstr <= 1 && s_vpull.extent <= S && vmax < (1u << 20) && out) {
++            if (++s_vg_gen == 0) { memset(s_vg_stamp, 0, (1u << 20) * sizeof(u32)); s_vg_gen = 1; }
++            u32 nv = 0;
++            for (u32 i = 0; i < out; i++) { const u32 v = tri[i];
++                if (s_vg_stamp[v] != s_vg_gen) { s_vg_stamp[v] = s_vg_gen; s_vg_map[v] = nv; s_vg_list[nv++] = v; } }
++            const int gvs = vp_get_vs_pull(st);
++            const u32 gbase = (s_vpull.off + 15u) & ~15u;
++            const u64 glen = (u64)nv * S;
++            if (gvs >= 0 && (u64)gbase + glen <= s_vpull.ring_bytes) {
++                u8* gring = s_vpull.ring_mapped + (u64)s_d3d.vp_parity * ((u64)s_vpull.ring_bytes + VPULL_RING_SLACK) + gbase;
++                u32 lpg = 0xFFFFFFFFu; const u8* lsrc = NULL;
++                for (u32 k = 0; k < nv; k++) {
++                    const u32 o = s_vpull.lbase + s_vg_list[k] * S, pg = o >> 20;
++                    if ((o & 0xFFFFFu) + S > 0x100000u) { vpull_copy(gring + (u64)k * S, o, S, s_vpull.loc); continue; }
++                    if (pg != lpg) { lpg = pg; lsrc = vm_base + cellGcmResolveLocated((int)s_vpull.loc, pg << 20); }
++                    vg_copy(gring + (u64)k * S, lsrc + (o & 0xFFFFFu), S);
++                }
++                u32* gib = (u32*)s_d3d.vp_ib_mapped + (u64)s_d3d.vp_parity * VP_MAX_INDICES + s_d3d.vp_ib_offset;
++                for (u32 i = 0; i < out; i++) gib[i] = s_vg_map[tri[i]];
++                if (strip) strip_cont_save(&s_sc_indexed, st, first + count, pos, t, seg0_abs, fan);
++                s_vpull.rec_base = gbase; s_vpull.seg_k = 0; s_vpull.seg_lo = 0; s_vpull.seg_hi = nv; s_vpull.seg_valid = 0;
++                s_vpull.rec_k = nv + s_vpull.pad;
++                { const u64 e = (u64)gbase + (u64)s_vpull.rec_k * S; s_vpull.off = e > s_vpull.ring_bytes ? s_vpull.ring_bytes : (u32)e; }
++                s_vpull.rec_noext = 1;
++                s_vpull.vs_idx = gvs;
++                s_vpull.rec_S = S; s_vpull.rec_lbase = s_vpull.lbase; s_vpull.rec_loc = s_vpull.loc;
++                memcpy(&s_vpull.rec_tab, &s_vpull.tab_cur, sizeof s_vpull.rec_tab);
++                s_d3d.vp_ib_offset += out;
++                s_vpull.last_cont = 0;
++                s_vpull.n_batch++; s_vpull.n_rec++; s_vpull.n_idx += out; s_vpull.vbytes += glen; s_vpull.n_gather++;
++                return out;
++            }
++        }
++        s_vpull.fb_sparse++; return VPULL_NO;
++    }
+     int vs = -1;
+     if (!cont) {
+         vs = vp_get_vs_pull(st);
+@@ -11665,18 +11726,18 @@ static void vpull_report(void)
+     const double sec = now - s_vpull.t0;
+     if (sec < 5.0) return;
+     const u64 all = s_vpull.n_batch + s_vpull.n_cpu;
+-    fprintf(stderr, "[VPULL] %.1f s: pulled %llu of %llu indexed draws (%.0f%%, %llu records) | CPU path:"
++    fprintf(stderr, "[VPULL] %.1f s: pulled %llu of %llu indexed draws (%.0f%%, %llu records, %llu gathered) | CPU path:"
+                     " layout %llu, sparse %llu, full %llu, no VS %llu, other prim %llu |"
+                     " uploaded %.1f MB vertex bytes (dup %.1f MB) + %.1f MB indices (%.1f MB/s) | not drawn %llu%c",
+             sec, (unsigned long long)s_vpull.n_batch, (unsigned long long)all,
+-            all ? 100.0 * (double)s_vpull.n_batch / (double)all : 0.0, (unsigned long long)s_vpull.n_rec,
++            all ? 100.0 * (double)s_vpull.n_batch / (double)all : 0.0, (unsigned long long)s_vpull.n_rec, (unsigned long long)s_vpull.n_gather,
+             (unsigned long long)s_vpull.fb_layout, (unsigned long long)s_vpull.fb_sparse,
+             (unsigned long long)s_vpull.fb_full, (unsigned long long)s_vpull.fb_vs,
+             (unsigned long long)s_vpull.fb_prim,
+             (double)s_vpull.vbytes / 1048576.0, (double)s_vpdup_bytes / 1048576.0, (double)s_vpull.n_idx * 4.0 / 1048576.0,
+             ((double)s_vpull.vbytes + (double)s_vpull.n_idx * 4.0) / 1048576.0 / sec,
+             (unsigned long long)s_vpull.n_skip, 10);
+-    s_vpull.n_batch = s_vpull.n_rec = s_vpull.n_idx = s_vpull.vbytes = s_vpull.n_cpu = 0;
++    s_vpull.n_batch = s_vpull.n_rec = s_vpull.n_idx = s_vpull.vbytes = s_vpull.n_cpu = s_vpull.n_gather = 0;
+     s_vpull.fb_layout = s_vpull.fb_sparse = s_vpull.fb_full = s_vpull.fb_vs = s_vpull.fb_prim = 0;
+     s_vpull.n_skip = 0; s_vpdup_bytes = 0;
+     s_vpull.t0 = now;
+@@ -11959,8 +12020,9 @@ static void vp_flush_if_full(u32 guest_count, int indexed)
+     if (off || !s_d3d.initialized || s_d3d.draw_count == 0) return;
+     u32 used = s_d3d.vp_vb_offset / VP_VERT_STRIDE;
+     int full = used + guest_count * 3u > MAX_VERTICES || s_d3d.draw_count + 8 >= MAX_DRAWS;
+-    if (indexed && s_d3d.vp_ib_offset + guest_count * 3u > VP_MAX_INDICES) full = 1;
+-    if (s_vpull.ring_mapped && (u64)s_vpull.off + VPULL_MARGIN > s_vpull.ring_bytes) full = 1;   /* VPULL */
++    const char* why = full ? (used + guest_count * 3u > MAX_VERTICES ? "vertices" : "draws") : "";
++    if (indexed && s_d3d.vp_ib_offset + guest_count * 3u > VP_MAX_INDICES) { full = 1; why = "indices"; }
++    if (s_vpull.ring_mapped && (u64)s_vpull.off + VPULL_MARGIN > s_vpull.ring_bytes) { full = 1; why = "vertex ring"; }   /* VPULL */
+     if (!full) return;
+     static u32 n = 0;
+     static double t_end = 0.0;
+@@ -11970,8 +12032,8 @@ static void vp_flush_if_full(u32 guest_count, int indexed)
+     render_frame();
+     s_present_this_frame = 1;
+     if (n < 40 || (n % 1000) == 0)
+-        fprintf(stderr, "[MIDFLUSH] #%u records=%u vertices=%u/%u -> run without present, render %.3fs, %.3fs since the last flush\n",
+-                n, recs, used, (u32)MAX_VERTICES, perf_now() - t0, t_end > 0.0 ? t0 - t_end : 0.0);
++        fprintf(stderr, "[MIDFLUSH] #%u records=%u vertices=%u/%u indices %u/%u ring %u MB (%s full) -> run without present, render %.3fs, %.3fs since the last flush\n",
++                n, recs, used, (u32)MAX_VERTICES, s_d3d.vp_ib_offset, (u32)VP_MAX_INDICES, (u32)(s_vpull.off >> 20), why, perf_now() - t0, t_end > 0.0 ? t0 - t_end : 0.0);
+     n++;
+     t_end = perf_now();
+ }
