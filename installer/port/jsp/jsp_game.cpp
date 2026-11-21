@@ -101,6 +101,12 @@ bool mp_on(); int mp_rows(); void mp_pad(uint32_t port, uint16_t* b); void psbar
 void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt);
 extern "C" __attribute__((weak)) int jsp_ps_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);   /* feat_port_settings.cpp (may be absent): 1 = the screen used the input */
 extern volatile bool g_mp_training_start; extern volatile int g_mp_entry;
+/* feat_3v3.cpp (3v3 Free Battle; weak: absent = no 3v3) */
+__attribute__((weak)) void six_pad_lock(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
+__attribute__((weak)) void six_pad_watch(uint32_t port, uint16_t* b);
+__attribute__((weak)) void six_ask_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
+__attribute__((weak)) void six_icall(uint32_t target, uint64_t* gpr);
+__attribute__((weak)) float six_ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay);
 
 namespace {
 
@@ -692,6 +698,7 @@ bool hud_target(uint32_t rt_off)
 
 float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
 {
+    if (six_ui_scale) { const float cs = six_ui_scale(rt_off, box, ax, ay); if (cs != 1.0f) return cs; }   /* feat_3v3.cpp: 3v3 Character Select layout */
     static float s = -1.0f;
     static int sgen = -1;
     if (s < 0.0f || sgen != jsp_setting_gen()) {   /* live: the in-game Graphics page changes it */
@@ -2648,6 +2655,7 @@ void impossible_icall(uint32_t target, uint64_t* gpr)
 
 int training_icall(uint32_t target, uint64_t* gpr)
 {
+    if (six_icall) six_icall(target, gpr);   /* feat_3v3.cpp */
     if (target == 0x003959C8u) {
         if (!JSP_LOD_ENTRY_HOOKS_VERIFIED || !jsp_lod_hooks_active()) lod_select_hook((uint32_t)gpr[3]);
         return 0; // the verified entry wrapper applies it exactly once
@@ -4006,6 +4014,7 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     }
     if (port == 0) two_player_watch(*b);
     if (port == 0) psbar_tick();   /* feat_menu_pages.cpp: the Port Settings hints on the game's button bar */
+    if (six_pad_lock) six_pad_lock(port, b, lx, ly);   /* feat_3v3.cpp: the 3v3 Character Select lock */
     if (jsp_ps_pad && jsp_ps_pad(port, b, lx, ly)) return;   /* the Port Settings screen is up (feat_port_settings.cpp) */
     if (port == 0) {
         /* MODEL_BODY=<3 digits>: test only, for fighters with empty models (Jotaro 019). The game names model
@@ -4219,8 +4228,10 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
               }
           } }
         ko_stagesel(b);   /* before the auto-pilot, which drives the pad on Stage Select */
+        if (six_pad_watch && port == 0) six_pad_watch(port, b);   /* feat_3v3.cpp: battle setup, roles while loading */
         auto_fight(b, lx, ly);
         mp_pad(port, b);   /* feat_menu_pages.cpp: the two-page main menu (on by default) */
+        if (six_ask_pad) six_ask_pad(port, b, lx, ly);   /* feat_3v3.cpp: the 2 vs 2 / 3 vs 3 window */
         if (g_free_battle_box) free_battle_box(port, b, lx, ly);
         tb_list_rows(*b);
         if (training_active()) {
@@ -4286,6 +4297,13 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 extern "C" uint32_t jsp_main_menu_obj(void) { return (uint32_t)g_seen_main.obj; }
 extern "C" int jsp_main_list_open(void) { return main_list_open() ? 1 : 0; }
 extern "C" int jsp_in_menu_scene(void) { return in_menu_scene() ? 1 : 0; }
+/* for feat_3v3.cpp */
+extern "C" SeenScreen* jsp_seen_charsel(void) { return &g_seen_charsel; }
+extern "C" SeenScreen* jsp_seen_main_screen(void) { return &g_seen_main; }
+extern "C" int jsp_on_charsel(void) { return on_charsel() ? 1 : 0; }
+extern "C" int jsp_on_stagesel(void) { return on_stagesel() ? 1 : 0; }
+extern "C" int jsp_training_active(void) { return training_active() ? 1 : 0; }
+extern "C" int jsp_training_fight_scene(void) { return training_fight_scene() ? 1 : 0; }
 
 /* Impossible AI: entry/leave hooks from port/lift_game_hooks.json (lifter --fn-hooks, with the LOD hooks).
  * Hit receivers (vtable 0x00875108): +0x18 the battle unit index; some fighters have a second receiver with the same

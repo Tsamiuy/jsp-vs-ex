@@ -42,8 +42,9 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 - 📋 Arcade for two players on one PC ([details](FEATURES.md#arcade-2p))
 - 🔧 KO count, 1 to 5, as a match option: Free Battle has it (L1 / R1 on the Stage Select); the other modes are planned ([details](FEATURES.md#ko-count))
 - ✅ **Impossible mode** in Free Battle: a computer opponent that guards and Just Guards whenever it can, as a 2 against 1 fight (opt-in, chosen in a window when Free Battle's Character Select opens) ([details](FEATURES.md#impossible-ai))
-- 📋 1v1 and 3v3 matches beside the usual 2v2 (the game is built around 2v2 with a support character; 3v3 only if the
-  engine allows it); all three online too, see section 4 ([details](FEATURES.md#match-sizes))
+- ✅ **3v3 Free Battle:** a window on Free Battle's list asks for 2 vs 2 or 3 vs 3 (three fighters per team, six in the fight; with the two-page Main Menu, on by default; Free Battle only, not tried online) ([details](FEATURES.md#free-battle-3v3))
+- 📋 1v1 matches beside the usual 2v2, and 3v3 in the other modes (the game is built around 2v2 with a support character);
+  all of them online too, see section 4 ([details](FEATURES.md#match-sizes))
 - 📋 Your own music files in place of the game's tracks (your files, never shipped) ([details](FEATURES.md#own-music))
 - ✅ An unlock-all switch for cards, progression bars, J-Points, characters, titles and more, as a save edit with a backup (launcher: Cheats tab) ([details](FEATURES.md#unlock-all))
 - 📋 **Cross-Save with RPCS3, without PSN:** one save that moves both ways between the port and RPCS3 as a plain copy,
