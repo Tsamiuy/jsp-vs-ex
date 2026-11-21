@@ -62,7 +62,8 @@ NOTICE = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental), which is off unless you turn it on and give a re-psn server (see the installer README).
+(experimental): setup turns it on with the project's public online server and rollback, and keeps online settings you
+already have. ONLINE-GUIDE.md says how to play online; the settings window's Online tab turns it off.
 
 The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
 Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.19.0 with this project's patches).
@@ -190,6 +191,7 @@ def main(argv=None):
             sys.exit(f"--release {a.release} differs from installer/VERSION")
         (out / "release.txt").write_text(a.release + "\n")
     (out / "NOTICE.txt").write_text(NOTICE)
+    shutil.copy2(ROOT / "docs/TESTING_ONLINE.md", out / "ONLINE-GUIDE.md")   # ENHANCEMENT: the online guide ships with the game (setup and portable)
     (out / "tree.txt").write_text(a.tree + "\n")
     (out / "tools").mkdir()
     for n in ("firstrun.py", "lift_jobs.py", "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
