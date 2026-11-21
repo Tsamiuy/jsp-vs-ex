@@ -13,6 +13,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 **Fixed**
 
 - **Port overlay pictures no longer flicker back.** A picture the port draws over the game and changes every frame (an animation) could show an older picture for a frame or two instead of the new one. It now waits for the new picture. Seen in test runs on one Windows PC only.
+- **KO sound no longer repeats with 4 or 5 KOs to win.** In a Free Battle with "KOs to win" set to 4 or 5, the sound of the KO bar (the "one KO left" sound) could play over and over for the rest of the match. It now plays once for each KO. Tried in test fights on one Windows PC; not tried online.
 
 ### Technical changes
 
@@ -27,6 +28,7 @@ What changed in each version, newest first. Each version has two parts: **For pl
 #### Fixed
 
 - **Graphics:** toolkit patch 2990: `jov_gpu_present` waits for an edit in progress on the overlay (at most about 8 ms, edits are short) and shows the new picture; before, it showed this frame index's last copy at once, so an overlay edited every frame showed a picture two or three edits old and an animation flickered back. Only after the wait does it fall back to the old copy; a closed overlay costs nothing, as before. Tested: the patch applies on its own and the 141 toolkit patches export (`export_toolkit.py`); animation seen without the flicker-back in test runs on one Windows PC. Not tested: other graphics cards, a 60 Hz monitor, online play. (#240)
+- **Game:** with 4 or 5 KOs to win the KO bar's sound no longer repeats every frame. Two lift hooks in `lift_game_hooks.json`: `jsp_kobar_logic` (func_00138C3C, the bar's logic) gives every pass the same 3-segment view of the count, and `jsp_kosnd` (func_004897A8, play a sound, only for the call from 0x00138EC8 with sound 0x9E) plays the sound once per KO a side really scores and gives a repeat an id past the bank so the function skips it; the `impossible_icall` hook also runs the bar's logic for its draw (func_00139F84) and only while the bar is in its normal state (+0x14 == 3), because once the match is won the game writes the real count and limit every frame. Nothing changes with 1 to 3 KOs to win. Tested: 5-KO Free Battle fights on one Windows PC (no repeat; the sound plays once per KO); the port sources compile in CI (`port_syntax_check.py`). Not tested: online with 4 or 5 KOs, Arcade after an Impossible fight, a second pad. (#241)
 
 ## [0.6.1] - 2026-11-20
 
