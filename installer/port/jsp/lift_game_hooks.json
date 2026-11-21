@@ -1,11 +1,15 @@
 {
   "schema": 1,
-  "note": "Impossible AI (Free Battle): entry/leave hooks around three game functions, the KO bar logic and its sound call (4/5 KOs to win), callbacks in port/jsp_game.cpp. Lifted together with lift_lod_hooks.json and only for the program it names (same check as the LOD hooks).",
+  "note": "Impossible AI (Free Battle): entry/leave hooks around three game functions, the KO bar logic and its sound call (4/5 KOs to win), the two-page main menu (feat_menu_pages.cpp), callbacks in port/jsp_game.cpp and the feature files. Lifted together with lift_lod_hooks.json and only for the program it names (same check as the LOD hooks).",
   "hooks": [
     {"addr": "0x00022AC0", "end": "0x00022C64", "enter": "jsp_imp_word_enter", "leave": "jsp_imp_word_leave"},
     {"addr": "0x00082464", "end": "0x000825C0", "enter": "jsp_imp_def_enter", "leave": "jsp_imp_def_leave"},
     {"addr": "0x000833DC", "end": "0x000835AC", "enter": "jsp_jg_check_enter", "leave": "jsp_jg_check_leave"},
     {"addr": "0x00138C3C", "end": "0x00139194", "enter": "jsp_kobar_logic_enter", "leave": "jsp_kobar_logic_leave"},
-    {"addr": "0x004897A8", "end": "0x00489954", "enter": "jsp_kosnd_enter", "leave": "jsp_kosnd_leave"}
+    {"addr": "0x004897A8", "end": "0x00489954", "enter": "jsp_kosnd_enter", "leave": "jsp_kosnd_leave"},
+    {"addr": "0x001E3BE0", "end": "0x001E3D28", "enter": "jsp_mp_hilite_enter", "leave": "jsp_mpf_leave"},
+    {"addr": "0x001E0830", "end": "0x001E0D58", "enter": "jsp_mp_menuenter_enter", "leave": "jsp_mp_menuenter_leave"},
+    {"addr": "0x0032B2B0", "end": "0x0032B318", "enter": "jsp_mpf_calc_enter", "leave": "jsp_mpf_calc_leave"},
+    {"addr": "0x0033C5FC", "end": "0x0033CA4C", "enter": "jsp_mpf_binder_enter", "leave": "jsp_mpf_leave"}
   ]
 }

@@ -96,6 +96,12 @@ extern "C" int (*g_ppu_icall_hook)(uint32_t target, uint64_t* gpr);   /* ppu_loa
 extern "C" int  jsp_setting_gen(void);
 extern "C" int  jsp_setting_get(const char* key, char* out, int n);
 
+/* feat_menu_pages.cpp (the two-page main menu, on by default; MENU_PAGES=0 turns it off) */
+bool mp_on(); int mp_rows(); void mp_pad(uint32_t port, uint16_t* b); void psbar_tick();
+void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt);
+extern "C" __attribute__((weak)) int jsp_ps_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);   /* feat_port_settings.cpp (may be absent): 1 = the screen used the input */
+extern volatile bool g_mp_training_start; extern volatile int g_mp_entry;
+
 namespace {
 
 /* A live setting as a float / text: an in-game change, else the environment, else def / nullptr-like "". */
@@ -652,8 +658,9 @@ int menu_layout(int* cursor, const short (**rects)[4], int* count)
 {
     if (main_list_open()) {
         const uint32_t c = vm_read32(0x00956550u);
-        if (c > 8) return 0;
-        *cursor = (int)c; *rects = k_main_menu_rects; *count = 9;
+        const int n = mp_on() ? mp_rows() : 9;   /* the two-page menu shows 6 or 7 rows */
+        if ((int)c >= n) return 0;
+        *cursor = (int)c; *rects = k_main_menu_rects; *count = n;
         return 1;
     }
     return 0;
@@ -3216,6 +3223,9 @@ void imp_mode_tick(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     if (main_menu_open()) { if (g_imp_mode) { std::printf("[impmode] main menu: mode off\n"); std::fflush(stdout); } g_imp_mode = 0; g_imp_no_partner = false; state = 0; was_cs = false; return; }
     const bool fb = !training_active() && vm_read32(0x00956550u) == 3 && !g_auto.on;
     const bool cs = on_charsel();
+    if (fb && cs && !was_cs && state == 0 && g_imp_mode == 0 && mp_on()) {   /* Battle Modes page: the row said which */
+        if (g_mp_entry == 2) { g_imp_mode = 1; std::printf("[impmode] Impossible 2 vs 1 (Battle Modes page)\n"); std::fflush(stdout); }
+    } else
     if (fb && cs && !was_cs && state == 0 && g_imp_mode == 0 &&
         cellOskDialog_choice_open(L"Choose a fight", L"Free Battle", L"Impossible")) { state = 1; prev_dir = 0; }
     was_cs = cs;
@@ -3757,6 +3767,12 @@ void free_battle_box(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     static int state = 0;    /* 0 idle, 1 box open, 2 release then press Cross, 3 release */
     static int pulse = 0;
     static bool left_menu = false;
+    if (g_mp_training_start) {   /* the Training Mode row of the Battle Modes page (MENU_PAGES, feat_menu_pages.cpp) */
+        g_mp_training_start = false;
+        if (g_training_mode) training_unlock_slots();
+        g_training_mode = true; left_menu = false; for (int k = 0; k < 4; k++) g_dummy[k] = false; g_zero_star_pending = true;
+        std::printf("[training] Battle Modes page: Training Mode\n"); std::fflush(stdout);
+    }
     uint16_t& prev = prev_b[port];
     uint16_t& prev_dir = prev_dir_b[port];
     const uint16_t cur = *b, pressed = (uint16_t)(cur & ~prev);
@@ -3810,7 +3826,7 @@ void free_battle_box(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
         vm_read32(0x0095654Cu) == 0)
         std::printf("[training] box not offered: step %u CCB0 %08X main %08X seen %llu ms ago\n", vm_read32(0x0094DEC4u),
                     vm_read32(0x0096CCB0u), (uint32_t)g_seen_main.obj, GetTickCount64() - g_seen_main.ms);
-    if (!g_auto.on && (pressed & (CROSS | START)) && on_menu && vm_read32(0x00956550u) == 3 &&
+    if (!g_auto.on && !mp_on() && (pressed & (CROSS | START)) && on_menu && vm_read32(0x00956550u) == 3 &&
         cellOskDialog_choice_open(L"Choose a mode", L"Free Battle", L"Training Mode")) {
         state = 1; owner = port; prev_dir_b[0] = prev_dir_b[1] = 0;
         *b = (uint16_t)(cur & ~(CROSS | START));
@@ -3973,6 +3989,13 @@ void shadow_range_tick()
     written = want;
 }
 
+/* the texture patch hook: the Exit Game label (EXIT_OPTION) and the two-page menu's row pictures (feat_menu_pages.cpp) */
+static void tex_patch_all(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
+{
+    if (g_exit_filter_on) exit_label_patch(off, w, h, fmt);
+    mp_tex_upload(off, w, h, fmt);
+}
+
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
@@ -3982,6 +4005,8 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
         if (!always) { *b = 0; *lx = 128; *ly = 128; return; }
     }
     if (port == 0) two_player_watch(*b);
+    if (port == 0) psbar_tick();   /* feat_menu_pages.cpp: the Port Settings hints on the game's button bar */
+    if (jsp_ps_pad && jsp_ps_pad(port, b, lx, ly)) return;   /* the Port Settings screen is up (feat_port_settings.cpp) */
     if (port == 0) {
         /* MODEL_BODY=<3 digits>: test only, for fighters with empty models (Jotaro 019). The game names model
          * packs "character/model/character_model_%03d_x.pak"; putting the digits in the three strings makes
@@ -4195,6 +4220,7 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
           } }
         ko_stagesel(b);   /* before the auto-pilot, which drives the pad on Stage Select */
         auto_fight(b, lx, ly);
+        mp_pad(port, b);   /* feat_menu_pages.cpp: the two-page main menu (on by default) */
         if (g_free_battle_box) free_battle_box(port, b, lx, ly);
         tb_list_rows(*b);
         if (training_active()) {
@@ -4255,6 +4281,11 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 }
 
 }  // namespace
+
+/* for feat_menu_pages.cpp */
+extern "C" uint32_t jsp_main_menu_obj(void) { return (uint32_t)g_seen_main.obj; }
+extern "C" int jsp_main_list_open(void) { return main_list_open() ? 1 : 0; }
+extern "C" int jsp_in_menu_scene(void) { return in_menu_scene() ? 1 : 0; }
 
 /* Impossible AI: entry/leave hooks from port/lift_game_hooks.json (lifter --fn-hooks, with the LOD hooks).
  * Hit receivers (vtable 0x00875108): +0x18 the battle unit index; some fighters have a second receiver with the same
@@ -4403,7 +4434,8 @@ extern "C" void jsp_register_game_overrides(void)
         g_spu_put_hook_img = pc_text_put;
     }
     const char* xo = std::getenv("EXIT_OPTION");
-    if (!xo || xo[0] != '0') { g_exit_filter_on = true; g_tex_patch_hook = exit_label_patch; }
+    if (!xo || xo[0] != '0') g_exit_filter_on = true;
+    if (g_exit_filter_on || mp_on()) g_tex_patch_hook = tex_patch_all;   /* Exit Game label and the two-page menu's pictures */
     { const char* tr = std::getenv("TRAINING_TEST");
       if (tr && tr[0] == '1') g_training_test = true; }
     { const char* fb = std::getenv("TRAINING_MODE");   /* TRAINING_MODE=0: no Free Battle box */
