@@ -23,7 +23,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 
 - ✅ Higher internal resolution (720p, 1440p, 4K), resizable window and borderless fullscreen ([details](FEATURES.md#resolution), [more](FEATURES.md#window-fullscreen))
 - ✅ Graphics options: edge smoothing, shadow quality and distance, model detail, object draw distance ([details](FEATURES.md#graphics-options))
-- ✅ Smoother busy scenes on slower PCs: two-thread drawing on by default and frames shown without waiting for the monitor's vblank ([details](FEATURES.md#two-thread-drawing), [more](FEATURES.md#present-no-vblank-wait))
+- ✅ Smoother busy scenes on slower PCs: two-thread drawing on by default, frames shown without waiting for the monitor's vblank, and a faster 2 Players split screen ([details](FEATURES.md#two-thread-drawing), [more](FEATURES.md#present-no-vblank-wait), [and](FEATURES.md#split-screen-speed))
 - ✅ Keyboard, keyboard and mouse, or controller, each with its own bindings; a keyboard or a second controller as player 2 ([details](FEATURES.md#input-modes), [more](FEATURES.md#second-player))
 - 🔧 PlayStation pads (DualSense, DualSense Edge, DualShock 4; up to four, USB or Bluetooth) read directly; hands-on tests with real pads are pending ([details](FEATURES.md#dualsense))
 - ✅ Launcher with resolution, window size, input choice, rebinds and the fight HUD size ([details](FEATURES.md#launcher), [more](FEATURES.md#hud-size))

@@ -4,11 +4,21 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### For players
+
+**Changed**
+
+- **2 Players split screen runs faster.** A 2 Players 2 vs 2 fight on a busy stage ran at about 18 to 24 frames per second on one Windows PC and now runs at about 28 to 30 with the default settings; 1 Player is the same as before. It uses 16 MB more graphics upload memory. Measured on one PC only.
+
 ### Technical changes
 
 #### Added
 
 - **Mods folder: a `roster` section in `mod.json` (ENHANCEMENT, opt-in, US 1.00 only).** A mod that declares interface `roster` 1 can add fighter ids 19, 20 or 21 to the character select, behind a given id, with an optional intro-logo alias and an owned flag, with no rebuild (`jsp_roster.cpp` puts it into the guest; the pure rules, list and digest are in `jsp_mods_core.h`). The list is capped at 56 ids (the random select's stack buffer; the three allowed ids make 55). A roster mod runs only on BLUS31519 and must name it in `game.title_ids` (the EU build is unverified); an id already in the list or out of range, an `after` that names nothing, or a `logo_as` that is not a stock fighter id (on the stock list, below 200) refuses the whole mod. A roster mod is gameplay: its fighters are part of the digest, so online refuses mismatched sets. The guest side checks every expected byte first (both list pointers, the whole 52-id stock list and its terminator, the code the logo alias relies on, the free memory for the copy); on any mismatch, or if the copy is later found changed, the list pointers go back to the stock list, nothing further is hooked and the set is reported as not run as listed. The list-repoint approach was first shown by a community mod. **A fight with an added fighter is untested, and this change serves no model, voice or card art for one: do not pick an added fighter unless its full data is in place (`owned` defaults to true, so its card is selectable).** Tested: host test `installer/tools/mods_overlay_test.sh` (278 checks; 347 with the toolkit glue), the port syntax check, and one Proton run with a roster mod without assets (the list of 53 ids was written at 0x0086FE00, the owned bit stamped, the select shows a placeholder card and the page counter 01/08 instead of 01/07). Not tested: a fighter with real assets, selecting an added fighter or starting a fight with one, JSP_UNLOCK_ALL together with a roster (the shared save-update hook is compiled and host-checked only), the EU build, a Windows run.
+
+#### Changed
+
+- **Graphics:** toolkit patch 2933 (2 Players split screen, vertex pulling in `rsx_d3d12_backend.c`): the per-frame index buffer of indexed vertex-pulled draws holds 1<<22 indices (was 1<<21, 16 MB more upload memory), because a 2 Players frame needs about 1.6 million indices and every frame was cut in two batches with a GPU wait between them (`[MIDFLUSH]` on every frame, now naming which buffer was full); and a batch the sparse check would send to the CPU path (a few vertices of a big mesh, as each split screen view uses) copies only the vertices it uses, one after the other, with its indices counted from 0 (up to 1<<20 vertices, tables of 12 MB allocated on first use; `VPULL_GATHER=0` turns it off; the `[VPULL]` report counts them as gathered). Tested: 2 Players 2 vs 2 on Hidden Leaf with two-thread drawing, median 18-24 FPS before and 28-30 after, pulled draws 81% to 100%, pictures checked in the test shots; 1 Player unchanged at 30.0; the 141 toolkit patches export (`export_toolkit.py`). Not tested: a 60 Hz monitor, other graphics cards, 3 or 4 player screens, online play. (#239)
 
 ## [0.6.1] - 2026-11-20
 
