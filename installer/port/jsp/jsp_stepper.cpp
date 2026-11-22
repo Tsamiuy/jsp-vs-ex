@@ -303,7 +303,7 @@ static ULONGLONG g_ls_last_ms = 0;                                 // frame cloc
 static jsr::State g_lf;                                            // frame clock thread only: the lost-flip rule (jsp_stall_rule.h)
 extern "C" void jsp_stepper_lockstep(int on)
 {
-    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; g_lf = jsr::State{}; }
+    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; jsr::begin(g_lf, GetTickCount64()); }
     else if (g_lockstep.load()) std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts (a flip over half a period late), time-sync stretch %.1f ms in all\n",
                                              (unsigned long long)g_ls_flips, (unsigned long long)g_ls_idle, (unsigned long long)g_ls_restarts, g_ls_stretch_total_us / 1000.0);
     g_lockstep.store(on ? 1 : 0);
@@ -492,7 +492,7 @@ static bool lost_flip_pass(ULONGLONG last_flip_ms)
     std::fprintf(stderr, "[step] lost flip %s: %llu ms without a flip, the guest in step 1 waiting for flip %u (reached %u): get=0x%08X put=0x%08X marker at 0x%08X "
                  "word there 0x%08X (%s), status %u, in a replay %d\n",
                  done ? "WRITTEN OFF (completed as if the walker had reached it)" : "NOT written off (the walker is not idle at put: still waiting)",
-                 (unsigned long long)(s.now_ms - last_flip_ms), w[4], w[5], w[0], w[1], w[2], w[3],
+                 (unsigned long long)(s.now_ms - jsr::last_progress_ms(g_lf, s)), w[4], w[5], w[0], w[1], w[2], w[3],
                  (w[3] & 0xFFFFFF00u) == 0xFEAD0100u ? "the marker" : "overwritten",
                  w[7], g_in_replay.load());
     if (done) jsr::flip_taken(g_lf);

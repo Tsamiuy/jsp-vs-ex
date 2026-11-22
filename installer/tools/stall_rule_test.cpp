@@ -62,6 +62,33 @@ int main()
         s.now_ms = 1000 + jsr::kFailMs;     CHECK(jsr::step(st, s) == Act::Fail);
         s.now_ms += 5000;                   CHECK(jsr::step(st, s) == Act::None);
     }
+    {   // no first flip: count from activation, not from a nonexistent flip timestamp
+        jsr::State st; jsr::begin(st, 1000);
+        jsr::Sample s; s.now_ms = 1000 + jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::None);
+        jsr::begin(st, 200000); s.now_ms = 200000 + jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None); // prior failure cannot carry into the new match
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+    }
+    {   // the real clock origin may be zero; stale samples cannot underflow the deadline
+        jsr::State st; jsr::begin(st, 0);
+        jsr::Sample s; s.now_ms = jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+        jsr::begin(st, 10000); s.now_ms = 9999;
+        CHECK(jsr::step(st, s) == Act::None);
+    }
+    {   // real flips renew the deadline; a prior match's timestamp does not predate activation
+        jsr::State st; jsr::begin(st, 1000);
+        jsr::Sample s; s.last_flip_ms = 10000; s.now_ms = 1000 + jsr::kFailMs;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms = 10000 + jsr::kFailMs; CHECK(jsr::step(st, s) == Act::Fail);
+        jsr::begin(st, 200000); s.last_flip_ms = 1000; s.now_ms = 200000 + jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+    }
     if (g_fail) { std::printf("stall_rule_test: %d failure(s)\n", g_fail); return 1; }
     std::printf("stall_rule_test: all checks passed\n");
     return 0;

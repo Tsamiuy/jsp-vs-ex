@@ -34,6 +34,8 @@ struct Sample {
 enum class Act { None, WriteOff, Fail };
 
 struct State {
+    uint64_t started_ms = 0;    // liveness begins when lockstep is enabled, before any flip
+    bool started = false;       // a timestamp of zero is valid
     uint64_t shape_since = 0;    // 0 = the shape does not hold
     uint32_t shape_queued = 0;   // the queued count it holds for
     uint32_t tried_queued = 0;   // the queued count a write-off was last asked for
@@ -41,6 +43,19 @@ struct State {
     bool tried = false;
     bool failed = false;
 };
+
+// Initialize before publishing the clock as active. A new match gets a new deadline.
+inline void begin(State& st, uint64_t now_ms)
+{
+    st = State{};
+    st.started_ms = now_ms;
+    st.started = true;
+}
+
+inline uint64_t last_progress_ms(const State& st, const Sample& s)
+{
+    return st.started && st.started_ms > s.last_flip_ms ? st.started_ms : s.last_flip_ms;
+}
 
 inline bool lost_flip_shape(const Sample& s)
 {
@@ -59,7 +74,9 @@ inline Act step(State& st, const Sample& s)
     } else {
         st.shape_since = 0;
     }
-    if (!st.failed && s.last_flip_ms && s.now_ms - s.last_flip_ms >= kFailMs) { st.failed = true; return Act::Fail; }
+    const uint64_t progress = last_progress_ms(st, s);
+    if (!st.failed && (st.started || s.last_flip_ms) && s.now_ms >= progress &&
+        s.now_ms - progress >= kFailMs) { st.failed = true; return Act::Fail; }
     return Act::None;
 }
 
