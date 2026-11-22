@@ -1328,7 +1328,8 @@ void start_session(ppu_context* c)
         // net slot is mapped to its owner's rollback slot (room record) for the pad take, and this PC's own fighter must come out on this PC's slot.
         if (why.empty()) {
             char om[600] = {};
-            const int ok = jsp_native_fight_map((int)g.plan.local_first, om, sizeof om);
+            // FIX (review of PR 248): the room's humans and the fighters must be exactly the plan's rollback seats (no missing, extra or stale member)
+            const int ok = jsp_native_fight_map((int)g.plan.local_first, (1u << g.plan.total_players) - 1u, om, sizeof om);
             std::fprintf(stderr, "[net] ownership: %s\n", om);
             if (!ok) why = "this PC's fighter is not the one its pad would drive (the game's fighter slots do not match the rollback slots)";
         }

@@ -30,8 +30,10 @@ extern int g_jsp_native_fight_armed;
 // jsp_native_fight_map reads the fight's battle players (net slot, member id) and the room records (member id) at the session start and fixes, for the
 // whole session, net slot s -> the rollback slot (record index) of the human whose fighter has it; the armed pad take reads that port. It also checks
 // this PC's own fighter (the builder's "me", G+0x48158, by member id) gets this PC's rollback slot. 1 = ok, 0 = refused (*msg says why; the map is off).
+// FIX (review of PR 248): `seats` = the session plan's rollback seats (bit r = record r, (1 << total_players) - 1); the room's human records and the mapped
+// fighters must cover exactly those (jnf::net_ports: no missing, extra or stale member).
 // msg always gets the "[net] ownership" line's text. Main thread, before arm; jsp_native_fight_arm(0) clears it.
-int  jsp_native_fight_map(int local_slot, char* msg, int n);
+int  jsp_native_fight_map(int local_slot, unsigned seats, char* msg, int n);
 // The ownership check of a running session: the battle players the LOCAL pad's non-neutral samples went to (counted in the armed pad take) against this
 // PC's own fighter. 1 = only my fighter got them, 0 = another fighter got them (SWAPPED), -1 = no local input seen yet. *msg = the line's text.
 int  jsp_native_fight_owner_check(char* msg, int n);
@@ -80,27 +82,54 @@ inline int placement_net_slot(const uint8_t team[4], const uint8_t com[4], int r
     return -1;
 }
 // FIX (swapped controls): port[s] = the room record (= rollback slot) of the human whose battle player has net slot s, matched by member id
-// (player +0x78 == record +0x08, human records only); -1 = no player has s. false: a net slot outside 0..3 or used twice, a player whose member is not
-// exactly one human record, or two slots naming one record.
-inline bool net_ports(const int32_t net[kPlayers], const uint16_t pmember[kPlayers], const uint16_t rmember[4], const uint8_t rcom[4], int8_t port[kRecCount])
+// (player +0x78 == record +0x08, human records only); -1 = no player has s.
+// FIX (review of PR 248: the mapper accepted incomplete tables): the room's human records and the mapped fighters must cover EXACTLY the planned
+// rollback seats (`seats`, bit r = record / rollback slot r is played by a human of this session: (1 << plan.total_players) - 1). Refused:
+//   MAP_SLOT       a net slot outside 0..3 or used by two fighters;
+//   MAP_MEMBER     a fighter whose member id is in no human record (a stale fighter: its player left the room), or in two records;
+//   MAP_RECORD     two fighters on one record;
+//   MAP_EXTRA      a human record outside the seats (an extra or stale room member), or a fighter on one;
+//   MAP_MISSING    a planned seat with no human record, or whose record no fighter is mapped to (a missing member or fighter).
+// A record with member id 0 is empty, a COM record (+0x1A != 0) is never a human.
+enum MapErr { MAP_OK = 0, MAP_SLOT, MAP_MEMBER, MAP_RECORD, MAP_EXTRA, MAP_MISSING };
+inline const char* map_err_text(MapErr e)
+{
+    switch (e) {
+    case MAP_OK: return "ok";
+    case MAP_SLOT: return "a fighter net slot is out of range or used twice";
+    case MAP_MEMBER: return "a fighter's member is in no human room record (stale) or in two";
+    case MAP_RECORD: return "two fighters belong to one room record";
+    case MAP_EXTRA: return "a human room record or fighter is outside the planned rollback seats (extra or stale member)";
+    case MAP_MISSING: return "a planned rollback seat has no human room record or no fighter (missing member)";
+    }
+    return "?";
+}
+inline MapErr net_ports(const int32_t net[kPlayers], const uint16_t pmember[kPlayers], const uint16_t rmember[4], const uint8_t rcom[4], uint32_t seats,
+                        int8_t port[kRecCount])
 {
     for (uint32_t s = 0; s < kRecCount; s++) port[s] = -1;
-    uint32_t used = 0;
+    seats &= 0xFu;
+    uint32_t used = 0, humans = 0;
+    for (int r = 0; r < 4; r++) if (!rcom[r] && rmember[r]) humans |= 1u << r;
+    if (humans & ~seats) return MAP_EXTRA;
     for (uint32_t i = 0; i < kPlayers; i++) {
         const int32_t s = net[i];
         if (s < 0) continue;
-        if (s >= (int32_t)kRecCount || port[s] >= 0) return false;
+        if (s >= (int32_t)kRecCount || port[s] >= 0) return MAP_SLOT;
         int rec = -1;
         for (int r = 0; r < 4; r++) {
-            if (rcom[r] || !rmember[r] || rmember[r] != pmember[i]) continue;
-            if (rec >= 0) return false;
+            if (!(humans & (1u << r)) || rmember[r] != pmember[i]) continue;
+            if (rec >= 0) return MAP_MEMBER;
             rec = r;
         }
-        if (rec < 0 || (used & (1u << rec))) return false;
+        if (rec < 0) return MAP_MEMBER;
+        if (used & (1u << rec)) return MAP_RECORD;
         used |= 1u << rec;
         port[s] = (int8_t)rec;
     }
-    return true;
+    if (used & ~seats) return MAP_EXTRA;
+    if ((humans & seats) != seats || (used & seats) != seats) return MAP_MISSING;
+    return MAP_OK;
 }
 
 // Target of a PowerPC `bl` word at `site` (I-form, LK=1, AA=0), 0 when the word is not one.

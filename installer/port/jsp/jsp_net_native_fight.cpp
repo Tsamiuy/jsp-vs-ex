@@ -599,7 +599,7 @@ extern "C" int jsp_native_fight_slot(void)
 
 // FIX (swapped controls): see the header. Guest reads only: G = *(*(TOC - 0x7A90)) (0x00030A14), players G+0x60+i*0x94 (+0x70 net slot, +0x78 member id),
 // "me" = *(G + 0x48158) (the builder 0x002EF6B8 stores the battle index of the record whose member id is this PC's), room records R+0x68+0x24*r.
-extern "C" int jsp_native_fight_map(int local_slot, char* msg, int n)
+extern "C" int jsp_native_fight_map(int local_slot, unsigned seats, char* msg, int n)
 {
     g_port_on = false; g_local_port = -1; g_me = -1;
     for (auto& d : g_drove) d = 0;
@@ -621,7 +621,8 @@ extern "C" int jsp_native_fight_map(int local_slot, char* msg, int n)
     }
     const int32_t me = (int32_t)vm_read32(G + 0x48158u);
     int8_t port[jnf::kRecCount];
-    const bool ok = jnf::net_ports(net, pm, rm, rc, port);
+    const jnf::MapErr me_err = jnf::net_ports(net, pm, rm, rc, seats, port);   // FIX (review of PR 248): exactly the planned seats
+    const bool ok = me_err == jnf::MAP_OK;
     const int32_t me_net = me >= 0 && me < (int32_t)jnf::kPlayers ? net[me] : -1;
     const int me_port = me_net >= 0 && me_net < (int32_t)jnf::kRecCount ? port[me_net] : -1;
     int p = std::snprintf(msg, (size_t)n, "my fighter = battle player %d (net slot %d, member %u) -> rollback slot %d, mine %d; net slot -> rollback slot:", me, me_net,
@@ -631,7 +632,7 @@ extern "C" int jsp_native_fight_map(int local_slot, char* msg, int n)
         if (net[i] >= 0) p += std::snprintf(msg + p, (size_t)(n - p), "; player %u net %d member %u", i, net[i], (unsigned)pm[i]);
     for (uint32_t r = 0; r < 4 && p > 0 && p < n; r++) p += std::snprintf(msg + p, (size_t)(n - p), "; record %u member %u team %u%s", r, (unsigned)rm[r], rt[r], rc[r] ? " COM" : "");
     if (!ok || me_port != local_slot) {
-        if (p > 0 && p < n) std::snprintf(msg + p, (size_t)(n - p), " -> MISMATCH (%s)", !ok ? "the fighters do not match the room's human records" : "my fighter is not on my rollback slot");
+        if (p > 0 && p < n) std::snprintf(msg + p, (size_t)(n - p), " -> MISMATCH (%s; planned seats 0x%X)", !ok ? jnf::map_err_text(me_err) : "my fighter is not on my rollback slot", seats);
         return 0;
     }
     for (uint32_t s = 0; s < jnf::kRecCount; s++) g_port[s] = port[s];
