@@ -299,6 +299,8 @@ struct State {
     // re-armed match waits until that fight is gone (boundary) before the fight hash may anchor again. last_end_ok: the last end was a normal one (end_with).
     uint32_t match_k = 0; std::atomic<uint32_t> match_jump{0}; uint64_t beacon_next = 0;
     bool fresh_gate = false, last_end_ok = false;
+    // FIX (review of PR 248): the pump thread ended this match's session on the frame clock's failure (pump_tick); cleared by start_session
+    std::atomic<bool> stall_ended{false};
 } g;
 // FIX (a missed KO): the KO / time-up winner of EVERY saved tick (commit and hash_only, predicted or not), keyed by tick; a re-save after a
 // rollback overwrites its entry and a rollback drops the entries after its target. The boundary ends the match on the earliest recorded winner whose tick is
@@ -906,6 +908,17 @@ uint64_t random_session_id()
 void pump_tick(uint64_t t)
 {
     if (g.phase.load() == Phase::Off || g.m2_ended.load()) return;   // once ended nothing more is logged or driven (no 10 lines a second after a refusal)
+    // FIX (review of PR 248, the freeze timeout's owner): the frame clock's failure (jsp_stepper_lockstep_failed: no flip for 60 s since the last flip or the
+    // clock's start, or a vblank not taken for 60 s) was consumed only at the tick boundary, on the game thread a stalled guest never gives back, while the
+    // session's keepalive thread went on answering the peer, so neither side ever ended. This thread stays responsive: it ends the session at once (the
+    // local actor leaves, the peer sees the disconnect, the keepalive stops) and tells the peer why (handshake Cancel). The boundary, when it runs again
+    // (the frame clock lets go of the guest kReleaseMs later, jsp_stall_rule.h), ends the match locally with the same reason. The flag is cleared by the
+    // lockstep clock's start and stop, so only this match's failure counts; the abort is idempotent if the boundary got there first.
+    if (g.phase.load() == Phase::Running && !g.bench && jsp_stepper_lockstep_failed() && !g.stall_ended.exchange(true)) {
+        std::fprintf(stderr, "[net] the frame clock failed (the game took no flip or vblank for 60 s): the pump thread ends the session now\n");
+        g.sess.abort("frame clock stalled");
+        if (g.plan_ready) { if (g.host && g.mh) g.mh->cancel(jpsm::Reason::SessionFailed); else if (!g.host && g.mc) g.mc->abort(jpsm::Reason::SessionFailed); }
+    }
     if (g.rp) g.rp->pump();   // re-psn: from the very first tick, BEFORE the startup-evidence wait (up to 240 s): the server drops a client that does not poll for 90 s (heartbeat inside psnr_poll); this thread is the only one that calls the psnr client
     if (!g.evidence_ready.load()) {   // the handshake belongs after boot: Startup-field evidence (renderer pipe state, installed render60 mode) must exist when a proposal is checked
         uint64_t& first = g.ev_first; uint64_t& next = g.ev_next;   // per connection (conn_close resets them)
@@ -1378,6 +1391,7 @@ void start_session(ppu_context* c)
     { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host) g.mh->handover(); else g.mc->handover(); }   // the rollback session owns liveness from here
     g.fight_seen = false; g.hud_mark = 0;
     g_ko_track = 1;   // ENHANCEMENT (online match end): the KO counters are found even with the default KO count (jsp_fight_ko_winner, GameGlue::confirmed)
+    g.stall_ended = false;   // FIX (review of PR 248): the pump's frame clock watchdog, per match
     g.phase = Phase::Running; g.last_run_ms = GetTickCount64(); g.started_ms = g.last_run_ms;
     log("session started", std::string(start_at_anchor() ? "at the camera anchor, " : "at the fight scene, ") + "base tick " + std::to_string(g.done_now) + " slots " + std::to_string(g.plan.local_first) + " of " + std::to_string(g.plan.total_players));
     task_watch_start();   // DIAGNOSTIC (JSP_NET_TASK_WATCH=1)
@@ -1601,9 +1615,11 @@ void boundary(ppu_context* c)
         default: break;
         }
     }
+    // FIX (frame clock stall): the lockstep clock gave up on the guest (no vblank taken for 60 s); end_with's jsp_stepper_lockstep(0) clears the flag.
+    // FIX (review of PR 248): checked before the session failure, because the pump thread may have ended the session on it already (pump_tick); the
+    // peer was told there, so this end only names the reason locally.
+    if (jsp_stepper_lockstep_failed()) { const bool told = g.stall_ended.exchange(true); g.sess.abort("frame clock stalled"); if (!told) send_failure_cancel(); end_with("Match ended: the game stopped taking vblanks"); return; }
     if (g.sess.failed()) { send_failure_cancel(); end_with("Rollback session ended: " + g.sess.failure()); return; }
-    // FIX (frame clock stall): the lockstep clock gave up on the guest (no vblank taken for 60 s); end_with's jsp_stepper_lockstep(0) clears the flag
-    if (jsp_stepper_lockstep_failed()) { g.sess.abort("frame clock stalled"); end_with("Match ended: the game stopped taking vblanks"); return; }
     // FIX (a peer that never reaches the fight): handover() switched the handshake's silence checks off, so a peer that never reaches its fight left this PC on "Connecting to
     // opponent..." for good. GekkoNet's own disconnect timer only runs once the session is synchronized; until then this deadline ends the match.
     if (!g.bench && g.started_ms && !g.sess.synced() && GetTickCount64() - g.started_ms > kSyncDeadlineMs) {

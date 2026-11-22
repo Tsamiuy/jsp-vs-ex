@@ -234,6 +234,9 @@ uint32_t g_ack_before = 0;
 long long g_ack_wait_qpc = 0, g_ack_drain_qpc = 0;   // this vblank's waiting time outside / inside the drains (QPC units)
 uint32_t g_ack_logs = 0;
 std::atomic<int> g_ls_failed{0};            // the lockstep clock gave up on the guest (kAckFailMs): read by jsp_stepper_lockstep_failed
+}  // namespace
+static jsr::State g_lf;                     // frame clock thread only (and jsp_stepper_lockstep): the lost-flip rule and its failure timers (jsp_stall_rule.h)
+namespace {
 bool vblank_ack(int rsx_ok, bool resumable = false)
 {
     LARGE_INTEGER qf; QueryPerformanceFrequency(&qf);
@@ -258,8 +261,11 @@ bool vblank_ack(int rsx_ok, bool resumable = false)
             if (g_ack_logs++ == 0) g_c.ack_timeouts.fetch_add(1);   // counted once per vblank (the replay summary shows it); the clock stays on
             std::fprintf(stderr, "[step] vblank not taken after %.1f s of waiting (+%.1f s in drains), main=%d vblank_counter=%d: still waiting, the lockstep clock stays on\n",
                          (double)g_ack_wait_qpc / qf.QuadPart, (double)g_ack_drain_qpc / qf.QuadPart, (int)g_jsp_main_stage, (int)jsp_net_vblank_counter());
-            if (g_ack_wait_qpc >= (long long)kAckFailMs * qms && !g_ls_failed.exchange(1))
-                std::fprintf(stderr, "[step] FAILED: the guest has not taken a vblank for %llu s: the match must end (jsp_stepper_lockstep_failed)\n", (unsigned long long)(kAckFailMs / 1000));
+            if (g_ack_wait_qpc >= (long long)kAckFailMs * qms) {
+                jsr::note_fail(g_lf, GetTickCount64());   // FIX (review of PR 248): the same release timer as a no-flip failure (jsp_rollback_clock_turbo)
+                if (!g_ls_failed.exchange(1))
+                    std::fprintf(stderr, "[step] FAILED: the guest has not taken a vblank for %llu s: the match must end (jsp_stepper_lockstep_failed)\n", (unsigned long long)(kAckFailMs / 1000));
+            }
         }
         if (resumable && slice >= (long long)kAckSliceMs * qms) return false;   // g_ack_open stays set: the next pass resumes this vblank
         // The guest may be busy-waiting on an RSX label that only the drain writes (a tick computing > 20 ms without a flip): drain while waiting, or the ack
@@ -301,12 +307,16 @@ std::atomic<uint32_t> g_ls_stretch_us{0};   // the main thread adds, the frame c
 constexpr uint32_t kStretchMaxUs = 2000;    // at most 2 ms (6%) longer per tick
 }
 static ULONGLONG g_ls_last_ms = 0;                                 // frame clock thread only: GetTickCount64 of the last lockstep flip
-static jsr::State g_lf;                                            // frame clock thread only: the lost-flip rule (jsp_stall_rule.h)
+// FIX (review of PR 248, the freeze timeout): on = a match starts: the no-flip deadline runs from now (jsr::start), not from a first flip that may never come.
+// off (end_with, after the boundary read the flag) also clears the failure flag, so a later match's pump watchdog (jsp_net_game.cpp) never sees this one's.
 extern "C" void jsp_stepper_lockstep(int on)
 {
-    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; g_lf = jsr::State{}; }
-    else if (g_lockstep.load()) std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts (a flip over half a period late), time-sync stretch %.1f ms in all\n",
-                                             (unsigned long long)g_ls_flips, (unsigned long long)g_ls_idle, (unsigned long long)g_ls_restarts, g_ls_stretch_total_us / 1000.0);
+    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; jsr::start(g_lf, GetTickCount64()); }
+    else {
+        if (g_lockstep.load()) std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts (a flip over half a period late), time-sync stretch %.1f ms in all\n",
+                                            (unsigned long long)g_ls_flips, (unsigned long long)g_ls_idle, (unsigned long long)g_ls_restarts, g_ls_stretch_total_us / 1000.0);
+        g_ls_failed.store(0);
+    }
     g_lockstep.store(on ? 1 : 0);
 }
 // The boundary (main thread, after a session update): stretch the next lockstep period by `us` (capped at kStretchMaxUs per period). Returns 0 when the
@@ -483,8 +493,8 @@ static bool lost_flip_pass(ULONGLONG last_flip_ms)
     const jsr::Act a = jsr::step(g_lf, s);
     if (a == jsr::Act::Fail) {
         if (!g_ls_failed.exchange(1))
-            std::fprintf(stderr, "[step] FAILED: no flip for %llu s (flip status %u, queued %u reached %u completed %u): the match must end (jsp_stepper_lockstep_failed)\n",
-                         (unsigned long long)(jsr::kFailMs / 1000), s.status, s.queued, s.reached, s.completed);
+            std::fprintf(stderr, "[step] FAILED: no flip for %llu s%s (flip status %u, queued %u reached %u completed %u): the match must end (jsp_stepper_lockstep_failed)\n",
+                         (unsigned long long)(jsr::kFailMs / 1000), last_flip_ms ? "" : " since the lockstep clock started", s.status, s.queued, s.reached, s.completed);
         return false;
     }
     if (a != jsr::Act::WriteOff) return false;
@@ -514,6 +524,15 @@ static bool owed_vblank_pass(int rsx_ok)
 // The frame clock (main.cpp). Returns 1 when this pass was handled by the replay clock, 2 when by the lockstep clock (main.cpp goes on to present / drain / pump).
 extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
 {
+    // FIX (review of PR 248, the freeze timeout's owner): a failed stall (jsr::kFailMs without a flip, or kAckFailMs without a vblank taken) is ended by the
+    // pump thread (jsp_net_game.cpp: session aborted, the peer told). If the guest still has not flipped kReleaseMs later, the game thread cannot reach the
+    // boundary that would turn this clock off, so this thread (which stays responsive: main.cpp calls it every pass) lets go of the guest itself: the
+    // lockstep clock goes off and the normal frame clock takes over (an open vblank closes in vblank_ack). The failure flag stays set for the boundary.
+    if (g_lockstep.load(std::memory_order_relaxed) && jsr::release_due(g_lf, GetTickCount64())) {
+        std::fprintf(stderr, "[step] the match failed %llu s ago and the guest still has not flipped: the lockstep clock lets go (the normal frame clock takes over)\n",
+                     (unsigned long long)(jsr::kReleaseMs / 1000));
+        g_lockstep.store(0);
+    }
     if (g_ack_open) return lockstep_resume(rsx_ok);          // FIX (never off mid-match): only the lockstep clock leaves one open; it comes first
     if (!g_turbo.load(std::memory_order_relaxed)) return g_lockstep.load(std::memory_order_relaxed) ? lockstep_pass(rsx_ok) : 0;
     if (rsx_ok) {                                            // executes what the guest queued, including its flip command ("reached")

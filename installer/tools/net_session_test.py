@@ -117,6 +117,9 @@ SCENARIOS = {
     # the game thread is busy for 7 s (a replay behind a slow render) and does not call the session; the 5 s disconnect timer of the peer must not fire because the
     # keepalive thread polls (GekkoNet's Poll sends its NetworkHealth ping). Control: the same without the thread, the peer must time out.
     "busy_stall_keepalive": (["--local", "2", "--busy-stall", "195,7000", "--timeout-ms", "5000"], ["--local", "2", "--timeout-ms", "5000"], "busy_ok"),
+    # FIX (review of PR 248, the freeze timeout's owner): the same 7 s stall of the game thread, but another thread ends the session 1 s into it (the game's
+    # pump thread on the frame clock's failure): the peer must see the disconnect while the stalled thread is still away, where the keepalive alone kept it waiting
+    "stall_owner_abort": (["--local", "2", "--busy-stall", "195,7000", "--stall-abort", "1000", "--timeout-ms", "5000"], ["--local", "2", "--timeout-ms", "5000"], "stall_owner"),
     "busy_stall_no_keepalive": (["--local", "2", "--busy-stall", "195,7000", "--timeout-ms", "5000", "--keepalive-ms", "0"], ["--local", "2", "--timeout-ms", "5000"], "busy_dies"),
     "impaired_2x2": (["--local", "2"] + IMP, ["--local", "2"] + IMP, "agree_rb"),
     "adv_20pct_loss": (["--local", "2"] + ADV, ["--local", "2"] + ADV, "agree_rb"),
@@ -176,6 +179,22 @@ SCENARIOS = {
     "ko_scan_agree": (["--local", "2", "--ko-from", "300", "--ko-every", "7"] + ADV, ["--local", "2", "--ko-from", "300", "--ko-every", "7"] + ADV, "ko_agree"),
 }
 KO_KINDS = ("ko_predicted", "ko_confirmed", "ko_agree", "ko_gap")
+
+
+def owner_check(ho, co, hs, cs, tmp, T):
+    """FIX (review of PR 248): stall_owner. The host's game thread is away 7 s (from tick 195); its owner thread ends the session 1 s in. The client must
+    see the disconnect about 1 s after its last new tick (well inside the 7 s stall and before its own 5 s timeout), then run on to the end alone."""
+    f = []
+    if "STALL-ABORT" not in ho: f.append("host: the owner thread did not end the session")
+    if "frame clock stalled" not in hs: f.append("host: the session did not fail with the owner's reason: " + hs[-160:])
+    m = re.search(r"DISCONNECT-EVENT (\d+) ms after", co)
+    if not m: f.append("client: no disconnect event: " + cs[-200:])
+    elif not (500 <= int(m.group(1)) <= 3500): f.append(f"client: the disconnect came {m.group(1)} ms after its last new tick, expected about 1000 (the owner's abort, not the 5 s timeout)")
+    if num(cs, "maxtick", 0) < T: f.append(f"client: stopped at tick {num(cs, 'maxtick', 0)} of {T} after the host left")
+    if num(cs, "tail_neutral", 0) != 1: f.append("client: the gone host's slots do not read neutral")
+    n, bad = agree(tmp, 190)
+    if bad: f.append(f"hashes differ before the stall: {bad}")
+    return f
 
 
 def ko_check(kind, ho, co):
@@ -363,6 +382,7 @@ def main():
             fl = problems or check(kind, hs, cs, hr, cr, tmp, a.ticks)
             if not problems and kind == "agree_rounds": fl += rounds_check(name, ho, co, a.ticks)
             if not problems and kind in KO_KINDS: fl += ko_check(kind, ho, co)
+            if not problems and kind == "stall_owner": fl += owner_check(ho, co, hs, cs, tmp, a.ticks)
             if not fl and name.startswith("skip_final"):   # the switch must have skipped saves on both peers, or the scenario tested nothing
                 for n_, s_ in (("host", hs), ("client", cs)):
                     if num(s_, "skipped", 0) <= 0: fl.append(f"{n_}: no save was skipped (skipped={num(s_, 'skipped', -1)})")

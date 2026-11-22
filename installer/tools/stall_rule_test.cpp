@@ -62,6 +62,77 @@ int main()
         s.now_ms = 1000 + jsr::kFailMs;     CHECK(jsr::step(st, s) == Act::Fail);
         s.now_ms += 5000;                   CHECK(jsr::step(st, s) == Act::None);
     }
+    // FIX (review of PR 248, the freeze timeout). (1) The deadline starts with the lockstep clock: a guest that never flipped in this match fails too.
+    {   // the old gap: no start, last flip 0 -> never failed
+        jsr::State st;
+        jsr::Sample s; s.status = 1; s.queued = s.reached = s.completed = 0; s.last_flip_ms = 0;
+        for (uint64_t ms = 1000; ms <= 1000 + 3 * jsr::kFailMs; ms += 500) { s.now_ms = ms; CHECK(jsr::step(st, s) == Act::None); }
+    }
+    {   // with start(): Fail exactly kFailMs after the start, once
+        jsr::State st; jsr::start(st, 20000);
+        jsr::Sample s; s.status = 1; s.queued = s.reached = s.completed = 0; s.last_flip_ms = 0;
+        s.now_ms = 20000 + jsr::kFailMs - 1; CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms = 20000 + jsr::kFailMs;     CHECK(jsr::step(st, s) == Act::Fail);
+        s.now_ms += 1000;                    CHECK(jsr::step(st, s) == Act::None);
+    }
+    {   // a flip after the start moves the deadline to that flip; a last flip from before the start (another match's clock) does not count
+        jsr::State st; jsr::start(st, 20000);
+        jsr::Sample s; s.status = 1; s.queued = s.reached = s.completed = 5; s.last_flip_ms = 50000;
+        s.now_ms = 20000 + jsr::kFailMs + 10; CHECK(jsr::step(st, s) == Act::None);   // 30 s after the flip
+        s.now_ms = 50000 + jsr::kFailMs;      CHECK(jsr::step(st, s) == Act::Fail);
+        jsr::State st2; jsr::start(st2, 20000);
+        s.last_flip_ms = 1000;   // older than the start
+        s.now_ms = 1000 + jsr::kFailMs;       CHECK(jsr::step(st2, s) == Act::None);
+        s.now_ms = 20000 + jsr::kFailMs;      CHECK(jsr::step(st2, s) == Act::Fail);
+    }
+    {   // a sample older than the start never underflows into a failure
+        jsr::State st; jsr::start(st, 90000);
+        jsr::Sample s; s.status = 1; s.now_ms = 80000; CHECK(jsr::step(st, s) == Act::None);
+    }
+    // (2) The owner that stays responsive: after a failure with no flip, release_due turns true kReleaseMs later; a flip or a new start clears it.
+    {
+        jsr::State st; jsr::start(st, 1000);
+        jsr::Sample s; s.status = 1; s.last_flip_ms = 0;
+        CHECK(!jsr::release_due(st, 1000 + jsr::kFailMs + jsr::kReleaseMs));   // not failed yet
+        s.now_ms = 1000 + jsr::kFailMs; CHECK(jsr::step(st, s) == Act::Fail);
+        CHECK(!jsr::release_due(st, s.now_ms));
+        CHECK(!jsr::release_due(st, s.now_ms + jsr::kReleaseMs - 1));
+        CHECK(jsr::release_due(st, s.now_ms + jsr::kReleaseMs));
+        jsr::flip_taken(st);   // the guest flipped after all: nothing to let go of
+        CHECK(!jsr::release_due(st, s.now_ms + 10 * jsr::kReleaseMs));
+        jsr::State st2; jsr::start(st2, 1000); s.now_ms = 1000 + jsr::kFailMs; CHECK(jsr::step(st2, s) == Act::Fail);
+        jsr::start(st2, s.now_ms + 1);   // the next match
+        CHECK(!st2.failed && !jsr::release_due(st2, s.now_ms + 10 * jsr::kReleaseMs));
+    }
+    {   // the vblank-wait failure (kAckFailMs) uses the same timer; a second note does not restart it
+        jsr::State st; jsr::start(st, 1000);
+        jsr::note_fail(st, 70000);
+        jsr::note_fail(st, 72000);
+        CHECK(!jsr::release_due(st, 70000 + jsr::kReleaseMs - 1));
+        CHECK(jsr::release_due(st, 70000 + jsr::kReleaseMs));
+        jsr::Sample s; s.status = 1; s.now_ms = 1000 + jsr::kFailMs; CHECK(jsr::step(st, s) == Act::None);   // already failed: no second Fail
+    }
+    {   // the frame clock thread alone, a guest stalled for good from the clock's start (no flip, no boundary ever again): the pass runs every 20 ms and
+        // asks the rule only after 500 ms without a flip (lockstep_pass); Fail comes once at kFailMs, the release kReleaseMs after it, and nothing else
+        // has to run for either (the pump thread's end of the session reads the same failure flag the Fail sets)
+        jsr::State st; const uint64_t t0 = 5000; jsr::start(st, t0);
+        uint64_t fail_at = 0, release_at = 0; int fails = 0;
+        for (uint64_t ms = t0; ms <= t0 + jsr::kFailMs + 2 * jsr::kReleaseMs; ms += 20) {
+            if (!release_at && jsr::release_due(st, ms)) release_at = ms;
+            if (ms - t0 <= 500) continue;
+            jsr::Sample s; s.now_ms = ms; s.last_flip_ms = 0; s.status = 1; s.queued = s.reached = s.completed = 0;
+            if (jsr::step(st, s) == Act::Fail) { fails++; fail_at = ms; }
+        }
+        CHECK(fails == 1 && fail_at == t0 + jsr::kFailMs);
+        CHECK(release_at == fail_at + jsr::kReleaseMs);
+    }
+    {   // the lost-flip shape from the start: written off after kWriteOffMs as before, and if the write-off keeps being refused, Fail at kFailMs
+        jsr::State st; jsr::start(st, 1000);
+        CHECK(jsr::step(st, lost(1000, 0, 7)) == Act::None);
+        CHECK(jsr::step(st, lost(2000, 0, 7)) == Act::WriteOff);
+        CHECK(jsr::step(st, lost(1000 + jsr::kFailMs, 0, 7)) == Act::WriteOff);   // the write-off is asked again first
+        CHECK(jsr::step(st, lost(1000 + jsr::kFailMs + 1, 0, 7)) == Act::Fail);
+    }
     if (g_fail) { std::printf("stall_rule_test: %d failure(s)\n", g_fail); return 1; }
     std::printf("stall_rule_test: all checks passed\n");
     return 0;

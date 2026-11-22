@@ -174,6 +174,7 @@ int main(int argc, char** argv)
     int frame = 0; bool left = false; int linger_until = -1; uint32_t max_tick = 0, cheats_applied = 0;
     std::string evlog; uint64_t commits = 0;
     jkr::Ring kr; jkr::Watermark kw; bool ko_decided = false, muted = false;   // FIX (review of PR 248): the game's end rules (--ko-from)
+    uint32_t progress_tick = 0; int progress_ms = 0;                             // when max_tick last grew (the DISCONNECT-EVENT line)
     auto ko_rec = [&](uint32_t tick) {   // as GameGlue::ko_record: every save, predicted or not
         if (ko_from < 0) return;
         const uint32_t f = fold(cur);
@@ -209,6 +210,9 @@ int main(int argc, char** argv)
     int poll_stall_at = -1, poll_stall_ms = 0; bool poll_stalled = false; if (const char* ps = arg(argc, argv, "--poll-stall", "")) std::sscanf(ps, "%d,%d", &poll_stall_at, &poll_stall_ms);   // --poll-stall TICK,MS: from that tick the loop only polls (as a long commit gate does) for MS
     // --busy-stall TICK,MS: from that tick the loop sleeps for MS WITHOUT calling the session (a replay or a slow render on the game thread); only the keepalive thread can keep the peer alive
     int busy_at = -1, busy_ms = 0; bool busy_done = false; if (const char* bs = arg(argc, argv, "--busy-stall", "")) std::sscanf(bs, "%d,%d", &busy_at, &busy_ms);
+    // FIX (review of PR 248, the freeze timeout's owner): --stall-abort MS: during the busy stall another thread (the game's pump thread) ends the session MS
+    // after it began, as pump_tick does on the frame clock's failure, while the game thread is still away; the keepalive thread alone would keep the peer waiting
+    const int stall_abort_ms = atoi(arg(argc, argv, "--stall-abort", "-1"));
     uint64_t iters_after_first_run = 0, runs_after_first = 0, live_after_first = 0; bool seen_run = false;   // window: first tick .. the tick `ticks` (the linger at the end is not counted)
     auto one_iteration = [&]() {
         const uint64_t u0 = glue.updates();
@@ -216,7 +220,13 @@ int main(int argc, char** argv)
         if (glue.updates() != u0) frame++;
         else s.poll();   // as the game: replay / regrant / stall iterations still service the network
         if (poll_stall_at >= 0 && !poll_stalled && (int)max_tick >= poll_stall_at) { poll_stalled = true; const int e = since() + poll_stall_ms; while (since() < e) { hub.pump(); s.poll(); sleep_ms(20); } }
-        if (busy_at >= 0 && !busy_done && (int)max_tick >= busy_at) { busy_done = true; sleep_ms(busy_ms); }
+        if (busy_at >= 0 && !busy_done && (int)max_tick >= busy_at) {
+            busy_done = true;
+            std::thread owner;
+            if (stall_abort_ms >= 0) owner = std::thread([&] { sleep_ms(stall_abort_ms); s.abort("frame clock stalled"); std::printf("STALL-ABORT by the owner thread at %d ms\n", since()); std::fflush(stdout); });
+            sleep_ms(busy_ms);
+            if (owner.joinable()) owner.join();
+        }
         const bool in_window = seen_run && (int)max_tick < ticks;
         if (in_window) iters_after_first_run++;
         if (op.kind != jsx::OpKind::Run) return;
@@ -256,8 +266,12 @@ int main(int argc, char** argv)
             const char* k[] = {"syncing", "connected", "started", "disconnected", "desync", "failed", "replay-finished"};
             std::snprintf(b, sizeof b, " %s(h=%d t=%d)", k[(int)e.kind], e.handle, e.tick);
             if (e.kind != SessionEventKind::Syncing) { if (evlog.size() < 600) evlog += b; }
-            if (e.kind == SessionEventKind::Disconnected) lost_now = true;
+            if (e.kind == SessionEventKind::Disconnected) {
+                if (!lost_now) std::printf("DISCONNECT-EVENT %d ms after this copy's last new tick %u\n", since() - progress_ms, max_tick);
+                lost_now = true;
+            }
         }
+        if (max_tick != progress_tick) { progress_tick = max_tick; progress_ms = since(); }
         // FIX (review of PR 248): the boundary's order in jsp_net_game.cpp: the events first (a Disconnected decides with the live watermark), then the
         // watermark takes this pass's final frame and ko_scan ends on a covered winner.
         if (ko_from >= 0 && !ko_decided) {
