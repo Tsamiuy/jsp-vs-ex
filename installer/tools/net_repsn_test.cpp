@@ -261,6 +261,7 @@ int main()
 
     // ---- ENHANCEMENT (version mismatch message): the release table, the text, both sides fail at once (paired), an older host's give-up text ----
     { CHECK(release_name(0xe9be7f43u) == "0.7.0-test1" && release_name(0xf1e06d4du) == "0.7.0-test2" && release_name(0x8a47e98au) == "0.7.0-test3");
+      CHECK(release_name(0x699bd950u) == "0.7.0-test4" && release_name(0x42959da6u) == "0.7.0-test5");
       CHECK(release_name(0x0000abcdu) == "build 0000abcd" && release_name(B) == "build a1b2c3d4");
       CHECK(version_mismatch_text(0xf1e06d4du, 0x8a47e98au, "") == "The other player is on 0.7.0-test2; you're on 0.7.0-test3. Both players need the same version for rollback.");
       CHECK(version_mismatch_text(0x8a47e98au, B, "0.7.0-test4") == "The other player is on 0.7.0-test3; you're on 0.7.0-test4. Both players need the same version for rollback.");

@@ -95,7 +95,8 @@ inline std::string build_hex(uint32_t build) { char b[12]; std::snprintf(b, size
 // ENHANCEMENT (version mismatch message): the build words of the published releases (jsp_build_id.cmake, without gameplay mods), so the message names the
 // release the other player runs. A word not listed (a newer release, a local build, gameplay mods) is named "build xxxxxxxx". Add each release when it is published.
 struct KnownBuild { uint32_t build; const char* release; };
-inline constexpr KnownBuild kKnownBuilds[] = { { 0xe9be7f43u, "0.7.0-test1" }, { 0xf1e06d4du, "0.7.0-test2" }, { 0x8a47e98au, "0.7.0-test3" } };
+inline constexpr KnownBuild kKnownBuilds[] = { { 0xe9be7f43u, "0.7.0-test1" }, { 0xf1e06d4du, "0.7.0-test2" }, { 0x8a47e98au, "0.7.0-test3" },
+                                                 { 0x699bd950u, "0.7.0-test4" }, { 0x42959da6u, "0.7.0-test5" } };
 inline std::string release_name(uint32_t build)
 {
     for (const KnownBuild& k : kKnownBuilds) if (k.build == build) return k.release;
