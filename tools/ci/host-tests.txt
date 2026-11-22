@@ -101,3 +101,6 @@ exclude | installer/tools/stepper_test.cpp | compiled and run by stepper_test.sh
 exclude | installer/tools/snapshot_ring_test.cpp | compiled and run by snapshot_ring_test.sh
 exclude | installer/tools/mods_overlay_test.cpp | compiled and run by mods_overlay_test.sh
 exclude | docs/archive/jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner
+
+posix | installer/tools/host_abort_test.sh
+exclude | installer/tools/host_abort_test.cpp | compiled and run by host_abort_test.sh

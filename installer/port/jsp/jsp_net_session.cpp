@@ -468,6 +468,11 @@ NetSession::~NetSession() { stop(); }
 // session (a new session magic, so stragglers of the old one addressed to it are dropped by GekkoNet) and binds the adapter to its own mux again.
 void NetSession::stop()
 {
+    { // Retire before joining; never hold the worker's mutex across its join.
+        std::lock_guard<std::recursive_mutex> lk(gmu_);
+        if (host_abort_) host_abort_->retired.store(true);
+        host_abort_.reset();
+    }
     stop_keepalive();   // first: the thread takes gmu_ and calls into GekkoNet
     std::lock_guard<std::recursive_mutex> lk(gmu_);
     if (gs_) { GekkoSession* g = (GekkoSession*)gs_; gekko_destroy(&g); gs_ = nullptr; }
@@ -493,6 +498,7 @@ void NetSession::fail(const std::string& why)
     std::lock_guard<std::recursive_mutex> lk(gmu_);
     if (failed_) return;
     failed_ = true; failure_ = why;
+    if (host_abort_) host_abort_->retired.store(true);
     events_.push_back({SessionEventKind::Failed, -1, -1, 0, 0, why});
     // Tell the peer at once: the local actor leaves, which flushes the disconnect message right away (GekkoNet drops every remote with it).
     if (gs_ && plan_.local_count) gekko_disconnect_actor((GekkoSession*)gs_, plan_.local_first);
@@ -501,6 +507,7 @@ void NetSession::abort(const std::string& why) { fail(why); }
 
 bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig& cfg)
 {
+    std::lock_guard<std::recursive_mutex> lk(gmu_); // lifecycle calls remain single-owner
     auto refuse = [&](const std::string& why) { start_error_ = why; return false; };
     if (gs_) return refuse("already started");
     if (!plan.total_players || plan.total_players > 4 || !plan.local_count || !cfg.input_size) return refuse("bad plan or input size");
@@ -553,17 +560,21 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
     if (cfg.keepalive_stale_ms) {
         const uint32_t stale = cfg.keepalive_stale_ms;
         ka_stop_.store(false);
-        ka_ = std::thread([this, stale]() {
+        const auto lifetime = std::make_shared<HostAbort>();
+        ka_ = std::thread([this, stale, lifetime]() {
             while (!ka_stop_.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(std::max<uint32_t>(5, stale / 5)));
-                if (now_ms() - last_poll_ms_.load() < stale) continue;
                 std::unique_lock<std::recursive_mutex> lk(gmu_, std::try_to_lock);
                 if (!lk.owns_lock()) continue;   // the game thread is inside the session: it polls anyway
-                if (ka_stop_.load() || failed_) break;   // a failed session sends nothing more (fail() already told the peer)
+                if (ka_stop_.load() || failed_ || lifetime->retired.load() || host_abort_ != lifetime) break;
+                // Control is independent of guest poll freshness and consumes no guest state.
+                if (lifetime->requested.load()) { fail("frame clock stalled"); break; }
+                if (now_ms() - last_poll_ms_.load() < stale) continue;
                 poll_impl();
                 ka_polls_.fetch_add(1);
             }
         });
+        host_abort_ = lifetime; // initialized session and ready consumer, before releasing ownership
     }
     return true;
 }
@@ -580,6 +591,7 @@ bool NetSession::start_replay(const std::vector<uint8_t>& bytes, const SessionCo
 // Stress and Replay sessions: no socket (the adapter is never set, GekkoNet sends nothing), no keepalive thread, no disconnect timer.
 bool NetSession::start_local(SessionMode m, const SessionPlan& plan, const SessionConfig& cfg, uint32_t distance, const std::vector<uint8_t>* bytes)
 {
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
     auto refuse = [&](const std::string& why) { start_error_ = why; return false; };
     if (gs_) return refuse("already started");
     if (cfg.record && m != SessionMode::Stress) return refuse("a replay session cannot record");
@@ -656,6 +668,7 @@ void NetSession::set_local_input(uint8_t n, const uint8_t* in)
 
 uint32_t NetSession::pace_sleep_ms(uint32_t tick_ms)
 {
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
     if (!gs_ || failed_ || frames_ahead() <= 0.5f) return 0;
     pace_us_ += tick_ms * 16u;   // 1.6% of a tick (GekkoNet's example), accumulated in microseconds: no 1 ms floor
     const uint32_t ms = pace_us_ / 1000u; pace_us_ %= 1000u;

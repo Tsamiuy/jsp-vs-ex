@@ -706,3 +706,9 @@ The Online settings page now refreshes observed connection progress without butt
 checking content/settings, ready, synchronizing, playing, reconnecting or ended. Unknown path and delay stay unknown.
 The menu owns the retained overlay while visible; network notices and the badge resume after it closes. These states are
 display observations, not admission decisions. Host models and production Windows syntax were checked; live/game UI remains untested.
+
+### Detected frame-clock failure
+
+A detected frame-clock failure requests a disconnect through the network session's own keepalive worker, even when the guest never reaches another tick boundary. Each clock activation retains the exact session lifetime; a retired activation cannot disconnect a replacement session. This control sends no guest ticks or acknowledgments and does not perform guest, settings or audio teardown from the host worker.
+
+The host control is available only for Game sessions with a nonzero keepalive interval (the normal native/custom network configuration). Sessions explicitly configured without that worker, local stress sessions and replay sessions expose no request handle. A detector blocked inside an HLE call still cannot publish a failure. This change does not establish guest unwinding, a restart notice, menu recovery or safe same-process rejoin. The focused host test uses the real network worker and no guest boundary.

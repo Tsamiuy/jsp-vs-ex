@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include "jsp_host_abort.h"
 
 namespace jsr {
 
@@ -57,7 +58,13 @@ inline void begin(State& st, uint64_t now_ms)
 // A pass keeps its own activation alive across HLE calls. Only the frame clock
 // mutates rule after publication. The session boundary polls the current flag.
 struct Activation {
-    explicit Activation(uint64_t now_ms) { begin(rule, now_ms); }
+    explicit Activation(uint64_t now_ms, jspnet::HostAbortHandle owner = {}) : host_abort(std::move(owner)) { begin(rule, now_ms); }
+    const jspnet::HostAbortHandle host_abort;
+    bool report_failure() {
+        const bool first = !failed.exchange(true);
+        if (host_abort) host_abort->post();
+        return first;
+    }
     State rule;
     std::atomic<bool> failed{false};
     std::atomic<uint32_t> stretch_us{0};
@@ -67,8 +74,8 @@ class Activations {
     std::atomic<std::shared_ptr<Activation>> current_;
 public:
     std::shared_ptr<Activation> current() const { return current_.load(); }
-    void set(bool enabled, uint64_t now_ms) {
-        current_.store(enabled ? std::make_shared<Activation>(now_ms) : nullptr);
+    void set(bool enabled, uint64_t now_ms, jspnet::HostAbortHandle owner = {}) {
+        current_.store(enabled ? std::make_shared<Activation>(now_ms, std::move(owner)) : nullptr);
     }
     bool failed() const {
         const auto activation = current();

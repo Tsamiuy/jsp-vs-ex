@@ -265,3 +265,6 @@ __pycache__/
 # Offline mod-package importer and hostile-fixture tests
 !/installer/tools/mod_package.py
 !/installer/tools/mod_package_test.py
+
+!/installer/tools/host_abort_test.cpp
+!/installer/tools/host_abort_test.sh

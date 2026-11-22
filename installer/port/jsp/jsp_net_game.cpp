@@ -550,6 +550,7 @@ void audio_lock_end()
 // still started on different ticks on two copies (tick 879). In a match the main thread's clock is the session start time + 1/30 s per tick + 1 us per read
 // within the tick (time still moves for a loop that waits on it); a rollback re-run reads the same times. Other threads keep the real clock.
 extern "C" int64_t (*g_ps3_guest_tb_shift)(uint64_t real_tb);
+extern "C" void jsp_stepper_lockstep_start(jspnet::HostAbortHandle owner);
 extern "C" void jsp_stepper_lockstep(int on);   // jsp_stepper.cpp
 extern "C" int jsp_stepper_lockstep_stretch_us(uint32_t us);   // jsp_stepper.cpp: the time-sync stretch of the next lockstep period (0 = lockstep clock off)
 extern "C" int jsp_stepper_lockstep_failed(void);   // jsp_stepper.cpp: 1 = the guest took no vblank for 60 s of real ack waiting (drains excluded); cleared by jsp_stepper_lockstep(0)
@@ -1457,7 +1458,7 @@ void start_session(ppu_context* c)
     task_watch_start();   // DIAGNOSTIC (JSP_NET_TASK_WATCH=1)
     report_start();
     audio_lock_start();
-    jsp_stepper_lockstep(1);   // FIX (rollback determinism): 2 vblanks per flip in the live ticks too (jsp_stepper.cpp)
+    jsp_stepper_lockstep_start(g.sess.host_abort_handle());   // FIX (rollback determinism): 2 vblanks per flip in the live ticks too (jsp_stepper.cpp)
     guest_clock_start();
     cri_lock_start();
     show("Connecting to opponent...");

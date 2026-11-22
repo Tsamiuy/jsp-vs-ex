@@ -258,7 +258,7 @@ bool vblank_ack(int rsx_ok, bool resumable = false)
             if (g_ack_logs++ == 0) g_c.ack_timeouts.fetch_add(1);   // counted once per vblank (the replay summary shows it); the clock stays on
             std::fprintf(stderr, "[step] vblank not taken after %.1f s of waiting (+%.1f s in drains), main=%d vblank_counter=%d: still waiting, the lockstep clock stays on\n",
                          (double)g_ack_wait_qpc / qf.QuadPart, (double)g_ack_drain_qpc / qf.QuadPart, (int)g_jsp_main_stage, (int)jsp_net_vblank_counter());
-            if (g_ack_wait_qpc >= (long long)kAckFailMs * qms && !g_clock_match->failed.exchange(true))
+            if (g_ack_wait_qpc >= (long long)kAckFailMs * qms && g_clock_match->report_failure())
                 std::fprintf(stderr, "[step] FAILED: the guest has not taken a vblank for %llu s: the match must end (jsp_stepper_lockstep_failed)\n", (unsigned long long)(kAckFailMs / 1000));
         }
         if (resumable && slice >= (long long)kAckSliceMs * qms) return false;   // g_ack_open stays set: the next pass resumes this vblank
@@ -303,6 +303,11 @@ static ULONGLONG g_ls_last_ms = 0;                                 // frame cloc
 extern "C" void jsp_stepper_lockstep(int on)
 {
     g_matches.set(on != 0, GetTickCount64());
+}
+// A successful network start supplies its deliverable lifetime before activation publication.
+extern "C" void jsp_stepper_lockstep_start(jspnet::HostAbortHandle owner)
+{
+    g_matches.set(true, GetTickCount64(), std::move(owner));
 }
 // The boundary (main thread, after a session update): stretch the next lockstep period by `us` (capped at kStretchMaxUs per period). Returns 0 when the
 // lockstep clock is off (the caller sleeps instead, as before).
@@ -478,7 +483,7 @@ static bool lost_flip_pass(ULONGLONG last_flip_ms)
     }
     const jsr::Act a = jsr::step(g_clock_match->rule, s);
     if (a == jsr::Act::Fail) {
-        if (!g_clock_match->failed.exchange(true))
+        if (g_clock_match->report_failure())
             std::fprintf(stderr, "[step] FAILED: no flip for %llu s (flip status %u, queued %u reached %u completed %u): the match must end (jsp_stepper_lockstep_failed)\n",
                          (unsigned long long)(jsr::kFailMs / 1000), s.status, s.queued, s.reached, s.completed);
         return false;
