@@ -71,11 +71,14 @@ struct Activation {
 };
 
 class Activations {
-    std::atomic<std::shared_ptr<Activation>> current_;
+    // The C++11 shared_ptr atomic operations also support libc++ toolchains
+    // without the C++20 atomic<shared_ptr> specialization. All access is atomic.
+    std::shared_ptr<Activation> current_;
 public:
-    std::shared_ptr<Activation> current() const { return current_.load(); }
+    std::shared_ptr<Activation> current() const { return std::atomic_load(&current_); }
     void set(bool enabled, uint64_t now_ms, jspnet::HostAbortHandle owner = {}) {
-        current_.store(enabled ? std::make_shared<Activation>(now_ms, std::move(owner)) : nullptr);
+        std::atomic_store(&current_, enabled ? std::make_shared<Activation>(now_ms, std::move(owner))
+                                             : std::shared_ptr<Activation>{});
     }
     bool failed() const {
         const auto activation = current();

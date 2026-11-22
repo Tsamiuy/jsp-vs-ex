@@ -115,6 +115,28 @@ int main()
         matches.set(false, 0);
         CHECK(!matches.failed());
     }
+    {   // Concurrent readers must see fully initialized handles across retire/rearm.
+        jsr::Activations matches;
+        std::atomic<bool> done{false}, bad{false};
+        std::thread reader([&] {
+            while (!done.load()) {
+                auto pass = matches.current();
+                if (pass && (!pass->rule.started || pass->rule.started_ms > 9999)) bad.store(true);
+                (void)matches.failed();
+            }
+        });
+        for (uint64_t i = 0; i < 10000; ++i) {
+            matches.set(true, i);
+            auto pinned = matches.current();
+            matches.set(false, i);
+            pinned->failed.store(true); // retired failure cannot affect current publication
+        }
+        done.store(true);
+        reader.join();
+        CHECK(!bad.load());
+        CHECK(!matches.current());
+        CHECK(!matches.failed());
+    }
     if (g_fail) { std::printf("stall_rule_test: %d failure(s)\n", g_fail); return 1; }
     std::printf("stall_rule_test: all checks passed\n");
     return 0;

@@ -148,7 +148,11 @@ class Packages(unittest.TestCase):
 
     def test_existing_mod_and_case_alias(self):
         self.make()
-        for name in ("sample", "SAMPLE", "sample.", "sample "):
+        # Win32 normalizes trailing dots/spaces before creating the directory.
+        # Keep real case-alias/no-overwrite checks there; exercise distinct
+        # on-disk suffix aliases on POSIX, where these names are representable.
+        names = ("sample", "SAMPLE") if os.name == "nt" else ("sample", "SAMPLE", "sample.", "sample ")
+        for name in names:
             dest = self.mods / name
             dest.mkdir()
             (dest / "keep").write_bytes(b"unchanged")
