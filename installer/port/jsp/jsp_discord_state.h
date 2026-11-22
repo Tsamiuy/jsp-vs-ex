@@ -8,9 +8,16 @@
 
 namespace jdp {
 
-// The Discord application the presence is shown under when JSP_DISCORD_APP_ID is not set: one registered by the contributor who
-// added this feature, not by the project. An owner who wants their own sets JSP_DISCORD_APP_ID (docs/DISCORD.md).
-constexpr const char* kDefaultAppId = "1573573702514384977";
+// FIX (review): no built-in Discord application. The presence runs only under the application named by JSP_DISCORD_APP_ID (the
+// settings file or the environment; docs/DISCORD.md), which the player or a package configured; unset = Rich Presence off.
+enum class AppId { Unset, Invalid, Ok };
+inline AppId app_id_setting(const std::string& v)
+{
+    if (v.empty()) return AppId::Unset;
+    if (v.size() > 20) return AppId::Invalid;   // Discord ids are 64-bit numbers: 20 digits at most
+    for (char c : v) if (c < '0' || c > '9') return AppId::Invalid;
+    return AppId::Ok;
+}
 constexpr size_t kSecretMax = 128;   // Discord's limit for a join secret
 constexpr size_t kTextMax = 128;     // and for details / state
 

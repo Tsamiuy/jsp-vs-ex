@@ -245,7 +245,9 @@ int main()
     CHECK(s.take(&got) && got.room == 43);
     s.clear(); CHECK(!s.active() && s.step(kJoinJoined, 99999) == Step::Idle);
     CHECK(std::string(join_state_text(kJoinFull)) == "the room is full" && std::string(verdict_text(Verdict::WrongServer)).find("server") != std::string::npos);
-    CHECK(std::string(kDefaultAppId) == "1573573702514384977");
+    // FIX (review): no built-in application: unset is off, only a numeric id of up to 20 digits is used
+    CHECK(app_id_setting("") == AppId::Unset && app_id_setting("123456789012345678") == AppId::Ok && app_id_setting("18446744073709551615") == AppId::Ok);
+    CHECK(app_id_setting("12a") == AppId::Invalid && app_id_setting(" 1") == AppId::Invalid && app_id_setting("123456789012345678901") == AppId::Invalid);
 
     if (fails) { std::printf("discord: %d checks FAILED\n", fails); return 1; }
     std::printf("PASS discord: secret, presence text, names, timer and join rules\n");

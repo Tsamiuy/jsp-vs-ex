@@ -1,6 +1,6 @@
 // ENHANCEMENT (Discord Rich Presence and Join/Invite): what the game shows on the player's Discord profile, and Discord's Join / Invite.
-// jsp_discord.cpp talks to the local Discord app over its IPC pipe (\\.\pipe\discord-ipc-N); nothing is sent anywhere else. On unless
-// JSP_DISCORD=0 (JSP_DISCORD_APP_ID picks another Discord application). jsp_game.cpp fills JspPresenceRaw from the screens it already
+// jsp_discord.cpp talks to the local Discord app over its IPC pipe (\\.\pipe\discord-ipc-N); nothing is sent anywhere else. Off unless
+// JSP_DISCORD_APP_ID names a Discord application (no built-in one); JSP_DISCORD=0 turns it off. jsp_game.cpp fills JspPresenceRaw from the screens it already
 // tracks; the online state comes from the runtime's Matching2 room (patch 7924) and jsp_net_game.cpp (our rollback in the fight).
 // The pure parts (presence text, join secret, join rules) are in jsp_discord_state.h.
 #pragma once

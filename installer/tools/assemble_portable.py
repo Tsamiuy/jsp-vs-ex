@@ -58,8 +58,9 @@ README = """J-Stars Victory VS-EX: Fan Revival, portable
 ============================================
 An unofficial fan project. Nothing of the game is included or downloaded: the port is built on your PC from your own copy.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental): the first run turns it on with rollback and a public test server (re-psn, not run by this project; see
-ONLINE-GUIDE.md); jsp-settings.exe, Online tab, turns it off. Online settings you already have are kept.
+(experimental), off until you choose a server in jsp-settings.exe, Online tab (see ONLINE-GUIDE.md). A test build offers
+its server there: one click on its "Use ... (TEST BUILD)" button. Nothing changes before that; online settings you already
+have are kept.
 
 1. Unpack the whole zip to a folder you can write to (not Program Files). Keep the folders as they are.
 2. Double-click run.cmd. It asks for:

@@ -58,7 +58,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 An experimental first version is in the build. A new install turns it on for Online Battle (setup writes the online settings when there are none; the settings
 window's Online tab turns it off). It needs fights that run the same on every machine and a way to save and restore the fight state each frame. How it works and
 the plan, with what we use and fall back to: [ROLLBACK.md](ROLLBACK.md). The port connects only for online play, and only to the server and players in the
-settings (by default a public re-psn test server that this project does not run).
+settings (none by default: online is off until the player chooses a server).
 Every gameplay option in a match is the same for all players; ranked uses one fixed rule set.
 
 - 🔧 **The game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server** (a fork of psnr) (experimental, on after a new install; how

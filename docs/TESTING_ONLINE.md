@@ -14,9 +14,14 @@ Online fights are **2 vs 2** for now: each player has one fighter, the CPU fills
 
 1. **Download** `jsp-setup.exe` (or the portable zip) from the project's Releases page. Both players need the same download.
 2. **Run setup.** It asks for your disc folder and your `EBOOT.elf` (see [What setup needs](#what-setup-needs)), then builds the game on
-   your PC. This takes a while (minutes, longer on an older PC); let it finish. Online is set up for you at the end. If Windows asks
+   your PC. This takes a while (minutes, longer on an older PC); let it finish. Online is off after setup. If Windows asks
    to allow the game through the firewall, click **Allow access**.
-3. **Start the game** from the Start menu or desktop shortcut. The first start installs the game data from your disc (a few minutes).
+3. **Turn online on, then start the game.** The Start menu or desktop shortcut opens the settings window. Go to its **Online** tab.
+   - A test build offers its online server there: click the button at the top, **Use** *server name* **(TEST BUILD)**. One click turns
+     online on (with rollback). Nothing changes before you click, and settings you already have are kept. Setup's last page names it too.
+   - Otherwise: choose re-psn, enter the server your group uses, then **Save online settings**.
+
+   Then click **Start Game**. The first start installs the game data from your disc (a few minutes).
 4. **Warm up (optional):** play one offline Free Battle (Battle Modes > Free Battle > 1 Player, **2 vs 2**) with the characters you
    plan to use online. The game builds their graphics once, so the online fights stutter less. Then go straight to Online Battle;
    no need to restart the game.
@@ -51,7 +56,7 @@ Look for these, in this order:
 | **Choppy or crackling sound** in an online fight. | Fight sound runs a little behind (about 1/20 of a second) to stay smooth; short gaps fade instead of cutting. It is worst when the game itself stalls, mostly in the first fights of a new install: do the warm-up fight (step 4). If it stays choppy, say when (first fight only, or all) and send the support bundle. |
 | **The match ended when you pressed F9** (or a recording or push-to-talk key on F9). | Holding **F9** for 1.5 seconds ends a rollback match on purpose; a tap does nothing. Do not hold F9 during a fight: move push-to-talk (Discord and similar) and any other hold-down key off F9. A quick tap of a recording hotkey such as Alt+F9 is fine. |
 | **`Connecting to opponent...` stays on screen.** | Wait: after 45 seconds the match ends with `Opponent did not reach the fight: match ended`. Make a new room. If it happens every time, send both support bundles. |
-| **The room is not in the list.** | The host creates the room first; then the other player searches again. Check the version (main menu corner) and that the settings window's **Online** tab shows the same server on both PCs (the **Public server** button sets the default). |
+| **The room is not in the list.** | The host creates the room first; then the other player searches again. Check the version (main menu corner) and that the settings window's **Online** tab shows the same server on both PCs (in a test build, the **Use** *server name* **(TEST BUILD)** button at the top of the tab turns the build's own one on). |
 | **The band says `the online name is taken`.** | Every player on the server needs a different online name. Change yours in the settings window's **Online** tab (3 to 16 letters, digits, `-` or `_`, starting with a letter). |
 | **EU disc:** `Rollback is off: rollback needs the US disc (BLUS31519).` | Rollback needs the US disc. Online Battle still works, with the game's own netcode. |
 | **Windows asks "Allow access?"** the first time you open Online Battle (the box can hide behind the game: press Alt+Tab if the game seems stuck). | Click **Allow access**. If you clicked Cancel, online still works, but more often through the server, which adds delay. Cancel can leave a rule that blocks the game, and setup keeps rules it did not make. To clear it: **Windows Security > Firewall & network protection > Allow an app through firewall > Change settings**, find the game's entry (**jsp** or **jsp.exe**, in the game folder), tick **Private** and **Public**, and click **OK**. |
@@ -81,9 +86,10 @@ failure also writes a small report in `<install folder>\game\run\reports\`; the 
 
 ## Settings, if you want them
 
-Setup turns online on: a public re-psn test server (`107.175.17.162:36100`, not run by this project; it passes the match through itself
-when the two PCs cannot connect directly), a random online name such as `Player1234`, and rollback for Online Battle (US disc only).
-Online settings you already had are kept.
+Online is off until you turn it on in the settings window's **Online** tab. A test build offers its server there: one click on
+**Use** *server name* **(TEST BUILD)**. Otherwise: re-psn, a server, Save. Nothing changes before that. The server passes the match
+through itself when the two PCs cannot connect directly (when its relay is on). The tab
+suggests a random online name such as `Player1234`; rollback for Online Battle is on by default (US disc only). Online settings you already had are kept.
 
 The settings window (Start menu or desktop shortcut), **Online** tab: the line at the top says what the next start does; it should start
 with "Online Battle + rollback (2 vs 2)". You can change your online name there. Changes apply on the next start.
@@ -96,6 +102,5 @@ with "Online Battle + rollback (2 vs 2)". You can change your online name there.
 - Only the host picks characters.
 - A sudden gap in the connection itself (a tenth of a second or more with no data) can still cause a short hitch.
 - Gameplay mods turn the game's own online off for the session.
-- The default server is a public test server that this project does not run; it may be down or restarted, and your online name is
-  not reserved. Each game also opens a hidden connection named `<your online name>-rb`, which may show up in the server's logs.
+- A public test server may be down or restarted, and your online name is not reserved. Each game also opens a hidden connection named `<your online name>-rb`, which may show up in the server's logs.
 - Matches through the server (`connected through the server`) have more delay than direct ones.

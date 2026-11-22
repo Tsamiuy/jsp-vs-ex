@@ -6,10 +6,11 @@ re-psn is a small matchmaking server that one player, or anyone else, hosts.
 - **Peer to peer:** the match itself goes directly between the players' games. If a direct link fails, it goes through
   the server's relay, but only when the host turned the relay on.
 
-Online is experimental. **It is on after install:** the first run writes `repsn.ini` with re-psn on, a
-public re-psn test server `107.175.17.162:36100` (relay on; this project does not run it) and a random name such as `Player1234`, and turns rollback on for
-Online Battle (the game's Friendly Match room pairs the players, rollback runs the fight). Nothing else to set up: see
-[TESTING_ONLINE.md](TESTING_ONLINE.md). An install that already had online settings keeps them. To host your own server instead,
+Online is experimental. **It is off after install** until you choose a server: the settings window's **Online** tab, re-psn, then a
+server you type or find with **Find on LAN** (this project names no server), and Save. The tab's rollback box (on by default) turns rollback on
+for Online Battle (the game's Friendly Match room pairs the players, rollback runs the fight); see [TESTING_ONLINE.md](TESTING_ONLINE.md).
+A test build offers its own server instead: one click on **Use** *server name* **(TEST BUILD)** at the top of the **Online** tab turns it
+on, with rollback. Nothing changes before that click. An install that already had online settings keeps them. To host your own server instead,
 follow the steps below. It needs the installer's only tree (`--tree current`; the earlier legacy tree is retired, tag `legacy-v15`), which builds the port on ps3recomp v0.19.0; see [installer/README.md](../installer/README.md#online-battle-experimental)).
 
 ## 1. One player hosts a server

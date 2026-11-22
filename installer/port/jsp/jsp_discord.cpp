@@ -1,5 +1,5 @@
-// ENHANCEMENT (Discord Rich Presence and Join/Invite; on by default, JSP_DISCORD=0 turns it off; JSP_DISCORD_APP_ID=<id> uses another
-// Discord application than the default one, jdp::kDefaultAppId, which the contributor who added this feature registered).
+// ENHANCEMENT (Discord Rich Presence and Join/Invite; FIX (review): off unless JSP_DISCORD_APP_ID=<id> names the Discord application to
+// show it under, set by the player or a package (there is no built-in one); JSP_DISCORD=0 turns it off even then).
 //
 // What it does: a background thread connects to the LOCAL Discord app over its IPC pipe (\\.\pipe\discord-ipc-0..9, the documented RPC
 // transport of the Discord client; no network access of our own, no SDK DLL) and keeps the player's activity up to date every 2 s
@@ -320,9 +320,12 @@ extern "C" void jsp_discord_start(void)
 {
 #ifdef _WIN32
     if (setting("JSP_DISCORD") == "0") return;
-    std::string id = setting("JSP_DISCORD_APP_ID");
-    if (id.empty()) id = jdp::kDefaultAppId;
-    for (char c : id) if (c < '0' || c > '9') { std::fprintf(stderr, "[discord] JSP_DISCORD_APP_ID must be the application's numeric id: off\n"); return; }
+    const std::string id = setting("JSP_DISCORD_APP_ID");
+    switch (jdp::app_id_setting(id)) {   // FIX (review): no built-in application; off until one is configured
+    case jdp::AppId::Unset: std::fprintf(stderr, "[discord] Rich Presence off: no Discord application set (JSP_DISCORD_APP_ID)\n"); return;
+    case jdp::AppId::Invalid: std::fprintf(stderr, "[discord] JSP_DISCORD_APP_ID must be the application's numeric id: off\n"); return;
+    case jdp::AppId::Ok: break;
+    }
     const char* js = std::getenv("JSP_DISCORD_JOIN");   // the environment only: a settings-file value would join again on every start
     std::fprintf(stderr, "[discord] Rich Presence on (application %s)\n", id.c_str());
     std::thread(run, id, std::string(js ? js : "")).detach();
