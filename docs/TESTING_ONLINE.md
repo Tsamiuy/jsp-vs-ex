@@ -17,7 +17,7 @@ Online fights are **2 vs 2** for now: each player has one fighter, the CPU fills
    your PC. This takes a while (minutes, longer on an older PC); let it finish. Online is set up for you at the end. If Windows asks
    to allow the game through the firewall, click **Allow access**.
 3. **Start the game** from the Start menu or desktop shortcut. The first start installs the game data from your disc (a few minutes).
-4. **Warm up (recommended):** play one offline Free Battle (Battle Modes > Free Battle > 1 Player, **2 vs 2**) with the characters you
+4. **Warm up (optional):** play one offline Free Battle (Battle Modes > Free Battle > 1 Player, **2 vs 2**) with the characters you
    plan to use online. The game builds their graphics once, so the online fights stutter less. Then go straight to Online Battle;
    no need to restart the game.
 5. Both players: **Main Menu > Battle Modes > Online Battle > Friendly Match**. One player picks **Create a Room** (the host), the

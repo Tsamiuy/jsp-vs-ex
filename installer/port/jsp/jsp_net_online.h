@@ -255,11 +255,15 @@ static const KV kDefaults[] = {
     // A restore waits (at most JSP_SNAPSHOT_SITE_MS, 50 ms) until every helper thread is parked where it was at the target's save (jsp_snapshot_sync.h, SiteMoved). Soak
     // 2026-11-21 (replay-driven depth 2, ~3,200 restores): a CRI loader worker was caught inside its file read at a restore; 0 desyncs, restore 10.7 ms avg (no cost).
     {"JSP_SNAPSHOT_SITE", "1"},
-    // WORKAROUND TO REPLACE (crash, 2026-11-21): with the D3D12 backend's asynchronous fragment-program builds on (PSO_ASYNC, 4 workers), every depth-2 bench
-    // run on a cold pipeline cache ended in heap corruption (0xC0000374, detected in D3DCompile's free on vp_fp_async_worker) within 15-60 s; with PSO_ASYNC=0
-    // two runs of 14 windows (~200 s) did not. The writer is not found yet. Off in rollback until it is: a new program is built on the drawing thread (a hitch
-    // once per program; the pipeline cache on disk removes it the next time).
-    {"PSO_ASYNC", "0"},
+    // PSO_ASYNC is no longer set here (the backend's default, on, applies; PSO_ASYNC=0 still turns it off). History: with the asynchronous fragment-program
+    // builds on, every depth-2 bench run on a cold pipeline cache (two runs, 2026-11-21) ended in heap corruption (0xC0000374 in D3DCompile's free on
+    // vp_fp_async_worker), so rollback set PSO_ASYNC=0. The writer was found: d3dcompiler_47's blob AddRef/Release are not interlocked and the async workers
+    // Released the drawing thread's vertex-shader blob (toolkit patch 2072 gives each job its own copy). Re-runs no longer queue builds either (draws skipped,
+    // JSP_STEP_SKIP_DRAWS below). With PSO_ASYNC=0 a cold program was built on the drawing thread inside the tick's FIFO drain (100-400 ms each, patch 2057),
+    // and the PC still building held both PCs. Async builds touch no guest memory (the decompile stays on the drawing thread); a draw whose pipeline is not
+    // ready is skipped, host-side only, as in a re-run.
+    // Measured 2026-11-22 (two copies, joiner cache cold, link 29,72,10, 3 runs each way): host boundary waits 51 (5.4 s) -> 0, host seconds under 29.5 fps
+    // 32 -> 6-9, audio concealed gaps 66 -> 2-5, 0 differing in all runs.
     // Re-run cost (2026-11-21, two copies, --rollback --link 80,10,10, one 10,000-tick match each): the frames of a rollback re-run are never shown, so the
     // RSX command handler skips their draws, clears and state flushes (patch 7919; labels, reports, flips still run; the D3D12 backend only reads guest memory).
     // Re-run FIFO drain 14-22 -> 0.6-0.8 ms per tick, re-run tick 18.6 -> 10.4 ms (222 rollbacks), 0 differing of 9,863 compared ticks.

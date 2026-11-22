@@ -274,8 +274,9 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
   but the game side is not wired for it yet.
 - Barely tested on two PCs: one match on one home network, through a re-psn room (see [Tested so far](#tested-so-far)).
   Two copies on one PC have passed two Free Battle runs with rollbacks and no desync (see step 5 above).
-- A warm pipeline cache is recommended: on a first launch, building the graphics pipelines can take seconds per frame,
-  which stalls the session. Play an offline fight first on each PC.
+- On a first launch (or after an update that empties `pipelines.bin`) the graphics pipelines are built in the background, as offline:
+  a new effect may be missing for a few frames on that PC, but its builds no longer hold the drawing thread and so the other PC.
+  An offline fight first still makes the first match look complete.
 - Workaround to replace: the snapshot waits for the game's frame threads to pause before each save; if they have not
   paused within 15 s of waiting between two session updates, the match ends as hung. The session keeps its connection
   alive while it waits.
@@ -480,7 +481,7 @@ Each is a `play_settings.txt` line (or an environment variable). Test-only switc
 | `JSP_NET_REPORT_DIR` | folder of the match reports (default `reports`) | no |
 | `JSP_AUDIO_TICKLOCK`, `JSP_NET_GUEST_CLOCK`, `JSP_NET_CRI_LOCK`, `JSP_NET_THREAD_REGS` | the determinism fixes above; on in a match, `0` turns each off | A/B only |
 | `JSP_ROLLBACK_SKIP_FINAL`, `JSP_SNAPSHOT_COPY_THREADS` (3), `JSP_SNAPSHOT_PRECHECK_US` (20000), `JSP_SNAPSHOT_AUDIT_EXEMPT`, `JSP_SNAPSHOT_LWM_CACHE`, `JSP_SNAPSHOT_LAYOUT_GEN`, `JSP_SNAPSHOT_QUICK`, `JSP_SNAPSHOT_QUICK_WAIT_US`, `JSP_SNAPSHOT_FROZEN_WALK_EVERY`, `JSP_SNAPSHOT_AUDIT_ASYNC`, `JSP_SNAPSHOT_SITE`, `JSP_SNAPSHOT_SITE_MS` | snapshot speed-ups, set by default in rollback; `0` turns each off | A/B only |
-| `PSO_ASYNC` | rollback sets `0` (asynchronous shader builds crashed in bench runs; a workaround) | no |
+| `PSO_ASYNC` | pipelines built on worker threads, on as offline (rollback no longer sets `0`: the bench crash was the blob count race toolkit patch 2072 fixed); `0` builds them on the drawing thread | no |
 | `JSP_STEP_SKIP_DRAWS` | skip the draws of re-run frames (with `JSP_STEP_TURBO`; off by default) | no |
 | `JSP_NET_STICK_DEADZONE`, `JSP_NET_STICK_LEVELS` | send the sticks with a dead zone or fewer steps (off by default) | yes |
 | `JSP_ROLLBACK_LIMITED_SAVING`, `JSP_ROLLBACK_START=fight`, `JSP_NET_LOAD_NEUTRAL`, `JSP_PAD_PEEK`, `JSP_SNAPSHOT_PREWAIT`, `JSP_SNAPSHOT_QUICK_SLEEP` | alternatives that were tried; off by default | yes |
