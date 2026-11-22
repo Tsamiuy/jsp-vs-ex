@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <windows.h>
+#include "cellPad.h"
 #include "jsp_step_effects.h"
 #include "jsp_step_input.h"
 #include "jsp_stall_rule.h"
@@ -43,13 +44,14 @@ struct JspTickState { uint32_t done; uint32_t anc_done; uint8_t anc_set, anc_ski
 void jsp_fight_hash_get_state(JspTickState* s);   // jsp_fight_hash.cpp: done = completed scene passes
 // patch 7915
 extern int (*g_cellpad_canon_hook)(uint32_t port_no, uint16_t* button, int32_t* len, int setting_len, int host_connected);
-extern void (*g_cellpad_info_hook)(void* info);   // patch 7915: CellPadInfo2* (host struct, before the copy to the guest)
+extern void (*g_cellpad_info_hook)(CellPadInfo2* info);   // patch 7915: CellPadInfo2* (host struct, before the copy to the guest)
 }
 
 namespace {
 
 std::atomic<int> g_turbo{0};          // the replay clock is on
-std::atomic<int> g_lockstep{0};       // FIX (rollback determinism): the live ticks of a match run on the lockstep clock (jsp_stepper_lockstep)
+jsr::Activations g_matches;
+std::shared_ptr<jsr::Activation> g_clock_match;   // frame-clock thread only, pinned for the entire pass
 std::atomic<int> g_in_replay{0};      // a replay is running (with or without the clock)
 bool g_turbo_on_switch = false, g_canon = false, g_poison = false;
 uint32_t g_canon_from = 0;
@@ -103,13 +105,11 @@ uint32_t env_u32(const char* n, uint32_t d) { const char* e = std::getenv(n); re
 // padjoin "next player 2") that PC simulated slot 1's input while the other did not. While a session's table is enabled every PC reports EXACTLY the
 // session's slots (the table mask) as connected standard pads and every other port as disconnected, whatever is plugged in locally (no hot-plug change bits).
 // The struct is patch 7915's CellPadInfo2 (libs/input/cellPad.h, 7 ports).
-struct PadInfo2 { uint32_t max_connect, now_connect, system_info, port_status[7], port_setting[7], device_capability[7], device_type[7]; };
 std::atomic<uint32_t> g_info_mask{0};
-void info_hook(void* p)
+void info_hook(CellPadInfo2* in)
 {
     const uint32_t m = g_info_mask.load();
-    if (!m || !p) return;
-    PadInfo2* in = static_cast<PadInfo2*>(p);
+    if (!m || !in) return;
     const uint32_t setting = in->port_setting[0];   // port 0 is always reported (the game sets one setting on every port: SetPortSetting 0x2 x 7)
     uint32_t n = 0;
     for (uint32_t i = 0; i < 7; i++) {
@@ -183,7 +183,7 @@ extern "C" void jsp_stepper_replay(int on, uint32_t done)
             const int32_t c = jsp_net_vblank_counter();
             const int owed = (c >= 0 && c < kVblanksPerFrame) ? kVblanksPerFrame - c : 0;
             g_rr_counter_at_start.store(c); g_rr_owed_at_start.store(owed); g_rr_owed_given.store(0);
-            g_rr_owed.store(g_lockstep.load() ? owed : 0);   // in a match only (the bench and the offline tests keep the old clock)
+            g_rr_owed.store(g_matches.current() ? owed : 0);   // in a match only (the bench and the offline tests keep the old clock)
         }
         g_turbo_t0 = GetTickCount64();
         g_last_flip.store(0);                       // the liveness clock of a replay starts with the replay
@@ -233,7 +233,6 @@ bool g_ack_open = false;                    // frame clock thread only: a vblank
 uint32_t g_ack_before = 0;
 long long g_ack_wait_qpc = 0, g_ack_drain_qpc = 0;   // this vblank's waiting time outside / inside the drains (QPC units)
 uint32_t g_ack_logs = 0;
-std::atomic<int> g_ls_failed{0};            // the lockstep clock gave up on the guest (kAckFailMs): read by jsp_stepper_lockstep_failed
 bool vblank_ack(int rsx_ok, bool resumable = false)
 {
     LARGE_INTEGER qf; QueryPerformanceFrequency(&qf);
@@ -247,7 +246,8 @@ bool vblank_ack(int rsx_ok, bool resumable = false)
             if (g_ack_logs) std::fprintf(stderr, "[step] the guest took the vblank after %.1f s of waiting (+%.1f s in drains)\n", (double)g_ack_wait_qpc / qf.QuadPart, (double)g_ack_drain_qpc / qf.QuadPart);
             return true;
         }
-        const bool match = g_lockstep.load(std::memory_order_relaxed) != 0;
+        if (g_matches.current() != g_clock_match) return false; // resume the outstanding tick on the next pass
+        const bool match = bool(g_clock_match);
         if (!match && !g_turbo.load(std::memory_order_relaxed)) { g_ack_open = false; return false; }
         if (!match && g_ack_wait_qpc > (long long)kAckMs * qms) {
             if (g_c.ack_timeouts.fetch_add(1) == 0) std::fprintf(stderr, "[step] vblank not delivered within %llu ms: the replay clock is switched off for this replay\n", (unsigned long long)kAckMs);
@@ -258,7 +258,7 @@ bool vblank_ack(int rsx_ok, bool resumable = false)
             if (g_ack_logs++ == 0) g_c.ack_timeouts.fetch_add(1);   // counted once per vblank (the replay summary shows it); the clock stays on
             std::fprintf(stderr, "[step] vblank not taken after %.1f s of waiting (+%.1f s in drains), main=%d vblank_counter=%d: still waiting, the lockstep clock stays on\n",
                          (double)g_ack_wait_qpc / qf.QuadPart, (double)g_ack_drain_qpc / qf.QuadPart, (int)g_jsp_main_stage, (int)jsp_net_vblank_counter());
-            if (g_ack_wait_qpc >= (long long)kAckFailMs * qms && !g_ls_failed.exchange(1))
+            if (g_ack_wait_qpc >= (long long)kAckFailMs * qms && g_clock_match->report_failure())
                 std::fprintf(stderr, "[step] FAILED: the guest has not taken a vblank for %llu s: the match must end (jsp_stepper_lockstep_failed)\n", (unsigned long long)(kAckFailMs / 1000));
         }
         if (resumable && slice >= (long long)kAckSliceMs * qms) return false;   // g_ack_open stays set: the next pass resumes this vblank
@@ -277,7 +277,7 @@ bool vblank_ack(int rsx_ok, bool resumable = false)
 }
 }  // namespace
 // jsp_net_game.cpp (at the boundary): 1 = the lockstep clock waited kAckFailMs (drains excluded) for the guest to take a vblank; the match must end.
-extern "C" int jsp_stepper_lockstep_failed(void) { return g_ls_failed.load(); }
+extern "C" int jsp_stepper_lockstep_failed(void) { return g_matches.failed(); }
 
 // FIX (rollback determinism): the game counts vblanks (main.cpp LATE_FLIP) and times things by them; on the 60 Hz grid a tick that took longer (a rollback
 // before it, a slow PC) gets 3 or 4 vblanks instead of 2. Two copies started the fight's idle camera cut 3 ticks apart (camera watch: func_0014F608 ->
@@ -297,24 +297,25 @@ LARGE_INTEGER g_ls_qf{};
 long long g_ls_next = 0;            // QPC deadline of the next flip (0 = no schedule yet: the first flip goes at once)
 long long g_ls_last = 0;            // QPC of the last flip (the liveness timer)
 uint64_t g_ls_flips = 0, g_ls_idle = 0, g_ls_restarts = 0, g_ls_stretch_total_us = 0;
-std::atomic<uint32_t> g_ls_stretch_us{0};   // the main thread adds, the frame clock takes it at the next flip
 constexpr uint32_t kStretchMaxUs = 2000;    // at most 2 ms (6%) longer per tick
 }
 static ULONGLONG g_ls_last_ms = 0;                                 // frame clock thread only: GetTickCount64 of the last lockstep flip
-static jsr::State g_lf;                                            // frame clock thread only: the lost-flip rule (jsp_stall_rule.h)
 extern "C" void jsp_stepper_lockstep(int on)
 {
-    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; g_lf = jsr::State{}; }
-    else if (g_lockstep.load()) std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts (a flip over half a period late), time-sync stretch %.1f ms in all\n",
-                                             (unsigned long long)g_ls_flips, (unsigned long long)g_ls_idle, (unsigned long long)g_ls_restarts, g_ls_stretch_total_us / 1000.0);
-    g_lockstep.store(on ? 1 : 0);
+    g_matches.set(on != 0, GetTickCount64());
+}
+// A successful network start supplies its deliverable lifetime before activation publication.
+extern "C" void jsp_stepper_lockstep_start(jspnet::HostAbortHandle owner)
+{
+    g_matches.set(true, GetTickCount64(), std::move(owner));
 }
 // The boundary (main thread, after a session update): stretch the next lockstep period by `us` (capped at kStretchMaxUs per period). Returns 0 when the
 // lockstep clock is off (the caller sleeps instead, as before).
 extern "C" int jsp_stepper_lockstep_stretch_us(uint32_t us)
 {
-    if (!g_lockstep.load(std::memory_order_relaxed)) return 0;
-    if (us) g_ls_stretch_us.fetch_add(us);
+    const auto match = g_matches.current();
+    if (!match) return 0;
+    if (us) match->stretch_us.fetch_add(us);
     return 1;
 }
 static bool guest_in_step3_without_flip();                       // below (frame clock thread only)
@@ -330,14 +331,14 @@ static void lockstep_take_flip()
     const long long period = (f + 15) / 30;   // 33.333 ms
     cellGcmTickFlip();
     QueryPerformanceCounter(&now);
-    const uint32_t st = std::min(g_ls_stretch_us.exchange(0), kStretchMaxUs);
+    const uint32_t st = std::min(g_clock_match->stretch_us.exchange(0), kStretchMaxUs);
     g_ls_stretch_total_us += st;
     const long long step = period + (long long)st * f / 1000000;
     if (!g_ls_next || now.QuadPart - g_ls_next > period / 2) { if (g_ls_next) g_ls_restarts++; g_ls_next = now.QuadPart + step; }   // over half a period late: restart
     else g_ls_next += step;                                                                                                         // on (or near) the schedule
     g_ls_last = now.QuadPart; g_ls_last_ms = GetTickCount64();
     g_ls_second = 1; g_ls_flips++; g_ls_wait_logs = 0;
-    jsr::flip_taken(g_lf);
+    if (g_clock_match) jsr::flip_taken(g_clock_match->rule);
 }
 // FIX (lockstep clock never off mid-match): a vblank of the lockstep clock the guest has not taken yet comes before anything else (no second tick, no grid), and the
 // step it belongs to goes on from where it stopped. Also called from a replay pass (a replay can start while one is open, as when the wait blocked).
@@ -470,7 +471,7 @@ static bool guest_in_step3_without_flip()
 // were (the cause of the lost flip is not proven: that line is what proves it next time).
 static bool lost_flip_pass(ULONGLONG last_flip_ms)
 {
-    if (!g_lockstep.load(std::memory_order_relaxed)) return false;
+    if (!g_clock_match) return false;
     uint32_t fc[9] = {}; cellGcm_flip_census(fc);
     jsr::Sample s;
     s.now_ms = GetTickCount64(); s.last_flip_ms = last_flip_ms;
@@ -480,29 +481,29 @@ static bool lost_flip_pass(ULONGLONG last_flip_ms)
         ps3_hle_thread_census(kind, id, obj, lr, alive, unrel, &ov, &ub);
         for (int t = 1; t < 65 && !s.main_in_step1; t++) s.main_in_step1 = alive[t] && !unrel[t] && kind[t] != 0 && (lr[t] == 0x00650820u || lr[t] == 0x00650854u);
     }
-    const jsr::Act a = jsr::step(g_lf, s);
+    const jsr::Act a = jsr::step(g_clock_match->rule, s);
     if (a == jsr::Act::Fail) {
-        if (!g_ls_failed.exchange(1))
+        if (g_clock_match->report_failure())
             std::fprintf(stderr, "[step] FAILED: no flip for %llu s (flip status %u, queued %u reached %u completed %u): the match must end (jsp_stepper_lockstep_failed)\n",
                          (unsigned long long)(jsr::kFailMs / 1000), s.status, s.queued, s.reached, s.completed);
         return false;
     }
-    if (a != jsr::Act::WriteOff) return false;
+    if (a != jsr::Act::WriteOff || g_matches.current() != g_clock_match) return false;
     uint32_t w[9] = {};
     const int done = cellGcm_flip_write_off_lost(1, w);
     std::fprintf(stderr, "[step] lost flip %s: %llu ms without a flip, the guest in step 1 waiting for flip %u (reached %u): get=0x%08X put=0x%08X marker at 0x%08X "
                  "word there 0x%08X (%s), status %u, in a replay %d\n",
                  done ? "WRITTEN OFF (completed as if the walker had reached it)" : "NOT written off (the walker is not idle at put: still waiting)",
-                 (unsigned long long)(s.now_ms - last_flip_ms), w[4], w[5], w[0], w[1], w[2], w[3],
+                 (unsigned long long)(s.now_ms - jsr::last_progress_ms(g_clock_match->rule, s)), w[4], w[5], w[0], w[1], w[2], w[3],
                  (w[3] & 0xFFFFFF00u) == 0xFEAD0100u ? "the marker" : "overwritten",
                  w[7], g_in_replay.load());
-    if (done) jsr::flip_taken(g_lf);
+    if (done) jsr::flip_taken(g_clock_match->rule);
     return done != 0;
 }
 
 static bool owed_vblank_pass(int rsx_ok)
 {
-    if (g_rr_owed.load(std::memory_order_relaxed) <= 0 || !g_lockstep.load(std::memory_order_relaxed)) return false;
+    if (g_rr_owed.load(std::memory_order_relaxed) <= 0 || !g_clock_match) return false;
     if (!guest_in_step3_without_flip()) return false;
     g_rr_owed.fetch_sub(1); g_rr_owed_given.fetch_add(1);
     (void)vblank_ack(rsx_ok);                           // observed, like every vblank of the replay clock
@@ -514,8 +515,27 @@ static bool owed_vblank_pass(int rsx_ok)
 // The frame clock (main.cpp). Returns 1 when this pass was handled by the replay clock, 2 when by the lockstep clock (main.cpp goes on to present / drain / pump).
 extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
 {
+    const auto match = g_matches.current();
+    if (g_clock_match != match) {
+        if (g_clock_match)
+            std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts, time-sync stretch %.1f ms in all\n",
+                         (unsigned long long)g_ls_flips, (unsigned long long)g_ls_idle, (unsigned long long)g_ls_restarts, g_ls_stretch_total_us / 1000.0);
+        g_clock_match = match;
+        QueryPerformanceFrequency(&g_ls_qf);
+        g_ls_next = g_ls_last = 0;
+        g_ls_last_ms = 0;
+        g_last_flip.store(0); // discard replay progress measured by the previous activation
+        g_ls_second = 0;
+        g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0;
+        g_ls_wait_logs = 0;
+        // Drain an already ticked vblank without ticking twice or carrying its
+        // elapsed wait or its old pre-flip continuation into this activation.
+        g_ls_ack_site = 0;
+        g_ack_wait_qpc = g_ack_drain_qpc = 0;
+        g_ack_logs = 0;
+    }
     if (g_ack_open) return lockstep_resume(rsx_ok);          // FIX (never off mid-match): only the lockstep clock leaves one open; it comes first
-    if (!g_turbo.load(std::memory_order_relaxed)) return g_lockstep.load(std::memory_order_relaxed) ? lockstep_pass(rsx_ok) : 0;
+    if (!g_turbo.load(std::memory_order_relaxed)) return g_clock_match ? lockstep_pass(rsx_ok) : 0;
     if (rsx_ok) {                                            // executes what the guest queued, including its flip command ("reached")
         LARGE_INTEGER a, b, qf; QueryPerformanceCounter(&a);
         cellGcm_rsx_process_fifo();
@@ -529,7 +549,8 @@ extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
         (void)cellGcm_take_flip_pending();                   // taken, not presented: the intermediate frames of a replay are never shown
         if (rsx_ok) cellGcm_rsx_process_fifo();
         if (!vblank_ack(rsx_ok)) return 1;                         // N = 2 vblanks per flip , each observed by the guest
-        g_c.flips.fetch_add(1); g_last_flip.store(GetTickCount64()); jsr::flip_taken(g_lf);
+        g_c.flips.fetch_add(1); g_last_flip.store(GetTickCount64());
+        if (g_clock_match) jsr::flip_taken(g_clock_match->rule);
         g_rr_stall_logged = 0;
         g_rr_owed.store(0);                                  // FIX (re-run vblanks): a flip came first: its 2 vblanks are the ones tick 1 needed
         return 1;
@@ -549,7 +570,7 @@ extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
     const ULONGLONG now = GetTickCount64();
     ULONGLONG lf = g_last_flip.load();
     if (!lf) { g_last_flip.store(now); return 1; }
-    const bool in_match = g_lockstep.load(std::memory_order_relaxed) != 0;
+    const bool in_match = bool(g_clock_match);
     if (in_match && now - lf >= 100 && !g_rr_stall_logged) { g_rr_stall_logged = 1; log_rerun_stall("100 ms", now - lf); }
     // FIX (rollback determinism): in a match (lockstep clock on) a re-run's idle vblank comes after 500 ms, not 20: a slow re-run tick is not a guest waiting
     // for a vblank, and an extra vblank there is counted by the game (replays logged idle_vblanks 1-2 on 19 and 8 of ~460 replays on two copies).

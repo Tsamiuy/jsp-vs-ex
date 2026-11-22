@@ -14,6 +14,9 @@
 #include <mutex>
 
 using namespace jspnet;
+// Embedded NULs exercise byte-counted external and member records.
+static const jpsm::Digest content = [] { jpsm::Digest d{}; d.back() = 0xff; return d; }();
+
 static int g_fail = 0, g_n = 0;
 #define CHECK(c) do { g_n++; if (!(c)) { g_fail++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 
@@ -109,7 +112,11 @@ struct FakeRepsn {
             if (drop_on_search) { ::shutdown(c->fd, SHUT_RDWR); return; }
             if (search_error) { std::vector<uint8_t> e; p32(e, 6); reply(c, 0x8F, req, e); return; }
             std::vector<uint8_t> b; std::vector<Room*> list; for (auto& r : rooms) if (r.members.size() < r.max) list.push_back(&r);
-            p16(b, (uint16_t)list.size()); p16(b, (uint16_t)list.size());
+            p16(b, (uint16_t)list.size());
+            size_t start = std::min<size_t>(g16(p), list.size());
+            size_t end = std::min(list.size(), start + g16(p + 2));
+            list = std::vector<Room*>(list.begin() + start, list.begin() + end);
+            p16(b, (uint16_t)list.size());
             for (Room* r : list) { p64(b, r->id); Conn* o = nullptr; for (Conn* m : r->members) if (r->data[m].first == r->owner) o = m; fixed(b, o ? o->name : "", 16); b.push_back((uint8_t)r->members.size()); b.push_back(r->max); p32(b, r->flags); blob(b, r->external); }
             reply(c, 0x91, req, b);
         } else if (type == 0x12 && n >= 10) {   // JOIN_ROOM: room_id u64 member_data blob
@@ -174,12 +181,12 @@ struct FakeRepsn {
 // ---- two players ---------------------------------------------------------------------------------------------------------------------------------
 struct Player {
     UdpMux mux; std::unique_ptr<MessageHub> hub; std::unique_ptr<PsnrClientTransport> tr; std::unique_ptr<RePsnRendezvous> rz; Path last = Path::None; int result = 0;
-    void init(FakeRepsn& sv, const std::string& name, bool host, uint32_t build, bool allow_relay, int punch_ms = 4000, int give_up_ms = 20000, int lookup_every_ms = 300)
+    void init(FakeRepsn& sv, const std::string& name, bool host, uint32_t build, bool allow_relay, int punch_ms = 4000, int give_up_ms = 20000, int lookup_every_ms = 300, const std::string& code = {})
     {
         std::string err; CHECK(mux.open(0, &err));
         RepsnIdentity id; id.host = "127.0.0.1"; id.port = sv.port; id.name = name; id.comm_id = "NPWR08138_00";
         hub.reset(new MessageHub(mux)); tr.reset(new PsnrClientTransport(mux, id));
-        RePsnRendezvous::Config c; c.host = host; c.build = build; c.allow_relay = allow_relay; c.punch_ms = punch_ms; c.give_up_ms = give_up_ms; c.lookup_every_ms = lookup_every_ms;
+        RePsnRendezvous::Config c; c.host = host; c.build = build; c.content = content; c.code = code; c.allow_relay = allow_relay; c.punch_ms = punch_ms; c.give_up_ms = give_up_ms; c.lookup_every_ms = lookup_every_ms;
         rz.reset(new RePsnRendezvous(*tr, mux, *hub, c));
         rz->on_path = [this](Path p, uint32_t u) { last = p; tr->set_peer_user(u); tr->set_relay_mode(p == Path::Relay); };
         tr->start(allow_relay);
@@ -203,7 +210,7 @@ int main()
     { FakeRepsn sv; CHECK(sv.start()); Player h, c; h.init(sv, "HostPlayer", true, B, false); c.init(sv, "GuestPlayer", false, B, false);
       // the host first: wait until its room exists, then let the client search
       { const uint64_t t0 = now_ms(); while (now_ms() - t0 < 5000) { h.step(); { std::lock_guard<std::mutex> lk(sv.mu); if (!sv.rooms.empty()) break; } std::this_thread::sleep_for(std::chrono::milliseconds(3)); } }
-      CHECK(sv.rooms.size() == 1 && sv.rooms[0].id == 0x100000007ull && (sv.rooms[0].flags & kRoomFlagRollback) && sv.rooms[0].external == make_record(B) && sv.rooms[0].max == 2);
+      CHECK(sv.rooms.size() == 1 && sv.rooms[0].id == 0x100000007ull && (sv.rooms[0].flags & kRoomFlagRollback) && sv.rooms[0].external == make_record(B, content) && sv.rooms[0].max == 2);
       drive(h, c, 10000);
       if (h.result != 1 || c.result != 1) std::printf("direct: host %d '%s' client %d '%s' rooms %zu hellos %d probes %d\n", h.result, h.rz->error().c_str(), c.result, c.rz->error().c_str(), sv.rooms.size(), sv.hellos, sv.probes);
       CHECK(h.result == 1 && c.result == 1);
@@ -218,18 +225,30 @@ int main()
 
     // ---- golden request bodies: written out by hand from the field tables of the re-psn protocol document (docs/api.md, v0.8.0, "Rooms"; it has tables, no byte dumps),
     //      NOT produced by the transport's own helpers ----
-    //   record = "rb=1;ver=1234abcd" (17 bytes = 0x0011), room flag bit 30 = 0x40000000, room id 0x0000000100000007
+    //   record = JRB2, build and 32 content bytes (40 bytes = 0x0028), room flag bit 30 = 0x40000000, room id 0x0000000100000007
     { auto hex = [](const char* h) { std::vector<uint8_t> v; for (const char* q = h; q[0] && q[1]; q += 2) { auto d = [](char ch) { return ch <= '9' ? ch - '0' : ch - 'a' + 10; }; v.push_back((uint8_t)(d(q[0]) << 4 | d(q[1]))); } return v; };
-      const char* R = "00117262" "3d313b76" "65723d31" "32333461" "626364";   // blob: u16 length 0x0011 then the 17 record bytes
-      FakeRepsn sv; CHECK(sv.start()); Player h, c; h.init(sv, "HostPlayer", true, B, false); c.init(sv, "GuestPlayer", false, B, false);
-      { const uint64_t t0 = now_ms(); while (now_ms() - t0 < 5000) { h.step(); { std::lock_guard<std::mutex> lk(sv.mu); if (!sv.rooms.empty()) break; } std::this_thread::sleep_for(std::chrono::milliseconds(3)); } }
+      for (bool coded : { false, true }) {
+      const std::string tag = "ce973beee4b76122b831913719bb34a0953dc4f256133feac337e369141ad15a";
+      std::string R = std::string(coded ? "0068" : "0028") + "4a5242321234abcd" + std::string(62, '0') + "ff";
+      if (coded) for (char ch : tag) { char b[3]; std::snprintf(b, sizeof b, "%02x", (unsigned char)ch); R += b; }
+      FakeRepsn sv;
+      const size_t decoys = coded ? 64 : 0;
+      for (size_t i = 0; i < decoys; ++i) {
+          FakeRepsn::Room r{}; r.id = i + 1; r.max = 2; r.flags = kRoomFlagRollback;
+          auto other = content; other.back() ^= 1;
+          r.external = make_record(B, other, tag); sv.rooms.push_back(r);
+      }
+      CHECK(sv.start()); Player h, c;
+      h.init(sv, "HostPlayer", true, B, false, 4000, 20000, 300, coded ? "T60CDATX" : "");
+      c.init(sv, "GuestPlayer", false, B, false, 4000, 20000, 300, coded ? "T60CDATX" : "");
+      { const uint64_t t0 = now_ms(); while (now_ms() - t0 < 5000) { h.step(); { std::lock_guard<std::mutex> lk(sv.mu); if (sv.rooms.size() > decoys) break; } std::this_thread::sleep_for(std::chrono::milliseconds(3)); } }
       drive(h, c, 10000);
       c.tr->leave_room(); { const uint64_t t0 = now_ms(); while (now_ms() - t0 < 1000) { c.step(); { std::lock_guard<std::mutex> lk(sv.mu); if (!sv.last_leave.empty()) break; } std::this_thread::sleep_for(std::chrono::milliseconds(3)); } }
       std::lock_guard<std::mutex> lk(sv.mu);
       CHECK(sv.last_create == hex((std::string("02" "40000000") + R + "0000" + R).c_str()));      // max u8 | flags u32 | external blob | internal blob (empty) | member_data blob
-      CHECK(sv.last_search == hex("00000040"));                                                  // start u16 = 0 | max u16 = 64
+      CHECK(sv.last_search == hex(coded ? "00400040" : "00000040"));                                                  // start u16 = 0 | max u16 = 64
       CHECK(sv.last_join == hex((std::string("0000000100000007") + R).c_str()));                 // room_id u64 | member_data blob
-      CHECK(sv.last_leave == hex("0000000100000007")); }                                         // room_id u64
+      CHECK(sv.last_leave == hex("0000000100000007")); } }                                         // room_id u64
     // ---- a refused SEARCH ends the lookup at once (not a re-send until the give-up); a name over 16 characters is refused before any connection ----
     { FakeRepsn sv; sv.search_error = true; CHECK(sv.start()); Player c; c.init(sv, "GuestPlayer", false, B, false);
       const uint64_t t0 = now_ms(); while (now_ms() - t0 < 6000 && c.result == 0) { c.step(); std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
@@ -281,8 +300,8 @@ int main()
       if (c.result != -1) std::printf("mismatch: client %d '%s'\n", c.result, c.rz->error().c_str());
       if (took < 3000 || took >= 5000) std::printf("mismatch took %llu ms\n", (unsigned long long)took);
       CHECK(c.result == -1 && took >= 3000 && took < 5000);
-      CHECK(c.rz->error() == "re-psn: no host with this version found within 3 seconds (seen: a rollback room with build 1234abce): start both games at about the same time "
-                             "(the host first is best; each waits 3 seconds after its own start-up); both need the same version (build 1234abcd) and the same gameplay mods (or none)");
+      CHECK(c.rz->error() == "re-psn (rollback): no host with this version found within 3 seconds (seen: a rollback room with build 1234abce) (is the other player set to Host?): start both games at about the same time "
+                             "(the host first is best; each waits 3 seconds after its own start-up); both need the same version (build 1234abcd) and the same enabled mods in the same order");
       CHECK(n >= 3 && n <= 3000 / 300 + 1 && (uint64_t)n == c.rz->lookups); }
     // ---- the joiner starts first: it reads the room list over the real wire for 1.5 s with no room, then the host starts and they meet ----
     { FakeRepsn sv; CHECK(sv.start()); Player h, c; c.init(sv, "GuestPlayer", false, B, false);

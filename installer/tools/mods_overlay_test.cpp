@@ -9,14 +9,60 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include "jsp_mods_glue.h"
+#include "jsp_session_handshake.h"
 
 using jmods::Bytes;
 
 static int g_pass = 0, g_fail = 0;
 #define CHECK(c) do { if (c) g_pass++; else { g_fail++; std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); } } while (0)
+
+// Exercise production loader identities through both handshake endpoints. Both peers use the same build word.
+static void check_admission(jpsm::Digest host_content, jpsm::Digest client_content, jpsm::Reason expected)
+{
+    using namespace jpsm;
+    struct Endpoint : Transport {
+        Bytes bytes;
+        void send(uint8_t, const uint8_t* data, size_t size) override { bytes.assign(data, data + size); }
+    } outgoing_host, outgoing_client;
+    struct ReaderStub : Reader {
+        bool startup_value(Id id, uint32_t* v) override { *v = rule(id).def; return true; }
+        bool read_back(Id id, uint32_t* v) override { *v = rule(id).def; return true; }
+    } reader;
+    EffectiveValues he(&reader), ce(&reader);
+    Caps hc, cc;
+    hc.content = host_content;
+    cc.content = client_content;
+    Host host(outgoing_host, he, hc, 0);
+    Client client(outgoing_client, ce, cc, 1);
+    if (expected == Reason::ContentUnavailable) {
+        CHECK(host_content == Digest{} || client_content == Digest{});
+        if (host_content == Digest{}) CHECK(host.begin(77, 3, 17, 0) == Reason::ContentUnavailable);
+        if (client_content == Digest{}) CHECK(client.join(77, 0, 0) == Reason::ContentUnavailable);
+        CHECK(host.start(0) == Reason::NotReady && !ce.active());
+        return;
+    }
+    CHECK(host_content != Digest{} && client_content != Digest{});
+    CHECK(host.begin(77, 3, 17, 0) == Reason::None && client.join(77, 0, 0) == Reason::None);
+    host.on_message(1, outgoing_client.bytes.data(), outgoing_client.bytes.size(), 0);
+    CHECK((host_content == client_content) == (expected == Reason::None));
+    if (expected == Reason::ContentMismatch) {
+        CHECK(host.state() == State::Failed && host.reason() == Reason::ContentMismatch);
+        client.on_message(0, outgoing_host.bytes.data(), outgoing_host.bytes.size(), 0);
+        CHECK(client.reason() == Reason::ContentMismatch && !ce.active() && host.start(0) == Reason::NotReady);
+        return;
+    }
+    CHECK(host.propose(defaults(), 0) == Reason::None);
+    client.on_message(0, outgoing_host.bytes.data(), outgoing_host.bytes.size(), 0);
+    host.on_message(1, outgoing_client.bytes.data(), outgoing_client.bytes.size(), 0);
+    CHECK(host.state() == State::Ready && client.applied());
+    CHECK(host.start(5) == Reason::None);
+    client.on_message(0, outgoing_host.bytes.data(), outgoing_host.bytes.size(), 0);
+    CHECK(host.state() == State::Started && client.state() == State::Started);
+}
 
 static uint64_t rnd_state = 1;
 static uint8_t rnd8() { rnd_state = rnd_state * 6364136223846793005ull + 1442695040888963407ull; return uint8_t(rnd_state >> 56); }
@@ -27,6 +73,19 @@ struct MemIo : jmods::Io {
     std::map<std::string, Bytes> mods, archives;
     std::map<std::string, const jmods::Plan*> virt;   // archives read through a plan (to parse the virtual file back)
     MemIo* under = nullptr;                            // the Io the plans read their sources from
+    bool list_dirs = false;                            // mod_dirs works (the glue lists the mods folder)
+    std::string dirs_error;
+    std::vector<std::string> extra_dirs;               // folders with no file in `mods`
+    bool mod_dirs(std::vector<std::string>& out) override
+    {
+        if (!list_dirs) return false;
+        std::set<std::string> d(extra_dirs.begin(), extra_dirs.end());
+        for (const auto& kv : mods) { const size_t k = kv.first.find('/'); if (k != std::string::npos) d.insert(kv.first.substr(0, k)); }
+        out.assign(d.begin(), d.end());
+        if (!dirs_error.empty()) return false;   // a partial listing must never load
+        return true;
+    }
+    std::string mod_dirs_error() override { return dirs_error; }
     bool mod_size(const std::string& rel, uint64_t& s) override
     {
         auto it = mods.find(rel);
@@ -296,6 +355,12 @@ static void test_helpers()
     bool dup = false, bad = false;
     for (const auto& s : log) { dup |= s.find("duplicate alpha") != std::string::npos; bad |= s.find("'Bad Id' is not a mod id") != std::string::npos; }
     CHECK(dup && bad);
+    {   // "-id" turns a mod off; a leading '-' is no longer part of an id
+        std::vector<std::string> l2;
+        const auto o = jmods::parse_mods_list("a\n-b\n - c\n-Bad\n-a\n", l2);
+        CHECK(o.size() == 4 && o[0].id == "a" && !o[0].off && o[1].id == "b" && o[1].off && o[2].id == "c" && o[2].off && !o[3].valid);
+        CHECK(!jmods::valid_id("-b") && jmods::valid_id("b-b"));
+    }
     CHECK(jmods::parse_mods_list("", log).empty() && jmods::parse_mods_list("# only\n\n", log).empty());
 
     CHECK(jmods::is_cosmetic_path("game/logo/logo_US_v.pak") && jmods::is_cosmetic_path("sound/bgm/x.acb") && jmods::is_cosmetic_path("movie/a.usm"));
@@ -542,6 +607,8 @@ static void test_refusals(MemIo& io)
     // A refused mod whose fully parsed manifest is cosmetic does not: only badsha (game/logo) refused, next to good.
     const jmods::ModSet c = jmods::load_mod_set(io, "badsha\ngood\n", opts());
     CHECK(!mod(c, "badsha")->loaded && !mod(c, "badsha")->gameplay && c.digest_kind == jmods::DigestKind::None);
+    check_admission(session_content(c, opts().eboot_id), session_content(c, opts().eboot_id), jpsm::Reason::ContentUnavailable);
+    CHECK(session_content(c, opts().eboot_id) == jpsm::Digest{});
     // An interface refusal stops parsing early, so the class is unknown: gameplay, online refused.
     const jmods::ModSet u = jmods::load_mod_set(io, "unkif\ngood\n", opts());
     CHECK(mod(u, "unkif")->gameplay && u.digest_kind == jmods::DigestKind::Refused);
@@ -600,6 +667,21 @@ static void test_conflicts_and_digest(MemIo& io, const SynthCpk& game)
     const jmods::ModSet t3 = jmods::load_mod_set(io, "third\n", opts());
     CHECK(t1.digest_kind == jmods::DigestKind::Value && t2.digest_kind == jmods::DigestKind::Value && t3.digest_kind == jmods::DigestKind::Value);
     CHECK(t1.digest != t2.digest && t2.digest != t3.digest);
+    jmods::FrozenOverrides captured;
+    CHECK(freeze_overrides(io, t3, captured, 1) != nullptr && captured.empty());
+    CHECK(freeze_overrides(io, t3, captured) == nullptr && !captured.empty());
+    const auto original = captured;
+    io.mods["third/files/r.pak"][0] ^= 1;
+    CHECK(freeze_overrides(io, t3, captured) != nullptr && captured == original);
+    io.mods["third/files/r.pak"][0] ^= 1;
+    const auto identity = [](const jmods::ModSet& set) { return session_content(set, opts().eboot_id); };
+    check_admission(identity(s), identity(s2), jpsm::Reason::None);
+    check_admission(identity(s), identity(rev), jpsm::Reason::ContentMismatch);
+    check_admission(identity(t1), identity(t2), jpsm::Reason::ContentMismatch);
+    check_admission(identity(t1), session_content(t1, "different executable"), jpsm::Reason::ContentMismatch);
+    check_admission(identity({}), identity({}), jpsm::Reason::None);
+    check_admission(identity({}), identity(t1), jpsm::Reason::ContentMismatch);
+    check_admission(identity(t1), session_content(t1, "unknown"), jpsm::Reason::ContentUnavailable);
     jmods::Options eu = opts();
     eu.eboot_id = "BLES02136 1.00";
     CHECK(jmods::load_mod_set(io, "third\n", eu).digest != t3.digest);   // the EBOOT id is an input
@@ -613,6 +695,7 @@ static void test_conflicts_and_digest(MemIo& io, const SynthCpk& game)
     io.mods["cos/files/l.pak"] = lg;
     add_mod(io, "cos", manifest("cos", file_ovr("game/logo/logo_a.pak", "files/l.pak", lg)));
     CHECK(jmods::load_mod_set(io, "cos\nthird\n", opts()).digest == t3.digest);
+    check_admission(identity(t3), identity(jmods::load_mod_set(io, "cos\nthird\n", opts())), jpsm::Reason::ContentMismatch);
 
     // Groups: a later mod that takes one entry of a group drops the whole group back to stock.
     const Bytes g1 = noise(50, 40), g2 = noise(60, 41), g3 = noise(70, 42);
@@ -638,13 +721,79 @@ static void test_conflicts_and_digest(MemIo& io, const SynthCpk& game)
     } else CHECK(false);
 }
 
+// Drop-in mods: every folder with a mod.json loads, alphabetically, after the mods.txt ones; "-id" turns one off.
+static void test_discovery(MemIo& io)
+{
+    const Bytes ba = noise(100, 61), bb = noise(100, 62), bc = noise(100, 63);
+    for (auto* m : { &io.mods }) { m->clear(); }
+    io.mods["zeta/files/x"] = ba;
+    add_mod(io, "zeta", manifest("zeta", file_ovr("game/logo/logo_a.pak", "files/x", ba)));
+    io.mods["alpha/files/x"] = bb;
+    add_mod(io, "alpha", manifest("alpha", file_ovr("game/logo/logo_b.pak", "files/x", bb)));
+    io.mods["mid/files/x"] = bc;
+    add_mod(io, "mid", manifest("mid", file_ovr("game/zz/last.pak", "files/x", bc)));
+    auto order = [](const jmods::ModSet& s) { std::string o; for (const auto& m : s.mods) o += (o.empty() ? "" : ",") + m.id; return o; };
+
+    // Without folder listing (or without the glue's help) nothing is found: the old behaviour.
+    io.list_dirs = false;
+    CHECK(order(jmods::load_mod_set(io, "", opts())).empty());
+    io.list_dirs = true;
+    // No mods.txt: alphabetical by folder name.
+    const jmods::ModSet d = jmods::load_mod_set(io, "", opts());
+    CHECK(order(d) == "alpha,mid,zeta" && mod(d, "alpha")->loaded && mod(d, "mid")->loaded && mod(d, "zeta")->loaded);
+    CHECK(has_log(d, "[mods] found in the mods folder (alphabetical, after the list): alpha, mid, zeta"));
+    // mods.txt first, in its order; the rest alphabetical after it.
+    CHECK(order(jmods::load_mod_set(io, "zeta\n", opts())) == "zeta,alpha,mid");
+    CHECK(order(jmods::load_mod_set(io, "mid\nzeta\n# c\n", opts())) == "mid,zeta,alpha");
+    // "-id" turns one off, listed or not; a listed folder is not loaded twice.
+    const jmods::ModSet off = jmods::load_mod_set(io, "-mid\nzeta\n", opts());
+    CHECK(order(off) == "zeta,alpha" && !mod(off, "mid") && has_log(off, "turned off by -id: mid"));
+    CHECK(order(jmods::load_mod_set(io, "-alpha\n-mid\n-zeta\n", opts())).empty());
+    // Removing the folder turns the mod off; a listed id with no folder is still refused (the old rule).
+    const jmods::ModSet gone = jmods::load_mod_set(io, "ghost\n", opts());
+    CHECK(order(gone) == "ghost,alpha,mid,zeta" && !mod(gone, "ghost")->loaded && has_log(gone, "ghost: refused: no mod.json"));
+    // Folders that are not mods are logged and skipped; the others load.
+    io.extra_dirs = { "_unpacked", "Notes", "empty-dir" };
+    io.mods["BigName/mod.json"] = Bytes{ '{', '}' };
+    io.mods["-lead/mod.json"] = Bytes{ '{', '}' };
+    const jmods::ModSet skip = jmods::load_mod_set(io, "", opts());
+    CHECK(order(skip) == "alpha,mid,zeta" && has_log(skip, "folder '_unpacked': not a mod id") && has_log(skip, "folder 'BigName': not a mod id") &&
+          has_log(skip, "folder '-lead': not a mod id") && has_log(skip, "folder 'empty-dir': no mod.json: skipped"));
+    io.mods.erase("BigName/mod.json");
+    io.mods.erase("-lead/mod.json");
+    io.extra_dirs.clear();
+    // A found folder with a broken mod.json is refused, the others still load; it is gameplay (not provably cosmetic), so the set refuses online.
+    add_mod(io, "badjson", "{ not json");
+    const jmods::ModSet bad = jmods::load_mod_set(io, "", opts());
+    CHECK(order(bad) == "alpha,badjson,mid,zeta" && !mod(bad, "badjson")->loaded && mod(bad, "alpha")->loaded && mod(bad, "zeta")->loaded);
+    CHECK(has_log(bad, "[mods] badjson: refused:") && bad.digest_kind == jmods::DigestKind::Refused);
+    // ... unless it is turned off.
+    CHECK(order(jmods::load_mod_set(io, "-badjson\n", opts())) == "alpha,mid,zeta");
+    io.mods.erase("badjson/mod.json");
+
+    // Digest: unchanged for the same set however it came about (found, listed in the same order, or listed in full).
+    const jmods::ModSet l = jmods::load_mod_set(io, "alpha\nmid\nzeta\n", opts());
+    CHECK(d.digest_kind == jmods::DigestKind::Value && l.digest == d.digest && l.digest_kind == d.digest_kind);
+    CHECK(jmods::load_mod_set(io, "-mid\n", opts()).digest != d.digest);          // a different set differs
+    CHECK(jmods::load_mod_set(io, "zeta\nalpha\n", opts()).digest == d.digest);   // only "mid" is gameplay (game/zz): the cosmetic order is not hashed
+    io.dirs_error = "test enumeration failure";
+    const jmods::ModSet failed = jmods::load_mod_set(io, "zeta\n", opts());
+    CHECK(failed.mods.empty() && failed.plans.empty() && failed.digest_kind == jmods::DigestKind::Refused);
+    CHECK(has_log(failed, "mods folder listing failed: test enumeration failure; stock game, online refused"));
+    io.dirs_error.clear();
+    io.list_dirs = false;
+    io.mods.clear();
+}
+
 static void test_glue(MemIo& io, const SynthCpk& chara)
 {
     using namespace jmods;
     // ---- the start decision
     CHECK(!choose_env("0", "D", "L").on && choose_env("0", "D", "L").why.find("JSP_MODS=0") != std::string::npos);
-    CHECK(!choose_env(nullptr, "D", nullptr).on && choose_env(nullptr, "D", nullptr).why.find("JSP_MODS_LIST") != std::string::npos);
-    CHECK(!choose_env(nullptr, "D", "").on);
+    CHECK(!choose_env(nullptr, nullptr, nullptr).on && choose_env(nullptr, nullptr, nullptr).why.find("JSP_MODS_DIR") != std::string::npos);
+    CHECK(!choose_env(nullptr, "", "").on);
+    { const EnvChoice c = choose_env(nullptr, "D", nullptr); CHECK(c.on && c.dir == "D" && c.list.empty()); }   // drop-in: the folder alone turns mods on
+    { const EnvChoice c = choose_env(nullptr, "D", ""); CHECK(c.on && c.list.empty()); }
     { const EnvChoice c = choose_env(nullptr, "D", "L"); CHECK(c.on && c.dir == "D" && c.list == "L"); }
     { const EnvChoice c = choose_env("1", nullptr, "L"); CHECK(c.on && c.dir.empty()); }   // no folder: every listed mod is refused (not stock)
     CHECK(choose_env("00", "D", "L").on && choose_env("", "D", "L").on);   // only the exact "0" is the kill switch
@@ -810,9 +959,10 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     CHECK(symlink((root + "/elsewhere").c_str(), (mods + "/dirlink").c_str()) == 0);
 
     const jmods::ModSet want = jmods::load_mod_set(io, "swap\nglogo\n", opts());   // the plans the glue must serve
-    put_text(root + "/mods.txt", "swap\nglogo\n");
-    put_text(root + "/links.txt", "linked\ndirlink\n");
-    put_text(root + "/ghost.txt", "ghost\n");
+    // the folder also holds the two link mods: a found folder loads (drop-in), so the lists that test the other rules turn them off with "-id"
+    put_text(root + "/mods.txt", "swap\nglogo\n-linked\n-dirlink\n");
+    put_text(root + "/links.txt", "linked\ndirlink\n-swap\n-glogo\n");
+    put_text(root + "/ghost.txt", "ghost\n-linked\n-dirlink\n-swap\n-glogo\n");
 
     // 1. off: the kill switch, and no list. No provider either way.
     setenv("JSP_MODS_DIR", mods.c_str(), 1);
@@ -822,10 +972,59 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     CHECK(has(log, "[mods] off (JSP_MODS=0): stock game") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 0);
     unsetenv("JSP_MODS");
     unsetenv("JSP_MODS_LIST");
+    unsetenv("JSP_MODS_DIR");
     log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
-    CHECK(has(log, "[mods] no mods list") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 0);
+    CHECK(has(log, "[mods] no mods folder or list") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 0);
     uint32_t nb = 0;
     CHECK(jsp_mods_net_build(0xB001, &nb) == 1 && nb == 0xB001);   // nothing loaded: the stock word
+
+    // 1b. drop-in: the folder alone (no mods.txt variable), and a list variable naming a file that is not there: every folder loads, mods.txt
+    //     is optional. Found in alphabetical order (glogo, linked, swap; the dirlink folder is skipped, it is a link); linked is refused, so the set refuses online.
+    setenv("JSP_MODS_DIR", mods.c_str(), 1);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] list (no mods.txt): 0 enabled") && has(log, "[mods] found in the mods folder (alphabetical, after the list): glogo, linked, swap"));
+    CHECK(has(log, "[mods] glogo 1.0.0: cosmetic") && has(log, "[mods] swap 1.0.0: gameplay") && has(log, "[mods] linked: refused:") &&
+          has(log, "[mods] folder 'dirlink': no mod.json (it is reached through a link") && g_online_refusals == 1);   // a folder that is a link is skipped, not followed
+    setenv("JSP_MODS_LIST", (root + "/not-there.txt").c_str(), 1);
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "not-there.txt: not there (mods.txt is optional): every mod folder loads") && has(log, "found in the mods folder") && g_online_refusals == 2);
+    // An open failure is not optional absence. ENOTDIR is reproducible even as root; EACCES covers a real unreadable off list.
+    put_text(root + "/not-a-directory", "-swap\n");
+    setenv("JSP_MODS_LIST", (root + "/not-a-directory/mods.txt").c_str(), 1);
+    g_ps3_fs_vfile_ops = nullptr;
+    log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "cannot read it") && !has(log, "every mod folder loads") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 2);
+    if (geteuid() != 0) {
+        const std::string denied = root + "/unreadable.txt";
+        put_text(denied, "-swap\n-linked\n-dirlink\n");
+        CHECK(chmod(denied.c_str(), 0000) == 0);
+        setenv("JSP_MODS_LIST", denied.c_str(), 1);
+        log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+        CHECK(has(log, "cannot read it") && !has(log, "every mod folder loads") && g_ps3_fs_vfile_ops == nullptr && g_online_refusals == 2);
+        CHECK(chmod(denied.c_str(), 0600) == 0);
+        // A discovered manifest that exists but cannot be read must also refuse online instead of silently disappearing.
+        const std::string manifest_path = mods + "/deniedmanifest/mod.json";
+        put_text(manifest_path, "{}");
+        CHECK(chmod(manifest_path.c_str(), 0000) == 0);
+        put_text(root + "/discovery.txt", "-linked\n-dirlink\n");
+        setenv("JSP_MODS_LIST", (root + "/discovery.txt").c_str(), 1);
+        log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+        CHECK(has(log, "deniedmanifest: refused: no mod.json (cannot open it:") && !has(log, "folder 'deniedmanifest': no mod.json"));
+        CHECK(g_online_refusals == 3);
+        CHECK(chmod(manifest_path.c_str(), 0600) == 0);
+        CHECK(unlink(manifest_path.c_str()) == 0 && rmdir((mods + "/deniedmanifest").c_str()) == 0);
+        g_online_refusals = 2;
+    }
+    unsetenv("JSP_MODS_LIST");
+    {   // a list with only "-id" lines: the other mods still load; with every mod off: stock (no provider)
+        put_text(root + "/offs.txt", "-linked\n-dirlink\n-swap\n");
+        setenv("JSP_MODS_LIST", (root + "/offs.txt").c_str(), 1);
+        log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+        CHECK(has(log, "turned off by -id: linked, dirlink, swap") && has(log, "found in the mods folder (alphabetical, after the list): glogo") &&
+              has(log, "[mods] set: cosmetic only, no gameplay digest") && g_ps3_fs_vfile_ops == &k_ops && g_online_refusals == 2);
+    }
+    g_online_refusals = 0;   // the later sections count from 0 as before
+    g_ps3_fs_vfile_ops = nullptr;
 
     // 2. links are not followed: both mods refused. linked's manifest was read (game/logo only: cosmetic), dirlink's could not be, so its
     //    class is unknown: gameplay, and the set refuses online.
@@ -855,6 +1054,9 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     CHECK(has(log, "[mods] override partition_op_character_ps3.cpk character/model/character_model_000_m.pak <- alias character/model/character_model_001_m.pak"));
     CHECK(has(log, "[mods] serving 2 archive(s): partition_op_character_ps3.cpk, partition_op_game_ps3.cpk (eboot sha256:"));
     CHECK(g_ps3_fs_vfile_ops == &k_ops && g_online_refusals == 3);
+    jpsm::Digest served{};
+    CHECK(jsp_mods_session_content(served.data()) && served != jpsm::Digest{});
+    check_admission(served, served, jpsm::Reason::None);
     log = capture([&] { CHECK(jsp_mods_net_build(0xB001, &nb) == 1 && nb != 0xB001); });
     CHECK(has(log, "[mods] set: gameplay digest ") && has(log, "net build 0x") && has(log, "(stock 0x0000b001)"));
     {   // the same word as the pure fold over the same set (the eboot id differs, so only the shape is compared: a value, not the stock word)
@@ -868,6 +1070,7 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     log = capture([&] { CHECK(ops->open("/dev_x/other.cpk", (root + "/other/" + CHARA).c_str()) == nullptr); });
     CHECK(has(log, "NOT served") && has(log, "its header or TOC differs"));
     // a gameplay archive's copy the start-up check did not see, that differs: loud, the flag is set, rollback is refused from now on
+    CHECK(!jsp_mods_session_content(nullptr));
     CHECK(has(log, "[mods] WARNING: partition_op_character_ps3.cpk") && has(log, "online content mismatch") && jsp_mods_copy_mismatch() == 1);
     CHECK(jmods::rollback_gate(jsp_mods_copy_mismatch() != 0) == jmods::kModsNotAsListed);   // the rollback pump stops before the rendezvous / Hello
     log = capture([&] { CHECK(ops->open("/dev_x/other.cpk", (root + "/other/" + CHARA).c_str()) == nullptr); });
@@ -913,6 +1116,7 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     CHECK(has(log, "[mods] check partition_op_game_ps3.cpk: the copy " + patch + GAME + " is not the one the mods were planned on (its header or TOC differs): it is read stock\n"));
     CHECK(has(log, "[mods] check partition_op_game_ps3.cpk: 1 of 2 copies") && !has(log, "set: refused") && jsp_mods_copy_mismatch() == 0);
     CHECK(g_online_refusals == 4);   // swap is gameplay: refused as before, not because of the copy
+    CHECK(!jsp_mods_session_content(nullptr));   // rollback requires even cosmetic archive copies to match
     log = capture([&] { CHECK(jsp_mods_net_build(0xB001, &nb) == 1 && nb != 0xB001); });
     {   // the bad copy is not claimed, without a second check
         log = capture([&] { CHECK(g_ps3_fs_vfile_ops->open("/dev_hdd0/x", (patch + GAME).c_str()) == nullptr); });
@@ -972,6 +1176,56 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
         if (vf) g_ps3_fs_vfile_ops->close(vf);
         CHECK(jsp_mods_copy_mismatch() == 1);   // the refusal already made stays
     }
+    // Two independent synthetic installations, loaded separately through the production provider.
+    setenv("PS3_HDD0_ROOT", (root + "/empty-hdd").c_str(), 1);
+    auto install = [&](const std::string& name, const Bytes& archive) {
+        const std::string base = root + "/" + name;
+        const std::string data = base + "/PS3_GAME/USRDIR/data/PS3/";
+        put_file(data + GAME, game.file);
+        put_file(data + CHARA, archive);
+        for (const auto& kv : io.mods)
+            if (kv.first.rfind("swap/", 0) == 0 || kv.first.rfind("glogo/", 0) == 0) put_file(base + "/mods/" + kv.first, kv.second);
+        put_text(base + "/mods.txt", "swap\nglogo\n");
+        setenv("JSP_MODS_DIR", (base + "/mods").c_str(), 1);
+        setenv("JSP_MODS_LIST", (base + "/mods.txt").c_str(), 1);
+        capture([&] { jsp_mods_init(base.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    };
+    jpsm::Digest peer_a{}, peer_b{};
+    install("a", chara.file); CHECK(jsp_mods_session_content(peer_a.data()));
+    install("b", chara.file); CHECK(jsp_mods_session_content(peer_b.data()));
+    check_admission(peer_a, peer_b, jpsm::Reason::None);
+    for (const char* archive : { GAME, CHARA }) {
+        const auto& o = want.plans.at(archive).overrides.front();
+        const std::string data = root + "/b/PS3_GAME/USRDIR/data/PS3/" + archive;
+        const std::string file = root + "/b/mods/" + o.mod_id + "/" + o.source;
+        FILE* host = std::fopen(data.c_str(), "rb");
+        auto* view = g_ps3_fs_vfile_ops->open("/dev_x", data.c_str());
+        CHECK(host && view);
+        if (host && view) {
+            Bytes expected = o.alias ? chara.data.at(o.source) : io.mods.at(o.mod_id + "/" + o.source);
+            Bytes got(expected.size());
+            if (o.alias) {
+                Bytes changed = chara.file;
+                changed[chara.offset.at(o.source)] ^= 1;
+                put_file(data, changed);
+            } else {
+                Bytes changed = expected; changed[0] ^= 1;
+                put_file(file, changed);
+            }
+            CHECK(g_ps3_fs_vfile_ops->read(view, host, o.virt, got.data(), got.size()) == got.size() && got == expected);
+        }
+        if (view) g_ps3_fs_vfile_ops->close(view);
+        if (host) std::fclose(host);
+    }
+    Bytes changed = chara.file;
+    const auto& alias = want.plans.at(CHARA).overrides.front();
+    changed[chara.offset.at(alias.source)] ^= 1;
+    install("c", changed); CHECK(jsp_mods_session_content(peer_b.data()));
+    check_admission(peer_a, peer_b, jpsm::Reason::ContentMismatch);
+    install("d", chara.file);
+    put_file(root + "/d/PS3_GAME/USRDIR/data/PS3/" + CHARA, changed);
+    CHECK(!jsp_mods_session_content(peer_b.data()) && !jsp_mods_session_content(nullptr));
+
     std::string rm = "rm -rf '" + root + "'";
     CHECK(std::system(rm.c_str()) == 0);
 }
@@ -1264,6 +1518,7 @@ int main()
     test_alias_and_classes(io, chara);
     test_refusals(io);
     test_conflicts_and_digest(io, game);
+    { MemIo keep = io; test_discovery(io); io = keep; }
     test_glue(io, chara);
     test_roster(io);
 #ifdef MODS_GLUE_FILES

@@ -2,7 +2,7 @@
 // Header only; talks to re-psn through IPsnrTransport (a fake in installer/tools/net_repsn_test.cpp; the real one over the psnr client is jsp_net_repsn_client.h).
 // Convention: re-psn docs/api.md, section "Real-time titles such as rollback" (re-psn v0.8.0, merge 9398a557cb57):
 //   - OUR UdpMux socket is THE P2P socket: its port goes in HELLO, PROBE and PUNCH go out from it (the transport's job), peers' ip/p2p_port come from the member entries.
-//   - a reserved room-flag bit plus the record "rb=1;ver=<build>" in the room's external blob and the same record in every member's data; any mismatch is refused
+//   - a reserved room-flag bit plus the port's versioned JRB2 release/content/code record in the room's external blob and the same record in every member's data; any mismatch is refused
 //     (ROOM_LIST shows flags + external before joining; the member entries at join). No fallback to the game's own online.
 //   - the owner hosts; room_id is the session id; the player index follows member-id order (ids count up in join order, never reused in a room).
 //   - direct when reachable (PUNCH first), punched otherwise; relay only if the player allowed it AND the server offers it (HELLO_ACK flag bit 0); the path is shown.
@@ -13,11 +13,13 @@
 #define JSP_NET_REPSN_H
 
 #include "jsp_net_session.h"
+#include "jsp_session_digest.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <set>
 
@@ -26,41 +28,58 @@ namespace jspnet {
 // ASSUMPTION: bit 30 of the room flags is "this room holds a rollback session" (the convention says "a reserved bit"; the server stores flags and does not read them).
 constexpr uint32_t kRoomFlagRollback = 0x40000000u;
 
-// The record in the external blob and in member data: "rb=1;ver=<8 hex digits of the build id>". Exactly this shape; anything else does not match.
-// ENHANCEMENT (native-room pairing, jsp_net_game.cpp native_poll): an optional pair key, the id of the game's own Online Battle room (Matching2) both players are in,
-// appended as ";pair=<16 hex digits>". A record with a pair key matches only the same build AND the same key: a joiner takes only the rollback room of ITS native room,
-// a host refuses a member from another native room. pair 0 = the plain record (the start-up and lobby paths, unchanged).
-inline std::string make_record(uint32_t build, uint64_t pair = 0)
+// External room and member records are opaque u16-length blobs. JRB2 binds the release, full applied-content
+// SHA-256 and optional lowercase SHA-256 match-code tag. Codes select a public group and are never sent directly.
+inline std::string code_tag(const std::string& normalized)
 {
-    char b[64];
-    if (pair) std::snprintf(b, sizeof b, "rb=1;ver=%08x;pair=%016llx", (unsigned)build, (unsigned long long)pair);
-    else std::snprintf(b, sizeof b, "rb=1;ver=%08x", (unsigned)build);
-    return b;
+    if (normalized.empty()) return std::string();
+    const std::string domain = "jsp-rb-code:" + normalized;
+    const jpsm::Digest digest = jpsm::sha256(reinterpret_cast<const uint8_t*>(domain.data()), domain.size());
+    static const char hex[] = "0123456789abcdef";
+    std::string tag; tag.reserve(64);
+    for (uint8_t byte : digest) { tag.push_back(hex[byte >> 4]); tag.push_back(hex[byte & 15]); }
+    return tag;
 }
-inline bool record_matches(const std::string& blob, uint32_t build, uint64_t pair = 0) { return blob == make_record(build, pair); }
-namespace detail {
-inline bool lower_hex(const std::string& s, size_t from, size_t n, uint64_t* out)
+inline bool valid_code_tag(const std::string& tag)
 {
-    uint64_t v = 0;
-    for (size_t i = from; i < from + n; i++) {
-        const char ch = s[i];
-        const int d = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
-        if (d < 0) return false;
-        v = v << 4 | (uint64_t)d;
-    }
-    *out = v; return true;
+    return tag.empty() || (tag.size() == 64 && tag.find_first_not_of("0123456789abcdef") == std::string::npos);
 }
-}  // namespace detail
-// The build word (and the pair key, 0 for a plain record) of a well-formed record (for the "another version was seen" hint); false for anything else.
-inline bool record_build(const std::string& blob, uint32_t* build, uint64_t* pair = nullptr)
+inline std::string make_record(uint32_t build, const jpsm::Digest& content, const std::string& tag = {})
 {
-    const bool plain = blob.size() == 17, paired = blob.size() == 39 && blob.compare(17, 6, ";pair=") == 0;
-    if ((!plain && !paired) || blob.compare(0, 9, "rb=1;ver=") != 0) return false;
-    uint64_t v = 0, k = 0;
-    if (!detail::lower_hex(blob, 9, 8, &v) || (paired && (!detail::lower_hex(blob, 23, 16, &k) || !k))) return false;
-    *build = (uint32_t)v; if (pair) *pair = k;
+    if (content == jpsm::Digest{} || !valid_code_tag(tag)) return {};
+    std::string record = "JRB2";
+    for (int shift = 24; shift >= 0; shift -= 8) record.push_back(static_cast<char>(build >> shift));
+    record.append(reinterpret_cast<const char*>(content.data()), content.size());
+    return record + tag;
+}
+inline bool record_matches(const std::string& blob, uint32_t build, const jpsm::Digest& content, const std::string& tag = {})
+{
+    return !blob.empty() && blob == make_record(build, content, tag);
+}
+inline bool record_build(const std::string& blob, uint32_t* build, std::string* tag = nullptr, jpsm::Digest* content = nullptr)
+{
+    if ((blob.size() != 40 && blob.size() != 104) || blob.compare(0, 4, "JRB2") != 0) return false;
+    jpsm::Digest digest;
+    std::memcpy(digest.data(), blob.data() + 8, digest.size());
+    const std::string code = blob.substr(40);
+    if (digest == jpsm::Digest{} || !valid_code_tag(code)) return false;
+    uint32_t value = 0;
+    for (size_t i = 4; i < 8; ++i) value = (value << 8) | static_cast<uint8_t>(blob[i]);
+    *build = value;
+    if (content) *content = digest;
+    if (tag) *tag = code;
     return true;
 }
+// Valid user codes contain only 4–8 ASCII letters/digits. The reserved prefix and full
+// room ID therefore name a separate group even on a server sharing one communication ID.
+inline std::string native_room_tag(uint64_t room)
+{
+    if (!room) return {};
+    char group[40];
+    std::snprintf(group, sizeof group, "native-room:%016llx", (unsigned long long)room);
+    return code_tag(group);
+}
+
 // ENHANCEMENT (native-room pairing): the rollback link opens its OWN re-psn client next to the game's own one (np_psnr, the Online Battle menus) on the same server.
 // The server refuses a second client with the same online name (PSNR_E_NAME_TAKEN), so the rollback client takes a derived name of at most 16 characters: the name
 // plus "-rb" when it fits, else its first 11 characters, "-" and 4 hex digits of the whole name's FNV-1a (two long names that share 11 characters still differ).
@@ -93,7 +112,7 @@ inline std::string window_words(int ms)
 }
 inline std::string build_hex(uint32_t build) { char b[12]; std::snprintf(b, sizeof b, "%08x", (unsigned)build); return b; }
 // ENHANCEMENT (version mismatch message): the build words of the published releases (jsp_build_id.cmake, without gameplay mods), so the message names the
-// release the other player runs. A word not listed (a newer release, a local build, gameplay mods) is named "build xxxxxxxx". Add each release when it is published.
+// release the other player runs. A word not listed (a newer release, a local build) is named "build xxxxxxxx". Add each release when it is published.
 struct KnownBuild { uint32_t build; const char* release; };
 inline constexpr KnownBuild kKnownBuilds[] = { { 0xe9be7f43u, "0.7.0-test1" }, { 0xf1e06d4du, "0.7.0-test2" }, { 0x8a47e98au, "0.7.0-test3" } };
 inline std::string release_name(uint32_t build)
@@ -102,21 +121,19 @@ inline std::string release_name(uint32_t build)
     return "build " + build_hex(build);
 }
 // The message of a version mismatch (the message line and the first line of the menu notice). own_release: this game's release.txt ("" = by its build word).
-// Two different words that name the same release (other gameplay mods, a changed source) are both shown as build words.
+// Two different words that name the same release label (for example a local build) are both shown as build words.
 inline std::string version_mismatch_text(uint32_t other, uint32_t own, const std::string& own_release)
 {
     std::string theirs = release_name(other), mine = own_release.empty() ? release_name(own) : own_release;
     if (theirs == mine) { theirs = "build " + build_hex(other); mine = "build " + build_hex(own); }
-    const bool unknown = theirs.rfind("build ", 0) == 0;
-    return "The other player is on " + theirs + (unknown ? " (or uses different gameplay mods)" : "") + "; you're on " + mine + ". Both players need the same version for rollback.";
+    return "The other player is on " + theirs + "; you're on " + mine + ". Both players need the same version for rollback.";
 }
-// How long a joiner that found the other version's room waits for the server's answer to its one join (that join tells a new host at once).
-constexpr int kMismatchJoinMs = 3000;
 // What to check when the two games did not meet (the second line of the on-screen notice; the tail of the one-line text).
-inline std::string meet_advice(uint32_t build, int window_ms)
+// auto_role: both players just pick re-psn (rollback) (nobody is the host first), code: a match code is set (the same one is needed).
+inline std::string meet_advice(uint32_t build, int window_ms, bool auto_role = false, bool code = false)
 {
-    return "start both games at about the same time (the host first is best; each waits " + window_words(window_ms) + " after its own start-up); both need the same version (build " + build_hex(build) +
-           ") and the same gameplay mods (or none)";
+    return std::string("start both games at about the same time (") + (auto_role ? "" : "the host first is best; ") + "each waits " + window_words(window_ms) + " after its own start-up); both need the same version (build " + build_hex(build) +
+           ")" + (code ? ", the same match code" : "") + " and the same enabled mods in the same order";
 }
 
 // Field widths follow re-psn docs/api.md "Rooms" (v0.8.0): room ids are u64, member ids u16, user ids u32. ROOM_LIST names the owner by online id (no user id).
@@ -124,12 +141,12 @@ struct PsnrRoom { uint64_t id = 0; uint32_t flags = 0; std::string external; uin
 struct PsnrMember { uint32_t user = 0; uint16_t member_id = 0; Endpoint ep; std::string data; };
 
 // ROOM_LIST entries a rollback client may join: the flag bit, the same build record, and not full. Sorted by room id (the first is the oldest).
-// pair != 0 (native-room pairing): only the rooms whose record carries that pair key (another native room's rollback room is never joined).
-inline std::vector<PsnrRoom> filter_rooms(const std::vector<PsnrRoom>& all, uint32_t build, uint64_t pair = 0)
+// exclude_id: a room that is ours (the search lists it too).
+inline std::vector<PsnrRoom> filter_rooms(const std::vector<PsnrRoom>& all, uint32_t build, const jpsm::Digest& content, const std::string& tag = std::string(), uint64_t exclude_id = 0)
 {
     std::vector<PsnrRoom> r;
     for (const PsnrRoom& x : all)
-        if ((x.flags & kRoomFlagRollback) && record_matches(x.external, build, pair) && x.members < x.max_members) r.push_back(x);
+        if ((x.flags & kRoomFlagRollback) && record_matches(x.external, build, content, tag) && x.members < x.max_members && x.id != exclude_id) r.push_back(x);
     std::sort(r.begin(), r.end(), [](const PsnrRoom& a, const PsnrRoom& b) { return a.id < b.id; });
     return r;
 }
@@ -158,7 +175,8 @@ public:
     virtual bool ready() = 0;                    // HELLO acknowledged (our UdpMux port was sent in it)
     virtual uint32_t self_user() = 0;
     virtual bool relay_offered() = 0;            // HELLO_ACK flag bit 0
-    virtual bool search(std::vector<PsnrRoom>& out) = 0;   // true when a ROOM_LIST answer is available (rooms searched with the rollback flag)
+    virtual void reset_search() = 0;
+    virtual bool search(uint16_t offset, std::vector<PsnrRoom>& out, uint16_t& total) = 0;   // true when a ROOM_LIST answer is available (rooms searched with the rollback flag)
     virtual void create_room(uint32_t flags, const std::string& external, const std::string& member_data) = 0;
     virtual void join_room(uint64_t room_id, const std::string& member_data) = 0;
     virtual bool poll_event(PsnrEvent& ev) = 0;
@@ -189,9 +207,16 @@ class RePsnRendezvous : public IRendezvous {
 public:
     struct Config {
         bool host = true;
+        // ENHANCEMENT (auto role): nobody picks Host or Join. SEARCH first: a matching room exists -> JOIN the oldest, else CREATE one. While a room is open the search
+        // goes on every lookup interval; when another matching room with a LOWER id exists the room with the higher id yields (LEAVE, then JOIN the lower). The server
+        // (re-psn server/rooms.go createRoom) gives every room the next value of one counter, so room ids are unique and ordered by creation: exactly one side yields.
+        // host is ignored when auto_role is set; the role is known when the rendezvous is done (hosting()).
+        bool auto_role = false;
+        std::string code;               // the NORMALIZED match code (upper case), "" = none; never logged
         uint64_t join_room = 0;         // client: 0 = the oldest matching room, else that room (it must still match)
         uint32_t build = 0;
         uint64_t pair = 0;              // ENHANCEMENT (native-room pairing): the game's own room id both players are in (0 = none: the plain record); see make_record
+        jpsm::Digest content{};
         bool allow_relay = false;       // the player's choice
         uint8_t local_count = 1;
         int punch_ms = 4000;            // direct/punch window before relay is considered
@@ -202,7 +227,9 @@ public:
         int progress_every_ms = kProgressEveryMs;
         std::string release;            // this game's release name (release.txt; "" = a local build): the version mismatch message
     };
-    RePsnRendezvous(IPsnrTransport& t, UdpMux& mux, MessageHub& hub, const Config& c) : t_(t), mux_(mux), hub_(hub), c_(c) {}
+    RePsnRendezvous(IPsnrTransport& t, UdpMux& mux, MessageHub& hub, const Config& c) : t_(t), mux_(mux), hub_(hub), c_(c), tag_(c.pair ? native_room_tag(c.pair) : code_tag(c.code)), hosting_(c.auto_role ? false : c.host) {}
+    // The role of this side once the games have met (auto role: whoever created the room hosts). Also the role while waiting (auto: false until a room is created).
+    bool hosting() const { return hosting_; }
     // when the path changes: Relay means the mux must send through the server from now on (psnr_relay_wrap / psnr_relay_unwrap_from); the glue sets that up
     std::function<void(Path, uint32_t peer_user)> on_path;
     std::function<uint64_t()> now_ms = [] { return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
@@ -214,14 +241,9 @@ public:
     {
         if (state_ == kDone) return 1;
         if (state_ == kFailed) return -1;
+        if (c_.content == jpsm::Digest{}) return fail("game and mod content could not be verified");
         const uint64_t t = now_ms();
         if (!t0_) t0_ = t;
-        if (mm_build_) {   // the joiner joined the other version's room once, only so that its host learns it: fail when the server answered (or did not in time)
-            PsnrEvent ev; bool answered = false;
-            while (t_.poll_event(ev)) if (ev.kind == PsnrEvent::RoomJoined || ev.kind == PsnrEvent::Error) answered = true;
-            if (answered || t >= mm_until_ || t_.failure()) return fail_version(mm_build_);
-            return 0;
-        }
         // The window covers finding the other player only: once its endpoint is known the punch (and the relay, if allowed) has its own bound (punch_ms).
         if (state_ < kPunch && t - t0_ > (uint64_t)c_.give_up_ms) return give_up();
         if (const char* f = t_.failure()) return fail(f);   // the connection failed for good, or a lookup was refused: end now, not at the give-up
@@ -229,63 +251,70 @@ public:
         if (state_ < kPunch) progress(t);   // after the connect step: a game that is already connected never reports "connecting"
         if (state_ == kConnect) return 0;
         if (state_ == kLookup) {
-            if (c_.host) { t_.create_room(kRoomFlagRollback, make_record(c_.build, c_.pair), make_record(c_.build, c_.pair)); state_ = kRoom; }   // listed until the host leaves (give-up, failure or the end)
+            if (c_.host && !c_.auto_role) { t_.create_room(kRoomFlagRollback, make_record(c_.build, c_.content, tag_), make_record(c_.build, c_.content, tag_)); state_ = kRoom; }   // listed until the host leaves (give-up, failure or the end)
             else {
                 if (next_lookup_ && t < next_lookup_) return 0;   // the last list had no room for us: wait before asking again
-                std::vector<PsnrRoom> all;
-                if (!t_.search(all)) return 0;                     // one request in flight; the answer comes on a later poll
-                ++lookups;
-                note_other_builds(all);
-                // FIX (two PCs, another version): with a pair key the host's rollback room is known exactly (same native room). When it is there with
-                // another build, waiting 2 minutes (then 3 retries) cannot help and the fight meanwhile starts on the game's own netcode with no word on
-                // screen: say so at once, with both versions. ENHANCEMENT (version mismatch message): first join that room once with our own record, so a
-                // host of this build or later fails at once too (its member check below); an older host refuses the member and still gives up at its window.
-                // The room's record format is unchanged: older builds compare it exactly.
-                if (c_.pair && !c_.join_room)
-                    for (const PsnrRoom& x : all) {
-                        uint32_t b = 0; uint64_t k = 0;
-                        if ((x.flags & kRoomFlagRollback) && record_build(x.external, &b, &k) && k == c_.pair && b != c_.build) {
-                            t_.join_room(x.id, make_record(c_.build, c_.pair)); room_ = x.id; state_ = kRoom;
-                            mm_build_ = b; mm_until_ = t + (uint64_t)kMismatchJoinMs;
-                            return 0;
-                        }
-                    }
-                const std::vector<PsnrRoom> ok = filter_rooms(all, c_.build, c_.pair);
                 uint64_t pick = 0;
-                if (c_.join_room) { for (const auto& r : ok) if (r.id == c_.join_room) pick = r.id;
-                    if (!pick) return fail("re-psn: that room is gone, full, or from another build"); }
-                else if (!ok.empty()) pick = ok.front().id;
-                else { next_lookup_ = t + (uint64_t)c_.lookup_every_ms; return 0; }   // no host yet (it may start later): keep looking until the window ends
-                t_.join_room(pick, make_record(c_.build, c_.pair)); room_ = pick; state_ = kRoom;
+                if (!search_page(0, &pick)) return 0;
+                if (!pick && c_.pair && native_mismatch_) {
+                    if (native_version_seen_) return fail_version(native_other_build_);
+                    fail("the other player runs another version or different game content");
+                    n1_ = "Rollback could not start: the other player has different game content.";
+                    n2_ = "Use the same release and the same enabled mods.";
+                    return -1;
+                }
+                if (c_.join_room && !pick) return fail("re-psn (rollback): that room is gone, full, or uses a different build, content or match code");
+                if (!pick && c_.auto_role) {   // nobody there yet: open a room and keep looking while it is open
+                    t_.create_room(kRoomFlagRollback, make_record(c_.build, c_.content, tag_), make_record(c_.build, c_.content, tag_));
+                    hosting_ = true; join_pending_ = false; room_ = 0; state_ = kRoom; next_lookup_ = t + (uint64_t)c_.lookup_every_ms;
+                    return 0;
+                }
+                else if (!pick) { next_lookup_ = t + (uint64_t)c_.lookup_every_ms; return 0; }   // no host yet (it may start later): keep looking until the window ends
+                t_.join_room(pick, make_record(c_.build, c_.content, tag_)); room_ = pick; hosting_ = false; join_pending_ = true; state_ = kRoom;
             }
         }
         PsnrEvent ev;
         while (t_.poll_event(ev)) {
-            if (ev.kind == PsnrEvent::Error) return fail("re-psn: the server refused (error " + std::to_string(ev.err) + ")");
-            if (ev.kind == PsnrEvent::RoomJoined) { room_ = ev.room_id; owner_ = ev.owner; members_ = ev.members; }
-            else if (ev.kind == PsnrEvent::MemberJoined) {
-                for (auto& m : ev.members) {
-                    uint32_t b = 0; if (other_version(m, &b)) return fail_version(b);   // checked here too: the joiner leaves again at once (MemberLeft may come in this same poll)
-                    members_.push_back(m);
-                }
+            if (ev.kind == PsnrEvent::Error) {
+                // a join that failed (the room filled up or vanished between the list and the join): look again within the window, unless a fixed room was asked for
+                if (join_pending_ && !hosting_ && !c_.join_room && state_ == kRoom) { restart_lookup(t, false); continue; }
+                return fail("re-psn (rollback): the server refused (error " + std::to_string(ev.err) + ")");
             }
+            if (ev.kind == PsnrEvent::RoomJoined) { room_ = ev.room_id; owner_ = ev.owner; members_ = ev.members; join_pending_ = false; }
+            else if (ev.kind == PsnrEvent::MemberJoined) { for (auto& m : ev.members) members_.push_back(m); }
             else if (ev.kind == PsnrEvent::MemberLeft) {
                 members_.erase(std::remove_if(members_.begin(), members_.end(), [&](const PsnrMember& m) { return m.user == ev.user; }), members_.end());
-                if (ev.user == peer_user_ && state_ >= kPunch) return fail("re-psn: the other player left the room");
-                if (ev.user == owner_ && !c_.host) return fail("re-psn: the host left the room");   // a session cannot move its host
+                if (ev.user == peer_user_ && state_ >= kPunch) return fail("re-psn (rollback): the other player left the room");
+                if (ev.user == owner_ && !hosting_) {
+                    // before the punch the room's owner leaving only means it is gone: look again (a session cannot move its host, but nothing was started yet)
+                    if (state_ < kPunch && !c_.join_room) { restart_lookup(t, true); continue; }
+                    return fail("re-psn (rollback): the host left the room");
+                }
+            }
+        }
+        // auto role, room open and nobody in it: another matching room with a lower id means this side yields (see Config::auto_role)
+        if (c_.auto_role && hosting_ && state_ == kRoom && room_ && !join_pending_ && !peer_user_ && members_.size() <= 1) {
+            if (!next_lookup_ || t >= next_lookup_) {
+                uint64_t target = 0;
+                if (search_page(room_, &target)) {
+                    if (target && target < room_) {
+                        t_.leave_room(); members_.clear(); owner_ = 0;
+                        t_.join_room(target, make_record(c_.build, c_.content, tag_)); room_ = target; hosting_ = false; join_pending_ = true;
+                        ++yields;
+                    } else next_lookup_ = t + (uint64_t)c_.lookup_every_ms;
+                }
             }
         }
         if (state_ == kRoom && room_) {
             // every OTHER member's record is checked; a mismatching member is refused (never played with). The host waits for the first match, the client looks at the owner.
             for (const PsnrMember& m : members_) {
                 if (m.user == t_.self_user()) continue;
-                { uint32_t b = 0; if (other_version(m, &b)) return fail_version(b); }   // ENHANCEMENT (version mismatch message): a player of our native room on another version
-                if (!record_matches(m.data, c_.build, c_.pair)) {
-                    if (!c_.host) return fail("re-psn: the host's build or settings record does not match (refused)");
+                if (!record_matches(m.data, c_.build, c_.content, tag_)) {
+                    if (!hosting_) return fail("re-psn (rollback): the host's build or settings record does not match (refused)");
                     if (!rejected_.count(m.user)) { rejected_.insert(m.user); ++rejected_members; t_.kick(m.user); }   // never played with, and removed from the room so it cannot hold the slot
                     continue;
                 }
-                if (!c_.host && m.user != owner_) continue;
+                if (!hosting_ && m.user != owner_) continue;
                 if (m.ep.port == 0) continue;   // no endpoint yet (the member's HELLO had no P2P port)
                 peer_ = m; peer_user_ = m.user; break;
             }
@@ -305,9 +334,9 @@ public:
                 if (!relay_ && c_.allow_relay && t_.relay_offered()) {   // relay only when the player allowed it AND the server offers it
                     relay_ = true; Path_(Path::Relay); start_inner(); punch_start_ = t;
                 } else
-                    return fail(relay_ ? "re-psn: the other player cannot be reached, even through the relay"
-                              : !c_.allow_relay ? "re-psn: not reachable directly (relay is not allowed in the settings)"
-                              : "re-psn: not reachable directly and this server offers no relay");
+                    return fail(relay_ ? "re-psn (rollback): the other player cannot be reached, even through the relay"
+                              : !c_.allow_relay ? "re-psn (rollback): not reachable directly (relay is not allowed in the settings)"
+                              : "re-psn (rollback): not reachable directly and this server offers no relay");
             }
         }
         return 0;
@@ -320,6 +349,7 @@ public:
     uint64_t room_id() const { return room_; }
     uint64_t rejected_members = 0;                    // members whose record did not match (the host side)
     uint64_t lookups = 0;                             // room lists read (the joiner)
+    uint64_t yields = 0, restarts = 0;                // auto role: times this side left its own room for an older one / went back to searching (counters for the tests and the log)
     // The failure as the two lines of the on-screen notice (what happened / what to do); line 2 is empty when error() says it all.
     const std::string& notice1() const { return n1_; }
     const std::string& notice2() const { return n2_; }
@@ -327,46 +357,87 @@ public:
 private:
     enum { kConnect = 0, kLookup, kRoom, kPunch, kDone, kFailed };
     int fail(const std::string& why) { err_ = why; n1_ = "Rollback could not start: " + why; n2_.clear(); state_ = kFailed; t_.leave_room(); return -1; }
-    // A member of our native room (the same pair key) whose record carries another build word.
-    bool other_version(const PsnrMember& m, uint32_t* b) const
-    {
-        uint64_t k = 0;
-        return c_.pair && m.user != t_.self_user() && record_build(m.data, b, &k) && k == c_.pair && *b != c_.build;
-    }
     int fail_version(uint32_t other)
     {
         fail("re-psn: the other player runs another version (build " + build_hex(other) + ", yours " + build_hex(c_.build) + ")");
         n1_ = version_mismatch_text(other, c_.build, c_.release);
-        n2_ = "Rollback is off in this room. Both need the same download and the same gameplay mods (or none); the main menu corner shows the version.";
+        n2_ = "Rollback is off in this room. Both need the same release and enabled mods; the main menu corner shows the version.";
         mismatch_ = true; return -1;
     }
     // The window ended before the other player was found. One line for the log and the screen, with the build word so the players can compare.
     int give_up()
     {
         std::string what;
-        if (state_ == kConnect) what = "the online server did not answer within " + window_words(c_.give_up_ms);
-        else if (!c_.host && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (other_builds_.empty() ? std::string() : " (" + other_builds_text() + ")");
-        // ENHANCEMENT (version mismatch message): a paired host knows the other player is in its native room; a joiner of a build before 0.7.0-test4 that
-        // runs another version never joins (it only says so on its own screen), so that is the likely reason
-        else if (c_.host && c_.pair) what = "the other player probably runs a different version (the main menu shows it), or their online connection failed";
-        else if (c_.host) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
+        if (state_ == kConnect) what = "the re-psn server did not answer within " + window_words(c_.give_up_ms);
+        else if (c_.auto_role && (state_ == kLookup || hosting_)) what = "no other player with this version" + std::string(c_.code.empty() ? "" : " and match code") + " found within " + window_words(c_.give_up_ms) + (!saw_other_rooms() ? std::string() : " (" + other_builds_text() + ")");
+        else if (!hosting_ && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (!saw_other_rooms() ? std::string() : " (" + other_builds_text() + ")") + " (is the other player set to Host?)";
+        else if (hosting_ && c_.pair) what = "no compatible peer joined this Friendly Match within " + window_words(c_.give_up_ms);
+        else if (hosting_) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
         else what = "the host's room did not answer within " + window_words(c_.give_up_ms);
-        const std::string advice = meet_advice(c_.build, c_.give_up_ms);
-        fail("re-psn: " + what + ": " + advice);
+        const std::string advice = meet_advice(c_.build, c_.give_up_ms, c_.auto_role, !c_.code.empty());
+        fail("re-psn (rollback): " + what + ": " + advice);
         n1_ = "Rollback could not start: " + what + ".";
         n2_ = advice + "."; if (n2_[0] >= 'a' && n2_[0] <= 'z') n2_[0] = (char)(n2_[0] - 'a' + 'A');
         return -1;
     }
+    // At most one reply per poll. Retain only the smallest eligible ID across pages.
+    bool search_page(uint64_t exclude, uint64_t* match)
+    {
+        std::vector<PsnrRoom> page;
+        uint16_t total = 0;
+        if (!t_.search(search_offset_, page, total)) return false;
+        ++lookups;
+        if (!search_offset_) { native_mismatch_ = false; native_version_seen_ = false; }
+        note_other_builds(page);
+        if (!search_offset_) scan_end_ = total;
+        for (const auto& room : filter_rooms(page, c_.build, c_.content, tag_, exclude))
+            if ((!c_.join_room || room.id == c_.join_room) && (!best_room_ || room.id < best_room_)) best_room_ = room.id;
+        const size_t next = search_offset_ + page.size();
+        if (!page.empty() && next < std::min(total, scan_end_)) {
+            search_offset_ = static_cast<uint16_t>(next);
+            return false;
+        }
+        *match = best_room_;
+        search_offset_ = 0;
+        best_room_ = 0;
+        return true;
+    }
     void note_other_builds(const std::vector<PsnrRoom>& all)
     {
-        for (const PsnrRoom& x : all) { uint32_t b = 0; if ((x.flags & kRoomFlagRollback) && record_build(x.external, &b) && b != c_.build) other_builds_.insert(b); }
+        for (const PsnrRoom& x : all) {
+            uint32_t b = 0; std::string tg;
+            if (!(x.flags & kRoomFlagRollback)) continue;
+            jpsm::Digest content;
+            if (!record_build(x.external, &b, &tg, &content)) { saw_unverified_ = true; continue; }
+            if (c_.pair && tg == tag_ && (b != c_.build || content != c_.content)) {
+                native_mismatch_ = true;
+                if (b != c_.build) { native_version_seen_ = true; native_other_build_ = b; }
+            }
+            if (b != c_.build) { if (other_builds_.size() < 4) other_builds_.insert(b); }
+            else if (tg != tag_) other_codes_ = true;   // the same build with another match code (or none): counted, the code is never shown
+            else if (content != c_.content) saw_other_content_ = true;
+        }
     }
+    bool saw_other_rooms() const { return !other_builds_.empty() || other_codes_ || saw_other_content_ || saw_unverified_; }
     std::string other_builds_text() const
     {
-        if (other_builds_.empty()) return std::string();
-        std::string s = "seen: a rollback room with build";
-        size_t i = 0; for (uint32_t b : other_builds_) { if (i == 3) { s += ", ..."; break; } s += (i ? ", " : " ") + build_hex(b); ++i; }
+        std::string s;
+        if (!other_builds_.empty()) {
+            s = "seen: a rollback room with build";
+            size_t i = 0; for (uint32_t b : other_builds_) { if (i == 3) { s += ", ..."; break; } s += (i ? ", " : " ") + build_hex(b); ++i; }
+        }
+        if (saw_other_content_) s += std::string(s.empty() ? "seen: " : "; ") + "a room with different game content or mods";
+        if (saw_unverified_) s += std::string(s.empty() ? "seen: " : "; ") + "a room without a compatible content record (update both games)";
+        if (other_codes_) s += std::string(s.empty() ? "seen: " : "; ") + "a rollback room with another match code (or none)";
         return s;
+    }
+    // Back to searching (auto role, or a joiner whose room filled up or vanished). leave: this side is in a room (it may have become the owner of the abandoned one).
+    void restart_lookup(uint64_t, bool leave)
+    {
+        t_.reset_search(); search_offset_ = 0; best_room_ = 0;
+        if (leave) t_.leave_room();
+        members_.clear(); room_ = 0; owner_ = 0; peer_user_ = 0; hosting_ = false; join_pending_ = false; state_ = kLookup; next_lookup_ = 0;
+        ++restarts;
     }
     void progress(uint64_t t)
     {
@@ -376,21 +447,26 @@ private:
         const std::string w = std::to_string((t - t0_) / 1000) + " s of " + std::to_string(c_.give_up_ms / 1000) + " s";
         const std::string b = "build " + build_hex(c_.build);
         std::string line, n1, n2;
-        if (state_ == kConnect) { line = "re-psn: connecting to the server (" + w + ", " + b + ")"; n1 = "Rollback: connecting to the online server (" + w + ")."; }
-        else if (c_.host) {
-            line = "re-psn: room open, waiting for a player with " + b + " (" + w + (rejected_members ? ", " + std::to_string(rejected_members) + " with another version refused" : "") + ")";
-            n1 = "Rollback: room open, waiting for the other player (" + w + ").";
+        const std::string rl = c_.auto_role ? "re-psn (rollback): " : c_.host ? "re-psn (rollback), Host: " : "re-psn (rollback), Join: ";   // the role, plainly (explicit roles: two Joins never meet)
+        if (state_ == kConnect) { line = "re-psn (rollback): connecting to the server (" + w + ", " + b + ")"; n1 = rl + "connecting to the server (" + w + ")."; }
+        else if (hosting_) {
+            line = "re-psn (rollback): room open, waiting for a player with " + b + " (" + w + (rejected_members ? ", " + std::to_string(rejected_members) + " with another version refused" : "") + ")";
+            n1 = rl + "room open, waiting for the other player (" + w + ").";
+        } else if (c_.auto_role && (state_ == kLookup || join_pending_)) {
+            line = std::string("re-psn (rollback): ") + (state_ == kLookup ? "looking for the other player with " : "joining the other player's room, with ") + b + " (" + w + ", " + std::to_string(lookups) + " room lists read" + (!saw_other_rooms() ? std::string() : "; " + other_builds_text()) + ")";
+            n1 = rl + (state_ == kLookup ? "looking for the other player (" : "found the other player's room, joining (") + w + ").";
         } else if (state_ == kLookup) {
-            line = "re-psn: looking for a host with " + b + " (" + w + ", " + std::to_string(lookups) + " room lists read" + (other_builds_.empty() ? std::string() : "; " + other_builds_text()) + ")";
-            n1 = "Rollback: looking for the host's room (" + w + ").";
-        } else { line = "re-psn: joined room " + std::to_string((unsigned long long)room_) + ", waiting for the host (" + w + ", " + b + ")"; n1 = "Rollback: joined the host's room, waiting for it (" + w + ")."; }
-        n2 = "Both need the same version (build " + build_hex(c_.build) + ") and the same gameplay mods (or none).";
+            line = "re-psn (rollback): looking for a host with " + b + " (" + w + ", " + std::to_string(lookups) + " room lists read" + (!saw_other_rooms() ? std::string() : "; " + other_builds_text()) + ")";
+            n1 = rl + "looking for the host's room (" + w + ").";
+        } else { line = "re-psn (rollback): joined room " + std::to_string((unsigned long long)room_) + ", waiting for the host (" + w + ", " + b + ")"; n1 = rl + "joined the host's room, waiting for it (" + w + ")."; }
+        n2 = "Start the match from Free Battle, not the Online menu. Same version (build " + build_hex(c_.build) + ") and mods needed.";
+        if (search_offset_) n2 = "Checking more rooms for matching game content and mods.";
         on_progress(line, n1, n2);
     }
     void Path_(Path p) { path_ = p; if (on_path) on_path(p, peer_user_); }
     void start_inner()
     {
-        if (c_.host) {
+        if (hosting_) {
             inner_.reset(new DirectRendezvous(mux_, hub_, c_.local_count, room_));   // the room id is the session id
             inner_->set_only_peer(peer_.ep);   // a HELO from any other endpoint is dropped (relayed datagrams are rewritten to this endpoint by the transport's rx hook)
         }
@@ -398,8 +474,13 @@ private:
     }
     IPsnrTransport& t_; UdpMux& mux_; MessageHub& hub_; Config c_;
     int state_ = kConnect; uint64_t t0_ = 0, punch_start_ = 0, last_punch_ = 0, next_lookup_ = 0, last_progress_ = 0;
-    std::set<uint32_t> other_builds_; std::string n1_, n2_;
-    uint32_t mm_build_ = 0; uint64_t mm_until_ = 0; bool mismatch_ = false;   // the joiner's one join of the other version's room; the failure was a version mismatch
+    bool native_mismatch_ = false, native_version_seen_ = false, mismatch_ = false;
+    uint32_t native_other_build_ = 0;
+    uint16_t search_offset_ = 0, scan_end_ = 0;
+    uint64_t best_room_ = 0;
+    bool saw_other_content_ = false, saw_unverified_ = false;
+    std::set<uint32_t> other_builds_; bool other_codes_ = false; std::string n1_, n2_;
+    std::string tag_; bool hosting_ = false, join_pending_ = false;   // tag_: the match code's hash in the record; join_pending_: a JOIN_ROOM is out and unanswered
     uint64_t room_ = 0; uint32_t owner_ = 0, peer_user_ = 0; int local_index_ = -1; bool relay_ = false;
     std::vector<PsnrMember> members_; PsnrMember peer_; std::set<uint32_t> rejected_;
     std::unique_ptr<DirectRendezvous> inner_; SessionPlan plan_; std::string err_; MessageChannel* ch_ = nullptr; Path path_ = Path::None;

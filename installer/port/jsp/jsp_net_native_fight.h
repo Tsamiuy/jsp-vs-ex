@@ -28,7 +28,7 @@ extern int g_jsp_native_fight_armed;
 // whole session, net slot s -> the rollback slot (record index) of the human whose fighter has it; the armed pad take reads that port. It also checks
 // this PC's own fighter (the builder's "me", G+0x48158, by member id) gets this PC's rollback slot. 1 = ok, 0 = refused (*msg says why; the map is off).
 // msg always gets the "[net] ownership" line's text. Main thread, before arm; jsp_native_fight_arm(0) clears it.
-int  jsp_native_fight_map(int local_slot, char* msg, int n);
+int  jsp_native_fight_map(int local_slot, unsigned planned_players, char* msg, int n);
 // The ownership check of a running session: the battle players the LOCAL pad's non-neutral samples went to (counted in the armed pad take) against this
 // PC's own fighter. 1 = only my fighter got them, 0 = another fighter got them (SWAPPED), -1 = no local input seen yet. *msg = the line's text.
 int  jsp_native_fight_owner_check(char* msg, int n);
@@ -78,15 +78,20 @@ inline int placement_net_slot(const uint8_t team[4], const uint8_t com[4], int r
 }
 // FIX (swapped controls): port[s] = the room record (= rollback slot) of the human whose battle player has net slot s, matched by member id
 // (player +0x78 == record +0x08, human records only); -1 = no player has s. false: a net slot outside 0..3 or used twice, a player whose member is not
-// exactly one human record, or two slots naming one record.
-inline bool net_ports(const int32_t net[kPlayers], const uint16_t pmember[kPlayers], const uint16_t rmember[4], const uint8_t rcom[4], int8_t port[kRecCount])
+// exactly one human record, or room records and mapped fighters failing to cover the planned ports exactly.
+inline bool net_ports(const int32_t net[kPlayers], const uint16_t pmember[kPlayers], const uint16_t rmember[4], const uint8_t rcom[4], unsigned planned_players, int8_t port[kRecCount])
 {
     for (uint32_t s = 0; s < kRecCount; s++) port[s] = -1;
+    if (planned_players == 0 || planned_players > kRecCount) return false;
+    for (unsigned r = 0; r < kRecCount; ++r) {
+        const bool human = !rcom[r] && rmember[r] != 0;
+        if (human != (r < planned_players)) return false;
+    }
     uint32_t used = 0;
     for (uint32_t i = 0; i < kPlayers; i++) {
         const int32_t s = net[i];
         if (s < 0) continue;
-        if (s >= (int32_t)kRecCount || port[s] >= 0) return false;
+        if (static_cast<unsigned>(s) >= planned_players || port[s] >= 0) return false;
         int rec = -1;
         for (int r = 0; r < 4; r++) {
             if (rcom[r] || !rmember[r] || rmember[r] != pmember[i]) continue;
@@ -97,7 +102,7 @@ inline bool net_ports(const int32_t net[kPlayers], const uint16_t pmember[kPlaye
         used |= 1u << rec;
         port[s] = (int8_t)rec;
     }
-    return true;
+    return used == (1u << planned_players) - 1;
 }
 
 // Target of a PowerPC `bl` word at `site` (I-form, LK=1, AA=0), 0 when the word is not one.

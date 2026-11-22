@@ -27,7 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from assemble_payload import FORBIDDEN  # noqa: E402
 
 FIXED_DATE = (1980, 1, 1, 0, 0, 0)
-REQUIRED = ("firstrun.py", "support_bundle.py", "support-bundle.cmd", "jsp-launcher.exe", "toolchain/python/python.exe", "toolchain/llvm-mingw/bin/clang.exe", "toolchain/cmake/bin/cmake.exe", "toolchain/ninja/ninja.exe", "cmake/llvm-mingw.cmake", "VERSION.txt", "NOTICE.txt",
+REQUIRED = ("tools/mod_package.py", "firstrun.py", "support_bundle.py", "support-bundle.cmd", "jsp-launcher.exe", "toolchain/python/python.exe", "toolchain/llvm-mingw/bin/clang.exe", "toolchain/cmake/bin/cmake.exe", "toolchain/ninja/ninja.exe", "cmake/llvm-mingw.cmake", "VERSION.txt", "NOTICE.txt",
             "licenses/jstars-port-LICENSE.txt", "licenses/ps3recomp-LICENSE.txt", "port/CMakeLists.txt",
             "ps3recomp/tools/ppu_lifter.py")
 FIRST_RUN_OUTPUT = ("build", "hdd0", "game", "logs", "paths.txt", "jsp-install.ini", "play_settings.txt", "run.cmd")
@@ -57,9 +57,8 @@ exit /b %RC%
 README = """J-Stars Victory VS-EX: Fan Revival, portable
 ============================================
 An unofficial fan project. Nothing of the game is included or downloaded: the port is built on your PC from your own copy.
-This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental): the first run turns it on with rollback and a public test server (re-psn, not run by this project; see
-ONLINE-GUIDE.md); jsp-settings.exe, Online tab, turns it off. Online settings you already have are kept.
+There is no update check, crash report or telemetry.
+Online Battle is optional. In jsp-settings.exe, open Online, choose re-psn, enter your approved server address and online name, and save. Select rollback separately. First run preserves saved settings. See ONLINE-GUIDE.md.
 
 1. Unpack the whole zip to a folder you can write to (not Program Files). Keep the folders as they are.
 2. Double-click run.cmd. It asks for:

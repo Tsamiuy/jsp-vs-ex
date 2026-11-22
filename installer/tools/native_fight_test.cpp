@@ -2,6 +2,7 @@
 // sample, and that every guarded instruction patch replaces the call it names. No game: build with any C++20 compiler and run.
 //   bash installer/tools/native_fight_test.sh
 #include "../port/jsp/jsp_net_native_fight.h"
+#include <algorithm>
 #include <cstdio>
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -25,27 +26,70 @@ int main()
         const int32_t net[6] = {0, -1, 1, -1, -1, -1};   // battle players as the two-copy repro read them: player 0 net 0 member 2, player 2 net 1 member 1
         const uint16_t pm[6] = {2, 0, 1, 0, 0, 0}, rm[4] = {1, 2, 0, 0};
         int8_t port[4];
-        CHECK(net_ports(net, pm, rm, com, port) && port[0] == 1 && port[1] == 0 && port[2] == -1 && port[3] == -1);
+        CHECK(net_ports(net, pm, rm, com, 2, port) && port[0] == 1 && port[1] == 0 && port[2] == -1 && port[3] == -1);
     }
     {   // the fixed versus (teams 0,1,1,0): net slot = record, the identity map
         const uint8_t team[4] = {0, 1, 1, 0}, com[4] = {0, 0, 1, 1};
         CHECK(placement_net_slot(team, com, 0) == 0 && placement_net_slot(team, com, 1) == 1);
         const int32_t net[6] = {0, -1, 1, -1, -1, -1}; const uint16_t pm[6] = {1, 0, 2, 0, 0, 0}, rm[4] = {1, 2, 0, 0};
-        int8_t port[4]; CHECK(net_ports(net, pm, rm, com, port) && port[0] == 0 && port[1] == 1);
+        int8_t port[4]; CHECK(net_ports(net, pm, rm, com, 2, port) && port[0] == 0 && port[1] == 1);
     }
     {   // 4 humans 1 + 3 vs 2 + 4 (teams 0,1,0,1): net slots 0,2,1,3 for records 0,1,2,3
         const uint8_t team[4] = {0, 1, 0, 1}, com[4] = {0, 0, 0, 0};
         CHECK(placement_net_slot(team, com, 0) == 0 && placement_net_slot(team, com, 2) == 1 && placement_net_slot(team, com, 1) == 2 && placement_net_slot(team, com, 3) == 3);
         const int32_t net[6] = {0, 1, 2, 3, -1, -1}; const uint16_t pm[6] = {11, 13, 12, 14, 0, 0}, rm[4] = {11, 12, 13, 14};
-        int8_t port[4]; CHECK(net_ports(net, pm, rm, com, port) && port[0] == 0 && port[1] == 2 && port[2] == 1 && port[3] == 3);
+        int8_t port[4]; CHECK(net_ports(net, pm, rm, com, 4, port) && port[0] == 0 && port[1] == 2 && port[2] == 1 && port[3] == 3);
     }
     {   // refusals: a member in no human record, one member twice, a net slot used twice, a net slot out of range
         const uint8_t com[4] = {0, 0, 1, 1}; const uint16_t rm[4] = {1, 2, 0, 0}; int8_t port[4];
-        { const int32_t net[6] = {0, 1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 9, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, port)); }
-        { const int32_t net[6] = {0, 1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 1, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, port)); }
-        { const int32_t net[6] = {0, 0, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 2, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, port)); }
-        { const int32_t net[6] = {4, -1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 0, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, port)); }
-        { const uint16_t rm2[4] = {1, 1, 0, 0}; const int32_t net[6] = {0, -1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 0, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm2, com, port)); }
+        { const int32_t net[6] = {0, 1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 9, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, 2, port)); }
+        { const int32_t net[6] = {0, 1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 1, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, 2, port)); }
+        { const int32_t net[6] = {0, 0, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 2, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, 2, port)); }
+        { const int32_t net[6] = {4, -1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 0, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm, com, 2, port)); }
+        { const uint16_t rm2[4] = {1, 1, 0, 0}; const int32_t net[6] = {0, -1, -1, -1, -1, -1}; const uint16_t pm[6] = {1, 0, 0, 0, 0, 0}; CHECK(!net_ports(net, pm, rm2, com, 2, port)); }
+    }
+    // Rollback handles are dense, but fighter order can be any permutation of the participants.
+    for (unsigned count = 1; count <= 4; ++count) {
+        int record[] = {0, 1, 2, 3};
+        const uint16_t room[] = {31, 47, 59, 73};
+        uint8_t cpu[4];
+        for (unsigned i = 0; i < 4; ++i) cpu[i] = i >= count;
+        do {
+            int32_t net[6] = {-1, -1, -1, -1, -1, -1};
+            uint16_t battle[6] = {};
+            for (unsigned i = 0; i < count; ++i) {
+                net[i + 1] = static_cast<int32_t>(i);
+                battle[i + 1] = room[record[i]];
+            }
+            int8_t port[4];
+            CHECK(net_ports(net, battle, room, cpu, count, port));
+            for (unsigned i = 0; i < 4; ++i) CHECK(port[i] == (i < count ? record[i] : -1));
+        } while (std::next_permutation(record, record + count));
+    }
+    {
+        const uint16_t room[4] = {31, 47, 59, 0};
+        const uint8_t cpu[4] = {0, 0, 1, 1}, three_humans[4] = {0, 0, 0, 1};
+        int32_t net[6] = {0, -1, -1, -1, -1, -1};
+        uint16_t battle[6] = {31, 47, 59};
+        int8_t port[4];
+        CHECK(!net_ports(net, battle, room, cpu, 2, port));  // host only
+        net[0] = -1; net[1] = 1;
+        CHECK(!net_ports(net, battle, room, cpu, 2, port));  // peer only
+        net[0] = 0;
+        CHECK(net_ports(net, battle, room, cpu, 2, port));
+        CHECK(!net_ports(net, battle, room, three_humans, 2, port));  // unplanned occupied human record
+        net[2] = 2;
+        CHECK(!net_ports(net, battle, room, three_humans, 2, port));  // extra mapped fighter
+        CHECK(!net_ports(net, battle, room, cpu, 2, port));  // CPU member cannot acquire a net slot
+        net[2] = -1; net[1] = 2;
+        CHECK(!net_ports(net, battle, room, cpu, 2, port));  // two participants, hole in net slots
+        net[1] = 1;
+        const uint16_t rematch[4] = {83, 97, 0, 0};
+        CHECK(!net_ports(net, battle, rematch, cpu, 2, port));  // old fighters with new room members
+        battle[0] = 97; battle[1] = 83;
+        CHECK(net_ports(net, battle, rematch, cpu, 2, port) && port[0] == 1 && port[1] == 0);
+        CHECK(!net_ports(net, battle, rematch, cpu, 0, port));
+        CHECK(!net_ports(net, battle, rematch, cpu, 5, port));
     }
     // patches: a replaced bl names its target; the replacement is never a branch (the lifter refuses those)
     for (const Patch& p : kPatches) {

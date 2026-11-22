@@ -935,7 +935,7 @@ var
   Rc: Integer;
 begin
   Exe := ExpandConstant('{app}\game\jsp.exe');
-  Params := '/C netsh advfirewall firewall delete rule name=all program="' + Exe + '" >nul 2>&1 & ' +
+  Params := '/C netsh advfirewall firewall delete rule name="{#AppDirName} online play" program="' + Exe + '" >nul 2>&1 & ' +
             'netsh advfirewall firewall add rule name="{#AppDirName} online play" dir=in action=allow protocol=UDP profile=private,public program="' + Exe + '" enable=yes';
   if ShellExec('runas', ExpandConstant('{cmd}'), Params, '', SW_HIDE, ewWaitUntilTerminated, Rc) then
     Log('firewall: rule command ran, exit ' + IntToStr(Rc))
@@ -1022,7 +1022,7 @@ begin
     WasPortable := GetIniInt('install', 'portable', 0, 0, 1, ExpandConstant('{app}\jsp-install.ini')) = 1;
     { ENHANCEMENT (online): remove the firewall task's rule; only when it exists (reading rules needs no admin), so most uninstalls see no UAC prompt }
     if Exec(ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall show rule name="{#AppDirName} online play"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
-      ShellExec('runas', ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="{#AppDirName} online play"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      ShellExec('runas', ExpandConstant('{sys}\netsh.exe'), 'advfirewall firewall delete rule name="{#AppDirName} online play" program="' + ExpandConstant('{app}\game\jsp.exe') + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exit;
   end;
   if CurUninstallStep <> usPostUninstall then Exit;

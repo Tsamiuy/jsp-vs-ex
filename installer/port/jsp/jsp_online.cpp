@@ -256,7 +256,7 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
         env.log("[online] PSNR_SERVER is set in the environment: wins over the settings files");
         online = 1; via = "environment";
     } else if (st.rep_enabled && st.com_enabled) {
-        env.log("[online] ERROR: re-psn and community are both enabled; online play refused, enable one method only "
+        env.log("[online] ERROR: re-psn (standard) and Community are both enabled; online play refused, enable one method only "
                 "(repsn.ini [repsn] enabled / community.ini [community] enabled)");
         /* ASSUMPTION: no player-visible message facility exists in the port yet; the log line is the only report. */
     } else if (st.com_enabled) {
@@ -267,7 +267,7 @@ static int apply(const Env& env, const std::string& shared_dir, const std::strin
         if (st.server.empty()) env.log("[online] repsn enabled but no valid server= given: staying offline");
         else {
             env.set("PS3_NET_ONLINE", "1"); env.set("PSNR_SERVER", st.server.c_str());
-            env.log("[online] re-psn enabled: server " + st.server);
+            env.log("[online] re-psn (standard) enabled: server " + st.server);
             online = 1;
         }
     }
@@ -518,7 +518,7 @@ static std::string edit_load(const std::string& dir, EditState& s)
 /* "" when s can be saved, else the player-visible reason (the launcher's wording). Both methods on is refused here too. */
 static std::string edit_check(const EditState& s)
 {
-    if (s.rep_enabled && s.com_enabled) return "re-psn and community cannot both be on; pick one method.";
+    if (s.rep_enabled && s.com_enabled) return "re-psn (standard) and Community cannot both be on; pick one choice.";
     if (s.rep_enabled) {
         if (!valid_hostport(s.server)) return "re-psn: the server is host or host:port, port 1 to 65535.";
         if (!valid_name(s.name)) return "re-psn: the online name is 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.";
@@ -566,12 +566,19 @@ static EditState g_es;
 /* Text lines for the in-game page, read only: the settings read at start, one line per call (line 0, 1, ...).
  * Returns the number of lines left to ask for after this one (0 = this was the last), or -1 when `line` is out of range
  * or nothing was read yet. ASCII only (the page's font). */
+// The immutable backend selected at startup; editing saved files does not change this session.
+extern "C" int jsp_online_running_method(void)
+{
+    const jsp_online::View& v = jsp_online::g_view;
+    return v.valid && v.online ? (v.method == 2 ? 2 : 1) : 0;
+}
+
 extern "C" int jsp_online_describe(int line, char* out, int n)
 {
     using namespace jsp_online;
     const View& v = g_view;
     if (!v.valid || line < 0 || line > 5 || n < 2) return -1;
-    static const char* const methods[] = {"Off", "re-psn", "Community (not supported yet)", "REFUSED: both enabled"};
+    static const char* const methods[] = {"Off", "re-psn (standard)", "Community (not supported yet)", "REFUSED: both enabled"};
     switch (line) {
     case 0: snprintf(out, n, "Method: %s (%s)", methods[v.method], v.via); break;
     case 1: snprintf(out, n, "Server: %s (%s)", v.server[0] ? v.server : "(none)", v.via); break;

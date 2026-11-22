@@ -6,8 +6,7 @@ copy, see RPCS3 and its documentation), copies the port's sources, a
 pinned compiler and a Python to the install folder, and then builds the port there (`installer/tools/firstrun.py`: lift,
 SPU jobs, compile). You need no Visual Studio: the compiler (llvm-mingw, with CMake and Ninja) is in the package. The
 installer and the program contact no server: no update check, no crash report, no telemetry. The one exception is
-Online Battle (experimental): the first run turns it on with a public re-psn test server (not run by this project) unless online settings already exist
-(the game talks to that server only for Online Battle); the settings window's Online tab turns it off. See
+optional Online Battle. Choose a server and online name in the settings window to enable it. See
 [Online Battle](#online-battle-experimental).
 
 **The compile step has not been run on a real Windows PC.** See the table.
@@ -215,20 +214,18 @@ The game's own Online Battle can run against a [re-psn](https://github.com/undec
 matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
 match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in
 the installer's only tree (`--tree current`, see above); the retired legacy tree (tag `legacy-v15`) never had them.
-**Online defaults:** at the end of a full run, `firstrun.py` writes the shared `repsn.ini` (re-psn on, a public test server that this project does not run,
-`107.175.17.162:36100`, a random name `Player` + 4 digits) when neither `repsn.ini` nor `community.ini` exists in the shared or the
-game folder, and adds `JSP_ROLLBACK=1` and `JSP_ROLLBACK_RELAY=1` to the settings file unless it already has a `JSP_ROLLBACK` line or a
-rollback role key. That is "Online Battle + rollback": the game's own Online Battle > Friendly Match pairs the players and rollback
-runs the fight. Existing files are never changed. `--no-online-defaults` (or `JSP_ONLINE_DEFAULTS=0`) skips the step. Tester guide:
-[docs/TESTING_ONLINE.md](../docs/TESTING_ONLINE.md). Without these files and settings, online is off. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
+**Online setup.** First run preserves saved settings. A fresh installation with no online configuration starts offline. To play online, open **Settings > Online**, choose **re-psn**, enter the server address approved for your session and your online name, then save. Select rollback separately for a supported disc. The launcher displays shared preferences. Per-game settings, environment variables and launch arguments can affect the session. The first-run options `--no-online-defaults` and `JSP_ONLINE_DEFAULTS=0` suppress the setup notice. See [the tester guide](../docs/TESTING_ONLINE.md). Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.
 
 The settings window's Online tab (the same tab is also in `launcher/JStarsLauncher19.cs`) sets this up without editing files: Off, re-psn (server and online name) or Community server
 (a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
-not work on a community server). With re-psn the tab also has **Public server** (fills in that public test server), **Rollback netcode for
-Online Battle fights** (`JSP_ROLLBACK=1` without a role key in `play_settings.txt`, on by default; untick it for the game's own netcode)
+not work on a community server). With re-psn, select **Rollback netcode for Online Battle fights** to enable `JSP_ROLLBACK=1` without a role key,
 and **If the two PCs cannot connect directly, pass the match through the server (relay)** (`JSP_ROLLBACK_RELAY`), and a line at the top says what the next start does. Choosing one turns the other off in the same save. It writes `repsn.ini` and
+The settings window's Online tab (the same tab is also in `launcher/JStarsLauncher19.cs`) sets this up without editing files, with one choice: Off, re-psn (standard) (server and online name), re-psn (rollback)
+(experimental, two players: role, relay, and an advanced direct-IP box) or Community (a list of presets, each with an address
+and an online name; none is shipped; features that exist only in this port do not work on a community server). Saving a choice
+turns the others off, including the rollback lines of `play_settings.txt`. It writes `repsn.ini` and
 `community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a
 portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. On the re-psn choice, **Find on LAN** broadcasts one small UDP request (port 36100) and fills the Server field from a server that
 answers; the host starts re-psn with `-discover` (a build with LAN discovery; see [docs/ONLINE.md](../docs/ONLINE.md#playing-on-the-same-network-lan)).

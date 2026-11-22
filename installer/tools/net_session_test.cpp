@@ -12,6 +12,9 @@
 #include "jsp_net_session.h"
 #include "jsp_stepper.h"
 #include "jsp_net_glue.h"
+#include "jsp_stall_rule.h"
+#include <filesystem>
+#include <fstream>
 
 #include <chrono>
 #include <cstdio>
@@ -207,15 +210,57 @@ int main(int argc, char** argv)
         if (in_window) { runs_after_first++; if (!op.replay) live_after_first++; }
         seen_run = true;
     };
+    // Test-only protocol: the driver releases the stalled origin ONLY after the real peer reports its event.
+    std::string mailbox_mode = arg(argc, argv, "--mailbox-peer", "");
+    const std::string mailbox_gate = arg(argc, argv, "--mailbox-gate", "");
+    bool mailbox_stalled = false, mailbox_noted = false; int mailbox_seen_at = -1;
+    auto gate_exists = [&](const char* suffix) { return std::filesystem::exists(mailbox_gate + suffix); };
+    auto await_release = [&] { const int end = since() + 5000; while (!gate_exists(".release") && since() < end) sleep_ms(1); return gate_exists(".release"); };
     uint64_t upd_prev = 0, paced_n = 0, paced_ms = 0;
     while (true) {
+        if (!mailbox_stalled && (mailbox_mode == "origin" || mailbox_mode == "control-origin") && max_tick >= 20 && s.synced()) {
+            mailbox_stalled = true;
+            const bool request = mailbox_mode == "origin";
+            auto activation = std::make_shared<jsr::Activation>(0, s.host_abort_handle());
+            if (!activation->host_abort) return 9;
+            std::thread producer([&, activation, request] {
+                if (!request) return;
+                sleep_ms(100); activation->report_failure();
+                std::printf("MAILBOX_POSTED\n"); std::fflush(stdout);
+            });
+            { std::ofstream mark(mailbox_gate + ".stalled"); mark << max_tick << '\n'; }
+            std::printf("MAILBOX_STALLED tick=%u timeout_ms=%u\n", max_tick, cfg.disconnect_timeout_ms); std::fflush(stdout);
+            // No hub/session/glue/boundary/poll call until driver acknowledges peer receipt (or control observation).
+            const bool released = await_release();
+            producer.join();
+            if (!released) { std::printf("MAILBOX_BOUND_EXPIRED\n"); std::fflush(stdout); return 9; }
+            if (request) {
+                const bool ok = s.failed() && s.failure() == "frame clock stalled";
+                std::printf("MAILBOX_ORIGIN_RELEASED failed=%d\n", ok); std::fflush(stdout); return ok ? 0 : 9;
+            }
+            if (s.failed()) return 9;
+            std::printf("MAILBOX_RESUMED tick=%u\n", max_tick); std::fflush(stdout); mailbox_mode.clear();
+        }
         hub.pump();
         if (!s.failed()) one_iteration();
         for (const SessionEvent& e : s.take_events()) {
+            if (!mailbox_mode.empty() && e.kind == SessionEventKind::Disconnected) {
+                if (mailbox_mode != "witness") { std::printf("MAILBOX_UNEXPECTED_DISCONNECT\n"); std::fflush(stdout); return 9; }
+                std::printf("MAILBOX_RECEIVED at_ms=%d timeout_ms=%u\n", since(), cfg.disconnect_timeout_ms); std::fflush(stdout);
+                if (!await_release()) return 9;
+                std::printf("MAILBOX_WITNESS_RELEASED\n"); std::fflush(stdout); return 0;
+            }
             char b[200];
             const char* k[] = {"syncing", "connected", "started", "disconnected", "desync", "failed", "replay-finished"};
             std::snprintf(b, sizeof b, " %s(h=%d t=%d)", k[(int)e.kind], e.handle, e.tick);
             if (e.kind != SessionEventKind::Syncing) { if (evlog.size() < 600) evlog += b; }
+        }
+        if (mailbox_mode == "control-witness" && gate_exists(".stalled")) {
+            if (mailbox_seen_at < 0) mailbox_seen_at = since();
+            if (!mailbox_noted && since() - mailbox_seen_at >= 1000) {
+                mailbox_noted = true; std::printf("MAILBOX_CONNECTED observed_ms=%d\n", since()-mailbox_seen_at); std::fflush(stdout);
+            }
+            if (gate_exists(".release")) mailbox_mode.clear();
         }
         if (s.failed()) { linger_until = linger_until < 0 ? since() + 700 : linger_until; if (since() > linger_until) break; }
         if (leave_at >= 0 && !left && (int)max_tick >= leave_at) { s.leave(0); left = true; linger_until = since() + 500; }

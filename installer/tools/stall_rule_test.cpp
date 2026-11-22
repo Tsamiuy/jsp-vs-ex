@@ -2,6 +2,7 @@
 #include "jsp_stall_rule.h"
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail++; } } while (0)
@@ -61,6 +62,80 @@ int main()
         s.now_ms = 1000 + jsr::kFailMs - 1; CHECK(jsr::step(st, s) == Act::None);
         s.now_ms = 1000 + jsr::kFailMs;     CHECK(jsr::step(st, s) == Act::Fail);
         s.now_ms += 5000;                   CHECK(jsr::step(st, s) == Act::None);
+    }
+    {   // no first flip: count from activation, not from a nonexistent flip timestamp
+        jsr::State st; jsr::begin(st, 1000);
+        jsr::Sample s; s.now_ms = 1000 + jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::None);
+        jsr::begin(st, 200000); s.now_ms = 200000 + jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None); // prior failure cannot carry into the new match
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+    }
+    {   // the real clock origin may be zero; stale samples cannot underflow the deadline
+        jsr::State st; jsr::begin(st, 0);
+        jsr::Sample s; s.now_ms = jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+        jsr::begin(st, 10000); s.now_ms = 9999;
+        CHECK(jsr::step(st, s) == Act::None);
+    }
+    {   // real flips renew the deadline; a prior match's timestamp does not predate activation
+        jsr::State st; jsr::begin(st, 1000);
+        jsr::Sample s; s.last_flip_ms = 10000; s.now_ms = 1000 + jsr::kFailMs;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms = 10000 + jsr::kFailMs; CHECK(jsr::step(st, s) == Act::Fail);
+        jsr::begin(st, 200000); s.last_flip_ms = 1000; s.now_ms = 200000 + jsr::kFailMs - 1;
+        CHECK(jsr::step(st, s) == Act::None);
+        s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+    }
+    {   // Pause the clock after obtaining the old pass. Rearm before its failure publication.
+        jsr::Activations matches;
+        matches.set(true, 0);
+        auto old_pass = matches.current();
+        jsr::Sample s;
+        s.now_ms = jsr::kFailMs;
+        CHECK(jsr::step(old_pass->rule, s) == Act::Fail);
+        matches.set(false, 0);
+        CHECK(!matches.current());
+        matches.set(true, 0); // same timestamp, distinct match
+        auto current_pass = matches.current();
+        std::thread late_clock([old_pass] {
+            old_pass->failed.exchange(true); // same publication used by the no-flip and ack watchdogs
+            jsr::flip_taken(old_pass->rule);
+        });
+        late_clock.join();
+        CHECK(old_pass->failed.load());
+        CHECK(!matches.failed());
+        CHECK(current_pass != old_pass);
+        CHECK(jsr::step(current_pass->rule, s) == Act::Fail);
+        current_pass->failed.exchange(true);
+        CHECK(matches.failed());
+        matches.set(false, 0);
+        CHECK(!matches.failed());
+    }
+    {   // Concurrent readers must see fully initialized handles across retire/rearm.
+        jsr::Activations matches;
+        std::atomic<bool> done{false}, bad{false};
+        std::thread reader([&] {
+            while (!done.load()) {
+                auto pass = matches.current();
+                if (pass && (!pass->rule.started || pass->rule.started_ms > 9999)) bad.store(true);
+                (void)matches.failed();
+            }
+        });
+        for (uint64_t i = 0; i < 10000; ++i) {
+            matches.set(true, i);
+            auto pinned = matches.current();
+            matches.set(false, i);
+            pinned->failed.store(true); // retired failure cannot affect current publication
+        }
+        done.store(true);
+        reader.join();
+        CHECK(!bad.load());
+        CHECK(!matches.current());
+        CHECK(!matches.failed());
     }
     if (g_fail) { std::printf("stall_rule_test: %d failure(s)\n", g_fail); return 1; }
     std::printf("stall_rule_test: all checks passed\n");

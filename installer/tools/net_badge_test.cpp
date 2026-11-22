@@ -1,13 +1,56 @@
 // Host test of installer/port/jsp/jsp_net_badge.h: the rollback status badge's text, key, values, refresh gate and layout, and the ping counter under the fight timer. No game, no GPU.
 // With a file argument it writes the status lines it built there, one per line, for net_badge_test.sh to match against support_bundle.py.
 #include "../port/jsp/jsp_net_badge.h"
+#include "../port/jsp/jsp_overlay_owner.h"
+#include <future>
+#include <thread>
+#include "../port/jsp/jsp_online_status.h"
+#include "../port/jsp/jsp_overlay_owner.h"
 #include <cstdio>
 #include <limits>
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
 using namespace jpnb;
+static void check_overlay_ownership()
+{
+    CHECK(!jpo::version_surface(true, false, false));
+    CHECK(jpo::version_surface(true, false, true));
+    CHECK(jpo::version_surface(true, true, false));
+    CHECK(!jpo::version_surface(false, true, true));
+
+    std::string surface = "Opponent disconnected";
+    const auto last_status_epoch = jpo::menu_epoch();
+    std::promise<void> competing;
+    auto started = competing.get_future();
+    std::thread status;
+    {
+        jpo::MenuFrame page(true);
+        surface = "Options";
+        status = std::thread([&] {
+            competing.set_value();
+            jpo::StatusFrame update;
+            if (update) surface = "64 ms";
+        });
+        started.get();
+    }
+    status.join();
+    CHECK(surface == "Options");
+    { jpo::StatusFrame close; if (close) surface.clear(); }
+    CHECK(surface == "Options");
+    { jpo::MenuFrame redraw(true); }
+    CHECK(jpo::menu_epoch() == last_status_epoch + 1);
+    { jpo::MenuFrame release(false); surface.clear(); }
+    // The message did not change while the page was up. Its previous presentation is stale.
+    if (!jpo::menu_active() && jpo::menu_epoch() != last_status_epoch) {
+        jpo::StatusFrame restore;
+        if (restore) surface = "Opponent disconnected";
+    }
+    CHECK(surface == "Opponent disconnected");
+}
+
 int main(int argc, char** argv)
 {
+    check_overlay_ownership();
     // the key: off unless set to a non-zero value (as JSP_ROLLBACK)
     CHECK(!key_on(nullptr) && !key_on("") && !key_on("0") && !key_on("00"));
     CHECK(key_on("1") && key_on("yes") && key_on("2"));
@@ -100,6 +143,47 @@ int main(int argc, char** argv)
             std::fclose(f);
         } else { std::printf("FAIL: cannot write %s\n", argv[1]); fails++; }
     }
+    // The shared retained surface must survive status redraw AND status close.
+    CHECK(!jpo::version_surface(true, false, false)); // absent or expired notice, no version art
+    CHECK(jpo::version_surface(true, false, true));
+    CHECK(jpo::version_surface(true, true, false));
+    CHECK(!jpo::version_surface(false, true, true));
+    const uint64_t prior_menu_epoch = jpo::menu_epoch();
+    int surface = 0;
+    { jpo::MenuFrame page(true); surface = 1; }
+    CHECK(jpo::menu_epoch() == prior_menu_epoch + 1);
+    { jpo::MenuFrame same_page(true); }
+    CHECK(jpo::menu_epoch() == prior_menu_epoch + 1);
+    { jpo::StatusFrame status; if (status) surface = 2; }
+    CHECK(surface == 1 && jpo::menu_active());
+    { jpo::StatusFrame status; if (status) surface = 0; }
+    CHECK(surface == 1);
+    { jpo::MenuFrame page(false); surface = 0; }
+    { jpo::StatusFrame status; CHECK(bool(status)); if (status) surface = 2; }
+    CHECK(surface == 2 && !jpo::menu_active());
+    CHECK(jpo::menu_epoch() != prior_menu_epoch); // restore previously painted static status too
+
+    // Unknown observations must never look connected or content-verified.
+    auto observed = jpon::empty();
+    CHECK(jpon::describe(observed).title == "Offline");
+    observed.phase = static_cast<uint32_t>(jpon::Phase::Playing);
+    CHECK(jpon::describe(observed).tone == jpon::Tone::Warning);
+    observed.content_agreed = 1;
+    CHECK(jpon::describe(observed).detail.find("path unknown") != std::string::npos);
+    CHECK(jpon::describe(observed).detail.find("delay unknown") != std::string::npos);
+    observed.path = 2; observed.input_delay = 3; observed.last_rollback = 5;
+    CHECK(jpon::describe(observed).detail == "Relay connection | input delay 3f | last rollback 5f");
+    observed.phase = static_cast<uint32_t>(jpon::Phase::Ended);
+    CHECK(jpon::describe(observed).title == "Online session ended");
+    std::fill(observed.reason, observed.reason + sizeof observed.reason, char(1));
+    CHECK(jpon::describe(observed).detail == std::string(sizeof observed.reason, char(63)));
+    observed.phase = static_cast<uint32_t>(jpon::Phase::Refused);
+    CHECK(jpon::describe(observed).title == "Online could not start");
+    observed.phase = 999;
+    CHECK(jpon::describe(observed).title == "Online status unavailable");
+    CHECK(jpon::badge_enabled(false, nullptr));
+    CHECK(!jpon::badge_enabled(true, "0") && !jpon::badge_enabled(true, ""));
+    CHECK(jpon::badge_enabled(true, "1"));
     if (!fails) std::printf("net badge: all checks pass\n");
     return fails ? 1 : 0;
 }

@@ -21,7 +21,7 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-INCS = ["include", "runtime/ppu", "runtime/spu", "runtime/memory", "runtime/syscalls", "runtime/platform", "libs/video", "libs/network/psnr"]
+INCS = ["include", "runtime/ppu", "runtime/spu", "runtime/memory", "runtime/syscalls", "runtime/platform", "libs/video", "libs/input", "libs/network/psnr"]
 FLAGS = ["-fsyntax-only", "-w", "-ffp-contract=off", "-mavx2", "-mfma", "-fno-strict-aliasing", "-fwrapv"]   # CMakeLists.txt: JSP_AVX2 on
 # CMakeLists.txt: the jsp target is built with JSP_ROLLBACK_BUILD and links jsp_gekkonet, whose include folder and definitions are PUBLIC
 PORT_DEFS = ["-DJSP_ROLLBACK_BUILD=1", "-DGEKKONET_STATIC", "-DGEKKONET_NO_ASIO"]

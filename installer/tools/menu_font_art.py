@@ -49,11 +49,11 @@ def main():
     f = ImageFont.truetype(font, int(round(mle.SIZE * SS * mle.CAP * SS / capnow)))
     glyphs = []     # (cw, adv16, pen_x, [off, on])
     for c in range(FIRST, LAST + 1):
-        ch = chr(c); adv = f.getlength(ch) / SS
+        ch = chr(c); adv = f.getlength(ch) / SS * mle.WIDTH_SCALE
         if ch == " ":
             glyphs.append((0, int(round(adv * 16)), 0, None)); continue
         bb = f.getbbox(ch, anchor="ls")
-        ink = (bb[2] - bb[0]) / SS
+        ink = (bb[2] - bb[0]) / SS * mle.WIDTH_SCALE
         cw = int(math.ceil(ink)) + 2 * PAD + 5      # +5: the shear leans the top right
         m = mle.letters(font, ch, cw, CELL_H, PAD, BASELINE)
         off, on = mle.styles(m, cw, CELL_H, BASELINE)
@@ -61,7 +61,7 @@ def main():
         for a in (off, on, *pl):                          # nothing may touch the cell border
             al = a[..., 3]
             assert al[0].max() == 0 and al[-1].max() == 0 and al[:, 0].max() == 0 and al[:, -1].max() == 0, ch
-        glyphs.append((cw, int(round((adv + TRACK_PX) * 16)), int(round(PAD - bb[0] / SS)), [off, on, *pl]))
+        glyphs.append((cw, int(round((adv + TRACK_PX * mle.WIDTH_SCALE) * 16)), int(round(PAD - bb[0] / SS * mle.WIDTH_SCALE)), [off, on, *pl]))
     # shelf packing, style 0
     x = y = 0; pos = []
     for cw, _, _, _ in glyphs:

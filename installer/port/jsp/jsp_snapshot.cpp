@@ -60,6 +60,7 @@
 #include "jsp_snapshot_sync.h"
 #include "jsp_snapshot_flow.h"
 #include "jsp_thread_registry.h"
+#include "jsp_rollback_checks.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -1340,20 +1341,24 @@ DWORD WINAPI async_audit_main(void*)
     }
 }
 #endif
-bool registry_audit_tick(const char* what, uint32_t k)
+bool start_audit_worker()
 {
-    if (!audit_async_on()) return registry_audit(what, k);
 #ifdef _WIN32
-    static bool started = false;
-    if (!started) {
-        started = true;
-        { const char* e = std::getenv("JSP_SNAPSHOT_AUDIT_PERIOD_MS"); if (e && *e) g_async_audit_period_ms = (DWORD)std::strtoul(e, nullptr, 10); }
-        DWORD tid = 0; HANDLE h = CreateThread(nullptr, 0, async_audit_main, nullptr, 0, &tid);
-        if (h) { if (g_audit_exempt) exempt_add((uint32_t)tid); CloseHandle(h); } else return registry_audit(what, k);   // exempt: listed in freeze_exempt before the next freeze (this thread takes them)
-        std::fprintf(stderr, "[snap] threads audit (background) every %lu ms, %s\n", (unsigned long)(g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u),
-                     g_audit_exempt ? "left running by the freeze (JSP_SNAPSHOT_AUDIT_EXEMPT=1)" : "frozen with the others (JSP_SNAPSHOT_AUDIT_EXEMPT=0)");
-    }
+    { const char* e = std::getenv("JSP_SNAPSHOT_AUDIT_PERIOD_MS"); if (e && *e) g_async_audit_period_ms = (DWORD)std::strtoul(e, nullptr, 10); }
+    DWORD tid = 0; HANDLE h = CreateThread(nullptr, 0, async_audit_main, nullptr, 0, &tid);
+    if (!h) return false;
+    if (g_audit_exempt) exempt_add((uint32_t)tid);
+    CloseHandle(h);   // exempt: listed in freeze_exempt before the next freeze (this thread takes them)
+    std::fprintf(stderr, "[snap] threads audit (background) every %lu ms, %s\n", (unsigned long)(g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u),
+             g_audit_exempt ? "left running by the freeze (JSP_SNAPSHOT_AUDIT_EXEMPT=1)" : "frozen with the others (JSP_SNAPSHOT_AUDIT_EXEMPT=0)");
+    return true;
+#else
+    return false;
 #endif
+}
+
+bool poll_audit_worker(const char* what, uint32_t k)
+{
     const auto t = Clock::now();
     jtr::Registry& R = jsp_thread_registry();
     R.reclaim([](void* h) { jsp_thread_registry_close(h); }, [](void* h) { return jsp_thread_registry_ended(h); }, true);
@@ -1367,6 +1372,14 @@ bool registry_audit_tick(const char* what, uint32_t k)
     if (n && k % (g_audit_every * 10u) == 0)
         std::fprintf(stderr, "[snap] threads audit (background) k=%u audits=%u ms mean=%.3f max=%.3f\n", k, n, (double)g_async_audit_us_sum.load() / 1000.0 / n, (double)g_async_audit_us_max.load() / 1000.0);
     return true;
+}
+
+bool registry_audit_tick(const char* what, uint32_t k)
+{
+    if (!audit_async_on()) return registry_audit(what, k);
+    static bool running = false;
+    return jsp_rollback::periodic_audit(running, start_audit_worker,
+        [&] { return registry_audit(what, k); }, [&] { return poll_audit_worker(what, k); });
 }
 
 // initial = the first save of the run; false = a re-baseline after the saved layout changed: the history is dropped, the round in progress is aborted by the caller.

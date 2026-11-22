@@ -26,7 +26,7 @@ index 09c7590..56ad6a0 100644
  
  /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
   * rather than including sys_event.h to avoid pulling PPU context/syscall
-@@ -728,6 +729,49 @@ static void audio_dump_mix(void)
+@@ -728,6 +729,52 @@ static void audio_dump_mix(void)
      if (wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, wf);
  }
  
@@ -58,8 +58,11 @@ index 09c7590..56ad6a0 100644
 +        if (!s_notify_queues[i].in_use) continue;
 +        const uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
 +        if (!qid || qid > SYS_EVENT_QUEUE_MAX) continue;
-+        const sys_event_queue_info* q = &g_sys_event_queues[qid - 1];
-+        if (q->active && (q->count > 0 || q->waiters < 1)) return 0;
++        sys_event_queue_info* q = &g_sys_event_queues[qid - 1];
++        mutex_lock(&q->lock);
++        const int busy = q->active && (q->count > 0 || q->waiters < 1);
++        mutex_unlock(&q->lock);
++        if (busy) return 0;
 +    }
 +    return 1;
 +}
@@ -76,7 +79,7 @@ index 09c7590..56ad6a0 100644
  #ifdef _WIN32
  static unsigned long long g_audio_underruns;
  static unsigned __stdcall audio_mix_thread_func(void* arg)
-@@ -756,7 +800,17 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -756,7 +803,17 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
       * With no device, pace on the performance counter instead. */
      LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
      unsigned long long blocks = 0;
@@ -86,8 +89,8 @@ index 09c7590..56ad6a0 100644
 +            if (g_ps3_audio_lock_done >= g_ps3_audio_lock_target) { WaitForSingleObject(s_lock_wake, 2); continue; }
 +            audio_mix_one_block();
 +            if (!g_ps3_audio_lock_mute) { const int rm = audio_backend_room(); if (rm < 0 || rm >= CELL_AUDIO_BLOCK_SAMPLES) audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES); }
-+            g_ps3_audio_lock_done++;
 +            audio_notify_event_queues();
++            g_ps3_audio_lock_done++;   /* publish the block only after its notification has been queued */
 +            QueryPerformanceCounter(&q0); blocks = 0;   /* back on the clock from here when the lock ends */
 +            continue;
 +        }

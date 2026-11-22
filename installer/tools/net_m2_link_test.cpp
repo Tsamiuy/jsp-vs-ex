@@ -41,9 +41,9 @@ template <class F> static bool wait_for(int ms, F f) { for (int i = 0; i < ms / 
 struct MatchSide {
     bool is_host; UdpMux& mux; Link link; FakeReader r; EffectiveValues ev{&r}; Caps caps; Config cfg; M2Pump pump;
     std::unique_ptr<Host> h; std::unique_ptr<Client> c; uint64_t base; uint32_t k = 0; std::atomic<uint32_t> jump{0};
-    uint64_t beacon_next = 0, older = 0, beacons = 0, newer = 0, follows = 0; bool proposed = false;
+    uint64_t beacon_next = 0, older = 0, beacons = 0, newer = 0, follows = 0; bool proposed = false, start_when_ready = true;
     MatchSide(bool host, UdpMux& m, const Endpoint& peer, uint64_t b, const Config& cf) : is_host(host), mux(m), link(m), cfg(cf), base(b)
-    { r.ev = &ev; caps.build = 0xB001; link.set_peer(host ? 1 : 0, peer); }
+    { r.ev = &ev; caps.build = 0xB001; caps.content = sha256(nullptr, 0); link.set_peer(host ? 1 : 0, peer); }
     void start() { pump.start(mux, link, [this](uint8_t f, const uint8_t* d, size_t n, uint64_t t) { on(f, d, n, t); }, [this](uint64_t t) { tick(t); }, 100); }
     void on(uint8_t from, const uint8_t* d, size_t n, uint64_t t)
     {
@@ -63,7 +63,7 @@ struct MatchSide {
         h->tick(t);
         const State st = h->state();
         if (st == State::Open && (h->hellos() & 2) && !proposed) proposed = h->propose(rb_values(), t) == Reason::None;
-        if (st == State::Ready) h->start(0);
+        if (st == State::Ready && start_when_ready) h->start(0);
         if (k > 0 && st == State::Open && !(h->hellos() & 2) && t >= beacon_next) { beacon_next = t + 1000; const auto b = match_beacon(base, k); link.send(1, b.data(), b.size()); }
     }
     void arm(uint32_t kk)
@@ -91,7 +91,7 @@ int main()
     const uint8_t roster = 0x3;                        // peers 0 and 1
 
     FakeReader rh, rc; EffectiveValues evh(&rh), evc(&rc); rh.ev = &evh; rc.ev = &evc;
-    Caps caps; caps.build = 0xB001;
+    Caps caps; caps.build = 0xB001; caps.content = sha256(nullptr, 0);
     Link lh(mh), lc(mc); lh.set_peer(1, ec); lc.set_peer(0, eh);
     Config cfg; cfg.retry_ms = 150; cfg.retries = 40; cfg.keepalive_ms = 300; cfg.liveness_ms = 2000;   // short timers for the test
     Host host(lh, evh, caps, 0, cfg);
@@ -216,6 +216,29 @@ int main()
         CHECK(wait_for(10000, both_started));
         CHECK(H.k == 3 && C.k == 3 && H.follows == 1);
         { std::lock_guard<std::mutex> a(C.pump.mutex()); CHECK(C.ev.active() && C.r.live.v[(size_t)Id::StageId] == 7); }   // settings applied for match 3
+        // A content change after Start must still cancel the remote's active session.
+        { std::lock_guard<std::mutex> lk(H.pump.mutex()); CHECK(!require_live_content(false, H.h.get(), nullptr)); }
+        CHECK(wait_for(6000, [&] { return terminal(C.state()); }));
+        { std::lock_guard<std::mutex> lk(C.pump.mutex()); CHECK(C.c->reason() == Reason::ContentChanged && !C.ev.active()); }
+        H.end(); C.end();
+        // Rematch on the same link and release word, but the reopened peer now offers different content.
+        { std::lock_guard<std::mutex> lk(C.pump.mutex()); C.caps.content.back() ^= 1; }
+        H.arm(4); C.arm(4);
+        CHECK(wait_for(6000, [&] { return terminal(H.state()) && terminal(C.state()); }));
+        CHECK(H.state() != State::Started && C.state() != State::Started);
+        { std::lock_guard<std::mutex> lk(H.pump.mutex()); CHECK(H.h->reason() == Reason::ContentMismatch); }
+        { std::lock_guard<std::mutex> lk(C.pump.mutex()); CHECK(C.c->reason() == Reason::ContentMismatch && !C.ev.active()); }
+        H.end(); C.end();
+        // Fresh agreement in the fixture. Hold the host at Ready, invalidate the client, and try Start.
+        { std::lock_guard<std::mutex> lk(H.pump.mutex()); H.start_when_ready = false; }
+        { std::lock_guard<std::mutex> lk(C.pump.mutex()); C.caps.content.back() ^= 1; }
+        H.arm(5); C.arm(5);
+        CHECK(wait_for(6000, [&] { return H.state() == State::Ready; }));
+        { std::lock_guard<std::mutex> lk(C.pump.mutex()); CHECK(!require_live_content(false, nullptr, C.c.get())); }
+        CHECK(wait_for(6000, [&] { return terminal(H.state()); }));
+        { std::lock_guard<std::mutex> lk(H.pump.mutex());
+          CHECK(H.h->reason() == Reason::ContentChanged && H.h->start(0) != Reason::None && !H.ev.active()); }
+        CHECK(C.state() != State::Started);
         CHECK(ma.dropped > 0 && mb.dropped > 0);   // the link really was lossy
         H.pump.stop(); C.pump.stop();
     }

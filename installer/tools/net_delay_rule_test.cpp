@@ -18,13 +18,21 @@ struct Sim {
     double avg = 100, jit = 2;
     uint64_t t0 = 0;
     int changes = 0; const char* last_why = "";
+    uint64_t sample_id = 0;
+    double sample_value = -1;
     // runs ms of live ticks (one per 33 ms); returns the delay
     int run(uint64_t ms)
     {
         const uint64_t end = t + ms;
         for (; t < end; t += 33) {
             if (!t0) t0 = t;
-            const jpdr::Decision d = jpdr::step(s, p, t, [&] { jpdr::Reading r; r.ping_avg = avg; r.jitter = jit; r.last_ping = rtt(t - t0); r.cur = cur; return r; });
+            const jpdr::Decision d = jpdr::step(s, p, t, [&] {
+                const uint64_t id = (t - t0) / 500 + 1;
+                if (id != sample_id) { sample_id = id; sample_value = rtt(t - t0); }
+                jpdr::Reading r; r.ping_avg = avg; r.jitter = jit; r.last_ping = sample_value; r.cur = cur;
+                r.sample_id = id; r.sample_at_ms = t - (t - t0) % 500; r.observed_ms = t;
+                return r;
+            });
             if (d.want >= 0 && d.want != cur) { cur = d.want; changes++; last_why = d.why; }
         }
         return cur;
@@ -135,6 +143,53 @@ int main()
     {
         Sim m; m.p.hi = 3; m.p.clamp(); m.rtt = [](uint64_t) { return 400.0; };
         CHECK(m.run(30000) == 3);
+    }
+    // Polling a cached measurement must not fabricate an RTT window or calm votes.
+    {
+        jpdr::Params p; p.guard_ms = p.early_ms = p.sample_from_ms = 0;
+        p.first_ms = 1000; p.every_ms = 500; p.down_votes = 2; p.clamp();
+        jpdr::State s;
+        auto tick = [&](uint64_t now, uint64_t id, double ping, uint64_t age) {
+            return jpdr::step(s, p, now, [&] {
+                jpdr::Reading r; r.cur = 3; r.ping_avg = r.last_ping = ping;
+                r.sample_id = id; r.sample_at_ms = now - age; r.observed_ms = now; return r;
+            });
+        };
+        tick(100000, 0, 20, 0);
+        tick(100500, 0, 20, 0);
+        CHECK(s.n == 0); // no producer sample, even with a plausible cached number
+        tick(101000, 1, 20, 0);
+        const uint64_t received = s.rtt_t[0];
+        for (uint64_t t = 101500; t <= 110000; t += 500)
+            CHECK(tick(t, 1, 20, t - received).want == -1);
+        CHECK(s.n == 1 && s.rtt_t[0] == received);
+        CHECK(tick(110500, 2, 20, 0).want == -1); // old sample has expired
+        CHECK(tick(111000, 3, 20, 0).want == -1);
+        CHECK(tick(111500, 4, 20, 0).want == -1); // first fresh calm vote
+        CHECK(s.down == 1);
+        CHECK(tick(112000, 4, 20, 500).want == -1 && s.down == 0);
+        CHECK(tick(112500, 5, 20, 0).want == -1);
+        CHECK(tick(113000, 6, 20, 0).want == 2); // equal RTT values are separate real measurements
+        CHECK(tick(113500, 1, 20, 0).want == -1 && s.n == 1); // restarted source
+        tick(114000, 2, 20, 14001); // belongs to before this match
+        tick(114500, 3, NAN, 0);
+        tick(115000, 4, INFINITY, 0);
+        CHECK(s.n == 1);
+        tick(115500, 5, 0, 0); // a measured zero is valid; an absent sample is not
+        CHECK(s.n == 2);
+    }
+    // A read delayed past the tick's captured clock must retain the real receipt time.
+    {
+        jpdr::Params p; p.sample_from_ms = 0; p.clamp();
+        jpdr::State s;
+        auto read = [] {
+            jpdr::Reading r; r.cur = 2; r.last_ping = r.ping_avg = 60;
+            r.sample_id = 1; r.sample_at_ms = 10100; r.observed_ms = 10300; return r;
+        };
+        jpdr::step(s, p, 10000, read);
+        jpdr::step(s, p, 10000, read);
+        CHECK(s.n == 1 && s.rtt_t[0] == 10100); // never 9800 from subtracting age 200 from 10000
+        CHECK(s.next_sample == 10800);
     }
     std::printf("net delay rule: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

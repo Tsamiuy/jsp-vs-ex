@@ -26,6 +26,177 @@ using System.Windows.Forms;
 
 namespace JStarsLauncher
 {
+    // BEGIN MODS MANAGER: identical in both launcher variants; no game or GUI calls.
+    class ModsManager
+    {
+        public class Entry { public string Id; public bool Enabled, Installed; public override string ToString() { return Id + (Installed ? "" : " (missing folder)"); } }
+        public readonly List<Entry> Entries = new List<Entry>();
+        public string DirectoryPath, ListPath;
+        public bool GlobalOff;
+        string rootPath, settingsPath, workingPath; bool installedPaths; Func<string, string> environment;
+        byte[] original;
+        string[] lines;
+        string newline;
+        bool bom;
+        static bool Valid(string id) { if (id.Length < 1 || id.Length > 40 || id[0] == '-') return false; foreach (char c in id) if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false; return true; }
+        static byte[] Read(string path)
+        {
+            try { using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) { if (f.Length > 1048576) throw new IOException("mods.txt is larger than 1 MiB."); byte[] b = new byte[(int)f.Length]; int n = 0, k; while (n < b.Length && (k = f.Read(b, n, b.Length - n)) > 0) n += k; if (n != b.Length) throw new IOException("The file changed while it was read."); return b; } }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+        }
+        static bool Same(byte[] a, byte[] b) { if (a == null || b == null) return a == b; if (a.Length != b.Length) return false; for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false; return true; }
+        static string Decode(byte[] b) { string text = new UTF8Encoding(false, true).GetString(b ?? new byte[0]); return text.Length > 0 && text[0] == '\uFEFF' ? text.Substring(1) : text; }
+        static string[] Lines(string text) { if (text.Length == 0) return new string[0]; var result = new List<string>(text.Split('\n')); if (text.EndsWith("\n")) result.RemoveAt(result.Count - 1); return result.ToArray(); }
+        static void Overrides(string path, IDictionary<string, string> values, bool installed, string root)
+        {
+            byte[] bytes = Read(path);
+            if (bytes == null) return;
+            foreach (string raw in (installed ? Encoding.Default.GetString(bytes) : Decode(bytes)).Split('\n')) {
+                string t = raw;
+                if (installed) { if (t.Length > 1022) throw new IOException("A settings line is too long for the game launcher."); if (t.StartsWith("#") || t.StartsWith(";")) continue; }
+                else { int h = t.IndexOf('#'); if (h >= 0) t = t.Substring(0, h); }
+                int eq = t.IndexOf('='); if (eq <= 0) continue;
+                string k = installed ? t.Substring(0, eq) : t.Substring(0, eq).Trim();
+                string v = installed ? t.Substring(eq + 1).TrimEnd('\r', ' ') : t.Substring(eq + 1).Trim();
+                if (k.Equals("JSP_MODS_DIR", StringComparison.OrdinalIgnoreCase) || k.Equals("JSP_MODS_LIST", StringComparison.OrdinalIgnoreCase) || k.Equals("JSP_MODS", StringComparison.OrdinalIgnoreCase)) {
+                    if (installed && v.StartsWith("@APP@", StringComparison.Ordinal)) v = root + v.Substring(5);
+                    values[k.ToUpperInvariant()] = v;
+                }
+            }
+        }
+        public static ModsManager Load(string root, string settings, string working, bool installed, Func<string, string> env)
+        {
+            var values = new Dictionary<string, string>();
+            values["JSP_MODS"] = env("JSP_MODS"); values["JSP_MODS_DIR"] = env("JSP_MODS_DIR"); values["JSP_MODS_LIST"] = env("JSP_MODS_LIST");
+            if (installed) Overrides(Path.Combine(root, "paths.txt"), values, true, root);
+            if (!string.IsNullOrEmpty(settings)) Overrides(settings, values, installed, root);
+            string dir = values["JSP_MODS_DIR"], list = values["JSP_MODS_LIST"];
+            if (string.IsNullOrEmpty(dir)) dir = Path.Combine(root, "mods");
+            // The settings window saves this active file before starting the game; the C launcher then selects it.
+            if (string.IsNullOrEmpty(list)) list = Path.Combine(string.IsNullOrEmpty(settings) ? root : Path.GetDirectoryName(Path.GetFullPath(settings)), "mods.txt");
+            var m = new ModsManager(); m.GlobalOff = values["JSP_MODS"] == "0"; m.rootPath = root; m.settingsPath = settings; m.workingPath = working; m.installedPaths = installed; m.environment = env;
+            m.DirectoryPath = Path.GetFullPath(Path.IsPathRooted(dir) ? dir : Path.Combine(working, dir));
+            m.ListPath = Path.GetFullPath(Path.IsPathRooted(list) ? list : Path.Combine(working, list));
+            m.original = Read(m.ListPath); string text = Decode(m.original); m.bom = m.original != null && m.original.Length >= 3 && m.original[0] == 239 && m.original[1] == 187 && m.original[2] == 191;
+            m.newline = text.Contains("\r\n") ? "\r\n" : "\n"; m.lines = Lines(text);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string raw in m.lines) { string t = raw; int h = t.IndexOf('#'); if (h >= 0) t = t.Substring(0, h); t = t.Trim(); if (t.Length == 0) continue; bool on = t[0] != '-'; if (!on) t = t.Substring(1).TrimStart(); if (!Valid(t)) throw new IOException("mods.txt has an invalid ID; fix the file before saving here."); if (seen.Add(t)) m.Entries.Add(new Entry { Id = t, Enabled = on }); }
+            string[] dirs;
+            try { dirs = Directory.GetDirectories(m.DirectoryPath); } catch (DirectoryNotFoundException) { dirs = new string[0]; }
+            Array.Sort(dirs, StringComparer.Ordinal);
+            foreach (string path in dirs) {
+                string id = Path.GetFileName(path); if (!Valid(id) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) continue;
+                string manifest = Path.Combine(path, "mod.json"); FileAttributes a;
+                try { a = File.GetAttributes(manifest); } catch (FileNotFoundException) { continue; } catch (DirectoryNotFoundException) { continue; }
+                if ((a & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) continue;
+                Entry item = m.Entries.Find(delegate(Entry e) { return e.Id == id; });
+                if (item == null) { item = new Entry { Id = id, Enabled = true }; m.Entries.Add(item); }
+                item.Installed = true;
+            }
+            return m;
+        }
+        public void Move(int from, int to) { if (from < 0 || to < 0 || from >= Entries.Count || to >= Entries.Count) return; Entry e = Entries[from]; Entries.RemoveAt(from); Entries.Insert(to, e); }
+        string Render()
+        {
+            var b = new StringBuilder(); bool inserted = false;
+            foreach (string raw in lines) {
+                string line = raw.TrimEnd('\r'), t = line; int h = t.IndexOf('#'); if (h >= 0) t = t.Substring(0, h);
+                if (t.Trim().Length == 0) { b.Append(line).Append(newline); continue; }
+                if (!inserted) { foreach (Entry e in Entries) b.Append(e.Enabled ? "" : "-").Append(e.Id).Append(newline); inserted = true; }
+                if (h >= 0) b.Append(line.Substring(h)).Append(newline);
+            }
+            if (!inserted) foreach (Entry e in Entries) b.Append(e.Enabled ? "" : "-").Append(e.Id).Append(newline);
+            return b.ToString();
+        }
+        public void Save()
+        {
+            VerifyPaths();
+            if (!Same(original, Read(ListPath))) throw new IOException("mods.txt changed in another program. Refresh before saving.");
+            if (File.Exists(ListPath) && (File.GetAttributes(ListPath) & FileAttributes.ReparsePoint) != 0) throw new IOException("mods.txt is a link; edit its target explicitly instead.");
+            string text = Render(); var enc = new UTF8Encoding(bom); byte[] body = enc.GetBytes(text), pre = enc.GetPreamble();
+            if (body.Length + pre.Length > 1048576) throw new IOException("mods.txt would be larger than 1 MiB.");
+            string temp = ListPath + ".tmp-" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListPath));
+            try { using (var f = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { f.Write(pre, 0, pre.Length); f.Write(body, 0, body.Length); f.Flush(true); } if (!Same(original, Read(ListPath))) throw new IOException("mods.txt changed while saving. Refresh before saving."); if (original == null) File.Move(temp, ListPath); else File.Replace(temp, ListPath, null); }
+            finally { if (File.Exists(temp)) File.Delete(temp); }
+            original = new byte[pre.Length + body.Length]; Buffer.BlockCopy(pre, 0, original, 0, pre.Length); Buffer.BlockCopy(body, 0, original, pre.Length, body.Length); lines = Lines(text);
+        }
+        public void VerifyPaths()
+        {
+            ModsManager current = Load(rootPath, settingsPath, workingPath, installedPaths, environment);
+            if (current.DirectoryPath != DirectoryPath || current.ListPath != ListPath) throw new IOException("Mod paths changed. Refresh before installing or saving.");
+        }
+        public static string QuoteArgument(string value)
+        {
+            var b = new StringBuilder("\""); int slashes = 0;
+            foreach (char c in value) { if (c == '\\') { slashes++; continue; } b.Append('\\', c == '"' ? slashes * 2 + 1 : slashes); b.Append(c); slashes = 0; }
+            return b.Append('\\', slashes * 2).Append('"').ToString();
+        }
+        public string PackageArguments(string root, string archive)
+        {
+            VerifyPaths();
+            return "-I -X utf8 " + QuoteArgument(Path.Combine(root, "tools", "mod_package.py")) + " --archive " + QuoteArgument(Path.GetFullPath(archive)) + " --mods " + QuoteArgument(DirectoryPath);
+        }
+        public string InstallZip(string root, string archive)
+        {
+            string python = Path.Combine(root, "toolchain", "python", "python.exe"), helper = Path.Combine(root, "tools", "mod_package.py");
+            if (!File.Exists(python) || !File.Exists(helper)) throw new IOException("The bundled mod installer is missing. Restore the complete installer or portable folder.");
+            var start = new ProcessStartInfo(python, PackageArguments(root, archive)) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true };
+            using (Process process = Process.Start(start)) {
+                string error = ""; Exception readError = null;
+                var drain = new Thread(delegate() { try { error = process.StandardError.ReadToEnd(); } catch (Exception e) { readError = e; } });
+                drain.IsBackground = true; drain.Start();
+                string output = process.StandardOutput.ReadToEnd(); process.WaitForExit(); drain.Join();
+                if (readError != null) throw new IOException("Could not read the mod installer's result.", readError);
+                if (process.ExitCode != 0) throw new IOException(error.Trim().Length > 0 ? error.Trim() : "The mod package could not be installed.");
+                return output.Trim();
+            }
+        }
+        public void Export(System.Collections.Specialized.StringDictionary env)
+        {
+            if (Directory.Exists(DirectoryPath)) env["JSP_MODS_DIR"] = DirectoryPath;
+            if (File.Exists(ListPath)) env["JSP_MODS_LIST"] = ListPath;
+        }
+    }
+    // END MODS MANAGER
+
+    // BEGIN RECOVERY NOTICE: standalone C# 5 helper, identical in both variants.
+    class RecoveryNotice
+    {
+        readonly object owner, sync = new object();
+        readonly StringBuilder line = new StringBuilder();
+        ulong highest, current, revision; bool stopped, discard, carriage;
+        string message;
+        public ulong Revision { get { lock (sync) return revision; } }
+        public string StatusAt(object process, ulong version) { lock (sync) return Object.ReferenceEquals(owner, process) && version == revision ? message : null; }
+        public RecoveryNotice(object process) { owner = process; }
+        public bool CanHide(object process) { lock (sync) return Object.ReferenceEquals(owner, process) && !stopped; }
+        public bool CanShow(object process, ulong id) { lock (sync) return Object.ReferenceEquals(owner, process) && current == id && stopped; }
+        public ulong Feed(byte value)
+        {
+            lock (sync) {
+                if (value != 10) {
+                    if (carriage) discard = true;
+                    if (value == 13) { carriage = true; return 0; }
+                    if (value < 32 || value > 126 || line.Length >= 96) discard = true;
+                    if (!discard) line.Append((char)value);
+                    return 0;
+                }
+                string record = line.ToString(); line.Length = 0;
+                bool bad = discard; discard = carriage = false; if (bad) return 0;
+                string[] fields = record.Split(' '); ulong id;
+                if (fields.Length < 3 || fields[0] != "JSP_SESSION/1" || fields[2].Length == 0 ||
+                    !UInt64.TryParse(fields[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out id) || id == 0 || fields[2] != id.ToString(System.Globalization.CultureInfo.InvariantCulture)) return 0;
+                if (fields[1] == "START" && fields.Length == 3 && id > highest) { highest = current = id; stopped = false; revision++; message = "Online session started."; }
+                else if (fields[1] == "RETIRE" && fields.Length == 3 && id == current) { current = 0; stopped = false; revision++; message = "Online session closed."; }
+                else if (fields[1] == "STOPPED" && fields.Length == 4 && fields[3] == "CLOCK" && id == current && !stopped) { stopped = true; revision++; message = "Online session stopped. If the game stays frozen, use Exit to close it, then start it again."; return id; }
+                return 0;
+            }
+        }
+    }
+    // END RECOVERY NOTICE
+
     static class Program
     {
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
@@ -436,6 +607,8 @@ namespace JStarsLauncher
         static readonly string[] AaIds = { "off", "fxaa", "fxaa2", "smaa" };
         Panel kbPanel, kbmPanel, padPanel;
         TabControl tabs;
+        TabPage onlineTab;
+        TabPage displayPage, graphicsPage, controlsPage, modsPage, cheatsPage;
         public string ShotDir;
         TrackBar sensBar, hudBar;
         Label hudLabel;
@@ -448,6 +621,7 @@ namespace JStarsLauncher
 
         // ---- running game ----
         Process game;
+        volatile RecoveryNotice recoveryNotice;
         volatile bool gameRunning, closingAfterGame;
 
         public LauncherForm()
@@ -488,10 +662,12 @@ namespace JStarsLauncher
             loading = true;
             LoadSettings();
             LoadOnline();
+            LoadMods();
             loading = false;
             RefreshKeyBoxes();
             RefreshPadBoxes();
             CheckGameReadsKeys();
+            FormClosing += delegate(object sender, FormClosingEventArgs e) { if (modsZipBusy) { e.Cancel = true; MessageBox.Show(this, "Please wait for the mod installation to finish.", Text); } };
             Application.AddMessageFilter(this);   // mouse clicks become bindings on the Keyboard & Mouse page
         }
 
@@ -502,13 +678,21 @@ namespace JStarsLauncher
             loading = true;   // switching pages below must not save anything
             int mode = modeBox.SelectedIndex;
             Directory.CreateDirectory(ShotDir);
-            Shot("display", 0, -1);
-            Shot("controls_keyboard", 1, 0);
-            Shot("controls_kbm", 1, 1);
-            Shot("controls_controller", 1, 2);
-            Shot("online", tabs.TabPages.Count - 1, -1);
+            Shot("display", displayPage, -1);
+            Shot("graphics", graphicsPage, -1);
+            Shot("controls_keyboard", controlsPage, 0);
+            Shot("controls_kbm", controlsPage, 1);
+            Shot("controls_controller", controlsPage, 2);
+            Shot("online", tabs.TabPages.IndexOf(onlineTab), -1);
+            Shot("mods", modsPage, -1);
+            Shot("cheats", cheatsPage, -1);
             modeBox.SelectedIndex = mode;
             Close();
+        }
+
+        void Shot(string name, TabPage page, int mode)
+        {
+            Shot(name, tabs.TabPages.IndexOf(page), mode);
         }
 
         void Shot(string name, int tab, int mode)
@@ -589,11 +773,13 @@ namespace JStarsLauncher
             Controls.Add(header);
 
             tabs = new TabControl { Location = P(12, 76), Size = Z(756, 676) };
-            tabs.TabPages.Add(BuildDisplayTab());
-            tabs.TabPages.Add(graphicsTab);
-            tabs.TabPages.Add(BuildControlsTab());
+            // Match the in-game hub order; capture pages by identity instead of position.
+            tabs.TabPages.Add(displayPage = BuildDisplayTab());
+            tabs.TabPages.Add(graphicsPage = graphicsTab);
+            tabs.TabPages.Add(controlsPage = BuildControlsTab());
             tabs.TabPages.Add(BuildOnlineTab());
-            tabs.TabPages.Add(BuildCheatsTab());
+            tabs.TabPages.Add(modsPage = BuildModsTab());
+            tabs.TabPages.Add(cheatsPage = BuildCheatsTab());
             Controls.Add(tabs);
 
             // Bottom bar
@@ -1293,22 +1479,21 @@ namespace JStarsLauncher
         // the launcher sets no online environment variable for the game: the game reads the files itself (a variable
         // set by hand still wins there). Keys that belong to the game itself are never shown or written here.
         // =====================================================================
-        RadioButton rbOnOff, rbOnRepsn, rbOnComm;
+        RadioButton rbOnOff, rbOnRepsn, rbOnRb, rbOnComm, rbOnNative;
+        ComboBox rbRoleBox;   // Auto (recommended) / Host / Join: the role is only an advanced override
+        CheckBox rbRelayBox, rbDirectBox;
+        TextBox rbPortBox, rbJoinBox, rbCodeBox;
+        Panel rbPanel;
         TextBox repsnServerBox, repsnNameBox, presetLabelBox, presetAddrBox, presetNameBox;
         ListBox presetList;
         Button lanBtn, presetAddBtn, presetUpdBtn, presetDelBtn, presetActiveBtn, onlineSaveBtn;
         Label onlineMsg, onlineWhere, onlineState;
         Panel repsnPanel, commPanel;
-        // ENHANCEMENT (Online Battle + rollback, the tester default): the game's own Online Battle > Friendly Match over re-psn, and our rollback runs the
+        // ENHANCEMENT (optional Online Battle with rollback): the game's own Online Battle > Friendly Match over re-psn, and our rollback runs the
         // fight (the game pairs the two players by their room; jsp_net_online.h NC_NATIVE). The two boxes are play_settings.txt lines that jsp-launcher.exe
         // turns into environment variables: JSP_ROLLBACK (1 = the lobby start, no role key) and JSP_ROLLBACK_RELAY. They must be in the environment when the
         // game starts (its thread registry reads JSP_ROLLBACK before any game code runs), so they are settings lines and not a default inside the game.
-        CheckBox rollbackBox, relayBox;
-        Button publicSrvBtn;
-        bool onlineFresh;   // neither file existed: the defaults below were filled in and are saved with Save or Start Game
-        // A public re-psn test server (relay on); this project does not run it. Filled in on the first start and by the "Public server" button; any
-        // other server can be typed.
-        const string PublicServer = "107.175.17.162:36100";
+        CheckBox relayBox;
         static readonly string[] RollbackRoleKeys = { "JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH" };
         readonly List<Preset> presets = new List<Preset>();
         readonly List<string> loadedLabels = new List<string>();
@@ -1318,29 +1503,114 @@ namespace JStarsLauncher
         string RepsnPath() { return Path.Combine(OnlineIni.SharedDir(root), "repsn.ini"); }
         string CommunityPath() { return Path.Combine(OnlineIni.SharedDir(root), "community.ini"); }
 
+        ModsManager modsManager;
+        CheckedListBox modsList;
+        Label modsMessage;
+        Button modsSave;
+        bool modsDirty, modsLoading, modsZipBusy;
+        TabPage BuildModsTab()
+        {
+            var p = new TabPage("Mods") { Padding = new Padding(12) };
+            p.Controls.Add(new Label { Text = "Tick mods to enable them. Later mods take priority. Changes apply on the next start.", Location = P(12, 12), Size = Z(560, 42) });
+            modsList = new CheckedListBox { Location = P(12, 60), Size = Z(560, 330), CheckOnClick = true };
+            modsList.ItemCheck += delegate(object sender, ItemCheckEventArgs e) { if (!modsLoading && modsManager != null) { modsManager.Entries[e.Index].Enabled = e.NewValue == CheckState.Checked; modsDirty = true; } };
+            p.Controls.Add(modsList);
+            var up = new Button { Text = "Move up", Location = P(12, 404), Size = Z(95, 30) };
+            var down = new Button { Text = "Move down", Location = P(114, 404), Size = Z(95, 30) };
+            up.Click += delegate { MoveMod(-1); }; down.Click += delegate { MoveMod(1); };
+            modsSave = new Button { Text = "Save mod choices", Location = P(216, 404), Size = Z(145, 30) };
+            modsSave.Click += delegate { SaveMods(); };
+            var refresh = new Button { Text = "Refresh", Location = P(368, 404), Size = Z(90, 30) };
+            refresh.Click += delegate { if (modsZipBusy) return; if (!modsDirty || MessageBox.Show(this, "Discard unsaved mod choices?", Text, MessageBoxButtons.YesNo) == DialogResult.Yes) LoadMods(); };
+            var folder = new Button { Text = "Open mods folder", Location = P(12, 444), Size = Z(160, 30) };
+            folder.Click += delegate { if (modsManager == null) return; try { Directory.CreateDirectory(modsManager.DirectoryPath); Process.Start(new ProcessStartInfo(modsManager.DirectoryPath) { UseShellExecute = true }); } catch (Exception e) { modsMessage.Text = e.Message; } };
+            var install = new Button { Text = "Install ZIP...", Location = P(184, 444), Size = Z(145, 30) };
+            install.Click += delegate {
+                if (modsZipBusy || !SaveModsIfDirty() || modsManager == null) return;
+                using (var choose = new OpenFileDialog { Filter = "Mod ZIP files (*.zip)|*.zip", CheckFileExists = true, Title = "Install a mod ZIP" }) {
+                    if (choose.ShowDialog(this) != DialogResult.OK) return;
+                    string archive = choose.FileName; ModsManager manager = modsManager;
+                    try { manager.VerifyPaths(); } catch (Exception e) { modsMessage.Text = e.Message; return; }
+                    modsZipBusy = true; install.Enabled = modsSave.Enabled = modsList.Enabled = false;
+                    modsMessage.Text = "Installing the package. Existing mods will not be replaced.";
+                    var job = new Thread(delegate() {
+                        string message; bool success = false;
+                        try { message = manager.InstallZip(root, archive); success = true; } catch (Exception e) { message = e.Message; }
+                        try { BeginInvoke((MethodInvoker)delegate {
+                            modsZipBusy = false; install.Enabled = modsList.Enabled = true; modsSave.Enabled = modsManager != null;
+                            if (success) { LoadMods(); modsMessage.Text = message + ". Changes apply on the next start." + (modsManager != null && modsManager.GlobalOff ? " All mods are disabled in advanced settings." : ""); }
+                            else modsMessage.Text = "Mod was not installed: " + message;
+                        }); } catch (InvalidOperationException) { }
+                    });
+                    job.IsBackground = true; job.Start();
+                }
+            };
+            p.Controls.Add(install);
+            p.Controls.Add(up); p.Controls.Add(down); p.Controls.Add(modsSave); p.Controls.Add(refresh); p.Controls.Add(folder);
+            modsMessage = new Label { Location = P(12, 485), Size = Z(560, 78) };
+            p.Controls.Add(modsMessage); return p;
+        }
+        void ShowMods(int selected)
+        {
+            modsLoading = true; modsList.Items.Clear();
+            if (modsManager != null) foreach (ModsManager.Entry e in modsManager.Entries) modsList.Items.Add(e, e.Enabled);
+            if (selected >= 0 && selected < modsList.Items.Count) modsList.SelectedIndex = selected;
+            modsLoading = false;
+        }
+        void LoadMods()
+        {
+            modsDirty = false; modsManager = null;
+            try { modsManager = ModsManager.Load(here, settingsFile, runDir, false, Environment.GetEnvironmentVariable); modsMessage.Text = "Folder: " + modsManager.DirectoryPath + "\nList: " + modsManager.ListPath + (modsManager.GlobalOff ? "\nAll mods are disabled in advanced settings." : ""); }
+            catch (Exception e) { modsMessage.Text = "Mods could not be read: " + e.Message; }
+            modsSave.Enabled = modsManager != null; ShowMods(-1);
+        }
+        void MoveMod(int offset)
+        {
+            if (modsZipBusy || modsManager == null) return; int from = modsList.SelectedIndex, to = from + offset;
+            if (from < 0 || to < 0 || to >= modsManager.Entries.Count) return;
+            modsManager.Move(from, to); modsDirty = true; ShowMods(to);
+        }
+        bool SaveMods()
+        {
+            if (modsZipBusy || modsManager == null) return false;
+            try { modsManager.Save(); modsDirty = false; modsMessage.Text = "Mod choices saved. They apply on the next start."; return true; }
+            catch (Exception e) { modsMessage.Text = "Mod choices were not saved: " + e.Message; return false; }
+        }
+        bool SaveModsIfDirty()
+        {
+            if (modsZipBusy) { MessageBox.Show(this, "Please wait for the mod installation to finish.", Text); return false; }
+            if (!modsDirty) { LoadMods(); return true; }
+            DialogResult r = MessageBox.Show(this, "Save mod choices before starting?", Text, MessageBoxButtons.YesNoCancel);
+            if (r == DialogResult.Cancel) return false;
+            if (r == DialogResult.Yes) return SaveMods();
+            LoadMods(); return true;
+        }
+
         TabPage BuildOnlineTab()
         {
-            var p = new TabPage("Online") { Padding = new Padding(12), AutoScroll = true };
+            var p = onlineTab = new TabPage("Online") { Padding = new Padding(12), AutoScroll = true };
             int y = 16;
             p.Controls.Add(new Label { Text = "Online play", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             y += 24;
             rbOnOff = new RadioButton { Text = "Off", Location = P(16, y), AutoSize = true, Checked = true };
-            rbOnRepsn = new RadioButton { Text = "re-psn", Location = P(90, y), AutoSize = true };
-            rbOnComm = new RadioButton { Text = "Community server", Location = P(180, y), AutoSize = true };
+            rbOnRepsn = new RadioButton { Text = "re-psn (standard)", Location = P(90, y), AutoSize = true };
+            rbOnRb = new RadioButton { Text = "re-psn (rollback)", Location = P(250, y), AutoSize = true };
+            rbOnComm = new RadioButton { Text = "Community", Location = P(420, y), AutoSize = true };
+            rbOnNative = new RadioButton { Text = "Friendly Match + rollback", Location = P(535, y), AutoSize = true };
             EventHandler pick = delegate { OnlineChanged(); };
-            rbOnOff.CheckedChanged += pick; rbOnRepsn.CheckedChanged += pick; rbOnComm.CheckedChanged += pick;
-            p.Controls.Add(rbOnOff); p.Controls.Add(rbOnRepsn); p.Controls.Add(rbOnComm);
+            rbOnOff.CheckedChanged += pick; rbOnRepsn.CheckedChanged += pick; rbOnRb.CheckedChanged += pick; rbOnComm.CheckedChanged += pick; rbOnNative.CheckedChanged += pick;
+            p.Controls.Add(rbOnOff); p.Controls.Add(rbOnRepsn); p.Controls.Add(rbOnRb); p.Controls.Add(rbOnComm); p.Controls.Add(rbOnNative);
             y += 26;
             p.Controls.Add(new Label {
-                Text = "re-psn is the online server for Online Battle. Only one is used; choosing one turns the other off when you save.",
+                Text = "One choice: saving it turns everything else off. Rollback is experimental.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 24;
             onlineState = new Label { Location = P(16, y), Size = Z(700, 36), Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
             p.Controls.Add(onlineState);
             y += 44;
 
-            repsnPanel = new Panel { Location = P(0, y), Size = Z(730, 214) };
-            repsnPanel.Controls.Add(new Label { Text = "Online server (re-psn)", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            repsnPanel = new Panel { Location = P(0, y), Size = Z(730, 150) };
+            repsnPanel.Controls.Add(new Label { Text = "re-psn server (standard and rollback)", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             repsnPanel.Controls.Add(new Label { Text = "Server", Location = P(16, 28), Size = Z(110, 20) });
             repsnServerBox = new TextBox { Location = P(130, 25), Width = S(260), MaxLength = 260 };
             repsnServerBox.TextChanged += delegate { OnlineChanged(); };
@@ -1355,21 +1625,45 @@ namespace JStarsLauncher
             lanBtn.Click += delegate { FindOnLan(); };
             repsnPanel.Controls.Add(lanBtn);
             repsnPanel.Controls.Add(new Label { Text = "looks for a re-psn server started with -discover on this network", Location = P(250, 98), AutoSize = true, ForeColor = SystemColors.GrayText });
-            publicSrvBtn = new Button { Text = "Public server", Location = P(130, 126), Size = Z(110, 28) };
-            publicSrvBtn.Click += delegate { repsnServerBox.Text = PublicServer; PresetMsg("Server set to the public test server (re-psn). Not saved yet."); };
-            repsnPanel.Controls.Add(publicSrvBtn);
-            repsnPanel.Controls.Add(new Label { Text = "a public test server (re-psn), not run by this project", Location = P(250, 132), AutoSize = true, ForeColor = SystemColors.GrayText });
-            rollbackBox = new CheckBox { Text = "Rollback netcode for Online Battle fights (recommended)", Location = P(16, 162), AutoSize = true };
-            rollbackBox.CheckedChanged += delegate { OnlineChanged(); };
-            repsnPanel.Controls.Add(rollbackBox);
-            relayBox = new CheckBox { Text = "If the two PCs cannot connect directly, pass the match through the server (relay)", Location = P(16, 186), AutoSize = true };
+            relayBox = new CheckBox { Text = "If the two PCs cannot connect directly, pass the match through the server (relay)", Location = P(16, 122), AutoSize = true };
             relayBox.CheckedChanged += delegate { OnlineChanged(); };
             repsnPanel.Controls.Add(relayBox);
             p.Controls.Add(repsnPanel);
-            y += 224;
+            y += 158;
+
+            rbPanel = new Panel { Location = P(0, y), Size = Z(730, 140) };
+            rbPanel.Controls.Add(new Label { Text = "re-psn (rollback)", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            rbPanel.Controls.Add(new Label { Text = "Match code", Location = P(16, 28), Size = Z(110, 20) });
+            rbCodeBox = new TextBox { Location = P(130, 25), Width = S(110), MaxLength = 8, CharacterCasing = CharacterCasing.Upper };
+            rbCodeBox.TextChanged += delegate { OnlineChanged(); };
+            rbPanel.Controls.Add(rbCodeBox);
+            rbPanel.Controls.Add(new Label { Text = "optional, 4 to 8 letters or digits: only players with the same code meet", Location = P(250, 28), AutoSize = true, ForeColor = SystemColors.GrayText });
+            rbRelayBox = new CheckBox { Text = "Allow the server's relay when a direct path fails", Location = P(130, 52), AutoSize = true };
+            rbRelayBox.CheckedChanged += delegate { OnlineChanged(); };
+            rbPanel.Controls.Add(rbRelayBox);
+            rbDirectBox = new CheckBox { Text = "Advanced: connect by IP address instead of through re-psn", Location = P(16, 80), AutoSize = true };
+            rbDirectBox.CheckedChanged += delegate { OnlineChanged(); };
+            rbPanel.Controls.Add(rbDirectBox);
+            rbPanel.Controls.Add(new Label { Text = "Role", Location = P(470, 82), Size = Z(34, 20) });
+            rbRoleBox = new ComboBox { Location = P(506, 78), Width = S(150), DropDownStyle = ComboBoxStyle.DropDownList };
+            rbRoleBox.Items.AddRange(new object[] { "Auto (recommended)", "Host", "Join" });
+            rbRoleBox.SelectedIndex = 0;
+            rbRoleBox.SelectedIndexChanged += delegate { OnlineChanged(); };
+            rbPanel.Controls.Add(rbRoleBox);
+            rbPanel.Controls.Add(new Label { Text = "Host port", Location = P(36, 108), Size = Z(70, 20) });
+            rbPortBox = new TextBox { Location = P(110, 105), Width = S(70), MaxLength = 5 };
+            rbPortBox.TextChanged += delegate { OnlineChanged(); };
+            rbPanel.Controls.Add(rbPortBox);
+            rbPanel.Controls.Add(new Label { Text = "Host address", Location = P(210, 108), Size = Z(80, 20) });
+            rbJoinBox = new TextBox { Location = P(294, 105), Width = S(160), MaxLength = 21 };
+            rbJoinBox.TextChanged += delegate { OnlineChanged(); };
+            rbPanel.Controls.Add(rbJoinBox);
+            rbPanel.Controls.Add(new Label { Text = "IP:port, for a join (advanced; with an IP address the role must be Host or Join)", Location = P(464, 108), AutoSize = true, ForeColor = SystemColors.GrayText });
+            p.Controls.Add(rbPanel);
+            y += 150;
 
             commPanel = new Panel { Location = P(0, y), Size = Z(730, 300) };
-            commPanel.Controls.Add(new Label { Text = "Community server", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            commPanel.Controls.Add(new Label { Text = "Community", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             commPanel.Controls.Add(new Label {
                 Text = "Features that exist only in this port do not work on a community server.",
                 Location = P(16, 22), AutoSize = true, ForeColor = SystemColors.GrayText });
@@ -1478,13 +1772,19 @@ namespace JStarsLauncher
             }
         }
 
-        int OnlineMethod() { return rbOnRepsn.Checked ? 1 : rbOnComm.Checked ? 2 : 0; }
+        // The one choice: 0 Off, 1 re-psn (standard), 2 re-psn (rollback), 3 Community. (The Advanced box turns 2 into a direct-IP rollback.)
+        int OnlineMethod() { return rbOnRepsn.Checked ? 1 : rbOnRb.Checked ? 2 : rbOnComm.Checked ? 3 : rbOnNative.Checked ? 4 : 0; }
 
         void OnlineChanged()
         {
             commPanel.Enabled = rbOnComm.Checked;
-            rollbackBox.Enabled = rbOnRepsn.Checked; relayBox.Enabled = rbOnRepsn.Checked && rollbackBox.Checked;
-            ShowOnlineState();
+            relayBox.Enabled = rbOnNative.Checked;
+            rbPanel.Enabled = rbOnRb.Checked;
+            rbPortBox.Enabled = rbDirectBox.Checked && rbRoleBox.SelectedIndex == 1;
+            rbJoinBox.Enabled = rbDirectBox.Checked && rbRoleBox.SelectedIndex == 2;
+            rbRelayBox.Enabled = !rbDirectBox.Checked;
+            rbCodeBox.Enabled = !rbDirectBox.Checked;
+            rbOnRb.Text = rbDirectBox.Checked ? "Rollback (direct IP)" : "re-psn (rollback)";
             if (loading) return;
             onlineDirty = true;
             onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
@@ -1565,23 +1865,116 @@ namespace JStarsLauncher
             OnlineChanged();
         }
 
-        // True when play_settings.txt turns rollback on, read the way jsp-launcher.exe (launcher.c load_env) and the
-        // game do: a line is "JSP_ROLLBACK=" at column 0 (# and ; lines are comments; letter case is ignored, like
-        // Windows environment names), the last such line wins, only trailing space, CR and LF are trimmed, and the
-        // value is on when it is not empty and its first character is not '0'. Read only, never written; the file is
-        // read at the time of the call because the in-game Port Settings page writes it.
-        bool RollbackOn()
+        // The last value of a rollback key in play_settings.txt, read the way jsp-launcher.exe (launcher.c load_env) and the
+        // game do: a line is "KEY=" at column 0 (# and ; lines are comments; letter case is ignored, like Windows
+        // environment names), the last such line wins and only trailing space, CR and LF are trimmed. null when absent.
+        // Read at the time of the call because the in-game Port Settings page writes the same keys.
+        string RbValue(string key)
         {
-            string v = "";
+            string v = null;
             try
             {
-                if (!File.Exists(settingsFile)) return false;
+                if (!File.Exists(settingsFile)) return null;
                 foreach (string line in File.ReadAllLines(settingsFile))
-                    if (line.StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)) v = line.Substring(13).TrimEnd(' ', '\r', '\n');
+                    if (line.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) v = line.Substring(key.Length + 1).TrimEnd(' ', '\r', '\n');
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
-            return v.Length != 0 && v[0] != '0';
+            return v;
+        }
+
+        // True when the value turns rollback on: not empty and its first character is not '0' (the game's test).
+        static bool RbFlag(string v) { return v != null && v.Length != 0 && v[0] != '0'; }
+        bool RollbackOn() { return RbFlag(RbValue("JSP_ROLLBACK")); }
+
+        // Sets (value) or removes (null) one rollback key in a list of lines: the column-0 lines of that key are dropped and the new line
+        // goes where the first one was, else at the end. Every other line is left as it is.
+        static void RbSet(List<string> lines, string key, string value)
+        {
+            int at = -1;
+            for (int i = lines.Count - 1; i >= 0; i--)
+                if (lines[i].StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) { lines.RemoveAt(i); at = i; }
+            if (value == null) return;
+            if (at < 0) lines.Add(key + "=" + value); else lines.Insert(at, key + "=" + value);
+        }
+
+        // The rollback keys for the one choice (same keys and values the in-game Online page writes, jsp_net_online.h Rollback::store).
+        // enable false: write JSP_ROLLBACK=0 explicitly, including when an inherited environment value enabled rollback.
+        static void RbApply(List<string> lines, bool enable, bool direct, bool auto, bool host, string port, string join, bool relay, string code)
+        {
+            if (!enable)
+            {
+                RbSet(lines, "JSP_ROLLBACK", "0");
+                return;
+            }
+            RbSet(lines, "JSP_ROLLBACK", "1"); RbSet(lines, "JSP_ROLLBACK_BENCH", null);
+            if (!direct)
+            {
+                RbSet(lines, "JSP_ROLLBACK_VIA", "repsn"); RbSet(lines, "JSP_ROLLBACK_ROLE", auto ? "auto" : host ? "host" : "join"); RbSet(lines, "JSP_ROLLBACK_RELAY", relay ? "1" : "0");
+                RbSet(lines, "JSP_ROLLBACK_CODE", code.Length == 0 ? null : code);
+                RbSet(lines, "JSP_ROLLBACK_LISTEN", null); RbSet(lines, "JSP_ROLLBACK_JOIN", null);
+                return;
+            }
+            RbSet(lines, "JSP_ROLLBACK_VIA", null); RbSet(lines, "JSP_ROLLBACK_ROLE", null); RbSet(lines, "JSP_ROLLBACK_RELAY", null); RbSet(lines, "JSP_ROLLBACK_CODE", null);
+            if (host) { RbSet(lines, "JSP_ROLLBACK_LISTEN", port); RbSet(lines, "JSP_ROLLBACK_JOIN", null); }
+            else { RbSet(lines, "JSP_ROLLBACK_JOIN", join); RbSet(lines, "JSP_ROLLBACK_LISTEN", null); }
+        }
+
+        // Writes the rollback keys into play_settings.txt (read again just before, so the in-game page's changes stay) and keeps otherLines,
+        // which SaveSettings writes back, the same. Returns null when written, else the reason.
+        static void RbNative(List<string> lines, bool relay)
+        {
+            foreach (string key in RollbackRoleKeys) RbSet(lines, key, null);
+            RbSet(lines, "JSP_ROLLBACK_ROLE", null);
+            RbSet(lines, "JSP_ROLLBACK_CODE", null);
+            RbSet(lines, "JSP_ROLLBACK", "1");
+            RbSet(lines, "JSP_ROLLBACK_RELAY", relay ? "1" : "0");
+        }
+
+        string WriteRollback(bool enable, bool direct, bool auto, bool host, string port, string join, bool relay, string code, bool native = false)
+        {
+            var lines = new List<string>();
+            try { if (File.Exists(settingsFile)) lines.AddRange(File.ReadAllLines(settingsFile)); }
+            catch (Exception ex) { return "Could not read the settings file: " + ex.Message; }
+            if (native) RbNative(lines, relay);
+            else RbApply(lines, enable, direct, auto, host, port, join, relay, code);
+            try { File.WriteAllLines(settingsFile, lines.ToArray(), Encoding.ASCII); }
+            catch (Exception ex) { return "Could not save the settings file: " + ex.Message; }
+            otherLines.RemoveAll(delegate (string l) { return l.StartsWith("JSP_ROLLBACK", StringComparison.OrdinalIgnoreCase); });
+            foreach (string l in lines)
+            {
+                string t = l.Trim(); int eq = t.IndexOf('=');
+                if (eq > 0 && t.StartsWith("JSP_ROLLBACK", StringComparison.OrdinalIgnoreCase) && !t.StartsWith("#")) otherLines.Add(t.Substring(0, eq).Trim() + "=" + t.Substring(eq + 1).Trim());
+            }
+            return null;
+        }
+
+        // Same rule as the game's valid_port / valid_join (jsp_net_online.h): 1 to 65535, and a dotted IPv4 address with the port.
+        // The match code: empty, or 4 to 8 of A-Z 0-9 (jsp_net_online.h normalize_code); stored upper case.
+        static bool ValidRbCode(string c)
+        {
+            if (c.Length == 0) return true;
+            if (c.Length < 4 || c.Length > 8) return false;
+            foreach (char ch in c) if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))) return false;
+            return true;
+        }
+        static bool ValidRbPort(string p)
+        {
+            int n;
+            return p.Length >= 1 && p.Length <= 5 && int.TryParse(p, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out n) && n >= 1 && n <= 65535;
+        }
+        static bool ValidRbJoin(string s)
+        {
+            int c = s.LastIndexOf(':');
+            if (c < 0 || !ValidRbPort(s.Substring(c + 1))) return false;
+            string[] o = s.Substring(0, c).Split('.');
+            if (o.Length != 4) return false;
+            foreach (string q in o)
+            {
+                int n;
+                if (q.Length < 1 || q.Length > 3 || !int.TryParse(q, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out n) || n > 255) return false;
+            }
+            return true;
         }
 
         // The last "KEY=" line of play_settings.txt, read like RollbackOn (null when absent). Read only.
@@ -1618,14 +2011,15 @@ namespace JStarsLauncher
         void ShowOnlineState()
         {
             int m = OnlineMethod();
-            if (m == 1 && rollbackBox.Checked)
+            if (m == 4)
             {
                 onlineState.ForeColor = Color.FromArgb(0, 110, 40);
                 // FIX (two-page Main Menu, on by default): Online Battle sits on its Battle Modes page; the fights are 2 vs 2
                 onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: Main Menu > Battle Modes > Online Battle > Friendly Match; one player picks Create a Room, the other Search for a Room.";
             }
             else if (m == 1) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Online Battle with the game's own netcode (rollback off)."; }
-            else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }
+            else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Custom rollback session."; }
+            else if (m == 3) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }
             else { onlineState.ForeColor = SystemColors.GrayText; onlineState.Text = "Online play is off. Choose Online server (re-psn) to play Online Battle."; }
         }
 
@@ -1639,23 +2033,37 @@ namespace JStarsLauncher
             string e1 = OnlineIni.Load(RepsnPath(), out ri), e2 = OnlineIni.Load(CommunityPath(), out ci);
             string note = e1 != null ? e1 : e2;
             bool on1 = ri.Get("repsn", "enabled") == "1", on2 = ci.Get("community", "enabled") == "1";
-            if (on1 && on2) { note = "Both files were switched on; saving turns one off."; on1 = on2 = false; }
-            bool roleKey = RollbackRoleKey();
-            if ((on1 || on2) && RollbackOn() && roleKey)
+            bool onR = RollbackOn();
+            bool native = on1 && !on2 && onR && !RollbackRoleKey();
+            // MIGRATION: more than one method on (a hand edit, or an older version that kept re-psn and rollback apart) shows as Off with a note;
+            // saving writes the one choice, which turns the rest off. The game itself refuses such a start (jsp_net_game.cpp).
+            if (on1 && on2) { note = "re-psn (standard) and Community were both on; shown as Off. Pick one and save."; on1 = on2 = onR = false; }
+            else if ((on1 || on2) && onR && !native)
             {
-                string rn = "Rollback is on (Options > Port Settings > Online) and so is this method; the game refuses to start both. Turn one of them off.";
+                string rn = "Rollback and " + (on1 ? "re-psn (standard)" : "Community") + " were both on (the game refuses to start both); shown as Off. Pick one and save.";
                 note = note == null ? rn : note + " " + rn;
+                on1 = on2 = onR = false;
             }
-            // first start (neither file exists, e.g. firstrun.py was told not to seed them): the tester defaults, saved with Save or Start Game
-            onlineFresh = !ri.Exists && !ci.Exists && e1 == null && e2 == null;
-            if (onlineFresh) { on1 = true; on2 = false; }
-            rbOnRepsn.Checked = on1; rbOnComm.Checked = on2; rbOnOff.Checked = !on1 && !on2;
-            repsnServerBox.Text = onlineFresh ? PublicServer : ri.Get("repsn", "server") ?? "";
-            repsnNameBox.Text = onlineFresh ? "Player" + new Random().Next(1000, 10000) : ri.Get("repsn", "name") ?? "";
-            string rbv = SettingsValue("JSP_ROLLBACK"), relv = SettingsValue("JSP_ROLLBACK_RELAY");
-            rollbackBox.Checked = onlineFresh ? (rbv == null && !roleKey) || (RollbackOn() && !roleKey) : (RollbackOn() && !roleKey);
+            string via = RbValue("JSP_ROLLBACK_VIA"), role = RbValue("JSP_ROLLBACK_ROLE"), lis = RbValue("JSP_ROLLBACK_LISTEN"), joi = RbValue("JSP_ROLLBACK_JOIN");
+            bool direct = !(via != null && string.Equals(via, "repsn", StringComparison.OrdinalIgnoreCase));
+            bool hl = lis != null && lis.Length != 0, hj = joi != null && joi.Length != 0;
+            bool host = hl || !hj;
+            bool roleAuto = true;   // the role key absent or "auto": nobody picks, the games find each other
+            if (!direct && role != null && (string.Equals(role, "host", StringComparison.OrdinalIgnoreCase) || string.Equals(role, "join", StringComparison.OrdinalIgnoreCase)))
+            { roleAuto = false; host = string.Equals(role, "host", StringComparison.OrdinalIgnoreCase); }
+            rbRoleBox.SelectedIndex = !direct && roleAuto ? 0 : host ? 1 : 2;   // with a direct IP connection the role is Host or Join
+            string cv = RbValue("JSP_ROLLBACK_CODE");
+            rbCodeBox.Text = (cv ?? "").ToUpperInvariant();
+            rbDirectBox.Checked = onR && !native && direct;
+            rbRelayBox.Checked = RbFlag(RbValue("JSP_ROLLBACK_RELAY"));
+            rbPortBox.Text = hl ? lis : "36200";
+            rbJoinBox.Text = hj ? joi : "";
+            rbOnNative.Checked = native; rbOnRepsn.Checked = on1 && !native; rbOnRb.Checked = onR && !native; rbOnComm.Checked = on2; rbOnOff.Checked = !on1 && !on2 && !onR;
+            repsnServerBox.Text = ri.Get("repsn", "server") ?? "";
+            repsnNameBox.Text = ri.Get("repsn", "name") ?? "";
+            string relv = SettingsValue("JSP_ROLLBACK_RELAY");
             relayBox.Checked = relv == null || (relv.Length != 0 && relv[0] != '0');
-            rollbackBox.Enabled = rbOnRepsn.Checked; relayBox.Enabled = rbOnRepsn.Checked && rollbackBox.Checked;
+            relayBox.Enabled = rbOnNative.Checked;
             ShowOnlineState();
             presets.Clear(); loadedLabels.Clear();
             foreach (string l in ci.PresetLabels())
@@ -1669,15 +2077,11 @@ namespace JStarsLauncher
             activeLabel = ci.Get("community", "active") ?? "";
             presetLabelBox.Text = presetAddrBox.Text = presetNameBox.Text = "";
             RefreshPresetList();
-            repsnPanel.Enabled = true; commPanel.Enabled = rbOnComm.Checked;
+            repsnPanel.Enabled = true; commPanel.Enabled = rbOnComm.Checked; rbPanel.Enabled = rbOnRb.Checked;
+            OnlineChanged();   // enabled states of the fields (loading is set: it only updates them)
             onlineDirty = false;
             onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
             onlineMsg.Text = note ?? "";
-            if (onlineFresh)
-            {
-                onlineDirty = true;
-                onlineMsg.Text = "First start: online is on, with a public test server (re-psn) and a random online name (change it if you like). Saved with Start Game.";
-            }
             loading = was;
         }
 
@@ -1686,19 +2090,24 @@ namespace JStarsLauncher
         // Returns null when saved, else the reason.
         string SaveOnline()
         {
-            int m = OnlineMethod();
+            int m = OnlineMethod();   // 0 Off, 1 re-psn (standard), 2 re-psn (rollback), 3 Community, 4 Friendly Match + rollback
+            bool native = m == 4, rollback = m == 2, direct = rollback && rbDirectBox.Checked, auto = rbRoleBox.SelectedIndex == 0, host = rbRoleBox.SelectedIndex == 1;
+            string rcode = rbCodeBox.Text.Trim().ToUpperInvariant();
+            string rport = rbPortBox.Text.Trim(), rjoin = rbJoinBox.Text.Trim();
             string server = repsnServerBox.Text.Trim(), rname = repsnNameBox.Text.Trim();
-            if (m == 1)
+            if (m == 1 || native || (rollback && !direct))
             {
+                if (server.Length == 0) return "Enter your re-psn server address to enable online play.";
                 if (!OnlineIni.ValidAddress(server)) return "re-psn: the server is a host name or IP address, optionally :port (1 to 65535).";
                 if (!OnlineIni.ValidName(rname)) return "re-psn: the online name is 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.";
             }
-            // ENHANCEMENT (Online Battle + rollback): only rollback WITH a role key conflicts with an online method; re-psn with the box ticked removes the role keys.
-            if (m == 2 && RollbackOn() && RollbackRoleKey())
-                return "Rollback is on (Port Settings > Online). Turn it off there first, or keep this tab on Off: only one online method can be active.";
+            if (rollback && !direct && !ValidRbCode(rcode)) return "Match code: 4 to 8 letters or digits (or leave it empty).";
+            if (direct && auto) return "Rollback with an IP address needs a role: choose Host or Join next to the Advanced box.";
+            if (direct && host && !ValidRbPort(rport)) return "Rollback host: the port is a number from 1 to 65535.";
+            if (direct && !host && !ValidRbJoin(rjoin)) return "Rollback join: the host address is IP:port, for example 192.0.2.10:36200.";
             Preset act = null;
             foreach (Preset q in presets) if (string.Equals(q.Label, activeLabel, StringComparison.OrdinalIgnoreCase)) act = q;
-            if (m == 2 && act == null) return "Community server: pick a preset and press \"Use this one\" (add one first if the list is empty).";
+            if (m == 3 && act == null) return "Community: pick a preset and press \"Use this one\" (add one first if the list is empty).";
 
             OnlineIni ri, ci;
             string e = OnlineIni.Load(RepsnPath(), out ri);
@@ -1706,18 +2115,18 @@ namespace JStarsLauncher
             e = OnlineIni.Load(CommunityPath(), out ci);
             if (e != null) return e;
 
-            bool writeR = ri.Exists || m == 1 || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname)), writeC = ci.Exists || m == 2 || presets.Count > 0;
+            bool writeR = ri.Exists || m == 1 || native || (rollback && !direct) || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname)), writeC = ci.Exists || m == 3 || presets.Count > 0;
             if (writeR)
             {
                 ri.SetPreamble("; re-psn server settings. Written by the launcher; the game reads it.");
-                ri.Set("repsn", "enabled", m == 1 ? "1" : "0");
-                if (m == 1 || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname)))
+                ri.Set("repsn", "enabled", (m == 1 || native) ? "1" : "0");
+                if (m == 1 || native || (rollback && !direct) || (OnlineIni.ValidAddress(server) && OnlineIni.ValidName(rname)))
                 { ri.Set("repsn", "server", server); ri.Set("repsn", "name", rname); }
             }
             if (writeC)
             {
                 ci.SetPreamble("; Community server settings. Features that exist only in this port do not work on a community server.");
-                ci.Set("community", "enabled", m == 2 ? "1" : "0");
+                ci.Set("community", "enabled", m == 3 ? "1" : "0");
                 ci.Set("community", "active", act != null ? act.Label : "");
                 foreach (string old in loadedLabels)
                 {
@@ -1731,29 +2140,34 @@ namespace JStarsLauncher
                     ci.Set(OnlineIni.PresetSection(q.Label), "name", q.Name);
                 }
             }
-            // the side being switched off goes to disk first
+            // The method being switched off goes to disk first, so that a failed or interrupted save never leaves two on:
+            // rollback on: both ini files (enabled=0) before JSP_ROLLBACK=1; anything else: JSP_ROLLBACK=0 first, then the ini files.
             string err = null;
-            if (m == 1) { if (writeC) err = ci.Save(); if (err == null && writeR) err = ri.Save(); }
-            else { if (writeR) err = ri.Save(); if (err == null && writeC) err = ci.Save(); }
-            if (err != null) { onlineMsg.ForeColor = Color.Firebrick; onlineMsg.Text = err; return err; }
-            // the rollback lines of play_settings.txt (written with the rest by SaveSettings). re-psn: the box decides; ticked = the lobby start, so the role keys
-            // of Port Settings > Online > Rollback go (as the in-game page does). Off or Community: a lobby rollback line is turned off (nothing to pair with
-            // offline); a role-key rollback (the direct-IP method) is left alone.
-            if (m == 1)
+            if (native)
             {
-                OtherSet("JSP_ROLLBACK", rollbackBox.Checked ? "1" : "0");
-                if (rollbackBox.Checked)
-                {
-                    OtherSet("JSP_ROLLBACK_RELAY", relayBox.Checked ? "1" : "0");
-                    foreach (string k in RollbackRoleKeys) OtherSet(k, null);
-                    OtherSet("JSP_ROLLBACK_ROLE", null);
-                }
-                SaveSettings();
+                if (writeC) err = ci.Save();
+                if (err == null && writeR) err = ri.Save();
+                if (err == null) err = WriteRollback(true, false, false, false, "", "", relayBox.Checked, "", true);
             }
-            else if (RollbackOn() && !RollbackRoleKey()) { OtherSet("JSP_ROLLBACK", "0"); SaveSettings(); }
+            else if (rollback)
+            {
+                if (writeC) err = ci.Save();
+                if (err == null && writeR) err = ri.Save();
+                if (err == null) err = WriteRollback(true, direct, auto, host, rport, rjoin, rbRelayBox.Checked, rcode);
+            }
+            else
+            {
+                err = WriteRollback(false, false, auto, host, rport, rjoin, rbRelayBox.Checked, rcode);
+                if (err == null)
+                {
+                    if (m == 1) { if (writeC) err = ci.Save(); if (err == null && writeR) err = ri.Save(); }
+                    else { if (writeR) err = ri.Save(); if (err == null && writeC) err = ci.Save(); }
+                }
+            }
+            if (err != null) { onlineMsg.ForeColor = Color.Firebrick; onlineMsg.Text = err; return err; }
             LoadOnline();
             onlineMsg.ForeColor = SystemColors.GrayText;
-            onlineMsg.Text = m == 0 ? "Saved. Online is off." : m == 1 ? (rollbackBox.Checked ? "Saved. Online is on, with rollback for Online Battle." : "Saved. Online is on (the game's own netcode).") : "Saved. The community server is on.";
+            onlineMsg.Text = native ? "Saved. Friendly Match with rollback is on." : m == 0 ? "Saved. Online is off." : m == 1 ? "Saved. re-psn (standard) is on." : m == 2 ? (direct ? "Saved. Rollback (direct IP) is on." : "Saved. re-psn (rollback) is on.") : "Saved. Community is on.";
             return null;
         }
 
@@ -1891,7 +2305,7 @@ namespace JStarsLauncher
         void Status(string s)
         {
             lastStatus = s;
-            if (InvokeRequired) { try { BeginInvoke((MethodInvoker)delegate { statusLabel.Text = s; }); } catch { } }
+            if (InvokeRequired) { try { BeginInvoke((MethodInvoker)delegate { if (s.StartsWith("Game running") && recoveryNotice != null && !recoveryNotice.CanHide(game)) return; statusLabel.Text = s; }); } catch { } }
             else statusLabel.Text = s;
             Log(s);
         }
@@ -1899,13 +2313,14 @@ namespace JStarsLauncher
         void StartGame()
         {
             if (gameRunning) return;
+            if (!SaveModsIfDirty()) return;
             if (!File.Exists(exe)) { MessageBox.Show(this, "The game is not built yet:\n" + exe, Text); return; }
             if (!File.Exists(iso)) { MessageBox.Show(this, "The game disc image was not found:\n" + iso, Text); return; }
             if (Process.GetProcessesByName("jsp").Length > 0) { MessageBox.Show(this, "The game is already running.", Text); return; }
             if (onlineDirty)
             {
                 string oerr = SaveOnline();   // unsaved Online tab edits are saved with the rest, or the start waits
-                if (oerr != null) { tabs.SelectedIndex = tabs.TabPages.Count - 1; MessageBox.Show(this, oerr, Text); return; }
+                if (oerr != null) { tabs.SelectedTab = onlineTab; MessageBox.Show(this, oerr, Text); return; }
             }
             SaveSettings();
             unlockThisRun = false;
@@ -1939,7 +2354,7 @@ namespace JStarsLauncher
             Directory.CreateDirectory(runDir);
             Directory.CreateDirectory(Path.Combine(appData, "hdd0"));
             try { log = new StreamWriter(Path.Combine(runDir, "launcher_log.txt"), false); } catch { log = null; }
-            Log("Launcher start. Settings: " + string.Join(" | ", File.ReadAllLines(settingsFile)));
+            Log("Launcher start. Settings saved.");
             if (unlockThisRun) Log(backupNote);
 
             bool mountedHere = false, boostOff = true;
@@ -1995,6 +2410,7 @@ namespace JStarsLauncher
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
                     if (k.Length > 0) psi.EnvironmentVariables[k] = v;
                 }
+                if (modsManager != null) modsManager.Export(psi.EnvironmentVariables);
                 boostOff = psi.EnvironmentVariables["BOOST_OFF_ON_EXIT"] != "0";
                 psi.EnvironmentVariables["JSP_SETTINGS_FILE"] = settingsFile;   // the in-game settings pages write this file (jsp_settings.cpp)
                 psi.EnvironmentVariables.Remove("JSP_UNLOCK_ALL");   // never from the settings file: only the Cheats box, after its backup
@@ -2006,8 +2422,11 @@ namespace JStarsLauncher
 
                 Status("Starting the game...");
                 game = Process.Start(psi);
+                Process ownedGame = game;
+                RecoveryNotice ownedNotice = new RecoveryNotice(ownedGame);
+                recoveryNotice = ownedNotice; hiddenForGame = false;
                 Thread o = Pump(game.StandardOutput.BaseStream, Path.Combine(runDir, "play_stdout.txt"));
-                Thread e = Pump(game.StandardError.BaseStream, Path.Combine(runDir, "play_stderr.txt"));
+                Thread e = Pump(game.StandardError.BaseStream, Path.Combine(runDir, "play_stderr.txt"), delegate(byte value) { RecoveryByte(ownedGame, ownedNotice, value); });
                 Status("Game running (disc on " + drive + ":). Close the game window or press Exit to stop.");
                 // Once the game's window is up the launcher hides; this thread stays to
                 // clean up (boost off, unmount) and then ends the launcher.
@@ -2015,9 +2434,10 @@ namespace JStarsLauncher
                 {
                     if (GameHasWindow(game.Id))
                     {
-                        hiddenForGame = true;
-                        Log("Game window is up, launcher hidden.");
-                        BeginInvoke((MethodInvoker)delegate { Hide(); });
+                        BeginInvoke((MethodInvoker)delegate {
+                            if (!Object.ReferenceEquals(game, ownedGame) || !ownedNotice.CanHide(ownedGame)) return;
+                            hiddenForGame = true; Hide();
+                        });
                         break;
                     }
                     Thread.Sleep(250);
@@ -2064,16 +2484,44 @@ namespace JStarsLauncher
             }
         }
 
-        static Thread Pump(Stream from, string file)
+        void RecoveryByte(Process ownedGame, RecoveryNotice ownedNotice, byte value)
         {
-            var t = new Thread(delegate () {
+                    ulong before = ownedNotice.Revision;
+                    ulong id = ownedNotice.Feed(value);
+                    ulong revision = ownedNotice.Revision;
+                    if (revision == before) return;
+                    try { BeginInvoke((MethodInvoker)delegate {
+                        if (!Object.ReferenceEquals(game, ownedGame)) return;
+                        string text = ownedNotice.StatusAt(ownedGame, revision);
+                        if (text == null) return;
+                        if (id != 0 && ownedNotice.CanShow(ownedGame, id)) {
+                            hiddenForGame = false;
+                            Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                            Activate();
+                        }
+                        lastStatus = statusLabel.Text = text;
+                    }); } catch { }
+        }
+
+        static Thread Pump(Stream from, string file, Action<byte> inspect = null)
+        {
+            // The pipe reader never waits for disk or UI. Logs are best effort under disk backpressure.
+            var pending = new Queue<byte[]>(); var wake = new AutoResetEvent(false); bool done = false;
+            var writer = new Thread(delegate () {
                 try { using (var f = new FileStream(file, FileMode.Create, FileAccess.Write, FileShare.Read)) {
-                    var buf = new byte[65536]; int n;
-                    while ((n = from.Read(buf, 0, buf.Length)) > 0) { f.Write(buf, 0, n); f.Flush(); }
-                } } catch { }
-            });
-            t.IsBackground = true; t.Start();
-            return t;
+                    for (;;) { byte[] part = null; lock (pending) { if (pending.Count > 0) part = pending.Dequeue(); else if (done) break; }
+                        if (part == null) { wake.WaitOne(100); continue; } f.Write(part, 0, part.Length); f.Flush(); }
+                } } catch { } // reader keeps draining even if this sink fails
+            }); writer.IsBackground = true; writer.Start();
+            var t = new Thread(delegate () {
+                try { var buf = new byte[65536]; int n;
+                    while ((n = from.Read(buf, 0, buf.Length)) > 0) {
+                        if (inspect != null) for (int i = 0; i < n; i++) inspect(buf[i]);
+                        lock (pending) { if (pending.Count < 8) { var copy = new byte[n]; Buffer.BlockCopy(buf, 0, copy, 0, n); pending.Enqueue(copy); } }
+                        wake.Set();
+                    }
+                } catch { } finally { lock (pending) done = true; wake.Set(); }
+            }); t.IsBackground = true; t.Start(); return t;
         }
 
         // Run a .bat with no console window; null when the file is missing.

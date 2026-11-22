@@ -3,6 +3,10 @@
 //
 // What it does, in load order:
 //   1. mods.txt: one mod id per line, '#' starts a comment, line order = load order, duplicates are logged and ignored.
+//      ENHANCEMENT (drop-in mods): mods.txt is optional. A line "-id" turns that mod off (listed or found in the mods folder). Every
+//      folder of the mods folder that holds a mod.json and is not named in mods.txt is loaded after the listed mods, in alphabetical order
+//      of its folder name (Io::mod_dirs). A folder with no mod.json, or whose name is not a mod id, is logged and skipped. A found folder
+//      whose mod.json is wrong is refused like a listed mod (and counts in the digest rules below), so a broken gameplay mod never hides.
 //   2. <id>/mod.json, manifest schema 1: id, version, title, game.title_ids, interfaces, gameplay, groups, overrides, conflicts_ok.
 //      An unknown interface or a higher version than the port supports refuses the mod. Any error refuses the whole mod (never
 //      half-applied); the other mods still load.
@@ -68,6 +72,11 @@ public:
     virtual size_t mod_read(const std::string& rel, uint64_t off, void* dst, size_t n) = 0;
     // Why the last mod_size of `rel` failed, when the glue knows (a link, a sharing violation): added to the refusal line. "" = no reason known.
     virtual std::string mod_why(const std::string&) { return std::string(); }
+    // The names of the folders directly in the mods folder (any order, any name). false with no error means unsupported:
+    // only mods.txt counts (the old behaviour); a runtime error refuses the whole set.
+    virtual bool mod_dirs(std::vector<std::string>&) { return false; }
+    // Empty when discovery is unsupported; nonempty when a runtime listing failed (never use a partial set).
+    virtual std::string mod_dirs_error() { return std::string(); }
     virtual bool archive_size(const std::string& base, uint64_t& size) = 0;
     virtual size_t archive_read(const std::string& base, uint64_t off, void* dst, size_t n) = 0;
 };
@@ -99,7 +108,7 @@ inline std::string lower(std::string s)
 }
 inline bool valid_id(const std::string& s)
 {
-    if (s.empty() || s.size() > 40) return false;
+    if (s.empty() || s.size() > 40 || s[0] == '-') return false;   // a leading '-' is the mods.txt "off" mark
     for (char c : s) if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
     return true;
 }
@@ -168,7 +177,7 @@ inline std::string archive_of(const std::string& entry)
 }
 
 // ---- mods.txt ----------------------------------------------------------------------------------------------------------------------
-struct ListEntry { std::string id; int line; bool valid; };
+struct ListEntry { std::string id; int line; bool valid; bool off = false; bool found = false; };   // off: a "-id" line; found: discovered in the folder
 inline std::vector<ListEntry> parse_mods_list(const std::string& text, std::vector<std::string>& log)
 {
     std::vector<ListEntry> out;
@@ -190,10 +199,14 @@ inline std::vector<ListEntry> parse_mods_list(const std::string& text, std::vect
         }
         l = l.substr(b);
         if (l.empty()) continue;
+        const bool off = l[0] == '-';
+        if (off) { l = l.substr(1); while (!l.empty() && (l[0] == ' ' || l[0] == '\t')) l.erase(0, 1); }
         if (!seen.insert(l).second) { log.push_back(fmt("[mods] list: line %d: duplicate %s ignored", ln, l.c_str())); continue; }
         const bool ok = valid_id(l);
         if (!ok) log.push_back(fmt("[mods] list: line %d: '%s' is not a mod id ([a-z0-9-], 1-40 characters)", ln, l.c_str()));
-        out.push_back({ l, ln, ok });
+        ListEntry le{ l, ln, ok };
+        le.off = off && ok;
+        out.push_back(le);
     }
     return out;
 }
@@ -777,11 +790,13 @@ struct Segment {
     uint64_t virt, len;
     uint64_t src;      // Original: offset in the archive; ModFile: offset in the file; Memory: offset in Plan::toc
     std::string rel;   // ModFile: path relative to the mods folder
+    size_t override_index = SIZE_MAX;   // winning override served by this segment
 };
 struct PlannedOverride {
     std::string entry, mod_id, source;   // source: "files/..." or the alias donor entry
     bool alias = false;
-    uint64_t orig_len = 0, len = 0, virt = 0;
+    uint64_t orig_len = 0, len = 0, virt = 0, donor_offset = 0;
+    Digest content{};
 };
 struct Plan {
     std::string archive;
@@ -792,7 +807,7 @@ struct Plan {
     std::vector<PlannedOverride> overrides;
 
     // Copy up to n bytes of the virtual file at pos; returns the count (short at the virtual end or on a source's short read).
-    size_t read(Io& io, uint64_t pos, void* dst, size_t n) const
+    size_t read(Io& io, uint64_t pos, void* dst, size_t n, const std::vector<Bytes>* frozen = nullptr) const
     {
         uint8_t* d = (uint8_t*)dst;
         size_t done = 0;
@@ -805,7 +820,11 @@ struct Plan {
             const uint64_t in = p - it->virt;
             const size_t k = size_t(std::min<uint64_t>(n - done, it->len - in));
             size_t got = 0;
-            switch (it->kind) {
+            if (frozen && it->override_index != SIZE_MAX) {
+                const size_t idx = it->override_index;
+                memcpy(d + done, (*frozen)[idx].data() + (p - overrides[idx].virt), k);
+                got = k;
+            } else switch (it->kind) {
             case Segment::Original: got = io.archive_read(archive, it->src + in, d + done, k); break;
             case Segment::ModFile: got = io.mod_read(it->rel, it->src + in, d + done, k); break;
             case Segment::Memory: memcpy(d + done, toc.data() + it->src + in, k); got = k; break;
@@ -901,6 +920,35 @@ struct ModSet {
     Digest digest{};
     std::vector<std::string> log;
 };
+
+// Identity for rollback peers. Both classes contribute only winning, served records in load order.
+inline Digest session_content(const ModSet& set, const std::string& eboot)
+{
+    if (set.digest_kind == DigestKind::Refused || eboot.empty() || eboot == "unknown") return {};
+    jpsm::Sha256 hash;
+    auto field = [&](const std::string& value) {
+        uint8_t length[8];
+        for (unsigned i = 0; i < 8; ++i) length[i] = uint8_t(uint64_t(value.size()) >> (8 * i));
+        hash.update(length, sizeof length);
+        hash.update(reinterpret_cast<const uint8_t*>(value.data()), value.size());
+    };
+    field("jsp-session-content-1");
+    field(eboot);
+    for (const ModState& mod : set.mods) {
+        if (!mod.loaded) return {};
+        if (!mod.applied) continue;  // fully shadowed mods contribute no served records
+        field("mod"); field(mod.id); field(mod.m.version);
+        for (const auto& entry : mod.ovr) {
+            if (!entry.served) continue;
+            field("override"); field(entry.archive); field(entry.spec.entry);
+            hash.update(entry.content.data(), entry.content.size());
+        }
+        for (const RosterFighter& fighter : mod.m.roster) {
+            field("roster"); field(fmt("%d %d %d %d", fighter.id, fighter.after, fighter.logo_as, fighter.owned ? 1 : 0));
+        }
+    }
+    return hash.finish();
+}
 
 inline bool hash_source(Io& io, bool archive, const std::string& name, uint64_t off, uint64_t len, Digest& out)
 {
@@ -1040,6 +1088,7 @@ inline Plan build_plan(const Archive& a, const std::vector<std::pair<const ModSt
         const uint64_t virt = a.toc_offset + row.offset, slot = slot_of(row);
         over.push_back(r->spec.alias.empty() ? Segment{ Segment::ModFile, virt, r->len, 0, ms->id + "/" + r->spec.file }
                                              : Segment{ Segment::Original, virt, r->len, r->src, "" });
+        over.back().override_index = p.overrides.size();
         if (r->len < slot) over.push_back({ Segment::Zero, virt + r->len, slot - r->len, 0, "" });
         put_be32(&p.toc[row.pos_size], uint32_t(r->len));
         put_be32(&p.toc[row.pos_extract], uint32_t(r->len));
@@ -1051,6 +1100,8 @@ inline Plan build_plan(const Archive& a, const std::vector<std::pair<const ModSt
         po.orig_len = r->orig_len;
         po.len = r->len;
         po.virt = virt;
+        po.content = r->content;
+        po.donor_offset = r->src;
         p.overrides.push_back(po);
     }
     if (a.toc.masked) mask(p.toc.data(), p.toc.size());
@@ -1067,12 +1118,49 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
 {
     ModSet set;
     auto& log = set.log;
-    const std::vector<ListEntry> list = parse_mods_list(list_text, log);
+    const std::vector<ListEntry> parsed = parse_mods_list(list_text, log);
+    std::vector<ListEntry> list;   // the mods that load, in load order: the listed ones, then the found ones
+    std::set<std::string> known;   // ids mods.txt names (on or off): a found folder with such an id is not added twice
     {
-        std::string ids;
-        for (const auto& e : list) ids += (ids.empty() ? "" : ", ") + e.id;
+        std::string ids, offs;
+        for (const auto& e : parsed) {
+            known.insert(e.id);
+            if (e.off) { offs += (offs.empty() ? "" : ", ") + e.id; continue; }
+            list.push_back(e);
+            ids += (ids.empty() ? "" : ", ") + e.id;
+        }
         log.push_back(fmt("[mods] list %s: %llu enabled%s%s%s", opt.list_name.c_str(), (unsigned long long)list.size(), ids.empty() ? "" : " (",
                           ids.c_str(), ids.empty() ? "" : ")"));
+        if (!offs.empty()) log.push_back("[mods] list: turned off by -id: " + offs);
+    }
+    {
+        std::vector<std::string> dirs;
+        if (io.mod_dirs(dirs)) {
+            std::sort(dirs.begin(), dirs.end());
+            std::string ids;
+            for (const std::string& d : dirs) {
+                if (known.count(d)) continue;   // listed (loads in list order) or turned off
+                uint64_t sz = 0;
+                if (!valid_id(d)) { log.push_back(fmt("[mods] folder '%s': not a mod id ([a-z0-9-], 1-40 characters, no leading '-'): skipped", d.c_str())); continue; }
+                if (!io.mod_size(d + "/mod.json", sz)) {
+                    const std::string w = io.mod_why(d + "/mod.json");
+                    if (w.empty() || w.rfind("it is reached through a link", 0) == 0) {
+                        log.push_back(fmt("[mods] folder '%s': no mod.json%s%s%s: skipped", d.c_str(), w.empty() ? "" : " (", w.c_str(), w.empty() ? "" : ")"));
+                        continue;
+                    }
+                    // An existing but unreadable manifest is not an absent mod: the ordinary refusal below keeps online closed.
+                }
+                ListEntry e{ d, 0, true };
+                e.found = true;
+                list.push_back(e);
+                ids += (ids.empty() ? "" : ", ") + d;
+            }
+            if (!ids.empty()) log.push_back("[mods] found in the mods folder (alphabetical, after the list): " + ids);
+        } else if (const std::string why = io.mod_dirs_error(); !why.empty()) {
+            log.push_back("[mods] mods folder listing failed: " + why + "; stock game, online refused");
+            set.digest_kind = DigestKind::Refused;
+            return set;
+        }
     }
     std::map<std::string, Archive> archives;
     std::set<int> roster_ids = stock_roster_ids();

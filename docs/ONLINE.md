@@ -6,11 +6,7 @@ re-psn is a small matchmaking server that one player, or anyone else, hosts.
 - **Peer to peer:** the match itself goes directly between the players' games. If a direct link fails, it goes through
   the server's relay, but only when the host turned the relay on.
 
-Online is experimental. **It is on after install:** the first run writes `repsn.ini` with re-psn on, a
-public re-psn test server `107.175.17.162:36100` (relay on; this project does not run it) and a random name such as `Player1234`, and turns rollback on for
-Online Battle (the game's Friendly Match room pairs the players, rollback runs the fight). Nothing else to set up: see
-[TESTING_ONLINE.md](TESTING_ONLINE.md). An install that already had online settings keeps them. To host your own server instead,
-follow the steps below. It needs the installer's only tree (`--tree current`; the earlier legacy tree is retired, tag `legacy-v15`), which builds the port on ps3recomp v0.19.0; see [installer/README.md](../installer/README.md#online-battle-experimental)).
+Online is experimental. First run preserves saved settings. A fresh installation with no online configuration starts offline. To play online, open **Settings > Online**, choose **re-psn**, enter the server address approved for your session and your online name, then save. Select rollback separately for a supported disc. The launcher displays shared preferences. Per-game settings, environment variables and launch arguments can affect the session.
 
 ## 1. One player hosts a server
 
@@ -25,7 +21,7 @@ Players on the same home network can use the host PC's local address.
 ## 2. Every player sets up the launcher
 
 1. Open the launcher and go to the **Online** tab.
-2. Choose **re-psn**.
+2. Choose **re-psn (standard)**. The tab (and the game's Port Settings > Online page) offers one choice: Off, re-psn (standard), re-psn (rollback) or Community.
 3. **Server:** the address from step 1. With no port given, 36100 is used.
 4. **Online name:** 3 to 16 letters, digits, `-` or `_`, starting with a letter. Other players see this name. Each player
    on a server needs a different name.
@@ -46,7 +42,7 @@ On a home network you can skip typing the host's address.
 
 1. **The host** starts re-psn with `-discover` (and `-name "Some name"` if you want a name shown, at most 24 letters or
    digits). Add `-relay` as in step 1 above if needed. Discovery is off unless `-discover` is given.
-2. **The others** open the launcher's **Online** tab, choose **re-psn** and press **Find on LAN**. The search takes about
+2. **The others** open the launcher's **Online** tab, choose **re-psn (standard)** and press **Find on LAN**. The search takes about
    a second. One server found: its address goes into the Server field. Several: pick one from the list, which shows
    each one's name, address, players, relay on or off and version.
 3. Press **Save online settings** and play as in step 3 above.
@@ -77,20 +73,27 @@ The older rollback starts with a role key (`JSP_ROLLBACK_VIA=repsn` with `JSP_RO
 method for tests: with a role key the game's own online must be off (`enabled = 0` in `repsn.ini`, which keeps the server and
 online name), or the start is refused. The recipe is in
 [ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn).
+The same re-psn server can also arrange a match for the port's experimental rollback netcode instead of the game's own
+online. The two are separate choices of the same Online tab and only one can be on: **re-psn (rollback)** in the launcher or the game's page sets everything (for rollback, `repsn.ini` keeps the server and your online
+name but says `enabled = 0`, and `play_settings.txt` has the rollback lines; choosing re-psn (standard) again turns rollback off). The full recipe is in
+[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Port Settings > Online
+(on by default) writes the same files.
 
 ## If it does not work
 
 - **Online Battle says: You have been signed out of "PSN". You cannot play online battles.** Online is off: no settings were found, or they were refused (the log says which). Check that the Online tab shows re-psn and
   that the server address is right. The game's log lists its online decisions on lines that start with `[online]`.
-- **Both methods on:** if re-psn and a community server are both enabled (by a hand edit), the game refuses online
-  play and says so in the log (`[online] ERROR: re-psn and community are both enabled`). Pick one in the Online tab.
+- **Two methods on:** if re-psn (standard) and Community, or either of them and rollback, are on together (by a hand edit or
+  an older version), the game refuses online play and says so in the log (`[online] ERROR: re-psn (standard) and Community are
+  both enabled`, or the rollback notice below). The Online tab shows such files as Off with a note; pick one choice and save.
   An address given by hand (see below) is not affected.
 - **The room is found but the battle does not start, or freezes:** the direct link between two players failed. Ask the
   host to start the server with `-relay`, or open UDP for the game on both PCs. The game's default peer port is 3658,
   and two copies on one PC need different ports (see below).
-- **The top of the main menu says "Rollback is off: repsn.ini has enabled=1 (the game's own online)."** Rollback and the
-  game's own online were both on, so neither runs and nothing can connect. For rollback, set `enabled = 0` in `repsn.ini`
-  (keep `server` and `name`); for the game's own online, remove `JSP_ROLLBACK=1` from `play_settings.txt` (or set it to 0).
+- **The top of the main menu says "Rollback is off: re-psn (standard) is on too (repsn.ini has enabled=1)."** Rollback and
+  re-psn (standard) were both on, so neither runs and nothing can connect. Pick one choice in the launcher's Online tab or the
+  game's Port Settings > Online and save (that fixes the files). By hand: for rollback, set `enabled = 0` in `repsn.ini`
+  (keep `server` and `name`); for re-psn (standard), remove `JSP_ROLLBACK=1` from `play_settings.txt` (or set it to 0).
   The other "Rollback is off" texts are listed in [ROLLBACK.md](ROLLBACK.md#if-rollback-does-not-start).
 - **Mods:** while the mods folder's list (`mods.txt`) holds a mod that changes gameplay, the game's own Online Battle is off
   for that session (the log says `[mods] game online refused: gameplay mod set active`, and the Online page says
@@ -100,11 +103,7 @@ online name), or the start is refused. The recipe is in
   game's data that a gameplay mod changes differs from the one it was checked against (`[mods] set: refused` in the log).
 - **Name refused:** use 3 to 16 letters, digits, `-` or `_`, starting with a letter, and not a name another player
   already uses on that server.
-- **Rollback (experimental) over re-psn ends with `re-psn: no host with this version found within 2 minutes` or
-  `re-psn: no player with this version joined within 2 minutes`:** the two games did not meet. Each game waits 2 minutes
-  after its own start-up (the joining game keeps looking for the host's room), so start both at about the same time,
-  the host first if you can. Both players need the same version and the same gameplay mods (or none): the message and the
-  main menu show the build number (8 hex digits) to compare. See
+- **Rollback (experimental) over re-psn ends with `re-psn (rollback): no other player with this version found within 2 minutes`:** the two games did not meet. Both players just pick re-psn (rollback): nobody is Host or Join, each game searches first and opens a room only if none matches. Each game waits 2 minutes after its own start-up, so start both at about the same time. Both players need the same version, the same match code if you use one (or none on both), and the same gameplay mods (or none): the message and the main menu show the build number (8 hex digits) to compare, and the message says when it saw a room with another match code (never the code). Matches start from Free Battle, not the game's Online menu. With an explicit Host or Join override the messages are `no host with this version found ... (is the other player set to Host?)` and `no player with this version joined`. See
   [ROLLBACK.md, Rollback over re-psn](ROLLBACK.md#rollback-over-re-psn-experimental).
 
 ## Where the settings live
@@ -136,6 +135,6 @@ decides. An address given by hand also skips the "both methods on" refusal.
 
 The peer port is 3658 unless `p2p_port` or `PS3_NET_P2P_PORT` says otherwise.
 
-A community server, set up through the Community server presets, runs only the base game's online features. Features
+A community server, set up through the Community presets, runs only the base game's online features. Features
 that exist only in this port do not work there. This build has no client for a community server yet, so choosing one
 keeps the game offline (the log says so).

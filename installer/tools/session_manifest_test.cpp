@@ -60,7 +60,7 @@ struct Peer {
 struct Room {
     Peer p[4]; uint8_t roster = 0; uint64_t now = 0;
     Caps caps; bool reverse = false;
-    Room(uint8_t roster_, Caps c = Caps()) : roster(roster_), caps(c) { caps.build = 0xB001; for (int i = 0; i < 4; ++i) p[i].net.from = (uint8_t)i; }
+    Room(uint8_t roster_, Caps c = Caps()) : roster(roster_), caps(c) { caps.build = 0xB001; caps.content = sha256(nullptr, 0); for (int i = 0; i < 4; ++i) p[i].net.from = (uint8_t)i; }
     void make_host(Config cfg = {}) { p[0].host = std::make_unique<Host>(p[0].net, p[0].ev, caps, 0, cfg); }
     void make_client(int i, Caps c, Config cfg = {}) { p[i].cl = std::make_unique<Client>(p[i].net, p[i].ev, c, (uint8_t)i, cfg); }
     void pump()
@@ -131,9 +131,14 @@ int main(int argc, char** argv)
     { Id id; CHECK(!values_valid([] { Values v = defaults(); v.v[(size_t)Id::TrainInfStamina] = 1; return v; }(), &id) && id == Id::TrainInfStamina); }
 
     // --- manifest ---
-    Manifest m; m.session = 77; m.revision = 1; m.host = 0; m.roster = 0x07; m.seed = 0xdeadbeef; m.values = rb_values();
+    Manifest m; m.session = 77; m.revision = 1; m.host = 0; m.roster = 0x07; m.seed = 0xdeadbeef; m.values = rb_values(); m.content = sha256(nullptr, 0);
+    {   // Independent schema-3 little-endian fixture: zero settings, digest bytes 1..32.
+        Manifest golden; golden.session = 77; golden.revision = 1; golden.roster = 3; golden.seed = 17;
+        for (size_t i = 0; i < golden.content.size(); ++i) golden.content[i] = uint8_t(i + 1);
+        CHECK(hex(manifest_digest(golden)) == "c98efa09e6127ad74120b564b3cbbfc1ada152593db12f77330d0ef957201ac3");
+    }
     const auto mb = encode_manifest(m);
-    CHECK(mb.size() == 29 + 5 * kCount && mb.size() <= kMaxMessage);
+    CHECK(mb.size() == 61 + 5 * kCount && mb.size() <= kMaxMessage);
     { Manifest o; CHECK(decode_manifest(mb.data(), mb.size(), &o) == Reason::None && o == m); }
     CHECK(manifest_digest(m) == manifest_digest(m));
     for (size_t i = 0; i < kCount; ++i) { Manifest x = m; x.values.v[i] ^= (i == (size_t)Id::StageId ? 1 : 0); if (i == (size_t)Id::StageId) CHECK(manifest_digest(x) != manifest_digest(m)); }
@@ -143,7 +148,7 @@ int main(int argc, char** argv)
         for (size_t cut = 0; cut < b.size(); ++cut) CHECK(decode_manifest(b.data(), cut, &o) != Reason::None);   // every truncation
         b = mb; b.push_back(0); CHECK(decode_manifest(b.data(), b.size(), &o) == Reason::Malformed);               // trailing byte
         b = mb; b[0] = 'X'; CHECK(decode_manifest(b.data(), b.size(), &o) == Reason::Malformed);
-        b = mb; b[4] = 3; CHECK(decode_manifest(b.data(), b.size(), &o) == Reason::SchemaMismatch);
+        b = mb; b[4] = 2; CHECK(decode_manifest(b.data(), b.size(), &o) == Reason::SchemaMismatch);
         b = mb; b[28] = (uint8_t)(kCount + 1); CHECK(decode_manifest(b.data(), b.size(), &o) == Reason::Malformed);   // unknown/extra field count
         b = mb; b[29] = 1; CHECK(decode_manifest(b.data(), b.size(), &o) == Reason::Malformed);                      // field out of order
         Manifest bad = m; bad.roster = 0x06; CHECK(decode_manifest(encode_manifest(bad).data(), encode_manifest(bad).size(), &o) == Reason::Malformed);   // host not in roster
@@ -204,7 +209,7 @@ int main(int argc, char** argv)
 
     // --- mismatch: a client that cannot honour rollback refuses with a clear reason ---
     {
-        Room r(0x03); r.make_host(); Caps old; old.build = r.caps.build; old.rollback = false; r.make_client(1, old);
+        Room r(0x03); r.make_host(); Caps old = r.caps; old.build = r.caps.build; old.rollback = false; r.make_client(1, old);
         r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
         // the host already knows from the Hello: the proposal is refused locally, nothing was sent, nothing installed
         CHECK(r.p[0].host->propose(rb_values(), 0) == Reason::RollbackUnsupported && r.p[0].host->bad_peer() == 1 && r.p[0].host->bad_id() == Id::Rollback);
@@ -274,20 +279,30 @@ int main(int argc, char** argv)
         CHECK(run(none, stock, &hs, &hr) == State::Started && hs == State::Started);                // stock with the fold = an old stock peer
         CHECK(std::strstr(explain(Reason::BuildMismatch), "build") != nullptr);
     }
+    {   // A valid proposal whose content disagrees with the Hello cannot install a layer.
+        Room r(3); r.make_host(); r.make_client(1, r.caps);
+        r.p[0].host->begin(77, 3, 1, 0); r.join_all();
+        r.p[0].net.hold = (int)Msg::Propose;
+        CHECK(r.p[0].host->propose(rb_values(), 0) == Reason::None);
+        auto proposal = r.p[0].net.held;
+        proposal[proposal.size() - 5] ^= 1;   // final digest byte before the release build
+        r.p[1].cl->on_message(0, proposal.data(), proposal.size(), 0); r.pump();
+        CHECK(r.p[1].cl->reason() == Reason::ContentMismatch && r.p[0].host->state() == State::Failed && all_clean(r));
+    }
     {   // build mismatch seen by the client (host build in the proposal differs from the client's)
         Room r(0x03); r.make_host(); r.make_client(1, r.caps); r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
-        Manifest mm; mm.session = 77; mm.revision = 1; mm.host = 0; mm.roster = 3; mm.seed = 1; mm.values = defaults();
+        Manifest mm; mm.session = 77; mm.revision = 1; mm.host = 0; mm.roster = 3; mm.seed = 1; mm.values = defaults(); mm.content = r.caps.content;
         std::vector<uint8_t> b; put_header(b, Msg::Propose, 77, 1); auto e = encode_manifest(mm); b.insert(b.end(), e.begin(), e.end()); wire::put(b, 0xBAD, 4);
         r.p[1].cl->on_message(0, b.data(), b.size(), 0);
         CHECK(r.p[1].cl->state() == State::Failed && r.p[1].cl->reason() == Reason::BuildMismatch);
     }
     {   // schema mismatch from a future/older peer, at host and client
         Room r(0x03); r.make_host(); r.make_client(1, r.caps); r.p[0].host->begin(77, 0x03, 1, 0);
-        std::vector<uint8_t> b; put_header(b, Msg::Hello, 77, 0); b[5] = 9;
+        std::vector<uint8_t> b; put_header(b, Msg::Hello, 77, 0); b[5] = 2;
         r.p[0].host->on_message(1, b.data(), b.size(), 0);
         CHECK(r.p[0].host->state() == State::Failed && r.p[0].host->reason() == Reason::SchemaMismatch);
         Room r2(0x03); r2.make_host(); r2.make_client(1, r2.caps); r2.p[0].host->begin(77, 3, 1, 0); r2.join_all();
-        std::vector<uint8_t> c2; put_header(c2, Msg::Propose, 77, 1); c2[5] = 9;
+        std::vector<uint8_t> c2; put_header(c2, Msg::Propose, 77, 1); c2[5] = 2;
         r2.p[1].cl->on_message(0, c2.data(), c2.size(), 0);
         CHECK(r2.p[1].cl->state() == State::Failed && r2.p[1].cl->reason() == Reason::SchemaMismatch);
     }

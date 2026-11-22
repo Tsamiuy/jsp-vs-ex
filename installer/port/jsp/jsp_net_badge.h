@@ -1,9 +1,9 @@
-// jsp_net_badge.h -- ENHANCEMENT (display, opt-in, default off): the rollback status badge. One short line in the top-left corner while a
+// jsp_net_badge.h -- ENHANCEMENT (display, default on during rollback): the rollback status badge. One short line in the top-left corner while a
 // rollback session runs: "Rollback | <path> | delay <N>f | last <M>f", and the "[net] status:" log line with the same values that the
 // support bundle reads (installer/tools/support_bundle.py). Pure text, value and layout choice, no game or overlay calls, so
 // installer/tools/net_badge_test.cpp runs it on the host. The drawing is in jsp_net_game.cpp (the same overlay layer as its messages).
 //
-// Switch: JSP_ROLLBACK_BADGE=1 in play_settings.txt (the launcher passes every line on as an environment variable), read once when the
+// Switch: JSP_ROLLBACK_BADGE=0 hides the badge; absent defaults on. JSP_ROLLBACK_BADGE=1 in play_settings.txt (the launcher passes every line on as an environment variable), read once when the
 // rollback hooks are installed. Any non-zero value is on (not empty, first character not '0'), as for JSP_ROLLBACK.
 // Values, all already known to the session:
 //   path   "direct" for a direct-IP session; over re-psn the rendezvous' path (jsp_net_repsn.h path_name: "direct" or "relay")

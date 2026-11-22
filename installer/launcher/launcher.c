@@ -37,6 +37,140 @@
 #include <stdio.h>
 #include <string.h>
 
+/* JSP_RECOVERY_PARSER_BEGIN: same bounded wire contract as the C# launchers. */
+#include <stdint.h>
+struct recovery_parser {
+    uint64_t highest, current;
+    int stopped, discard;
+    size_t used;
+    char line[97];
+};
+static void recovery_byte(struct recovery_parser *p, unsigned char c)
+{
+    char *s, *digits;
+    uint64_t id = 0;
+    int kind;
+    if (c != '\n') {
+        if (p->discard) return;
+        if (p->used == 96 || c == 0 || c > 127 || (c < 32 && c != '\r')) {
+            p->discard = 1; return;
+        }
+        p->line[p->used++] = (char)c;
+        return;
+    }
+    if (p->discard) { p->discard = 0; p->used = 0; return; }
+    if (p->used && p->line[p->used - 1] == '\r') --p->used;
+    p->line[p->used] = 0;
+    p->used = 0;
+    if (strncmp(p->line, "JSP_SESSION/1 ", 14)) return;
+    s = p->line + 14;
+    if (!strncmp(s, "START ", 6)) { kind = 1; s += 6; }
+    else if (!strncmp(s, "RETIRE ", 7)) { kind = 2; s += 7; }
+    else if (!strncmp(s, "STOPPED ", 8)) { kind = 3; s += 8; }
+    else return;
+    digits = s;
+    if (*s < '1' || *s > '9') return;
+    for (; *s >= '0' && *s <= '9'; ++s) {
+        unsigned d = (unsigned)(*s - '0');
+        if (id > (UINT64_MAX - d) / 10) return;
+        id = id * 10 + d;
+    }
+    if (s == digits || (kind == 3 ? strcmp(s, " CLOCK") : *s != 0)) return;
+    if (kind == 1 && id > p->highest) { p->highest = p->current = id; p->stopped = 0; }
+    else if (kind == 2 && id == p->current) { p->current = 0; p->stopped = 0; }
+    else if (kind == 3 && id == p->current) p->stopped = 1;
+}
+/* JSP_RECOVERY_PARSER_END */
+
+struct recovery_ui {
+    struct recovery_parser parser;
+    HWND window;
+    HFONT font;
+    uint64_t shown, dismissed;
+};
+static LRESULT CALLBACK recovery_window(HWND window, UINT message, WPARAM wp, LPARAM lp)
+{
+    struct recovery_ui *ui = (struct recovery_ui *)GetWindowLongPtrA(window, GWLP_USERDATA);
+    if (message == WM_CREATE) {
+        HWND text, button;
+        ui = (struct recovery_ui *)((CREATESTRUCTA *)lp)->lpCreateParams;
+        SetWindowLongPtrA(window, GWLP_USERDATA, (LONG_PTR)ui);
+        ui->font = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Segoe UI");
+        text = CreateWindowA("STATIC", "Online session stopped because the game stopped responding.\r\n\r\n"
+            "If the game stays frozen, close its window and start the game again.",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 20, 18, 530, 100, window, NULL, NULL, NULL);
+        button = CreateWindowA("BUTTON", "Dismiss", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            452, 126, 96, 28, window, (HMENU)(INT_PTR)1, NULL, NULL);
+        SendMessageA(text, WM_SETFONT, (WPARAM)ui->font, TRUE);
+        SendMessageA(button, WM_SETFONT, (WPARAM)ui->font, TRUE);
+        return 0;
+    }
+    if (ui && (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == 1))) {
+        ui->dismissed = ui->shown;
+        DestroyWindow(window); // dismissing this notice never closes or kills the game
+        return 0;
+    }
+    if (ui && message == WM_DESTROY) {
+        ui->window = NULL;
+        if (ui->font) { DeleteObject(ui->font); ui->font = NULL; }
+        return 0;
+    }
+    return DefWindowProcA(window, message, wp, lp);
+}
+static void recovery_update(struct recovery_ui *ui)
+{
+    if (ui->window && (!ui->parser.current || !ui->parser.stopped || ui->shown != ui->parser.current))
+        DestroyWindow(ui->window);
+    if (!ui->parser.current || !ui->parser.stopped || ui->window || ui->dismissed == ui->parser.current) return;
+    ui->shown = ui->parser.current;
+    ui->window = CreateWindowExA(WS_EX_DLGMODALFRAME, "JspRecoveryNotice", "JSP - Online session stopped",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, (GetSystemMetrics(SM_CXSCREEN) - 580) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - 218) / 2, 580, 218, NULL, NULL, GetModuleHandleA(NULL), ui);
+    if (ui->window) {
+        FLASHWINFO flash = { sizeof flash, ui->window, FLASHW_TRAY, 3, 0 };
+        ShowWindow(ui->window, SW_SHOWNORMAL);
+        SetForegroundWindow(ui->window);
+        FlashWindowEx(&flash);
+    }
+}
+static void wait_game_with_recovery(HANDLE process, HANDLE records)
+{
+    struct recovery_ui ui;
+    WNDCLASSA wc;
+    MSG msg;
+    memset(&ui, 0, sizeof ui);
+    memset(&wc, 0, sizeof wc);
+    wc.lpfnWndProc = recovery_window;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = "JspRecoveryNotice";
+    RegisterClassA(&wc);
+    while (WaitForSingleObject(process, 50) == WAIT_TIMEOUT) {
+        unsigned budget;
+        int caught_up = 0;
+        // Only this launch's newly-created stderr file, never a historical log.
+        // Bound each read batch so a noisy game cannot starve process/UI checks.
+        for (budget = 0; records != INVALID_HANDLE_VALUE && budget != 8; ++budget) {
+            unsigned char bytes[8192]; DWORD count = 0, i;
+            if (!ReadFile(records, bytes, sizeof bytes, &count, NULL)) {
+                if (GetLastError() == ERROR_HANDLE_EOF) caught_up = 1;
+                break;
+            }
+            if (!count) { caught_up = 1; break; }
+            for (i = 0; i < count; ++i) recovery_byte(&ui.parser, bytes[i]);
+        }
+        // Avoid showing a failure while later lifecycle records are still in the batch.
+        // Stream latency remains asynchronous; this is not a cross-process live-state lock.
+        if (caught_up || !ui.parser.stopped) recovery_update(&ui);
+        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (!ui.window || !IsDialogMessageA(ui.window, &msg)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+        }
+    }
+    if (ui.window) DestroyWindow(ui.window);
+}
+
 static int file_exists(const char *path)
 {
     return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
@@ -285,7 +419,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
-    HANDLE out, err;
+    HANDLE out, err, records;
     (void)h; (void)p; (void)show;
 
     GetModuleFileNameA(NULL, here, sizeof here);
@@ -333,6 +467,8 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     snprintf(bfile, sizeof bfile, "%s\\play_stderr.prev.txt", run);
     MoveFileExA(path, bfile, MOVEFILE_REPLACE_EXISTING);
     err = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    records = err == INVALID_HANDLE_VALUE ? INVALID_HANDLE_VALUE :
+        CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -350,15 +486,21 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) SetEnvironmentVariableA("WINDOW_ICON", path);
     if (!GetEnvironmentVariableA("TITLE_STATS", boost, sizeof boost)) SetEnvironmentVariableA("TITLE_STATS", "0");
     if (!CreateProcessA(NULL, cl, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, run, &si, &pi)) {
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+        if (err != INVALID_HANDLE_VALUE) CloseHandle(err);
+        if (records != INVALID_HANDLE_VALUE) CloseHandle(records);
         if (boosted) boost_restore(bfile);
         fail("Could not start the game program.");
         return 1;
     }
     CloseHandle(pi.hThread);
-    if (boosted) {                      /* wait for the game, then put the power plan back as it was */
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        boost_restore(bfile);
-    }
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    if (err != INVALID_HANDLE_VALUE) CloseHandle(err);
+    // Keep this exact game's owner alive even with the default CPU_BOOST=0.
+    // The notice is nonmodal; dismissal never controls the game or delays cleanup.
+    wait_game_with_recovery(pi.hProcess, records);
+    if (records != INVALID_HANDLE_VALUE) CloseHandle(records);
+    if (boosted) boost_restore(bfile);
     CloseHandle(pi.hProcess);
     return 0;
 }

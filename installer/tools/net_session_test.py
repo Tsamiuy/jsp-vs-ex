@@ -32,7 +32,7 @@ class Proc:
         return "".join(self.lines)
 
 
-def run(exe, host_args, client_args, tmp, deadline_s=DEADLINE_S):
+def run(exe, host_args, client_args, tmp, deadline_s=DEADLINE_S, mailbox=None):
     """Returns (host rc, host output, client rc, client output, problems); problems names a process that did not exit by the deadline (then killed)."""
     end = time.monotonic() + deadline_s
     left = lambda: max(0.0, end - time.monotonic())
@@ -47,7 +47,26 @@ def run(exe, host_args, client_args, tmp, deadline_s=DEADLINE_S):
                             "host printed no PORT line" + (f" and exited ({h.p.poll()})" if h.p.poll() is not None else f" within the {deadline_s} s deadline"))
         else:
             procs["client"] = Proc([exe, "--role", "client", "--peer", f"127.0.0.1:{port}", "--out", str(tmp / "c.log")] + client_args)
+        if mailbox and "client" in procs:
+            wanted = "MAILBOX_RECEIVED" if mailbox == "mailbox_receipt" else "MAILBOX_CONNECTED"
+            acknowledged = False
+            while left() > 0:
+                origin, witness = procs["host"], procs["client"]
+                if wanted in witness.out() and "MAILBOX_STALLED" in origin.out() and (mailbox != "mailbox_receipt" or "MAILBOX_POSTED" in origin.out()):
+                    if origin.p.poll() is not None:
+                        problems.append("origin exited before peer receipt acknowledgment")
+                    else:
+                        # This is the only success-path authorization to leave the origin's stalled scope.
+                        (tmp / "mailbox.release").write_text("peer observed while origin alive\n")
+                        acknowledged = True
+                    break
+                if origin.p.poll() is not None or witness.p.poll() is not None:
+                    problems.append("peer exited before the required mailbox observation")
+                    break
+                time.sleep(0.002)
+            if not acknowledged and not problems: problems.append("mailbox observation deadline expired")
         for who, pr in procs.items():
+            if mailbox and problems: break
             try: pr.p.wait(timeout=left())
             except subprocess.TimeoutExpired: problems.append(f"hung: the {who} was still running at the {deadline_s} s scenario deadline (killed)")
     finally:
@@ -102,7 +121,10 @@ def agree(tmp, upto):
 
 IMP = ["--loss", "50", "--jitter", "20", "--delay", "10"]
 ADV = ["--loss", "200", "--jitter", "40", "--delay", "10"]
+MAILBOX_COMMON = ["--local", "1", "--timeout-ms", "60000", "--keepalive-ms", "25", "--tick-ms", "2", "--max-ms", "12000", "--mailbox-gate", "{tmp}/mailbox"]
 SCENARIOS = {
+    "mailbox_peer_receipt": (MAILBOX_COMMON + ["--mailbox-peer", "origin"], MAILBOX_COMMON + ["--mailbox-peer", "witness"], "mailbox_receipt"),
+    "mailbox_no_request_resume": (MAILBOX_COMMON + ["--mailbox-peer", "control-origin"], MAILBOX_COMMON + ["--mailbox-peer", "control-witness"], "mailbox_control"),
     # name: (host args, client args, kind). Ticks are completed simulation ticks (stepper tick numbering: Advance(F) = tick F+1).
     "clean_2x2": (["--local", "2"], ["--local", "2"], "agree"),
     # Runs (live + replay) per main-loop iteration, window = first tick..tick T: the old two-step loop ran about 0.5. Live ticks per iteration (rate=) are lower by design: every
@@ -296,14 +318,47 @@ def main():
     fails = 0
     for name, (ha, ca, kind) in SCENARIOS.items():
         if a.only and a.only != name: continue
+        if kind == "mailbox_control" and a.ticks <= 50:
+            print(f"FAIL {name}: --ticks must be at least 51 so settled comparison extends beyond stall tick 20", flush=True)
+            fails += 1
+            continue # refuse before creating/spawning either process
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td)
             ex = ["--ticks", str(a.ticks), "--seed", "5"]
             t0 = time.monotonic()
             sub = lambda args: [x.replace("{tmp}", str(tmp)) for x in args]
-            hr, ho, cr, co, problems = run(a.exe, sub(ha) + ex, sub(ca) + ex, tmp, a.deadline)
+            hr, ho, cr, co, problems = run(a.exe, sub(ha) + ex, sub(ca) + ex, tmp, a.deadline, kind if kind.startswith("mailbox_") else None)
             hs, cs = summary(ho), summary(co)
-            fl = problems or check(kind, hs, cs, hr, cr, tmp, a.ticks)
+            if kind.startswith("mailbox_"):
+                fl = list(problems)
+                if hr != 0 or cr != 0: fl.append(f"mailbox peer exits host={hr} client={cr}")
+                if "MAILBOX_STALLED" not in ho: fl.append("origin did not enter the no-call stalled scope")
+                if kind == "mailbox_receipt":
+                    if "MAILBOX_RECEIVED" not in co or "MAILBOX_ORIGIN_RELEASED failed=1" not in ho or "MAILBOX_WITNESS_RELEASED" not in co:
+                        fl.append("missing real receipt and explicit lifetime-release evidence")
+                else:
+                    if "MAILBOX_CONNECTED" not in co or "MAILBOX_RESUMED" not in ho or "MAILBOX_POSTED" in ho:
+                        fl.append("no-request observation/resume evidence missing")
+                    if num(hs,"maxtick",0) < a.ticks or num(cs,"maxtick",0) < a.ticks or num(hs,"ref_bad",1) or num(cs,"ref_bad",1):
+                        fl.append("both peers must resume to the target with matching reference state")
+                    if "disconnected(" in ho or "disconnected(" in co or num(hs,"desync",0) != -1 or num(cs,"desync",0) != -1:
+                        fl.append("the no-request control disconnected or desynchronized")
+                    for who, state in (("host", hs), ("client", cs)):
+                        if num(state, "ref_ticks", 0) < a.ticks:
+                            fl.append(f"{who}: reference covers fewer than {a.ticks} ticks")
+                    # Exclude the unsettled tail, but require every earlier tick on BOTH peers.
+                    settled = max(1, a.ticks - 30)
+                    hlog, clog = logs(tmp)
+                    for who, values in (("host", hlog), ("client", clog)):
+                        missing = [tick for tick in range(1, settled + 1) if tick not in values]
+                        if missing: fl.append(f"{who}: incomplete settled prefix 1..{settled}, missing {missing[:3]}")
+                    bad = [tick for tick in range(1, settled + 1) if tick in hlog and tick in clog and hlog[tick] != clog[tick]]
+                    if bad: fl.append(f"settled peer hashes differ at ticks {bad[:3]}")
+                for text in (ho, co):
+                    for line in text.splitlines():
+                        if line.startswith("MAILBOX_"): print("   receipt:", line)
+            else:
+                fl = problems or check(kind, hs, cs, hr, cr, tmp, a.ticks)
             if not problems and kind == "agree_rounds": fl += rounds_check(name, ho, co, a.ticks)
             if not fl and name.startswith("skip_final"):   # the switch must have skipped saves on both peers, or the scenario tested nothing
                 for n_, s_ in (("host", hs), ("client", cs)):
