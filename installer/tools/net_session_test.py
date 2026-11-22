@@ -318,6 +318,10 @@ def main():
     fails = 0
     for name, (ha, ca, kind) in SCENARIOS.items():
         if a.only and a.only != name: continue
+        if kind == "mailbox_control" and a.ticks <= 50:
+            print(f"FAIL {name}: --ticks must be at least 51 so settled comparison extends beyond stall tick 20", flush=True)
+            fails += 1
+            continue # refuse before creating/spawning either process
         with tempfile.TemporaryDirectory() as td:
             tmp = pathlib.Path(td)
             ex = ["--ticks", str(a.ticks), "--seed", "5"]

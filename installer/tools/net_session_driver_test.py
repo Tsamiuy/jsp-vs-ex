@@ -108,7 +108,24 @@ def check_mailbox_main(driver):
         finally:
             sys.argv = previous
         if rc != expected: failures.append(f"{label}: actual main returned {rc}, expected {expected}: {output.getvalue()[-300:]}")
-    return failures, len(cases)
+    for target, expected, expected_calls in ((20, 1, 0), (50, 1, 0), (51, 0, 1)):
+        calls = []
+        def edge_observations(exe, ha, ca, tmp, *args):
+            calls.append(True)
+            prefix = "".join(f"{t} {t:016x}\n" for t in range(1, max(1, target - 30) + 1))
+            (tmp / "h.log").write_text(prefix); (tmp / "c.log").write_text(prefix)
+            state = f"SUMMARY maxtick={target} ref_ticks={target} ref_bad=0 desync=-1 failed=-"
+            return (0, "MAILBOX_STALLED\nMAILBOX_RESUMED\n" + state, 0, "MAILBOX_CONNECTED\n" + state, [])
+        m.run = edge_observations
+        previous = sys.argv
+        try:
+            sys.argv = [str(driver), "--exe", "not-executed", "--only", "mailbox_no_request_resume", "--ticks", str(target)]
+            with contextlib.redirect_stdout(io.StringIO()) as output: rc = m.main()
+        finally:
+            sys.argv = previous
+        if rc != expected or len(calls) != expected_calls:
+            failures.append(f"target {target}: rc={rc}, run calls={len(calls)}, expected {expected}/{expected_calls}: {output.getvalue()[-300:]}")
+    return failures, len(cases) + 3
 
 
 def alive(pid):
