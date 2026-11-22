@@ -26,6 +26,7 @@
 #include <windows.h>
 #include "jsp_step_effects.h"
 #include "jsp_step_input.h"
+#include "jsp_stall_rule.h"
 
 extern "C" {
 void cellGcmTickVBlank(void);
@@ -37,6 +38,7 @@ uint32_t cellGcm_vblank_delivered(void);   // patch 7915: vblank notifications t
 uint32_t cellGcm_flip_request_count(void);
 extern void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly);   // patch 6501
 void cellGcm_rsx_process_fifo(void);
+int cellGcm_flip_write_off_lost(int want_write_off, uint32_t* out);   // patch 7927
 struct JspTickState { uint32_t done; uint32_t anc_done; uint8_t anc_set, anc_skip; };
 void jsp_fight_hash_get_state(JspTickState* s);   // jsp_fight_hash.cpp: done = completed scene passes
 // patch 7915
@@ -315,6 +317,9 @@ extern "C" int jsp_stepper_lockstep_stretch_us(uint32_t us)
 }
 static bool guest_in_step3_without_flip();                       // below (frame clock thread only)
 static void log_rerun_stall(const char* what, ULONGLONG gap_ms);   // below
+static bool lost_flip_pass(ULONGLONG last_flip_ms);                // below (frame clock thread only): true = a lost flip was written off
+static ULONGLONG g_ls_last_ms = 0;                                 // frame clock thread only: GetTickCount64 of the last lockstep flip
+static jsr::State g_lf;                                            // frame clock thread only: the lost-flip rule (jsp_stall_rule.h)
 static int g_ls_ack_site = 0;       // frame clock thread only: the open vblank (g_ack_open) is the one before a flip (1: the flip follows it) or another (0)
 static uint32_t g_ls_wait_logs = 0; // frame clock thread only: "no flip, no step-3 wait" lines of this stall
 // The flip after its first vblank: complete it and advance the 30 Hz schedule.
@@ -330,8 +335,9 @@ static void lockstep_take_flip()
     const long long step = period + (long long)st * f / 1000000;
     if (!g_ls_next || now.QuadPart - g_ls_next > period / 2) { if (g_ls_next) g_ls_restarts++; g_ls_next = now.QuadPart + step; }   // over half a period late: restart
     else g_ls_next += step;                                                                                                         // on (or near) the schedule
-    g_ls_last = now.QuadPart;
+    g_ls_last = now.QuadPart; g_ls_last_ms = GetTickCount64();
     g_ls_second = 1; g_ls_flips++; g_ls_wait_logs = 0;
+    jsr::flip_taken(g_lf);
 }
 // FIX (lockstep clock never off mid-match): a vblank of the lockstep clock the guest has not taken yet comes before anything else (no second tick, no grid), and the
 // step it belongs to goes on from where it stopped. Also called from a replay pass (a replay can start while one is open, as when the wait blocked).
@@ -378,10 +384,16 @@ static int lockstep_pass(int rsx_ok)
     if (gap > f / 50 && guest_in_step3_without_flip()) {
         g_ls_idle++; g_ls_last = now.QuadPart; g_ls_wait_logs = 0; g_ls_ack_site = 0;
         (void)vblank_ack(rsx_ok, true);
-    } else if (gap > f / 2 + (long long)g_ls_wait_logs * 5 * f && g_ls_wait_logs < 20) {
-        g_ls_wait_logs++;
-        log_rerun_stall("lockstep, live: no flip and no step-3 wait, waiting", (ULONGLONG)(gap * 1000 / f));
+        return 2;
     }
+    if (gap > f / 2 + (long long)g_ls_wait_logs * 5 * f && g_ls_wait_logs < 20) {
+        g_ls_wait_logs++;
+        log_rerun_stall(g_in_replay.load() ? "lockstep, in a replay: no flip and no step-3 wait, waiting"
+                                           : "lockstep, LIVE (no replay running; the replay fields are the last replay's): no flip and no step-3 wait, waiting",
+                        (ULONGLONG)(gap * 1000 / f));
+    }
+    // FIX (rollback freeze, jsp_stall_rule.h): a flip queued in the ring that the walker never reaches, with the guest polling for it in step 1
+    if (gap > f / 2) (void)lost_flip_pass(g_ls_last_ms);   // the next pass sees the flip ready and takes it with its 2 vblanks, as always
     return 2;
 }
 
@@ -451,6 +463,43 @@ static bool guest_in_step3_without_flip()
     const int32_t c = jsp_net_vblank_counter();
     return c >= 0 && c < kVblanksPerFrame;              // else not waiting for a vblank (it leaves step 3 on its own)
 }
+// FIX (rollback freeze: a flip the FIFO walker never reaches; the rule and the evidence are in jsp_stall_rule.h). Frame clock thread only, on a pass
+// with no flip ready. Samples the flip census and whether a guest thread is in the frame pacing's step 1 (func_006507DC polling cellGcmGetFlipStatus:
+// lr 0x00650820 after the poll, 0x00650854 after its every-10th call), and asks the toolkit (patch 7927) to write the flip off when the rule says so.
+// The toolkit refuses unless the walker is idle at put with exactly that one flip outstanding; either way one line says where get, put and the marker
+// were (the cause of the lost flip is not proven: that line is what proves it next time).
+static bool lost_flip_pass(ULONGLONG last_flip_ms)
+{
+    if (!g_lockstep.load(std::memory_order_relaxed)) return false;
+    uint32_t fc[9] = {}; cellGcm_flip_census(fc);
+    jsr::Sample s;
+    s.now_ms = GetTickCount64(); s.last_flip_ms = last_flip_ms;
+    s.status = fc[0]; s.queued = fc[3]; s.reached = fc[4]; s.completed = fc[5]; s.direct = fc[6];
+    if (s.status == 1 && s.queued == s.reached + 1u) {   // the census of the threads only when the cheap part already matches
+        static uint32_t kind[65], id[65], obj[65], lr[65]; static uint8_t alive[65], unrel[65]; uint32_t ov = 0, ub = 0;
+        ps3_hle_thread_census(kind, id, obj, lr, alive, unrel, &ov, &ub);
+        for (int t = 1; t < 65 && !s.main_in_step1; t++) s.main_in_step1 = alive[t] && !unrel[t] && kind[t] != 0 && (lr[t] == 0x00650820u || lr[t] == 0x00650854u);
+    }
+    const jsr::Act a = jsr::step(g_lf, s);
+    if (a == jsr::Act::Fail) {
+        if (!g_ls_failed.exchange(1))
+            std::fprintf(stderr, "[step] FAILED: no flip for %llu s (flip status %u, queued %u reached %u completed %u): the match must end (jsp_stepper_lockstep_failed)\n",
+                         (unsigned long long)(jsr::kFailMs / 1000), s.status, s.queued, s.reached, s.completed);
+        return false;
+    }
+    if (a != jsr::Act::WriteOff) return false;
+    uint32_t w[9] = {};
+    const int done = cellGcm_flip_write_off_lost(1, w);
+    std::fprintf(stderr, "[step] lost flip %s: %llu ms without a flip, the guest in step 1 waiting for flip %u (reached %u): get=0x%08X put=0x%08X marker at 0x%08X "
+                 "word there 0x%08X (%s), status %u, in a replay %d\n",
+                 done ? "WRITTEN OFF (completed as if the walker had reached it)" : "NOT written off (the walker is not idle at put: still waiting)",
+                 (unsigned long long)(s.now_ms - last_flip_ms), w[4], w[5], w[0], w[1], w[2], w[3],
+                 (w[3] & 0xFFFFFF00u) == 0xFEAD0100u ? "the marker" : "overwritten",
+                 w[7], g_in_replay.load());
+    if (done) jsr::flip_taken(g_lf);
+    return done != 0;
+}
+
 static bool owed_vblank_pass(int rsx_ok)
 {
     if (g_rr_owed.load(std::memory_order_relaxed) <= 0 || !g_lockstep.load(std::memory_order_relaxed)) return false;
@@ -480,7 +529,7 @@ extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
         (void)cellGcm_take_flip_pending();                   // taken, not presented: the intermediate frames of a replay are never shown
         if (rsx_ok) cellGcm_rsx_process_fifo();
         if (!vblank_ack(rsx_ok)) return 1;                         // N = 2 vblanks per flip , each observed by the guest
-        g_c.flips.fetch_add(1); g_last_flip.store(GetTickCount64());
+        g_c.flips.fetch_add(1); g_last_flip.store(GetTickCount64()); jsr::flip_taken(g_lf);
         g_rr_stall_logged = 0;
         g_rr_owed.store(0);                                  // FIX (re-run vblanks): a flip came first: its 2 vblanks are the ones tick 1 needed
         return 1;
@@ -511,7 +560,9 @@ extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
         if (in_match) log_rerun_stall("idle vblank", now - lf);
         g_c.idle.fetch_add(1); g_last_flip.store(now); (void)vblank_ack(rsx_ok);   // observed like the others (a lone unacknowledged tick could be mistaken for the next ack)
         g_rr_stall_logged = 0;
+        return 1;
     }
+    if (in_match && now - lf >= 500u) (void)lost_flip_pass(lf);   // FIX (rollback freeze, jsp_stall_rule.h): same rule in a re-run; the next pass takes the flip
     return 1;
 }
 

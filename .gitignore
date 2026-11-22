@@ -218,6 +218,8 @@ __pycache__/
 !/installer/tools/stepper_test.sh
 !/installer/tools/snapshot_ring_test.cpp
 !/installer/tools/snapshot_ring_test.sh
+!/installer/tools/stall_rule_test.cpp
+!/installer/tools/stall_rule_test.sh
 !/installer/patches/
 /installer/patches/*
 !/installer/patches/*.patch
