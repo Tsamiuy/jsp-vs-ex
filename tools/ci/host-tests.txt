@@ -35,6 +35,8 @@ posix   | installer/tools/net_repsn_test.sh {toolkit} {scratch}
 posix   | installer/tools/np_dialogs_test.sh {toolkit} {scratch}
 posix   | installer/tools/fs_vfile_test.sh {toolkit} {scratch}
 posix   | installer/tools/np_log_test.sh {toolkit} {scratch}
+# toolkit patch 7928 (sys_net_abort_socket, SO_RCVTIMEO, per-thread errno): the toolkit's own test_sys_net.c, built against the export
+posix   | installer/tools/sys_net_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/net_badge_test.sh
 posix   | installer/tools/net_delay_rule_test.sh
@@ -71,6 +73,8 @@ windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scra
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
 # toolkit patches 3005/3007: the tick-locked audio path is the WASAPI mix thread, so its race test is a Windows exe (MINGW_CC, llvm-mingw)
 windows | installer/tools/audio_lock_test.sh {toolkit} {scratch}
+# toolkit patch 7928 on the game's own platform (Winsock): the same test_sys_net.c as the posix row, a Windows exe (MINGW_CC, llvm-mingw)
+windows | installer/tools/sys_net_test.sh {toolkit} {scratch}
 exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py
 exclude | installer/tools/matching2_stale_test.c | optional baseline fixture compiled and run by matching2_context_test.py only with --baseline-sdk; not run by regular CI
 exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
