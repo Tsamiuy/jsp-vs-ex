@@ -1,49 +1,81 @@
-Patch 3007: the tick-locked audio's output keeps a cushion, fades its gaps and counts them (AUDIO_LOCK_SMOOTH=0 turns it off).
+Patch 3007: the tick-locked audio's output keeps a cushion, rate-controls it, conceals its gaps and counts them (AUDIO_LOCK_SMOOTH=0 turns it off).
 
-Symptom (testers, 2-player rollback, 0.7.0-test1): choppy audio. In the tick-locked mode (patch 3005) the 6-7 blocks of a tick reach the
-device in one burst at the tick boundary, and nothing kept a cushion in the 60 ms WASAPI buffer: a late tick (a rollback re-run, a long
-FIFO drain, the time-sync stretch of up to 2 ms per tick on the peer that is ahead, a flip schedule restart) let the device run dry (a hard
-cut), and once dry the buffer stayed at its floor, so every later late tick was another gap; a burst into a fuller buffer dropped whole
-blocks. Nothing counted either: the AUDIO_RATE underrun counter is in the free-running path only.
+Symptom (testers, 2-player rollback): choppy audio. In the tick-locked mode (patch 3005) the 6-7 blocks of a tick reach the device in one
+burst at the tick boundary, with no reserve in the 60 ms WASAPI buffer: a late tick (a rollback re-run, a flip schedule restart, the
+time-sync stretch, frame jitter) ran the device dry (a hard cut), and once dry it stayed at its floor; a burst into a fuller buffer dropped
+whole blocks. Revision 1 (test3) kept a 17 ms cushion in the 60 ms buffer: the test3 testers still had 31 and 53 gaps and 68 and 109
+dropped blocks in one 3.2 min match.
 
-Now, for the OUTPUT only (blocks mixed, read index and notify events are as before, so determinism is untouched; the mix thread never
-waits on the device in the lock): about to run dry between ticks, the last chunk plays on time-reversed with a fade to zero; the next
-burst is preceded by silence up to a cushion (AUDIO_LOCK_CUSHION_MS, default 30, capped so a 7-block burst still fits in the device
-buffer, PS3_AUDIO_BUF_MS) and fades in; below the cushion each block is stretched by up to AUDIO_LOCK_DRC frames of 256 (default 2,
-0.8%; 0 = off) so the cushion builds back. One "[audio-lock]" line when the lock ends (underruns, silence put in, fade tails, dropped
-blocks, level before a burst), every ~5 s with AUDIO_LOCK_LOG=1; the counters also run with the smoothing off (A/B).
+Revision 2, for the OUTPUT only (blocks mixed, read index and notify events are exactly as in 3005, so determinism is untouched; the mix
+thread never waits on the device in the lock):
+- the device opens with AUDIO_LOCK_BUF_MS (default 150; 0 = as before) when that is more than PS3_AUDIO_BUF_MS (60); the free-running mode
+  still fills only PS3_AUDIO_BUF_MS of it, so menus and offline keep their latency;
+- a cushion of AUDIO_LOCK_CUSHION_MS (default 50) kept by rate control: the smoothed level before each burst steers a continuous linear
+  resampler by up to AUDIO_LOCK_DRC/256 (default 4 = 1.6%);
+- a block that does not fit is time-compressed into the room left; only under half a block of room is it dropped (both counted);
+- when the device falls under AUDIO_LOCK_LOW_MS (default 12) between ticks, the last 15 ms played are looped with crossfaded seams and a
+  decaying gain (silence after AUDIO_LOCK_CONCEAL_MS, default 150) instead of running dry, and the next real block crossfades in;
+- one "[audio-lock]" line when the lock ends (device underruns, concealed gaps, squeezed / dropped blocks, rate range, level), every ~5 s
+  with AUDIO_LOCK_LOG=1, also with the smoothing off.
 
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index fe85113..eaf43df 100644
+index fe85113..4be76f5 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
-@@ -772,6 +772,143 @@ void ps3_audio_lock_rewind(long long blocks)
+@@ -248,6 +248,7 @@ static IAudioClient*        s_wasapi_client = NULL;
+ static IAudioRenderClient*  s_wasapi_render = NULL;
+ static HANDLE               s_wasapi_event  = NULL;
+ static UINT32               s_wasapi_buf_frames = 0;
++static int                  s_lk_fill_ms = 60;   /* patch 3007: what the free-running mode fills (PS3_AUDIO_BUF_MS); the device may be bigger */
+ static wchar_t              s_wasapi_dev_id[128];
+ /* J-Stars patch 3004: re-open after a lost device. State is touched by the mix thread only, except the staging
+  * struct, which the opener thread owns until it publishes s_wasapi_open_state 2 or 3. */
+@@ -323,6 +324,11 @@ static HRESULT wasapi_open_default(wasapi_dev* d)
+     REFERENCE_TIME buf_duration = 600000; /* 60 ms in 100 ns units */
+     { const char* e = getenv("PS3_AUDIO_BUF_MS"); const int ms = e ? atoi(e) : 0;
+       if (ms >= 10 && ms <= 500) buf_duration = (REFERENCE_TIME)ms * 10000; }
++    /* patch 3007: the tick-locked mode of a rollback match keeps a cushion on top of a whole tick's burst: open the device with AUDIO_LOCK_BUF_MS
++     * (default 150, 0 = off) when that is bigger; the free-running mode still fills only the PS3_AUDIO_BUF_MS above, so its latency is unchanged. */
++    s_lk_fill_ms = (int)(buf_duration / 10000);
++    { const char* e = getenv("AUDIO_LOCK_BUF_MS"); const int ms = (e && *e) ? atoi(e) : 150;
++      if (ms >= 10 && ms <= 500 && (REFERENCE_TIME)ms * 10000 > buf_duration) buf_duration = (REFERENCE_TIME)ms * 10000; }
+     d->event = CreateEventW(NULL, FALSE, FALSE, NULL);
+ 
+     /* Shared mode only takes the device's own mix format unless the stream
+@@ -772,6 +778,190 @@ void ps3_audio_lock_rewind(long long blocks)
      g_ps3_audio_lock_done = blocks; g_ps3_audio_lock_target = blocks;
  }
  
 +#ifdef _WIN32
 +/* J-Stars patch 3007 (rollback audio, AUDIO_LOCK_SMOOTH=0 turns it off): the output side of the tick-locked mode (patch 3005). There the blocks of a tick
-+ * reach the device in one burst at the tick boundary (6-7 blocks, 32-37 ms) and nothing kept a cushion in the device buffer: a tick that came late (a
-+ * rollback re-run, a long drain, the time-sync stretch of up to 2 ms per tick on the peer that is ahead, a flip schedule restart) let the device run dry,
-+ * a hard cut and a click, and once dry the buffer stayed at its floor, so from then on every late tick was another gap (choppy audio); a burst into a
-+ * fuller buffer dropped whole blocks (a skip). Now, for the OUTPUT only (what the guest sees -- blocks mixed, read index, notify events -- is unchanged,
-+ * so determinism is untouched, and the mix thread never waits on the device in the lock):
-+ *  - when the device is about to run dry between ticks, the last chunk sent is played on time-reversed with a 5 ms fade to zero (no hard cut);
-+ *  - the first block after that is preceded by silence up to a cushion (AUDIO_LOCK_CUSHION_MS, default 30, capped by the device buffer,
-+ *    PS3_AUDIO_BUF_MS, so that a 7-block burst still fits on top) and fades in: one clean pause instead of a run of clicks;
-+ *  - while the level before a burst is under the cushion, each block is stretched by up to AUDIO_LOCK_DRC frames of 256 (default 2 = 0.8%, linear
-+ *    interpolation; 0 = off) so the cushion builds back slowly; well over it, one frame shorter;
-+ *  - counters: one "[audio-lock]" line when the lock ends (underruns, silence put in, fade tails, dropped blocks, trough level), and every ~5 s with
-+ *    AUDIO_LOCK_LOG=1. The counters run with the smoothing off too (the A/B measurement). */
++ * reach the device in one burst at the tick boundary (6-7 blocks, 32-37 ms). With no reserve in the device buffer, a late tick (a rollback re-run, a long
++ * drain, a flip schedule restart, the time-sync stretch, plain frame jitter) let the device run dry -- a hard cut -- and a burst into a fuller buffer
++ * dropped whole blocks (skips). Revision 2 (test3 tester: 31 gaps and 68 dropped blocks in a 3.2 min match with the 60 ms buffer and a 17 ms cushion):
++ *  - a bigger device buffer: the device opens with AUDIO_LOCK_BUF_MS (default 150) when that is more than PS3_AUDIO_BUF_MS (60), and the free-running
++ *    mode still fills only PS3_AUDIO_BUF_MS of it (menus and offline keep their latency); the lock may use all of it;
++ *  - a cushion of AUDIO_LOCK_CUSHION_MS (default 50) kept by rate control: the level before each burst (smoothed) steers a continuous linear resampler
++ *    by up to AUDIO_LOCK_DRC/256 (default 4 = 1.6%) -- slower under the cushion, faster over it;
++ *  - nothing is dropped while it can be avoided: a block that does not fit is time-compressed into the room left (counted), only under half a block of
++ *    room is it dropped (counted);
++ *  - concealment instead of silence: when the device level falls under AUDIO_LOCK_LOW_MS (default 12) between ticks, the last 15 ms played are looped
++ *    with crossfaded seams and a decaying gain (AUDIO_LOCK_CONCEAL_MS, default 150, after which it is silence), and the next real block crossfades in;
++ *  - counters: one "[audio-lock]" line when the lock ends (every ~5 s with AUDIO_LOCK_LOG=1, also with the smoothing off).
++ * Output only: blocks mixed, read index and notify events are exactly as in 3005 (determinism untouched); the mix thread never waits on the device. */
 +static int lk_env(const char* e, int def) { return (e && *e) ? atoi(e) : def; }
-+static int   s_lk_smooth = -1, s_lk_cushion_ms = 30, s_lk_drc = 2, s_lk_log = 0;
-+static int   s_lk_active = 0, s_lk_burst = 1, s_lk_have_last = 0, s_lk_tailed = 0, s_lk_fadein = 0, s_lk_k = 0;
-+static float s_lk_last[(CELL_AUDIO_BLOCK_SAMPLES + 8) * 2]; static u32 s_lk_last_n = 0;   /* the last chunk sent (the fade tail's source) */
-+static float s_lk_out[(CELL_AUDIO_BLOCK_SAMPLES + 8) * 2];
-+static float s_lk_zeros[CELL_AUDIO_BLOCK_SAMPLES * 2];
-+static float s_lk_prev[2];
-+static unsigned long long s_lk_blocks, s_lk_underruns, s_lk_sil_frames, s_lk_tails, s_lk_drops, s_lk_slow, s_lk_fast, s_lk_bursts;
-+static double s_lk_trough_sum; static long s_lk_trough_min = -1;
++#define LK_N   CELL_AUDIO_BLOCK_SAMPLES
++#define LK_L   720                 /* concealment loop: 15 ms */
++#define LK_X   96                  /* its seam crossfade: 2 ms */
++#define LK_H   (LK_L + LK_X)       /* history kept: the loop and the frames before it */
++#define LK_F   128                 /* crossfade into the first real block after concealment */
++#define LK_OUTMAX (LK_N * 2 + 16)
++static int    s_lk_smooth = -1, s_lk_cushion_ms = 50, s_lk_drc = 4, s_lk_log = 0, s_lk_low_ms = 12, s_lk_conceal_ms = 150;
++static int    s_lk_active = 0, s_lk_burst = 1, s_lk_have_last = 0;
++static float  s_lk_out[LK_OUTMAX * 2], s_lk_tmp[LK_OUTMAX * 2], s_lk_fill[LK_N * 2];
++static float  s_lk_prev[2]; static double s_lk_pos = 0.0, s_lk_ema = -1.0, s_lk_skew = 0.0;
++static float  s_lk_ring[LK_H * 2]; static unsigned long long s_lk_ring_w = 0;   /* the last LK_H frames sent */
++static float  s_lk_seg[LK_H * 2]; static int s_lk_conc = 0, s_lk_conc_p = 0, s_lk_conc_first = 0; static long s_lk_conc_t = 0;
++static unsigned long long s_lk_blocks, s_lk_dry, s_lk_conceals, s_lk_conc_frames, s_lk_long_gaps, s_lk_drops, s_lk_squeezed, s_lk_bursts;
++static double s_lk_trough_sum, s_lk_skew_min, s_lk_skew_max; static long s_lk_trough_min = -1;
 +static int lk_cap_frames(void)
 +{
 +#if AUDIO_BACKEND_WASAPI
@@ -52,116 +84,156 @@ index fe85113..eaf43df 100644
 +    return 0;
 +#endif
 +}
++static int lk_fill_spare(void)   /* device frames the free-running mode leaves empty */
++{
++#if AUDIO_BACKEND_WASAPI
++    const int fill = s_lk_fill_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
++    return (int)s_wasapi_buf_frames > fill ? (int)s_wasapi_buf_frames - fill : 0;
++#else
++    return 0;
++#endif
++}
 +static void lk_begin(void)
 +{
 +    if (s_lk_smooth < 0) {
-+        s_lk_smooth = lk_env(getenv("AUDIO_LOCK_SMOOTH"), 1) != 0; s_lk_cushion_ms = lk_env(getenv("AUDIO_LOCK_CUSHION_MS"), 30);
-+        s_lk_drc = lk_env(getenv("AUDIO_LOCK_DRC"), 2); if (s_lk_drc < 0) s_lk_drc = 0; if (s_lk_drc > 8) s_lk_drc = 8;
++        s_lk_smooth = lk_env(getenv("AUDIO_LOCK_SMOOTH"), 1) != 0; s_lk_cushion_ms = lk_env(getenv("AUDIO_LOCK_CUSHION_MS"), 50);
++        s_lk_drc = lk_env(getenv("AUDIO_LOCK_DRC"), 4); if (s_lk_drc < 0) s_lk_drc = 0; if (s_lk_drc > 12) s_lk_drc = 12;
++        s_lk_low_ms = lk_env(getenv("AUDIO_LOCK_LOW_MS"), 12); if (s_lk_low_ms < 4) s_lk_low_ms = 4;
++        s_lk_conceal_ms = lk_env(getenv("AUDIO_LOCK_CONCEAL_MS"), 150); if (s_lk_conceal_ms < 0) s_lk_conceal_ms = 0;
 +        s_lk_log = lk_env(getenv("AUDIO_LOCK_LOG"), 0);
 +    }
-+    s_lk_active = 1; s_lk_burst = 1; s_lk_have_last = 0; s_lk_tailed = 0; s_lk_fadein = 0; s_lk_k = 0; s_lk_last_n = 0;
-+    s_lk_blocks = s_lk_underruns = s_lk_sil_frames = s_lk_tails = s_lk_drops = s_lk_slow = s_lk_fast = s_lk_bursts = 0;
-+    s_lk_trough_sum = 0; s_lk_trough_min = -1;
++    s_lk_active = 1; s_lk_burst = 1; s_lk_have_last = 0; s_lk_pos = 0.0; s_lk_ema = -1.0; s_lk_skew = 0.0; s_lk_ring_w = 0; s_lk_conc = 0;
++    s_lk_blocks = s_lk_dry = s_lk_conceals = s_lk_conc_frames = s_lk_long_gaps = s_lk_drops = s_lk_squeezed = s_lk_bursts = 0;
++    s_lk_trough_sum = 0; s_lk_trough_min = -1; s_lk_skew_min = s_lk_skew_max = 0;
 +}
 +static int lk_cushion_frames(void)
 +{
-+    const int cap = lk_cap_frames();
 +    int c = s_lk_cushion_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
-+    const int fits = cap - 8 * CELL_AUDIO_BLOCK_SAMPLES;   /* a 7-block burst (+1 block of slack) must still fit on top of it */
++    const int fits = lk_cap_frames() - 9 * LK_N;   /* a 7-block burst, stretched, plus slack must still fit on top of it */
 +    if (c > fits) c = fits;
 +    return c < 0 ? 0 : c;
 +}
 +static void lk_report(const char* why)
 +{
 +    const double fpms = CELL_AUDIO_SAMPLE_RATE / 1000.0;
-+    fprintf(stderr, "[audio-lock] %s: %llu blocks, %llu underruns (%.0f ms of silence put in), %llu fade tails, %llu blocks dropped (device full), "
-+                    "%llu stretched / %llu shortened, level before a burst min %.1f ms mean %.1f ms, cushion %.1f ms, device buffer %.1f ms, smoothing %s\n",
-+            why, s_lk_blocks, s_lk_underruns, s_lk_sil_frames / fpms, s_lk_tails, s_lk_drops, s_lk_slow, s_lk_fast,
-+            s_lk_trough_min < 0 ? 0.0 : s_lk_trough_min / fpms, s_lk_bursts ? s_lk_trough_sum / s_lk_bursts / fpms : 0.0,
++    fprintf(stderr, "[audio-lock] %s: %llu blocks, %llu device underruns, %llu concealed gaps (%.0f ms, %llu longer than %d ms), %llu blocks squeezed, %llu dropped, "
++                    "rate %+.2f..%+.2f %%, level before a burst min %.1f ms mean %.1f ms, cushion %.1f ms, device buffer %.1f ms, smoothing %s\n",
++            why, s_lk_blocks, s_lk_dry, s_lk_conceals, s_lk_conc_frames / fpms, s_lk_long_gaps, s_lk_conceal_ms, s_lk_squeezed, s_lk_drops,
++            s_lk_skew_min * 100.0, s_lk_skew_max * 100.0, s_lk_trough_min < 0 ? 0.0 : s_lk_trough_min / fpms, s_lk_bursts ? s_lk_trough_sum / s_lk_bursts / fpms : 0.0,
 +            lk_cushion_frames() / fpms, lk_cap_frames() / fpms, s_lk_smooth ? "on" : "off (AUDIO_LOCK_SMOOTH=0)");
 +}
 +static void lk_end(void) { if (!s_lk_active) return; s_lk_active = 0; lk_report("lock ended"); }
-+static void lk_keep_last(const float* f, u32 n)
++static void lk_send(const float* f, u32 n)   /* to the device, and into the history */
 +{
-+    if (n > CELL_AUDIO_BLOCK_SAMPLES + 8) n = CELL_AUDIO_BLOCK_SAMPLES + 8;
-+    memcpy(s_lk_last, f, n * 2 * sizeof(float)); s_lk_last_n = n; s_lk_have_last = 1; s_lk_tailed = 0;
-+    s_lk_prev[0] = f[(n - 1) * 2]; s_lk_prev[1] = f[(n - 1) * 2 + 1];
++    audio_backend_submit(f, n);
++    for (u32 i = 0; i < n; i++) { const u32 w = (u32)(s_lk_ring_w++ % LK_H); s_lk_ring[w * 2] = f[i * 2]; s_lk_ring[w * 2 + 1] = f[i * 2 + 1]; }
++    s_lk_have_last = 1;
 +}
-+/* Idle between ticks: when the device is about to run dry, play the last chunk on backwards with a fade to zero (continuous at the join). */
++/* One concealment frame: the loop over the history snapshot (seg[0..X) the frames before the loop, seg[X..H) the loop, seg[H-1] the last frame played). */
++static void lk_conc_frame(float* o)
++{
++    float v[2];
++    if (s_lk_conc_first) {   /* the first X frames: from the time-reversed end (continuous with the last frame played) into the loop */
++        const int j = s_lk_conc_p; const float w = (float)j / LK_X;
++        for (int c = 0; c < 2; c++) v[c] = s_lk_seg[(LK_H - 1 - j) * 2 + c] * (1.0f - w) + s_lk_seg[(LK_X + j) * 2 + c] * w;
++        if (++s_lk_conc_p == LK_X) { s_lk_conc_first = 0; s_lk_conc_p = LK_X; }
++    } else {
++        const int p = s_lk_conc_p;
++        if (p < LK_L - LK_X) for (int c = 0; c < 2; c++) v[c] = s_lk_seg[(LK_X + p) * 2 + c];
++        else { const int j = p - (LK_L - LK_X); const float w = (float)j / LK_X;   /* the loop's end crossfades into the frames before its start */
++               for (int c = 0; c < 2; c++) v[c] = s_lk_seg[(LK_X + p) * 2 + c] * (1.0f - w) + s_lk_seg[j * 2 + c] * w; }
++        if (++s_lk_conc_p == LK_L) s_lk_conc_p = 0;
++    }
++    const long lim = (long)s_lk_conceal_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
++    const float g = s_lk_conc_t >= lim ? 0.0f : expf(-(float)s_lk_conc_t / (50.0f * (CELL_AUDIO_SAMPLE_RATE / 1000)));   /* -8.7 dB per 50 ms */
++    o[0] = v[0] * g; o[1] = v[1] * g; s_lk_conc_t++;
++}
++static void lk_conc_start(void)
++{
++    for (int i = 0; i < LK_H; i++) { const u32 r = (u32)((s_lk_ring_w - LK_H + i) % LK_H); s_lk_seg[i * 2] = s_lk_ring[r * 2]; s_lk_seg[i * 2 + 1] = s_lk_ring[r * 2 + 1]; }
++    s_lk_conc = 1; s_lk_conc_first = 1; s_lk_conc_p = 0; s_lk_conc_t = 0; s_lk_conceals++;
++}
++static void lk_conc_stop(void)
++{
++    s_lk_conc_frames += (unsigned long long)s_lk_conc_t;
++    if (s_lk_conc_t > (long)s_lk_conceal_ms * (CELL_AUDIO_SAMPLE_RATE / 1000)) s_lk_long_gaps++;
++    s_lk_conc = 0;
++}
++/* Idle between ticks (every ~2 ms): keep the device over the low-water mark with concealment while no real block comes. */
 +static void lk_idle_tail(void)
 +{
-+    if (!s_lk_smooth || !s_lk_have_last || s_lk_tailed || !s_lk_last_n) return;
++    if (!s_lk_smooth || s_lk_ring_w < LK_H) return;
 +    const int cap = lk_cap_frames(), rm = audio_backend_room();
 +    if (cap <= 0 || rm < 0) return;
-+    if (cap - rm >= CELL_AUDIO_BLOCK_SAMPLES) return;   /* over one block (5.3 ms) still queued */
-+    const u32 n = s_lk_last_n;
-+    if ((int)n > rm) return;
-+    for (u32 i = 0; i < n; i++) {
-+        const float g = 1.0f - (float)(i + 1) / (float)n;
-+        s_lk_out[i * 2] = s_lk_last[(n - 1 - i) * 2] * g; s_lk_out[i * 2 + 1] = s_lk_last[(n - 1 - i) * 2 + 1] * g;
++    int level = cap - rm;
++    if (level == 0 && !s_lk_conc) s_lk_dry++;
++    const int low = s_lk_low_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
++    if (level >= low) return;
++    if (!s_lk_conc) lk_conc_start();
++    while (level < low + (int)LK_N) {
++        for (u32 i = 0; i < LK_N; i++) lk_conc_frame(&s_lk_fill[i * 2]);
++        audio_backend_submit(s_lk_fill, LK_N); level += LK_N;   /* not into the history: the loop keeps its source */
 +    }
-+    audio_backend_submit(s_lk_out, n);
-+    s_lk_tailed = 1; s_lk_tails++;
 +}
 +/* One mixed, unmuted block (s_mix_buffer) to the device. */
 +static void lk_submit_block(void)
 +{
 +    s_lk_blocks++;
++    if (s_lk_log && (s_lk_blocks % 938) == 0) lk_report("running");
 +    const int cap = lk_cap_frames(), rm = audio_backend_room();
-+    if (rm < 0 || cap <= 0) { audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES); s_lk_burst = 0; return; }   /* no device: as before */
-+    int level = cap - rm;
-+    const int cushion = lk_cushion_frames();
++    if (rm < 0 || cap <= 0) { audio_backend_submit(s_mix_buffer, LK_N); s_lk_burst = 0; return; }   /* no device: as before */
++    const int level = cap - rm, cushion = lk_cushion_frames();
 +    if (s_lk_burst) {   /* the first block after an idle wait: the level now is the low point before this tick's burst */
 +        s_lk_burst = 0; s_lk_bursts++; s_lk_trough_sum += level; if (s_lk_trough_min < 0 || level < s_lk_trough_min) s_lk_trough_min = level;
-+        const int dry = s_lk_have_last && (level < CELL_AUDIO_BLOCK_SAMPLES / 4 || s_lk_tailed);   /* ran dry, or only the fade tail was left */
-+        if (dry) s_lk_underruns++;
-+        if (s_lk_smooth && dry) s_lk_fadein = 1;
-+        if (s_lk_smooth && (dry || !s_lk_have_last) && cushion > level) {   /* re-prime: silence up to the cushion, then fade in */
-+            int want = cushion - level;
-+            while (want > 0) { const int n = want > (int)CELL_AUDIO_BLOCK_SAMPLES ? (int)CELL_AUDIO_BLOCK_SAMPLES : want; audio_backend_submit(s_lk_zeros, (u32)n); want -= n; s_lk_sil_frames += (u32)n; }
-+            level = cushion; s_lk_fadein = 1;
-+        }
-+        s_lk_k = 0;   /* the stretch of this burst's blocks, from the low point */
-+        if (s_lk_smooth && s_lk_drc > 0) {
-+            const int e = cushion - level;   /* frames short of the cushion */
-+            if (e > (int)CELL_AUDIO_BLOCK_SAMPLES / 2) { s_lk_k = e / (int)CELL_AUDIO_BLOCK_SAMPLES + 1; if (s_lk_k > s_lk_drc) s_lk_k = s_lk_drc; }
-+            else if (e < -2 * (int)CELL_AUDIO_BLOCK_SAMPLES) s_lk_k = -1;
-+        }
++        if (level == 0 && s_lk_have_last && !s_lk_conc) s_lk_dry++;
++        s_lk_ema = s_lk_ema < 0 ? level : s_lk_ema * 0.9 + level * 0.1;
++        if (s_lk_smooth && s_lk_drc > 0 && cushion > 0) {
++            double e = (cushion - s_lk_ema) / cushion; if (e > 1) e = 1; if (e < -1) e = -1;
++            s_lk_skew = e * s_lk_drc / (double)LK_N;
++            if (s_lk_skew < s_lk_skew_min) s_lk_skew_min = s_lk_skew; if (s_lk_skew > s_lk_skew_max) s_lk_skew_max = s_lk_skew;
++        } else s_lk_skew = 0;
 +    }
 +    if (!s_lk_smooth) {   /* patch 3005 as it was, counted */
-+        if (rm >= (int)CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES); s_lk_have_last = 1; } else s_lk_drops++;
++        if (rm >= (int)LK_N) { audio_backend_submit(s_mix_buffer, LK_N); s_lk_have_last = 1; } else s_lk_drops++;
 +        return;
 +    }
-+    const u32 N = CELL_AUDIO_BLOCK_SAMPLES, M = (u32)((int)N + s_lk_k);
-+    const int room_now = audio_backend_room();
-+    if (room_now >= 0 && room_now < (int)M) { s_lk_drops++; s_lk_fadein = 1; return; }   /* device full: dropped (as before); the next block fades in */
-+    if (s_lk_fadein || !s_lk_have_last) { s_lk_prev[0] = s_mix_buffer[0]; s_lk_prev[1] = s_mix_buffer[1]; }
-+    if (M == N) memcpy(s_lk_out, s_mix_buffer, N * 2 * sizeof(float));
-+    else {   /* linear interpolation over prev, x[0..N-1]: output j = 1..M at t = j*N/M (M == N gives x exactly) */
-+        if (s_lk_k > 0) s_lk_slow++; else s_lk_fast++;
-+        for (u32 j = 1; j <= M; j++) {
-+            const double t = (double)j * N / M; const u32 i = (u32)t; const float fr = (float)(t - i);
-+            for (int ch = 0; ch < 2; ch++) {
-+                const float a = i == 0 ? s_lk_prev[ch] : s_mix_buffer[(i - 1) * 2 + ch];
-+                s_lk_out[(j - 1) * 2 + ch] = i >= N ? s_mix_buffer[(N - 1) * 2 + ch] : a + fr * (s_mix_buffer[i * 2 + ch] - a);
-+            }
++    /* the continuous resampler: output frame at input position pos (prev = position -1), step 1 / (1 + skew) */
++    const double step = 1.0 / (1.0 + s_lk_skew);
++    u32 m = 0;
++    while (s_lk_pos <= (double)(LK_N - 1) && m < LK_OUTMAX) {
++        const int i = (int)floor(s_lk_pos); const float fr = (float)(s_lk_pos - i);
++        for (int c = 0; c < 2; c++) {
++            const float a = i < 0 ? s_lk_prev[c] : s_mix_buffer[i * 2 + c];
++            const float b = i + 1 <= (int)LK_N - 1 ? s_mix_buffer[(i + 1) * 2 + c] : a;
++            s_lk_out[m * 2 + c] = a + fr * (b - a);
 +        }
++        m++; s_lk_pos += step;
 +    }
-+    if (s_lk_fadein) {
-+        const u32 F = 128;   /* 2.7 ms */
-+        for (u32 i = 0; i < F && i < M; i++) { const float g = (float)(i + 1) / (float)F; s_lk_out[i * 2] *= g; s_lk_out[i * 2 + 1] *= g; }
-+        s_lk_fadein = 0;
++    s_lk_pos -= LK_N; s_lk_prev[0] = s_mix_buffer[(LK_N - 1) * 2]; s_lk_prev[1] = s_mix_buffer[(LK_N - 1) * 2 + 1];
++    if (s_lk_conc) {   /* back from concealment: crossfade the loop out and the real block in */
++        for (u32 i = 0; i < LK_F && i < m; i++) { float f[2]; lk_conc_frame(f); const float w = (float)(i + 1) / LK_F;
++            s_lk_out[i * 2] = s_lk_out[i * 2] * w + f[0] * (1.0f - w); s_lk_out[i * 2 + 1] = s_lk_out[i * 2 + 1] * w + f[1] * (1.0f - w); }
++        lk_conc_stop();
++    } else if (!s_lk_have_last) {
++        for (u32 i = 0; i < LK_F && i < m; i++) { const float w = (float)(i + 1) / LK_F; s_lk_out[i * 2] *= w; s_lk_out[i * 2 + 1] *= w; }
 +    }
-+    audio_backend_submit(s_lk_out, M);
-+    lk_keep_last(s_lk_out, M);
-+    if (s_lk_log && (s_lk_blocks % 938) == 0) lk_report("running");
++    const int room = audio_backend_room();
++    if (room >= 0 && room < (int)m) {
++        if (room < (int)LK_N / 2) { s_lk_drops++; return; }
++        for (int j = 0; j < room; j++) {   /* time-compress the block into the room left */
++            const double t = room > 1 ? (double)j * (m - 1) / (room - 1) : 0.0; const int i = (int)t; const float fr = (float)(t - i);
++            for (int c = 0; c < 2; c++) { const float a = s_lk_out[i * 2 + c], b = i + 1 < (int)m ? s_lk_out[(i + 1) * 2 + c] : a; s_lk_tmp[j * 2 + c] = a + fr * (b - a); }
++        }
++        s_lk_squeezed++; lk_send(s_lk_tmp, (u32)room); return;
++    }
++    lk_send(s_lk_out, m);
 +}
 +#endif
 +
  #ifdef _WIN32
  static unsigned long long g_audio_underruns;
  static unsigned __stdcall audio_mix_thread_func(void* arg)
-@@ -803,14 +940,16 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -803,21 +993,25 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      if (!s_lock_wake) s_lock_wake = CreateEventW(NULL, FALSE, FALSE, NULL);   /* patch 3005 */
      while (s_mix_thread_running) {
          if (g_ps3_audio_lock_target >= 0) {   /* patch 3005: tick-locked (see ps3_audio_lock_idle) */
@@ -170,13 +242,24 @@ index fe85113..eaf43df 100644
 +            if (g_ps3_audio_lock_done >= g_ps3_audio_lock_target) { s_lk_burst = 1; lk_idle_tail(); WaitForSingleObject(s_lock_wake, 2); continue; }
              audio_mix_one_block();
 -            if (!g_ps3_audio_lock_mute) { const int rm = audio_backend_room(); if (rm < 0 || rm >= CELL_AUDIO_BLOCK_SAMPLES) audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES); }
-+            if (!g_ps3_audio_lock_mute) lk_submit_block();   /* patch 3007: the output side (cushion, fades, counters) */
++            if (!g_ps3_audio_lock_mute) lk_submit_block();   /* patch 3007: the output side (cushion, rate control, concealment, counters) */
              g_ps3_audio_lock_done++;
              audio_notify_event_queues();
              QueryPerformanceCounter(&q0); blocks = 0;   /* back on the clock from here when the lock ends */
              continue;
          }
+-        const int room = audio_backend_room();
 +        lk_end();   /* patch 3007: the lock's output counters, once */
-         const int room = audio_backend_room();
++        int room = audio_backend_room();
++        const int spare = lk_fill_spare();   /* patch 3007: a device opened bigger for the lock is filled only to PS3_AUDIO_BUF_MS here */
++        if (room >= 0) { room -= spare; if (room < 0) room = 0; }
          if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
  #if AUDIO_BACKEND_WASAPI
+         /* Device queue under half a block: it is about to play silence (an
+          * audible click/stutter). AUDIO_RATE reports how often. */
+         if (room >= 0 && blocks > 64 &&
+-            (UINT32)room + CELL_AUDIO_BLOCK_SAMPLES / 2 >= s_wasapi_buf_frames) g_audio_underruns++;
++            (UINT32)room + CELL_AUDIO_BLOCK_SAMPLES / 2 >= s_wasapi_buf_frames - (UINT32)spare) g_audio_underruns++;
+ #endif
+         if (room < 0) {
+             LARGE_INTEGER now; QueryPerformanceCounter(&now);
