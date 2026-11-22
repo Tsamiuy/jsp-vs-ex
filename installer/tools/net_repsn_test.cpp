@@ -264,9 +264,9 @@ int main()
       CHECK(release_name(0x0000abcdu) == "build 0000abcd" && release_name(B) == "build a1b2c3d4");
       CHECK(version_mismatch_text(0xf1e06d4du, 0x8a47e98au, "") == "The other player is on 0.7.0-test2; you're on 0.7.0-test3. Both players need the same version for rollback.");
       CHECK(version_mismatch_text(0x8a47e98au, B, "0.7.0-test4") == "The other player is on 0.7.0-test3; you're on 0.7.0-test4. Both players need the same version for rollback.");
-      CHECK(version_mismatch_text(0x12345678u, B, "0.7.0-test4") == "The other player is on build 12345678; you're on 0.7.0-test4. Both players need the same version for rollback.");
+      CHECK(version_mismatch_text(0x12345678u, B, "0.7.0-test4") == "The other player is on build 12345678 (or uses different gameplay mods); you're on 0.7.0-test4. Both players need the same version for rollback.");
       // the same release name on both sides (other gameplay mods): the build words
-      CHECK(version_mismatch_text(0x8a47e98au, B, "0.7.0-test3") == "The other player is on build 8a47e98a; you're on build a1b2c3d4. Both players need the same version for rollback."); }
+      CHECK(version_mismatch_text(0x8a47e98au, B, "0.7.0-test3") == "The other player is on build 8a47e98a (or uses different gameplay mods); you're on build a1b2c3d4. Both players need the same version for rollback."); }
     // paired, the host on 0.7.0-test3 (B2) and a 0.7.0-test4 joiner (B): the joiner joins once, then fails; the host fails at that join, not at its window; nobody retries
     { FakeServer sv; const uint64_t P = 0x7777; const uint32_t B2 = 0x8a47e98au;
       auto ch = cfg(true, B2); ch.pair = P; auto cc = cfg(false, B); cc.pair = P; cc.release = "0.7.0-test4";
@@ -277,7 +277,7 @@ int main()
       CHECK(c.rz->notice1() == "The other player is on 0.7.0-test3; you're on 0.7.0-test4. Both players need the same version for rollback." && !c.rz->notice2().empty());
       CHECK(c.rz->error() == "re-psn: the other player runs another version (build 8a47e98a, yours a1b2c3d4)");
       h.clock += 50; const int rh = h.rz->poll();   // the host's release.txt is "" here (a local build): its own side by the table
-      CHECK(rh == -1 && h.rz->version_mismatch() && h.rz->notice1() == "The other player is on build a1b2c3d4; you're on 0.7.0-test3. Both players need the same version for rollback.");
+      CHECK(rh == -1 && h.rz->version_mismatch() && h.rz->notice1() == "The other player is on build a1b2c3d4 (or uses different gameplay mods); you're on 0.7.0-test3. Both players need the same version for rollback.");
       CHECK(h.clock < 2000); }
     // the joiner's join and leave reach the host in one poll: the host still fails with the message (checked at MemberJoined)
     { FakeServer sv; const uint64_t P = 0x7778; const uint32_t B2 = 0xf1e06d4du;
@@ -299,8 +299,8 @@ int main()
     // a paired host whose joiner never comes (a joiner before 0.7.0-test4 on another version only says so on its own screen): the 120 s give-up says why
     { FakeServer sv; auto ch = cfg(true, B); ch.pair = 0x777c; Side h; h.init(sv, 11, ch);
       CHECK(h.run_alone(119000) == 0 && h.run_alone(2000) == -1 && !h.rz->version_mismatch());
-      CHECK(h.rz->notice1() == "Rollback could not start: the other player probably runs a different version (the main menu shows it).");
-      CHECK(h.rz->error().rfind("re-psn: the other player probably runs a different version (the main menu shows it): start both games", 0) == 0); }
+      CHECK(h.rz->notice1() == "Rollback could not start: the other player probably runs a different version (the main menu shows it), or their online connection failed.");
+      CHECK(h.rz->error().rfind("re-psn: the other player probably runs a different version (the main menu shows it), or their online connection failed: start both games", 0) == 0); }
 
     // ---- the notice store (jsp_net_game.cpp): every end of the wait leaves it right ----
     { RendezvousNotice n; std::string a, b; const unsigned g0 = n.gen();

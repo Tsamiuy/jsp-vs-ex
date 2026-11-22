@@ -107,7 +107,8 @@ inline std::string version_mismatch_text(uint32_t other, uint32_t own, const std
 {
     std::string theirs = release_name(other), mine = own_release.empty() ? release_name(own) : own_release;
     if (theirs == mine) { theirs = "build " + build_hex(other); mine = "build " + build_hex(own); }
-    return "The other player is on " + theirs + "; you're on " + mine + ". Both players need the same version for rollback.";
+    const bool unknown = theirs.rfind("build ", 0) == 0;
+    return "The other player is on " + theirs + (unknown ? " (or uses different gameplay mods)" : "") + "; you're on " + mine + ". Both players need the same version for rollback.";
 }
 // How long a joiner that found the other version's room waits for the server's answer to its one join (that join tells a new host at once).
 constexpr int kMismatchJoinMs = 3000;
@@ -347,7 +348,7 @@ private:
         else if (!c_.host && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (other_builds_.empty() ? std::string() : " (" + other_builds_text() + ")");
         // ENHANCEMENT (version mismatch message): a paired host knows the other player is in its native room; a joiner of a build before 0.7.0-test4 that
         // runs another version never joins (it only says so on its own screen), so that is the likely reason
-        else if (c_.host && c_.pair) what = "the other player probably runs a different version (the main menu shows it)";
+        else if (c_.host && c_.pair) what = "the other player probably runs a different version (the main menu shows it), or their online connection failed";
         else if (c_.host) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
         else what = "the host's room did not answer within " + window_words(c_.give_up_ms);
         const std::string advice = meet_advice(c_.build, c_.give_up_ms);

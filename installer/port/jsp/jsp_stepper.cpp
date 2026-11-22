@@ -300,9 +300,11 @@ uint64_t g_ls_flips = 0, g_ls_idle = 0, g_ls_restarts = 0, g_ls_stretch_total_us
 std::atomic<uint32_t> g_ls_stretch_us{0};   // the main thread adds, the frame clock takes it at the next flip
 constexpr uint32_t kStretchMaxUs = 2000;    // at most 2 ms (6%) longer per tick
 }
+static ULONGLONG g_ls_last_ms = 0;                                 // frame clock thread only: GetTickCount64 of the last lockstep flip
+static jsr::State g_lf;                                            // frame clock thread only: the lost-flip rule (jsp_stall_rule.h)
 extern "C" void jsp_stepper_lockstep(int on)
 {
-    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); }
+    if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; g_lf = jsr::State{}; }
     else if (g_lockstep.load()) std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts (a flip over half a period late), time-sync stretch %.1f ms in all\n",
                                              (unsigned long long)g_ls_flips, (unsigned long long)g_ls_idle, (unsigned long long)g_ls_restarts, g_ls_stretch_total_us / 1000.0);
     g_lockstep.store(on ? 1 : 0);
@@ -318,8 +320,6 @@ extern "C" int jsp_stepper_lockstep_stretch_us(uint32_t us)
 static bool guest_in_step3_without_flip();                       // below (frame clock thread only)
 static void log_rerun_stall(const char* what, ULONGLONG gap_ms);   // below
 static bool lost_flip_pass(ULONGLONG last_flip_ms);                // below (frame clock thread only): true = a lost flip was written off
-static ULONGLONG g_ls_last_ms = 0;                                 // frame clock thread only: GetTickCount64 of the last lockstep flip
-static jsr::State g_lf;                                            // frame clock thread only: the lost-flip rule (jsp_stall_rule.h)
 static int g_ls_ack_site = 0;       // frame clock thread only: the open vblank (g_ack_open) is the one before a flip (1: the flip follows it) or another (0)
 static uint32_t g_ls_wait_logs = 0; // frame clock thread only: "no flip, no step-3 wait" lines of this stall
 // The flip after its first vblank: complete it and advance the 30 Hz schedule.

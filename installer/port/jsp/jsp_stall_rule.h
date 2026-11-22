@@ -36,7 +36,8 @@ enum class Act { None, WriteOff, Fail };
 struct State {
     uint64_t shape_since = 0;    // 0 = the shape does not hold
     uint32_t shape_queued = 0;   // the queued count it holds for
-    uint32_t tried_queued = 0;   // the queued count a write-off was last asked for (once per flip)
+    uint32_t tried_queued = 0;   // the queued count a write-off was last asked for
+    uint64_t tried_at = 0;       // when it was last asked (a refused write-off is asked again every kWriteOffMs)
     bool tried = false;
     bool failed = false;
 };
@@ -51,8 +52,8 @@ inline Act step(State& st, const Sample& s)
 {
     if (lost_flip_shape(s)) {
         if (!st.shape_since || st.shape_queued != s.queued) { st.shape_since = s.now_ms ? s.now_ms : 1; st.shape_queued = s.queued; }
-        if (s.now_ms - st.shape_since >= kWriteOffMs && !(st.tried && st.tried_queued == s.queued)) {
-            st.tried = true; st.tried_queued = s.queued;
+        if (s.now_ms - st.shape_since >= kWriteOffMs && !(st.tried && st.tried_queued == s.queued && s.now_ms - st.tried_at < kWriteOffMs)) {
+            st.tried = true; st.tried_queued = s.queued; st.tried_at = s.now_ms;
             return Act::WriteOff;
         }
     } else {

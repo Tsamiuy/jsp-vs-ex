@@ -20,8 +20,10 @@ int main()
         CHECK(jsr::step(st, lost(1000, 900)) == Act::None);
         CHECK(jsr::step(st, lost(1999, 900)) == Act::None);
         CHECK(jsr::step(st, lost(2000, 900)) == Act::WriteOff);
-        CHECK(jsr::step(st, lost(2500, 900)) == Act::None);   // refused (walker not idle): not asked again for this flip
-        CHECK(jsr::step(st, lost(9000, 900)) == Act::None);
+        CHECK(jsr::step(st, lost(2500, 900)) == Act::None);   // refused (walker not idle): not asked again within kWriteOffMs
+        CHECK(jsr::step(st, lost(2999, 900)) == Act::None);
+        CHECK(jsr::step(st, lost(3000, 900)) == Act::WriteOff);   // asked again once per kWriteOffMs while the same flip stays lost
+        CHECK(jsr::step(st, lost(3500, 900)) == Act::None);
     }
     {   // a normal frame: the flip is reached quickly (queued == reached), or the main thread is not in step 1: never written off
         jsr::State st;
