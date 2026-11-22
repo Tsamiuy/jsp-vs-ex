@@ -104,6 +104,7 @@ uint32_t jsp_snapshot_ext_hash(uint32_t k);
 int jsp_snapshot_ext_rollback(uint32_t k, uint32_t to, ppu_context* c);
 void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
 void jsp_fight_hash_reset_fight(void);   // jsp_fight_hash.cpp (ENHANCEMENT, online rematch): forget the fight that ended, the next one anchors again
+void jsp_fight_hash_native_online(int on);   // jsp_fight_hash.cpp (FIX, review of PR 248): 1 = the battle setup table is out of the checksum (native online fight)
 int jsp_fight_end_state(void);           // jsp_fight_hash.cpp (ENHANCEMENT, time-up): -1 unknown, 0 running, 1 red, 2 blue, 3 time up (winner not written yet)
 int jsp_fight_ko_winner(void);           // jsp_fight_hash.cpp (ENHANCEMENT, online match end): -1 unknown, 0 nobody yet, 1 red won, 2 blue won (guest words: rolled back)
 extern volatile int g_ko_track;          // jsp_game.cpp: 1 = find the KO counters even with the default KO count (a rollback match)
@@ -815,6 +816,7 @@ void reset_match()
     // fight fix): the disarm restores share pad +0x6D8 and +0x6DC to what they held when armed, when the share pad object is still the same one (a new object
     // is left alone). The fix chose this over calling 0x454EE8 from the main thread. Unverified in a game run.
     jsp_native_fight_arm(0);
+    jsp_fight_hash_native_online(0);   // FIX (review of PR 248): offline fights (and the bench) keep the battle setup table in the checksum
     // The fight that ended is forgotten: the next fight anchors again from done = 0 (without this a second fight never anchors and done stays where it was),
     // so a re-armed session waits for the NEW fight's anchor (ts.done >= 1) and its first HUD draw (hud_seen above).
     jsp_fight_hash_reset_fight();
@@ -1361,6 +1363,9 @@ void start_session(ppu_context* c)
         }
         std::fprintf(stderr, "[net] native fight taken over: the game's online fight runs on the rollback session (battle slot %d = rollback slot %u)\n", jsp_native_fight_slot(), (unsigned)g.plan.local_first);
     }
+    // FIX (review of PR 248): the battle setup table 0x009540E4 is Free Battle's; a native online fight never reads it (jsp_fight_hash.cpp says where that
+    // was checked), so it leaves this session's checksum before the first save instead of being cleared. Both PCs run the same mode (the slot and map checks).
+    jsp_fight_hash_native_online(native_online ? 1 : 0);
     g.stepper.begin(g.done_now, kRingDepth);
     g.stepper.table().set_mask((1u << g.plan.total_players) - 1);
     jsp_stepper_net_enable(&g.stepper.table());

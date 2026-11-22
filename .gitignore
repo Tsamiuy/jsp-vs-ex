@@ -224,6 +224,8 @@ __pycache__/
 !/installer/tools/sharepad_wd_test.sh
 !/installer/tools/thread_audit_test.cpp
 !/installer/tools/thread_audit_test.sh
+!/installer/tools/fight_setup_rule_test.cpp
+!/installer/tools/fight_setup_rule_test.sh
 !/installer/tools/audio_lock_test.sh
 !/installer/patches/
 /installer/patches/*
