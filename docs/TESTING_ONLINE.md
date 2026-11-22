@@ -22,9 +22,10 @@ Online fights are **2 vs 2** for now: each player has one fighter, the CPU fills
    - Otherwise: choose re-psn, enter the server your group uses, then **Save online settings**.
 
    Then click **Start Game**. The first start installs the game data from your disc (a few minutes).
-4. **Warm up (optional):** play one offline Free Battle (Battle Modes > Free Battle > 1 Player, **2 vs 2**) with the characters you
-   plan to use online. The game builds their graphics once, so the online fights stutter less. Then go straight to Online Battle;
-   no need to restart the game.
+4. **Warm up (optional, not needed for smooth fights):** online fights prepare new graphics in the background, so a player whose game
+   has not seen a character or effect yet no longer pauses both players. An effect may be missing for a moment the first time it
+   appears. If you like, play one offline Free Battle first (Battle Modes > Free Battle > 1 Player, **2 vs 2**) with the characters you
+   plan to use, then go straight to Online Battle.
 5. Both players: **Main Menu > Battle Modes > Online Battle > Friendly Match**. One player picks **Create a Room** (the host), the
    other **Search for a Room** and joins it. When both are in the room, the host waits about 10 seconds, then starts the battle.
    Only the host picks characters; the other player is on Random Select.
@@ -53,7 +54,9 @@ Look for these, in this order:
 | **The picture freezes.** | Wait up to a minute: the game recovers most freezes by itself within a few seconds, and otherwise ends the match. If it stays frozen, close the game (Alt+F4, or Task Manager), then **make the support bundle before you start the game again** (it keeps the logs of the last two starts only). Say who froze, the host or the other player. |
 | **`Reconnecting... N s`** during a fight. | The connection dropped for a moment. Wait a few seconds; after 5 seconds without data the match ends with `Opponent disconnected`. |
 | **`Opponent disconnected`.** | The other player left or lost the connection. Make a new room when they are back. |
-| **Choppy or crackling sound** in an online fight. | Fight sound runs a little behind (about 1/20 of a second) to stay smooth; short gaps fade instead of cutting. It is worst when the game itself stalls, mostly in the first fights of a new install: do the warm-up fight (step 4). If it stays choppy, say when (first fight only, or all) and send the support bundle. |
+| **`Communicating...` stays on screen** when you open Online Battle again after the other player quit mid-fight (`Connection has timed out.`, OK). | Fixed in this version: the next Online Battle goes through, with no need to restart the game. If it still stays for more than a minute, close the game and send both support bundles. |
+| **The screen stays black after a match** (often after a rematch), then the game leaves the room about 30 seconds later. | Fixed in this version: the game now gets past that point by itself within about a second. If it still happens, wait for the game to return, then send both support bundles and say who had the black screen. |
+| **Choppy or crackling sound** in an online fight. | Fight sound runs a little behind (about 1/20 of a second) to stay smooth; short gaps fade instead of cutting. It is worst when the game itself stalls. If it stays choppy, say when (first fight only, or all) and send the support bundle. |
 | **The match ended when you pressed F9** (or a recording or push-to-talk key on F9). | Holding **F9** for 1.5 seconds ends a rollback match on purpose; a tap does nothing. Do not hold F9 during a fight: move push-to-talk (Discord and similar) and any other hold-down key off F9. A quick tap of a recording hotkey such as Alt+F9 is fine. |
 | **`Connecting to opponent...` stays on screen.** | Wait: after 45 seconds the match ends with `Opponent did not reach the fight: match ended`. Make a new room. If it happens every time, send both support bundles. |
 | **The room is not in the list.** | The host creates the room first; then the other player searches again. Check the version (main menu corner) and that the settings window's **Online** tab shows the same server on both PCs (in a test build, the **Use** *server name* **(TEST BUILD)** button at the top of the tab turns the build's own one on). |
