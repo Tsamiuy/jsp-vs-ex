@@ -6,7 +6,8 @@ copy, see RPCS3 and its documentation), copies the port's sources, a
 pinned compiler and a Python to the install folder, and then builds the port there (`installer/tools/firstrun.py`: lift,
 SPU jobs, compile). You need no Visual Studio: the compiler (llvm-mingw, with CMake and Ninja) is in the package. The
 installer and the program contact no server: no update check, no crash report, no telemetry. The one exception is
-Online Battle (experimental), which is off unless you turn it on and give a re-psn server, see
+Online Battle (experimental), which is off until the player chooses a server in the settings window's Online tab (the game talks to that
+server only for Online Battle), and Discord Rich Presence, which is off until a Discord application is set (`JSP_DISCORD_APP_ID`). See
 [Online Battle](#online-battle-experimental).
 
 **The compile step has not been run on a real Windows PC.** See the table.
@@ -145,6 +146,26 @@ Never in the zip: the EBOOT, disc files, saves (`hdd0`, `.sav`), lifted code, sh
 step up to the SPU lift and stop before the compile; on Linux or macOS they take a few minutes. `make_fixture.py DIR` writes
 a fake disc folder and an `EBOOT.elf` stand-in for the checks that need no real data.
 
+## Firewall rule
+
+The **Allow online play through Windows Firewall** task adds one inbound UDP allow rule named `JSP Fan Revival online play` for this
+installation's `game\jsp.exe`. Setup (before adding it again) and uninstall remove only a rule with that exact name **and** that program
+path; rules the player or Windows made for the program, and the same-named rule of another installation in another folder, are kept.
+Uninstall first reads the rules (no administrator rights needed) and asks for them (UAC) only when this installation owns a rule.
+Source and model checks: `python3 -I installer/tools/firewall_rule_test.py` (CI runs it).
+
+Manual check on a Windows test PC or VM, never on a PC whose rules matter (an elevated PowerShell; `A` and `B` are two install folders):
+
+    $A = "C:\JSPTest\A\game\jsp.exe"; $B = "C:\JSPTest\B\game\jsp.exe"; $N = "JSP Fan Revival online play"
+    netsh advfirewall firewall add rule name="$N" dir=in action=allow protocol=UDP program="$A" enable=yes
+    netsh advfirewall firewall add rule name="$N" dir=in action=allow protocol=UDP program="$B" enable=yes
+    netsh advfirewall firewall add rule name="my own jsp rule" dir=in action=block protocol=UDP program="$A" enable=yes
+    netsh advfirewall firewall delete rule name="$N" program="$A"    # the command setup and uninstall run for A
+    Get-NetFirewallApplicationFilter -Program $A, $B | Get-NetFirewallRule | Select-Object DisplayName, Action
+    # expected: "my own jsp rule" (Block) for A and "JSP Fan Revival online play" for B; then remove the three test rules
+
+Then install into `A` with the task, uninstall, and check the same listing: B's rule and the custom rule are still there.
+
 ## What the player needs
 
 - The disc folder (the one that holds `PS3_GAME`), US BLUS31519 or EU BLES02136. Setup reads it in place.
@@ -213,19 +234,33 @@ Quick start for players: [docs/ONLINE.md](../docs/ONLINE.md).
 The game's own Online Battle can run against a [re-psn](https://github.com/undecuple/re-psn) server instead of PSN: a small
 matchmaking server (MIT, a maintained fork of [psnr](https://github.com/sp00nznet/psnr)) that one player, or anyone, hosts. Rooms, search and the player list go through the server; the
 match itself goes peer to peer between the players' games, through the server's relay when a direct link fails and the host turned the relay on (`-relay`). It is in
-the installer's only tree (`--tree current`, see above); the retired legacy tree (tag `legacy-v15`) never had them. Online is off unless these settings are
-present. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
+the installer's only tree (`--tree current`, see above); the retired legacy tree (tag `legacy-v15`) never had them.
+**Online service:** a fresh install is offline; this repository names no server and no Discord application. A package may ship one
+service as `online-service.ini` in the install folder (`assemble_payload.py --online-service FILE`; keys in `firstrun.py`, `SERVICE_FILE`; a
+test build sets `test_build=1` and says so in its log, its Online tab and its notes). The file only **offers** the service: setup and
+`firstrun.py` write nothing for it (the first-run log and the setup finish page name the one step). The player turns it on with one click
+in the settings window's Online tab: **Use** *label* (plus **(TEST BUILD)** for a test build; `UseService` in both launchers). That click,
+and only it, writes the shared `repsn.ini` (re-psn on, that server, the tab's online name or a random `Player` + 4 digits) when neither
+`repsn.ini` nor `community.ini` exists in the shared folder and the game has no `repsn.ini` of its own, then adds `JSP_ROLLBACK=1` and
+`JSP_ROLLBACK_RELAY` (the service's relay) to `play_settings.txt` unless it already has a `JSP_ROLLBACK` line or a rollback role key, and
+adds the service's Discord application id as `JSP_DISCORD_APP_ID` unless the settings file has a `JSP_DISCORD` or `JSP_DISCORD_APP_ID`
+line. That is "Online Battle + rollback": the game's own Online Battle > Friendly Match pairs the players and rollback runs the fight.
+Existing settings are never changed; the click says what it turned on and what it kept. `--no-online-defaults` (or
+`JSP_ONLINE_DEFAULTS=0`) only drops the first-run log lines. Tester guide:
+[docs/TESTING_ONLINE.md](../docs/TESTING_ONLINE.md). Without these files and settings, online is off. Setting up the server: download it from the [re-psn releases](https://github.com/undecuple/re-psn/releases) (Linux, or a
 Windows zip; still pre-releases) and follow its README; players need TCP and UDP 36100 on the server, and UDP between each
 other or the relay. The original psnr server speaks the same protocol and still works.
 
 The settings window's Online tab (the same tab is also in `launcher/JStarsLauncher19.cs`) sets this up without editing files: Off, re-psn (server and online name) or Community server
 (a list of presets, each with an address and an online name; none is shipped; features that exist only in this port do
-not work on a community server). Choosing one turns the other off in the same save. It writes `repsn.ini` and
+not work on a community server). With an `online-service.ini` the tab has the **Use** *label* button at the top (above) and, with re-psn, **Build's server** (fills in its server, for a player who keeps other settings; saved with Save). With re-psn the tab also has **Rollback netcode for
+Online Battle fights** (`JSP_ROLLBACK=1` without a role key in `play_settings.txt`, on by default; untick it for the game's own netcode)
+and **If the two PCs cannot connect directly, pass the match through the server (relay)** (`JSP_ROLLBACK_RELAY`), and a line at the top says what the next start does. Choosing one turns the other off in the same save. It writes `repsn.ini` and
 `community.ini` in the shared folder: `%APPDATA%\PS3Recomp\` for an installed game, `<install folder>\shared\` for a
 portable install, or the folder in the environment variable `PS3RECOMP_SHARED_DIR`. On the re-psn choice, **Find on LAN** broadcasts one small UDP request (port 36100) and fills the Server field from a server that
 answers; the host starts re-psn with `-discover` (a build with LAN discovery; see [docs/ONLINE.md](../docs/ONLINE.md#playing-on-the-same-network-lan)).
 It fills a normal `host:port`; nothing else is saved. Keys that belong to the game itself
-are never changed by the launcher. The launcher sets no online environment variable; the game reads the files at
+are never changed by the launcher. The launcher sets no online environment variable other than the two rollback lines above; the game reads the files at
 startup (`installer/port/jsp/jsp_online.cpp`, logging each decision on `[online]` lines) and sets the runtime's
 variables from them. Re-psn and community on together: online is refused. Community on: no client yet, offline. The
 game's own `repsn.ini` (in the install folder when portable, else `%APPDATA%\JSP Fan Revival\`) can also hold
@@ -239,7 +274,8 @@ Or add to the settings file (see above) of each player:
     PS3_NP_ONLINE_ID=yourname
 
 `PSNR_SERVER` is the server's address and port; `PS3_NP_ONLINE_ID` is the name other players see (up to 16 characters).
-Then Main Menu > Online Battle > Friendly Match: one player uses Create a Room, the others Search for a Room.
+Then Main Menu > Battle Modes > Online Battle > Friendly Match (Main Menu > Online Battle with `MENU_PAGES=0`): one player uses
+Create a Room, the others Search for a Room. Online fights are 2 vs 2.
 
 Two copies on one PC need a second settings file with another name and `PS3_NET_P2P_PORT=3659` (the default is 3658),
 started with `jsp-launcher.exe --settings <file>`, and their own save data: `PS3_GAMEDATA_ROOT=<folder>` in that file,

@@ -578,7 +578,9 @@ extern "C" int jsp_online_describe(int line, char* out, int n)
     case 2: snprintf(out, n, "Online name: %s (%s)", v.name[0] ? v.name : "(none)", v.name_via); break;
     case 3: snprintf(out, n, "Community preset: %s (%d saved)", v.active[0] ? v.active : "(none)", v.presets); break;
     case 4: snprintf(out, n, "Settings files: %d read, %d rejected", v.files, v.rejected); break;
-    default: snprintf(out, n, "Online play this session: %s", v.online ? "yes" : g_mods_refused ? "no (gameplay mods are on)" : "no"); break;
+    /* FIX (review): a fresh install selects no service; the page says so (Method and Server above select one) */
+    default: snprintf(out, n, "Online play this session: %s", v.online ? "yes" : g_mods_refused ? "no (gameplay mods are on)"
+                      : v.method == 0 ? "no (no service selected)" : "no"); break;
     }
     return 5 - line;
 }

@@ -6,7 +6,9 @@
 The C# launcher needs a C# compiler to build, so this checks the rules the tab must keep in the source: the three
 methods and what a save writes to each file, the shared-folder rule, the safe-writer rules (temp file in the same
 folder, flush, replace; 64 KB and 512-byte limits; re-read before saving; unknown lines kept), the input checks, and
-that the launcher sets no online environment variable and never touches the game's own keys.
+that the launcher sets no online environment variable and never touches the game's own keys. FIX (offer only): a packaged
+online-service.ini is only offered: the "Use <label>" button (" (TEST BUILD)" for a test build) turns it on when clicked, and
+nothing else (the first start, LoadOnline, LoadService) writes anything for it.
 """
 import pathlib
 import re
@@ -71,14 +73,76 @@ def run_checks(rel):
     check("per-game keys never touched", not any(k in cs for k in ("comm_id", "p2p_port", "report_rtt")))
     ro = cs[cs.index("bool RollbackOn()"):]
     ro = ro[:ro.index("\n        }\n")]
-    check("rollback on refuses re-psn and Community (the error path stops Start Game too)",
-          re.search(r"if \(m != 0 && RollbackOn\(\)\)\s*return \"Rollback is on \(Port Settings > Online\)\.", save) is not None
+    # ENHANCEMENT (Online Battle + rollback): only rollback WITH a role key conflicts; re-psn with the box ticked is the lobby start and removes the role keys
+    check("rollback with a role key refuses Community (the error path stops Start Game too)",
+          re.search(r"if \(m == 2 && RollbackOn\(\) && RollbackRoleKey\(\)\)\s*return \"Rollback is on \(Port Settings > Online\)\.", save) is not None
           and save.index("RollbackOn()") < save.index("OnlineIni.Load(RepsnPath()"))
+    check("role keys are LISTEN, JOIN, VIA and BENCH",
+          '{ "JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH" }' in cs)
     check("RollbackOn only reads JSP_ROLLBACK (0 or empty is off) and never writes",
           'StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)' in ro and 'TrimEnd(\' \', \'\\r\', \'\\n\')' in ro
           and "v.Length != 0 && v[0] != '0'" in ro and "break" not in ro and "WriteAll" not in ro and "File.Replace" not in ro)
-    check("the launcher never writes JSP_ROLLBACK", [l for l in cs.splitlines() if "JSP_ROLLBACK" in l and not l.strip().startswith("//")] == [l for l in cs.splitlines() if 'StartsWith("JSP_ROLLBACK=", StringComparison.OrdinalIgnoreCase)' in l])
+    # the rollback lines are written only by the Online tab's save and the offered service's click (UseService), through otherLines and SaveSettings
+    # (never a file write of their own), after the ini files
+    use = cs[cs.index("void UseService()"):]
+    use = use[:use.index("\n        }\n")]
+    writes = [l.strip() for l in cs.splitlines() if "OtherSet(" in l and "void OtherSet" not in l]
+    check("JSP_ROLLBACK is written only by the Online tab's save (or the service button's click)",
+          all(l in save or l in use for l in writes) and 'OtherSet("JSP_ROLLBACK", rollbackBox.Checked ? "1" : "0");' in save
+          and 'OtherSet("JSP_ROLLBACK_RELAY", relayBox.Checked ? "1" : "0");' in save
+          and save.index('OtherSet("JSP_ROLLBACK"') > save.index("err = ri.Save()") and "SaveSettings();" in save)
+    check("Off or Community turns only a lobby rollback off", 'else if (RollbackOn() && !RollbackRoleKey()) { OtherSet("JSP_ROLLBACK", "0"); SaveSettings(); }' in save)
     load = cs[cs.index("void LoadOnline()"):cs.index("string SaveOnline()")]
+    state = cs[cs.index("void ShowOnlineState()"):cs.index("void LoadOnline()")]
+    # FIX (review): a first start is Off with no server (a suggested Player name only) and saves nothing by itself
+    check("first start: Off, no server, a random Player name (no user name), nothing marked to save",
+          "onlineFresh = !ri.Exists && !ci.Exists" in load and 'repsnServerBox.Text = ri.Get("repsn", "server") ?? "";' in load
+          and "on1 = true" not in load and "onlineDirty = true" not in load
+          and '"Player" + new Random().Next(1000, 10000)' in cs and "UserName" not in cs)
+    check("first start says no online service is selected", "No online service selected yet, so online is off." in load
+          and "no online service selected" in cs[cs.index("void ShowOnlineState()"):cs.index("void LoadOnline()")])
+    check("the launcher names no server: no IP address, no PublicServer", "PublicServer" not in cs
+          and [x for x in re.findall(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", cs) if x != "255.255.255.255"] == [])
+    svc = cs[cs.index("void LoadService()"):]
+    svc = svc[:svc.index("\n        }\n")]
+    check("a packaged service (online-service.ini in the install folder) is only offered: button hidden without one, Off until the player saves",
+          'Path.Combine(root, "online-service.ini")' in svc and "OnlineIni.ValidAddress(s)" in svc and "Visible = serviceServer != null" in tab
+          and "Set(" not in svc and "Save(" not in svc and "serviceServer" not in load.split("onlineMsg.Text = \"No online service")[0])
+    # FIX (offer only): the packaged service is offered by one button and applied only by its click
+    check("offer: a button at the top of the tab, labelled by ServiceButtonText, hidden without a valid service, bold, no & mnemonic",
+          'serviceUseBtn = new Button { Text = serviceServer == null ? "" : ServiceButtonText()' in tab and "UseMnemonic = false, Visible = serviceServer != null }" in tab
+          and tab.index("serviceUseBtn = new Button") < tab.index("repsnPanel = new Panel") and tab.index("LoadService();") < tab.index("serviceUseBtn = new Button"))
+    check("offer: the button says Use <service name>, and (TEST BUILD) for a test build",
+          'string ServiceButtonText() { return "Use " + serviceLabel + (serviceTest ? " (TEST BUILD)" : ""); }' in cs
+          and 'serviceTest = si.Get("service", "test_build") == "1";' in svc)
+    check("offer: applying is click-only (UseService is called by the button's Click and nowhere else)",
+          "serviceUseBtn.Click += delegate { UseService(); };" in tab and cs.count("UseService()") == 2)
+    check("offer: nothing is written at load (LoadOnline, LoadService and ShowOnlineState write nothing and do not apply the service)",
+          not any(w in load + svc + state for w in ("UseService", "OtherSet(", ".Save()", "SaveSettings(", "File.Write", "File.Append"))
+          and "onlineDirty = false;" in load and "onlineDirty = true" not in load)
+    check("offer: the service file is read with firstrun.py read_service's rules (label 1-64 printable, server, numeric app id, flags)",
+          "ServiceHostOk(s)" in svc and "l.Length < 1 || l.Length > 64" in svc and "c < ' ' || c > '~'" in svc and "app.Length > 20" in svc
+          and "c < '0' || c > '9'" in svc and 'serviceRollback = si.Get("repsn", "rollback") != "0"; serviceRelay = si.Get("repsn", "relay") != "0";' in svc)
+    check("offer: the click keeps existing online files (shared repsn.ini, community.ini, the game's repsn.ini) and writes repsn.ini only without them",
+          "new string[] { RepsnPath(), CommunityPath(), GameRepsnPath() }" in use and "if (present.Count > 0)" in use
+          and ".Save()" not in use[use.index("if (present.Count > 0)"):use.index("else\n")]
+          and 'ri.Set("repsn", "enabled", "1");' in use and 'ri.Set("repsn", "server", serviceServer);' in use)
+    check("offer: rollback lines only after this click turned re-psn on, never over a JSP_ROLLBACK line or a role key",
+          "if (repsnOn)" in use and use.index('SettingsHas("JSP_ROLLBACK")') < use.index('OtherSet("JSP_ROLLBACK", "1")')
+          and "foreach (string k in RollbackRoleKeys) if (SettingsHas(k)) role = true;" in use
+          and 'bool relay = !SettingsHas("JSP_ROLLBACK_RELAY");' in use and 'if (relay) { OtherSet("JSP_ROLLBACK_RELAY", serviceRelay ? "1" : "0");' in use)
+    check("offer: the Discord app id only when the settings file has no JSP_DISCORD_APP_ID or JSP_DISCORD line",
+          'if (SettingsHas("JSP_DISCORD_APP_ID") || SettingsHas("JSP_DISCORD")) kept.Add(' in use and 'OtherSet("JSP_DISCORD_APP_ID", serviceAppId);' in use)
+    # FIX (review): with the player's own online settings kept (no re-psn turned on by this click), the service's Discord app id is not added either
+    check("offer: the Discord app id only when this click turned the service on (never beside kept online settings)",
+          "if (serviceAppId.Length > 0 && repsnOn)" in use and "if (serviceAppId.Length > 0)\n" not in use
+          and use.index("repsnOn = true;") < use.index("if (serviceAppId.Length > 0 && repsnOn)") < use.index('OtherSet("JSP_DISCORD_APP_ID", serviceAppId);'))
+    check("offer: the click saves through SaveSettings, checks what landed and shows the result",
+          "SaveSettings();" in use and "SettingsValue(k) == null" in use and "MessageBox.Show(this, msg, Text);" in use and "Kept as they are: " in use)
+    check("offer: the game's repsn.ini path is the install folder's game\\ when portable, else %APPDATA%\\JSP Fan Revival",
+          'PortableInstall(root) ? Path.Combine(Path.Combine(root, "game"), "repsn.ini")' in cs and '"JSP Fan Revival"), "repsn.ini")' in cs)
+    check("offer: the first start and the Off line name the button", r'click \"" + ServiceButtonText() + "\" at the top of this tab, or ' in load
+          and r'click \"" + ServiceButtonText() + "\" below, or ' in state)
     check("a file with both on, or one on beside rollback, shows a note",
           "RollbackOn()" in load and "Both files were switched on" in load and "note + \" \" + rn" in load)
     check("Server and Name can be saved while Off is chosen (panel stays enabled, valid values are written)",
@@ -144,5 +208,27 @@ for txt, want in (("JSP_ROLLBACK=1", True), ("JSP_ROLLBACK=0", False), ("JSP_ROL
 # the installer builds jsp-settings.exe from JStarsLauncher.cs; the v19 launcher is generated from it: both need the tab
 for rel in ("launcher/JStarsLauncher.cs", "launcher/JStarsLauncher19.cs"):
     run_checks(rel)
+
+# FIX (offer only): the same button words in firstrun.py's log, the setup finish page and the launchers; both launchers keep the Online tab's offer in step
+print("== firstrun.py, jsp.iss, both launchers")
+sys.path.insert(0, str(root / "installer" / "tools"))
+import firstrun   # noqa: E402
+check("firstrun.py names the same button", firstrun.service_button({"label": "Example", "test": True}) == "Use Example (TEST BUILD)"
+      and firstrun.service_button({"label": "Example", "test": False}) == "Use Example")
+iss = (root / "installer" / "jsp.iss").read_text(encoding="utf-8")
+fin = iss[iss.index("if CurPageID = wpFinished then begin"):]
+check("setup finish page: an offered service is turned on with one click in the settings window's Online tab",
+      "SvcIni := ExpandConstant('{app}\\online-service.ini');" in fin and "if FileExists(SvcIni) then begin" in fin
+      and "SvcBtn := 'Use ' + GetIniString('service', 'label', '', SvcIni);" in fin and "SvcBtn := SvcBtn + ' (TEST BUILD)';" in fin and "Online tab" in fin and "one click" in fin and "sets up online play" not in fin)
+
+
+def offer_part(text):
+    a = text.index("        // FIX (review): no built-in server.")
+    return text[a:text.index("        static readonly string[] RollbackRoleKeys")]
+
+
+c1 = (root / "launcher/JStarsLauncher.cs").read_text(encoding="utf-8")
+c2 = (root / "launcher/JStarsLauncher19.cs").read_text(encoding="utf-8")
+check("both launchers have the same offer code (LoadService, ServiceButtonText, UseService)", offer_part(c1) == offer_part(c2))
 print("RESULT:", "ok" if not fails else "FAILED")
 sys.exit(1 if fails else 0)

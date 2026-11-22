@@ -36,8 +36,8 @@ RUN_CMD = """@echo off
 rem J-Stars Victory VS-EX: Fan Revival, portable zip: first run.
 rem Asks for your disc folder and your decrypted EBOOT.elf, checks them and builds the game here
 rem from your own copy with the bundled compiler (nothing to install). Saves, settings, logs and the
-rem build stay in this folder; the folder may be moved or renamed afterwards. Start it again to resume. Nothing is
-rem downloaded and no server is contacted.
+rem build stay in this folder; the folder may be moved or renamed afterwards. Start it again to resume. The build
+rem downloads nothing and contacts no server.
 setlocal
 cd /d "%~dp0"
 set "PY=%~dp0toolchain\\python\\python.exe"
@@ -58,7 +58,9 @@ README = """J-Stars Victory VS-EX: Fan Revival, portable
 ============================================
 An unofficial fan project. Nothing of the game is included or downloaded: the port is built on your PC from your own copy.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental), which is off unless you turn it on and give a re-psn server (see the installer README).
+(experimental), off until you choose a server in jsp-settings.exe, Online tab (see ONLINE-GUIDE.md). A test build offers
+its server there: one click on its "Use ... (TEST BUILD)" button. Nothing changes before that; online settings you already
+have are kept.
 
 1. Unpack the whole zip to a folder you can write to (not Program Files). Keep the folders as they are.
 2. Double-click run.cmd. It asks for:
@@ -67,8 +69,10 @@ This program contacts no server: no update check, no crash report, no telemetry.
    and then builds the game here. (An EBOOT.elf the port does not know is refused; to try one at your own risk, start run.cmd --allow-unknown-eboot: unsupported.) This takes a long time; if it stops, run.cmd again: finished steps are kept.
 3. Start the game with jsp-settings.exe (settings: resolution, window, controls; then Start Game), or directly with
    jsp-launcher.exe. The first start installs the game data from your disc (a few minutes).
+4. Online: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2). One player picks Create a Room, the other
+   Search for a Room. ONLINE-GUIDE.md has the details and what to do if something goes wrong.
 
-Everything stays in this folder: build, logs (logs\\firstrun.log), saves (hdd0) and settings (jsp-install.ini,
+Everything stays in this folder: build, logs (logs\\firstrun-<time>.log), saves (hdd0) and settings (jsp-install.ini,
 play_settings.txt). You can move or rename the folder after the first run. To remove the game, delete the folder.
 
 If something goes wrong, double-click support-bundle.cmd: it makes one zip of the logs and settings (user name removed) on your

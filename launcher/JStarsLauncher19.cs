@@ -1297,8 +1297,190 @@ namespace JStarsLauncher
         TextBox repsnServerBox, repsnNameBox, presetLabelBox, presetAddrBox, presetNameBox;
         ListBox presetList;
         Button lanBtn, presetAddBtn, presetUpdBtn, presetDelBtn, presetActiveBtn, onlineSaveBtn;
-        Label onlineMsg, onlineWhere;
+        Label onlineMsg, onlineWhere, onlineState;
         Panel repsnPanel, commPanel;
+        // ENHANCEMENT (Online Battle + rollback, the tester default): the game's own Online Battle > Friendly Match over re-psn, and our rollback runs the
+        // fight (the game pairs the two players by their room; jsp_net_online.h NC_NATIVE). The two boxes are play_settings.txt lines that jsp-launcher.exe
+        // turns into environment variables: JSP_ROLLBACK (1 = the lobby start, no role key) and JSP_ROLLBACK_RELAY. They must be in the environment when the
+        // game starts (its thread registry reads JSP_ROLLBACK before any game code runs), so they are settings lines and not a default inside the game.
+        CheckBox rollbackBox, relayBox;
+        Button publicSrvBtn;
+        bool onlineFresh;   // neither file existed: the first start; online stays Off until the player picks a method and saves
+        // FIX (review): no built-in server. A package may ship one service, <install folder>\online-service.ini (installer/tools/firstrun.py SERVICE_FILE
+        // and read_service; none in this repository). FIX (offer only): that file only OFFERS the service. Nothing is written or turned on (no repsn.ini,
+        // no rollback line, no JSP_DISCORD_APP_ID) until the player clicks the "Use <label>" button at the top of this tab (UseService); the first run
+        // and LoadOnline never apply it. Without a valid file the button is hidden.
+        Label serviceNote, serviceUseNote;
+        Button serviceUseBtn;
+        string serviceServer, serviceLabel, serviceAppId;
+        bool serviceTest, serviceRollback, serviceRelay;
+
+        // Reads online-service.ini with the rules of firstrun.py read_service (untrusted input: 64 KB, only these keys); an invalid file offers nothing.
+        void LoadService()
+        {
+            serviceServer = serviceLabel = serviceAppId = null; serviceTest = false; serviceRollback = serviceRelay = true;
+            OnlineIni si;
+            if (OnlineIni.Load(Path.Combine(root, "online-service.ini"), out si) != null || !si.Exists) return;
+            string s = (si.Get("repsn", "server") ?? "").Trim(), l = (si.Get("service", "label") ?? "").Trim(), app = (si.Get("discord", "app_id") ?? "").Trim();
+            if (!ServiceHostOk(s) || !OnlineIni.ValidAddress(s) || l.Length < 1 || l.Length > 64 || app.Length > 20) return;
+            foreach (char c in l) if (c < ' ' || c > '~') return;
+            foreach (char c in app) if (c < '0' || c > '9') return;
+            serviceServer = s; serviceLabel = l; serviceAppId = app;
+            serviceTest = si.Get("service", "test_build") == "1";
+            serviceRollback = si.Get("repsn", "rollback") != "0"; serviceRelay = si.Get("repsn", "relay") != "0";
+        }
+
+        // [repsn] server= as firstrun.py _SERVICE_HOST: a letter or digit first and last, letters, digits, '.' and '-' between, 253 at most;
+        // an optional :port of 1 to 65535.
+        static bool ServiceHostOk(string a)
+        {
+            string host = a;
+            int c = a.IndexOf(':');
+            if (c >= 0)
+            {
+                host = a.Substring(0, c);
+                string ps = a.Substring(c + 1);
+                int port;
+                if (ps.Length < 1 || ps.Length > 5) return false;
+                foreach (char ch in ps) if (ch < '0' || ch > '9') return false;
+                if (!int.TryParse(ps, out port) || port < 1 || port > 65535) return false;
+            }
+            if (host.Length < 1 || host.Length > 253) return false;
+            for (int i = 0; i < host.Length; i++)
+            {
+                char ch = host[i];
+                bool an = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                if (!an && (i == 0 || i == host.Length - 1 || (ch != '.' && ch != '-'))) return false;
+            }
+            return true;
+        }
+
+        // The button's text; firstrun.py (service_button), the setup finish page and the guide use the same words.
+        string ServiceButtonText() { return "Use " + serviceLabel + (serviceTest ? " (TEST BUILD)" : ""); }
+
+        string ServiceOfferText()
+        {
+            return "This build offers " + (serviceTest ? "a TEST BUILD online service" : "an online service") + ". Nothing is set up until you click: the click turns on " +
+                "re-psn with its server and rollback for Online Battle" + (serviceAppId.Length > 0 ? ", and Discord Rich Presence" : "") +
+                ". Settings you already have are kept.";
+        }
+
+        // jsp-install.ini [install] portable=1 (the rule of OnlineIni.SharedDir and firstrun.py is_portable).
+        static bool PortableInstall(string dir)
+        {
+            try
+            {
+                string ini = Path.Combine(dir, "jsp-install.ini");
+                if (File.Exists(ini))
+                    foreach (string line in File.ReadAllLines(ini))
+                        if (line.Replace(" ", "").ToLowerInvariant() == "portable=1") return true;
+            }
+            catch { }
+            return false;
+        }
+
+        // The game's own repsn.ini (firstrun.py looked there too): <install folder>\game\ when portable, else %APPDATA%\JSP Fan Revival\.
+        string GameRepsnPath()
+        {
+            return PortableInstall(root) ? Path.Combine(Path.Combine(root, "game"), "repsn.ini")
+                : Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "JSP Fan Revival"), "repsn.ini");
+        }
+
+        // A "KEY=" line of play_settings.txt (read like SettingsValue) or of the lines this window writes back to it (otherLines).
+        bool SettingsHas(string key)
+        {
+            if (SettingsValue(key) != null) return true;
+            foreach (string l in otherLines) if (l.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // FIX (offer only): the one click that turns the offered service on, called only from serviceUseBtn's Click. It does what the first run did on its
+        // own before (firstrun.py online_defaults), only where nothing is set:
+        //   repsn.ini in the shared folder (re-psn on, the service's server, the online name of the tab or a random Player name) when no repsn.ini or
+        //   community.ini exists in the shared folder and the game has no repsn.ini of its own;
+        //   when this click turned re-psn on and the service keeps rollback: JSP_ROLLBACK=1 and JSP_ROLLBACK_RELAY (the service's relay), unless the
+        //   settings file has a JSP_ROLLBACK line or a rollback role key;
+        //   JSP_DISCORD_APP_ID when the service names a Discord application and the settings file has no JSP_DISCORD_APP_ID or JSP_DISCORD line.
+        // Existing settings are never changed. The settings lines go through otherLines and SaveSettings, like the tab's own save. The launcher does not know
+        // the disc's region: on an EU disc the game itself refuses the rollback takeover and plays its own netcode (as with the Rollback box).
+        void UseService()
+        {
+            LoadService();   // read again: the button shows the file as it was when the window opened
+            if (serviceServer == null) { MessageBox.Show(this, "online-service.ini is gone or no longer valid. Nothing was changed.", Text); return; }
+            string name = serviceLabel + (serviceTest ? " (TEST BUILD)" : "");
+            var done = new List<string>();
+            var kept = new List<string>();
+            var added = new List<string>();
+            var present = new List<string>();
+            foreach (string f in new string[] { RepsnPath(), CommunityPath(), GameRepsnPath() })
+                if (File.Exists(f)) present.Add(f);
+            bool repsnOn = false, inUse = false;
+            if (present.Count > 0)
+            {
+                OnlineIni cur;
+                if (OnlineIni.Load(RepsnPath(), out cur) == null && cur.Get("repsn", "enabled") == "1"
+                    && string.Equals(cur.Get("repsn", "server") ?? "", serviceServer, StringComparison.OrdinalIgnoreCase)) inUse = true;
+                kept.Add("your online settings (" + string.Join(", ", present.ToArray()) + ")");
+            }
+            else
+            {
+                OnlineIni ri;
+                string e = OnlineIni.Load(RepsnPath(), out ri);
+                string rname = repsnNameBox.Text.Trim();
+                if (!OnlineIni.ValidName(rname)) rname = "Player" + new Random().Next(1000, 10000);
+                if (e == null)
+                {
+                    ri.SetPreamble("; re-psn server settings. Written by the launcher when the player clicked \"" + ServiceButtonText() + "\" (online-service.ini); the game reads it.");
+                    ri.Set("repsn", "enabled", "1");
+                    ri.Set("repsn", "server", serviceServer);
+                    ri.Set("repsn", "name", rname);
+                    e = ri.Save();
+                }
+                if (e != null) { onlineMsg.ForeColor = Color.Firebrick; onlineMsg.Text = e; MessageBox.Show(this, "Nothing was turned on: " + e, Text); return; }
+                repsnOn = true;
+                done.Add("Online is on: " + name + " (re-psn, server " + serviceServer + "), online name " + rname + " (you can change it in this tab).");
+            }
+            if (repsnOn)
+            {
+                bool role = false;
+                foreach (string k in RollbackRoleKeys) if (SettingsHas(k)) role = true;
+                if (!serviceRollback) done.Add("This service keeps rollback off: Online Battle uses the game's own netcode.");
+                else if (SettingsHas("JSP_ROLLBACK")) kept.Add("your rollback setting (JSP_ROLLBACK)");
+                else if (role) kept.Add("your rollback start-up session (a rollback role key), so rollback for Online Battle stays off");
+                else
+                {
+                    bool relay = !SettingsHas("JSP_ROLLBACK_RELAY");
+                    OtherSet("JSP_ROLLBACK", "1"); added.Add("JSP_ROLLBACK");
+                    if (relay) { OtherSet("JSP_ROLLBACK_RELAY", serviceRelay ? "1" : "0"); added.Add("JSP_ROLLBACK_RELAY"); }
+                    else kept.Add("your relay setting (JSP_ROLLBACK_RELAY)");
+                    done.Add("Rollback for Online Battle is on" + (relay && serviceRelay ? ", with the server's relay when the two PCs cannot connect directly." : "."));
+                }
+            }
+            // FIX (review): Discord comes with the service only when this click turned the service on; with the player's own online settings kept, the
+            // service's app id is not added either.
+            if (serviceAppId.Length > 0 && repsnOn)
+            {
+                if (SettingsHas("JSP_DISCORD_APP_ID") || SettingsHas("JSP_DISCORD")) kept.Add("your Discord setting");
+                else { OtherSet("JSP_DISCORD_APP_ID", serviceAppId); added.Add("JSP_DISCORD_APP_ID"); done.Add("Discord Rich Presence is on (Discord shows what you play)."); }
+            }
+            string lost = null;
+            if (added.Count > 0)
+            {
+                SaveSettings();
+                foreach (string k in added) if (SettingsValue(k) == null) lost = lost == null ? k : lost + ", " + k;
+            }
+            if (repsnOn || added.Count > 0) LoadOnline();
+            string msg = inUse ? name + " is already on. Nothing was changed." : done.Count > 0 ? string.Join("\r\n", done.ToArray()) : "Nothing was changed.";
+            if (lost != null) msg += "\r\n\r\nThe settings file could not be saved (" + lost + "): " + settingsFile;
+            if (kept.Count > 0 && !inUse) msg += "\r\n\r\nKept as they are: " + string.Join("; ", kept.ToArray()) + ".";
+            if (present.Count > 0 && !inUse)
+                msg += "\r\n\r\nTo use " + name + " instead of your online settings: press Build's server below, then Save online settings.";
+            if (repsnOn) msg += "\r\n\r\nTo play: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2).";
+            onlineMsg.ForeColor = SystemColors.GrayText;
+            onlineMsg.Text = repsnOn ? "Saved. " + name + " is on." : inUse ? name + " is already on." : "Your online settings are kept.";
+            MessageBox.Show(this, msg, Text);
+        }
+        static readonly string[] RollbackRoleKeys = { "JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH" };
         readonly List<Preset> presets = new List<Preset>();
         readonly List<string> loadedLabels = new List<string>();
         string activeLabel = "";
@@ -1321,12 +1503,25 @@ namespace JStarsLauncher
             p.Controls.Add(rbOnOff); p.Controls.Add(rbOnRepsn); p.Controls.Add(rbOnComm);
             y += 26;
             p.Controls.Add(new Label {
-                Text = "Only one is used. Choosing one turns the other off when you save.",
+                Text = "re-psn is the online server for Online Battle. Only one is used; choosing one turns the other off when you save.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
-            y += 34;
+            y += 24;
+            onlineState = new Label { Location = P(16, y), Size = Z(700, 36), Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
+            p.Controls.Add(onlineState);
+            y += 44;
+            // FIX (offer only): the service this build offers, turned on with one click (UseService); hidden without a valid online-service.ini
+            LoadService();
+            serviceUseBtn = new Button { Text = serviceServer == null ? "" : ServiceButtonText(), Location = P(16, y), AutoSize = true, MinimumSize = Z(220, 30),
+                Font = new Font("Segoe UI", 9F, FontStyle.Bold), UseMnemonic = false, Visible = serviceServer != null };
+            serviceUseBtn.Click += delegate { UseService(); };
+            p.Controls.Add(serviceUseBtn);
+            serviceUseNote = new Label { Text = serviceServer == null ? "" : ServiceOfferText(), Location = P(16, y + 36), Size = Z(700, 36),
+                ForeColor = SystemColors.GrayText, UseMnemonic = false, Visible = serviceServer != null };
+            p.Controls.Add(serviceUseNote);
+            if (serviceServer != null) y += 80;
 
-            repsnPanel = new Panel { Location = P(0, y), Size = Z(730, 130) };
-            repsnPanel.Controls.Add(new Label { Text = "re-psn server", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            repsnPanel = new Panel { Location = P(0, y), Size = Z(730, 214) };
+            repsnPanel.Controls.Add(new Label { Text = "Online server (re-psn)", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             repsnPanel.Controls.Add(new Label { Text = "Server", Location = P(16, 28), Size = Z(110, 20) });
             repsnServerBox = new TextBox { Location = P(130, 25), Width = S(260), MaxLength = 260 };
             repsnServerBox.TextChanged += delegate { OnlineChanged(); };
@@ -1341,8 +1536,24 @@ namespace JStarsLauncher
             lanBtn.Click += delegate { FindOnLan(); };
             repsnPanel.Controls.Add(lanBtn);
             repsnPanel.Controls.Add(new Label { Text = "looks for a re-psn server started with -discover on this network", Location = P(250, 98), AutoSize = true, ForeColor = SystemColors.GrayText });
+            publicSrvBtn = new Button { Text = "Build's server", Location = P(130, 126), Size = Z(110, 28), Visible = serviceServer != null };
+            publicSrvBtn.Click += delegate {
+                if (serviceServer == null) return;
+                rbOnRepsn.Checked = true; repsnServerBox.Text = serviceServer;
+                PresetMsg("Server set to " + serviceLabel + (serviceTest ? " (TEST BUILD)" : "") + ". Not saved yet.");
+            };
+            repsnPanel.Controls.Add(publicSrvBtn);
+            serviceNote = new Label { Text = serviceServer == null ? "" : serviceLabel + (serviceTest ? " (TEST BUILD)" : "") + ", the server this build names",
+                Location = P(250, 132), AutoSize = true, ForeColor = SystemColors.GrayText, Visible = serviceServer != null };
+            repsnPanel.Controls.Add(serviceNote);
+            rollbackBox = new CheckBox { Text = "Rollback netcode for Online Battle fights (recommended)", Location = P(16, 162), AutoSize = true };
+            rollbackBox.CheckedChanged += delegate { OnlineChanged(); };
+            repsnPanel.Controls.Add(rollbackBox);
+            relayBox = new CheckBox { Text = "If the two PCs cannot connect directly, pass the match through the server (relay)", Location = P(16, 186), AutoSize = true };
+            relayBox.CheckedChanged += delegate { OnlineChanged(); };
+            repsnPanel.Controls.Add(relayBox);
             p.Controls.Add(repsnPanel);
-            y += 140;
+            y += 224;
 
             commPanel = new Panel { Location = P(0, y), Size = Z(730, 300) };
             commPanel.Controls.Add(new Label { Text = "Community server", Location = P(16, 0), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
@@ -1459,6 +1670,8 @@ namespace JStarsLauncher
         void OnlineChanged()
         {
             commPanel.Enabled = rbOnComm.Checked;
+            rollbackBox.Enabled = rbOnRepsn.Checked; relayBox.Enabled = rbOnRepsn.Checked && rollbackBox.Checked;
+            ShowOnlineState();
             if (loading) return;
             onlineDirty = true;
             onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
@@ -1558,6 +1771,56 @@ namespace JStarsLauncher
             return v.Length != 0 && v[0] != '0';
         }
 
+        // The last "KEY=" line of play_settings.txt, read like RollbackOn (null when absent). Read only.
+        string SettingsValue(string key)
+        {
+            string v = null;
+            try
+            {
+                if (!File.Exists(settingsFile)) return null;
+                foreach (string line in File.ReadAllLines(settingsFile))
+                    if (line.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) v = line.Substring(key.Length + 1).TrimEnd(' ', '\r', '\n');
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return v;
+        }
+
+        // A rollback role key is set (a start-up session of Port Settings > Online > Rollback: direct IP, VIA=repsn, or the bench). Rollback WITH a role
+        // key and the game's own online cannot run together (the game refuses both); rollback without one is the Online Battle + rollback start.
+        bool RollbackRoleKey()
+        {
+            foreach (string k in RollbackRoleKeys) { string v = SettingsValue(k); if (!string.IsNullOrEmpty(v)) return true; }
+            return false;
+        }
+
+        // The lines of play_settings.txt this window does not own (otherLines, written back by SaveSettings): one key set, every older line of it dropped.
+        void OtherSet(string key, string value)
+        {
+            otherLines.RemoveAll(l => l.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase));
+            if (value != null) otherLines.Add(key + "=" + value);
+        }
+
+        // One line in plain words: what the next start does online (the boxes as they are now, saved or not).
+        void ShowOnlineState()
+        {
+            int m = OnlineMethod();
+            if (m == 1 && rollbackBox.Checked)
+            {
+                onlineState.ForeColor = Color.FromArgb(0, 110, 40);
+                // FIX (two-page Main Menu, on by default): Online Battle sits on its Battle Modes page; the fights are 2 vs 2
+                onlineState.Text = "Online Battle + rollback (2 vs 2). In the game: Main Menu > Battle Modes > Online Battle > Friendly Match; one player picks Create a Room, the other Search for a Room.";
+            }
+            else if (m == 1) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Online Battle with the game's own netcode (rollback off)."; }
+            else if (m == 2) { onlineState.ForeColor = SystemColors.ControlText; onlineState.Text = "Community server: no client in this port yet, the game stays offline."; }
+            else
+            {
+                onlineState.ForeColor = SystemColors.GrayText;
+                onlineState.Text = "Online play is off: no online service selected. To play Online Battle, " +
+                    (serviceServer != null ? "click \"" + ServiceButtonText() + "\" below, or " : "") + "choose re-psn, enter a server and save.";
+            }
+        }
+
         // Reads both files into the controls. A file that cannot be used is reported and left alone.
         void LoadOnline()
         {
@@ -1569,14 +1832,23 @@ namespace JStarsLauncher
             string note = e1 != null ? e1 : e2;
             bool on1 = ri.Get("repsn", "enabled") == "1", on2 = ci.Get("community", "enabled") == "1";
             if (on1 && on2) { note = "Both files were switched on; saving turns one off."; on1 = on2 = false; }
-            if ((on1 || on2) && RollbackOn())
+            bool roleKey = RollbackRoleKey();
+            if ((on1 || on2) && RollbackOn() && roleKey)
             {
-                string rn = "Rollback is on (Port Settings > Online) and so is this method; the game refuses to start both. Turn one of them off.";
+                string rn = "Rollback is on (Options > Port Settings > Online) and so is this method; the game refuses to start both. Turn one of them off.";
                 note = note == null ? rn : note + " " + rn;
             }
+            // first start (neither file exists): FIX (review): Off, no server; a suggested online name only. Nothing is written until the player
+            // picks a method and a server and saves (a save while Off with no server writes neither file).
+            onlineFresh = !ri.Exists && !ci.Exists && e1 == null && e2 == null;
             rbOnRepsn.Checked = on1; rbOnComm.Checked = on2; rbOnOff.Checked = !on1 && !on2;
             repsnServerBox.Text = ri.Get("repsn", "server") ?? "";
-            repsnNameBox.Text = ri.Get("repsn", "name") ?? "";
+            repsnNameBox.Text = onlineFresh ? "Player" + new Random().Next(1000, 10000) : ri.Get("repsn", "name") ?? "";
+            string rbv = SettingsValue("JSP_ROLLBACK"), relv = SettingsValue("JSP_ROLLBACK_RELAY");
+            rollbackBox.Checked = onlineFresh ? (rbv == null && !roleKey) || (RollbackOn() && !roleKey) : (RollbackOn() && !roleKey);
+            relayBox.Checked = relv == null || (relv.Length != 0 && relv[0] != '0');
+            rollbackBox.Enabled = rbOnRepsn.Checked; relayBox.Enabled = rbOnRepsn.Checked && rollbackBox.Checked;
+            ShowOnlineState();
             presets.Clear(); loadedLabels.Clear();
             foreach (string l in ci.PresetLabels())
             {
@@ -1593,6 +1865,10 @@ namespace JStarsLauncher
             onlineDirty = false;
             onlineMsg.ForeColor = Color.FromArgb(170, 90, 0);
             onlineMsg.Text = note ?? "";
+            if (onlineFresh)
+                onlineMsg.Text = "No online service selected yet, so online is off. To play Online Battle: " +
+                    (serviceServer != null ? "click \"" + ServiceButtonText() + "\" at the top of this tab, or " : "") +
+                    "choose re-psn, enter a server (or Find on LAN), then Save online settings.";
             loading = was;
         }
 
@@ -1608,7 +1884,8 @@ namespace JStarsLauncher
                 if (!OnlineIni.ValidAddress(server)) return "re-psn: the server is a host name or IP address, optionally :port (1 to 65535).";
                 if (!OnlineIni.ValidName(rname)) return "re-psn: the online name is 3 to 16 of A-Z a-z 0-9 _ -, starting with a letter.";
             }
-            if (m != 0 && RollbackOn())
+            // ENHANCEMENT (Online Battle + rollback): only rollback WITH a role key conflicts with an online method; re-psn with the box ticked removes the role keys.
+            if (m == 2 && RollbackOn() && RollbackRoleKey())
                 return "Rollback is on (Port Settings > Online). Turn it off there first, or keep this tab on Off: only one online method can be active.";
             Preset act = null;
             foreach (Preset q in presets) if (string.Equals(q.Label, activeLabel, StringComparison.OrdinalIgnoreCase)) act = q;
@@ -1650,9 +1927,24 @@ namespace JStarsLauncher
             if (m == 1) { if (writeC) err = ci.Save(); if (err == null && writeR) err = ri.Save(); }
             else { if (writeR) err = ri.Save(); if (err == null && writeC) err = ci.Save(); }
             if (err != null) { onlineMsg.ForeColor = Color.Firebrick; onlineMsg.Text = err; return err; }
+            // the rollback lines of play_settings.txt (written with the rest by SaveSettings). re-psn: the box decides; ticked = the lobby start, so the role keys
+            // of Port Settings > Online > Rollback go (as the in-game page does). Off or Community: a lobby rollback line is turned off (nothing to pair with
+            // offline); a role-key rollback (the direct-IP method) is left alone.
+            if (m == 1)
+            {
+                OtherSet("JSP_ROLLBACK", rollbackBox.Checked ? "1" : "0");
+                if (rollbackBox.Checked)
+                {
+                    OtherSet("JSP_ROLLBACK_RELAY", relayBox.Checked ? "1" : "0");
+                    foreach (string k in RollbackRoleKeys) OtherSet(k, null);
+                    OtherSet("JSP_ROLLBACK_ROLE", null);
+                }
+                SaveSettings();
+            }
+            else if (RollbackOn() && !RollbackRoleKey()) { OtherSet("JSP_ROLLBACK", "0"); SaveSettings(); }
             LoadOnline();
             onlineMsg.ForeColor = SystemColors.GrayText;
-            onlineMsg.Text = m == 0 ? "Saved. Online is off." : m == 1 ? "Saved. re-psn is on." : "Saved. The community server is on.";
+            onlineMsg.Text = m == 0 ? "Saved. Online is off." : m == 1 ? (rollbackBox.Checked ? "Saved. Online is on, with rollback for Online Battle." : "Saved. Online is on (the game's own netcode).") : "Saved. The community server is on.";
             return null;
         }
 

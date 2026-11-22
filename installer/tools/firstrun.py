@@ -893,6 +893,114 @@ def step_place(c):
     return True
 
 
+# ---------------------------------------------------------------- online service (ENHANCEMENT; FIX (review): offline unless a service is selected)
+# A fresh install is offline: this repository names no online server and no Discord application, and setup chooses none. Online starts when the
+# player selects a service: in the settings window's Online tab (re-psn with a server they type or find on the LAN, or a community preset), or on
+# the game's Port Settings > Online page. Settings already present are never changed (an upgrade keeps what the player had).
+# A package may ship one service as <install folder>\online-service.ini (SERVICE_FILE; assemble_payload.py --online-service). Nothing in this
+# repository ships one; a build that does says so in its own notes (a test build says it is one: [service] test_build=1).
+#     [service]  label=<shown in the log and the Online tab>   test_build=0|1
+#     [repsn]    server=host[:port]   rollback=0|1 (1)   relay=0|1 (1)
+#     [discord]  app_id=<the Discord application's numeric id>   (Rich Presence is off without one: jsp_discord.cpp)
+# FIX (offer only): the file only OFFERS the service. The first run writes nothing for it (no repsn.ini, no JSP_ROLLBACK or JSP_ROLLBACK_RELAY line,
+# no JSP_DISCORD_APP_ID) and only logs the offer and the one step that turns it on: the settings window's Online tab, button "Use <label>"
+# (" (TEST BUILD)" added for a test build; service_button). That click (launcher/JStarsLauncher.cs UseService, the same in JStarsLauncher19.cs)
+# writes what this step wrote before, only where nothing is set: the shared repsn.ini (re-psn on, that server, an online name) when no repsn.ini or
+# community.ini exists in the shared folder and the game has no repsn.ini of its own; then, unless the settings file has a JSP_ROLLBACK line or a
+# rollback role key, JSP_ROLLBACK=1 (the lobby start: the game's own Online Battle room pairs the players and rollback runs the fight;
+# jsp_net_online.h NC_NATIVE) and JSP_ROLLBACK_RELAY; and app_id as JSP_DISCORD_APP_ID unless the settings file has a JSP_DISCORD_APP_ID or
+# JSP_DISCORD line. JSP_ROLLBACK is a settings line, not a game-side default: the thread registry reads it at process attach
+# (jsp_thread_registry.cpp), before any code of the game runs. On an EU disc the game itself refuses the rollback takeover (US 1.00 addresses,
+# jsp_net_native_fight.cpp) and Online Battle plays on its own netcode. Off switch for the log lines: --no-online-defaults or JSP_ONLINE_DEFAULTS=0.
+SERVICE_FILE = "online-service.ini"
+ONLINE_ROLE_KEYS = ("JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH")
+_SERVICE_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::(\d{1,5}))?")
+
+
+def read_service(root):
+    """The service this install was packaged with: (None, None) without SERVICE_FILE, (dict, None) when it is valid, (None, reason) when it
+    is not (then nothing is selected). Untrusted input: 64 KB at most, only the keys above, nothing executed."""
+    p = pathlib.Path(root) / SERVICE_FILE
+    if not p.is_file():
+        return None, None
+    try:
+        raw = p.read_bytes()
+    except OSError as e:
+        return None, f"could not be read ({e.__class__.__name__})"
+    if len(raw) > 64 * 1024:
+        return None, "is over 64 KB"
+    sec, vals = None, {}
+    for line in raw.decode("utf-8-sig", "replace").splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            sec = line[1:-1].strip().lower()
+        elif "=" in line and sec:
+            k, v = line.split("=", 1)
+            vals[(sec, k.strip().lower())] = v.strip()
+    label, server, app = vals.get(("service", "label"), ""), vals.get(("repsn", "server"), ""), vals.get(("discord", "app_id"), "")
+    if not (1 <= len(label) <= 64) or not all(" " <= c <= "~" for c in label):
+        return None, "has no valid [service] label= (1 to 64 printable ASCII characters)"
+    m = _SERVICE_HOST.fullmatch(server)
+    if not m or (m.group(1) and not 1 <= int(m.group(1)) <= 65535):
+        return None, "has no valid [repsn] server= (host or host:port, port 1 to 65535)"
+    if app and not (app.isascii() and app.isdigit() and len(app) <= 20):
+        return None, "has an invalid [discord] app_id= (the application's numeric id)"
+    return {"label": label, "server": server, "app_id": app, "test": vals.get(("service", "test_build"), "0") == "1",
+            "rollback": vals.get(("repsn", "rollback"), "1") != "0", "relay": vals.get(("repsn", "relay"), "1") != "0"}, None
+
+
+def shared_dir(root, portable, env=None):
+    """The folder of repsn.ini / community.ini, as jsp_online.cpp resolve_dirs and the settings window find it; None without APPDATA."""
+    env = os.environ if env is None else env
+    if env.get("PS3RECOMP_SHARED_DIR"):
+        return pathlib.Path(env["PS3RECOMP_SHARED_DIR"])
+    if portable:
+        return pathlib.Path(root) / "shared"
+    ad = env.get("APPDATA")
+    return pathlib.Path(ad) / "PS3Recomp" if ad else None
+
+
+def settings_file(root, portable, env=None):
+    """The play_settings.txt jsp-launcher.exe reads (installer README, "Settings: which file wins", rules 2 to 4)."""
+    env = os.environ if env is None else env
+    root = pathlib.Path(root)
+    if (root / "settings_here.txt").is_file() or (root / "play_settings.txt").is_file() or portable or not env.get("APPDATA"):
+        return root / "play_settings.txt"
+    return pathlib.Path(env["APPDATA"]) / APPDIR / "play_settings.txt"
+
+
+def service_button(svc):
+    """The text of the settings window's button that turns the offered service on (ServiceButtonText in the launchers)."""
+    return f"Use {svc['label']}" + (" (TEST BUILD)" if svc["test"] else "")
+
+
+def online_defaults(root, portable, env=None, region=None):
+    """FIX (offer only): logs the online service a package offers, if any (see above). Writes nothing: the player turns the service on with one
+    click in the settings window's Online tab. Returns the log lines. region: the disc's region ("US", "EU"); None = not known."""
+    env = os.environ if env is None else env
+    if env.get("JSP_ONLINE_DEFAULTS", "1") == "0":
+        return ["[online] defaults: skipped (JSP_ONLINE_DEFAULTS=0)"]
+    svc, bad = read_service(root)
+    if bad:
+        return [f"[online] {SERVICE_FILE} {bad}: no online service offered, online stays off"]
+    if svc is None:
+        return ["[online] no online service selected: online stays off. To play Online Battle, choose a server in the settings window's "
+                "Online tab (or the game's Options > Port Settings > Online)"]
+    tag = "[online] TEST BUILD: " if svc["test"] else "[online] "
+    out = [f"{tag}this build offers the online service \"{svc['label']}\" ({SERVICE_FILE}). Nothing is set up yet, online stays off until you "
+           f"turn it on: settings window, Online tab, click \"{service_button(svc)}\" (one click)"]
+    sd = shared_dir(root, portable, env)
+    gd = pathlib.Path(root) / "game" if portable else (pathlib.Path(env["APPDATA"]) / APPDIR if env.get("APPDATA") else None)
+    present = [p for p in (sd / "repsn.ini", sd / "community.ini", gd and gd / "repsn.ini") if p and p.exists()] if sd else []
+    if present:
+        out.append("[online] online settings already present (" + ", ".join(p.name for p in present) + "): kept; the click keeps them too")
+    if region not in (None, "US") and svc["rollback"]:
+        out.append(f"[online] the rollback takeover is US-disc only: on this {region} disc Online Battle uses the game's own netcode")
+    return out
+
+
 SETTINGS_HASH = "jsp-settings.exe.src-sha256"   # beside the exe: SHA-256 of the tools/jsp-settings.cs it was built from
 
 
@@ -1032,6 +1140,8 @@ def main(argv=None, ask=input):
     ap.add_argument("--allow-unknown-eboot", action="store_true", help="opt in: go on with an EBOOT.elf this port does not know (check E3 "
                     "becomes a WARN, the build is unsupported); the other region's known EBOOT is still refused")
     ap.add_argument("--portable", action="store_true", help="saves and settings in the install folder (jsp-install.ini portable=1)")
+    ap.add_argument("--no-online-defaults", action="store_true", help="do not log the online service this build offers in " + SERVICE_FILE +
+                    " (none in this repository). The first run never turns it on: the settings window's Online tab does, on the player's click")
     a = ap.parse_args(argv)
     a.root = os.path.abspath(a.root or str(pathlib.Path(__file__).resolve().parent))   # CMake is run from other folders: absolute paths only
     root = pathlib.Path(a.root)
@@ -1108,6 +1218,9 @@ def main(argv=None, ask=input):
             say(f"RESULT: failed, step {s} stopped; see {c.build}")
             return 1
         c.mark(s)
+    if a.until == "all" and not a.no_online_defaults:
+        for line in online_defaults(root, a.portable, region=c.region):
+            say(line)
     say(f"RESULT: ok, steps up to {STEPS[last]} done")
     if a.until == "all":
         if (c.root / "jsp-settings.exe").is_file():
@@ -1116,6 +1229,13 @@ def main(argv=None, ask=input):
         else:   # no C# compiler of Windows: build_settings_window said so above
             say("Start the game with jsp-launcher.exe in this folder (the settings window could not be built, see above). "
                 "The first start installs the game data from your disc.")
+        svc = read_service(root)[0]
+        if svc:   # FIX (offer only): the service is offered; nothing is on until the player clicks
+            say(f"Online is off until you turn it on: this build offers \"{svc['label']}\"" + (" (TEST BUILD)" if svc["test"] else "") +
+                f". Settings window, Online tab, click \"{service_button(svc)}\" (one click). Then: Main Menu > Battle Modes > Online Battle > "
+                "Friendly Match (2 vs 2); one player picks Create a Room, the other Search for a Room.")
+        else:   # FIX (review): offline until the player selects a service
+            say("Online is off until you choose an online server: settings window, Online tab (or in the game: Options > Port Settings > Online).")
     return 0
 
 

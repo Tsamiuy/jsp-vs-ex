@@ -1,0 +1,38 @@
+Patch 7922 (experimental, rollback netcode): a fresh read of one host pad, for the rollback netcode's local input.
+
+libs/input/cellPad.c gains ps3_pad_peek_record(port, button, connected): it polls the host devices and returns the port's buttons and
+sticks in the cellPadGetData record layout (button[2..7]), without injection (PAD_SCRIPT, PAD_FILE, filters) and without touching the
+game's packet state. The rollback stepper (installer/port/jsp/jsp_stepper.cpp, JSP_PAD_PEEK=1) reads the local pad with it at the
+tick boundary instead of using the record the game read during the previous tick, one tick (33 ms) less input lag.
+No behaviour change: nothing calls it unless the port does. Applies after 7921.
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1553,6 +1553,26 @@
+ void (*g_cellpad_script_report_observer)(uint32_t, uint32_t, uint32_t,
+                                         uint32_t, uint32_t, int32_t) = NULL;
+ 
++/* ps3_pad_peek_record (title ports, rollback netcode): the host pad of one port as a fresh record, read at the caller's moment instead of the
++ * game's next cellPadGetData. Fills button[0..7] the way cellPadGetData does (DIGITAL1/DIGITAL2 split of the host mask, the four sticks) from the
++ * host state after a poll; no injection (PAD_SCRIPT/PAD_FILE/filters), no change to the game's packet state (len, drain) beyond the poll itself,
++ * which only marks a fresh report as any poll does. Returns 0 when the pad library is not open or the port is out of range. */
++int ps3_pad_peek_record(u32 port_no, u16* button, int* connected)
++{
++    if (!s_pad_initialized || port_no >= PAD_MAX_HOST_PORTS || !button) return 0;
++    pad_poll_backend();
++    const PadHostState* hs = &s_host_state[port_no];
++    for (int i = 0; i < 8; i++) button[i] = 0;
++    button[CELL_PAD_BTN_OFFSET_DIGITAL1] = (u16)(hs->buttons & 0xFF);
++    button[CELL_PAD_BTN_OFFSET_DIGITAL2] = (u16)((hs->buttons >> 8) & 0xFF);
++    button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = hs->analog_rx;
++    button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = hs->analog_ry;
++    button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = hs->analog_lx;
++    button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]  = hs->analog_ly;
++    if (connected) *connected = (hs->connected || port_no == 0) ? 1 : 0;
++    return 1;
++}
++
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
+     int probe_candidate = -1;

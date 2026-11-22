@@ -195,6 +195,13 @@ int main()
         jsp_online_edit_set(2, "", b, sizeof b);
         check("save refused through the API when server or name is missing; message says why", jsp_online_edit_save(b, sizeof b) == 0 && std::string(b).find("re-psn:") != std::string::npos);
     }
+    {   // FIX (review): no settings files (a fresh install): offline, and the page says that no service is selected (before the mods block,
+        // whose refusal stays for the process)
+        reset(); char b[200];
+        check("fresh install: offline", run() == 0 && g("PS3_NET_ONLINE") == "<unset>");
+        check("fresh install: the page says no online service is selected",
+              jsp_online_describe(5, b, sizeof b) == 0 && std::string(b) == "Online play this session: no (no service selected)");
+    }
     {   // a gameplay mod set (jsp_mods.cpp calls this): the game's own online is off for the session, with the reason on the page
         reset(); char b[200];
         { Env e = mk(); refuse_for_mods(e); }   // online was off anyway: only the [mods] line, nothing set

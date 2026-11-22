@@ -28,6 +28,8 @@
 #define AppTitle "J-Stars Victory VS-EX: Fan Revival"
 #define AppDirName "JSP Fan Revival"
 #define LauncherExe "jsp-launcher.exe"
+; The one Windows Firewall rule name this setup owns (the firewall task); see AddFirewallRule and the uninstall step.
+#define FirewallRule AppDirName + " online play"
 #define AppVersion Trim(FileRead(FileOpen(AddBackslash(Payload) + "VERSION.txt")))
 
 [Setup]
@@ -88,6 +90,13 @@ Name: "portable"; Description: "&Portable: saves and settings in the install fol
 Name: "unlock"; Description: "&Unlock everything (cheat): all cards, characters, titles and more, when you press Start Game"; Flags: unchecked
 Name: "unlock\testsave"; Description: "Use a separate TEST save for the unlocked play (recommended; your normal save is not touched)"; Flags: exclusive
 Name: "unlock\normalsave"; Description: "Apply it to the normal save (the launcher asks, and copies the save to a dated backup first)"; Flags: exclusive unchecked
+; ENHANCEMENT (online, checked by default): one inbound UDP allow rule for game\jsp.exe, so Windows does not show its "Allow access?" box over the
+; fullscreen game the first time Online Battle opens a UDP socket. It needs administrator rights (this setup runs without them), so Windows asks
+; once (UAC); saying No only skips the rule. Setup and uninstall touch only the rule this installation owns: the one named FirewallRule (below)
+; whose program is this installation's game\jsp.exe. Rules the player made, rules Windows made (also a Block rule from a cancelled box) and the
+; rule of another installation in another folder are kept. Online also works without the rule (both games send first, so replies pass, and the
+; relay covers the rest).
+Name: "firewall"; Description: "Allow online play through Windows Firewall (Windows asks for administrator permission once)"
 
 [INI]
 Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "portable"; String: "1"; Tasks: portable
@@ -922,10 +931,60 @@ begin
   if not SkipBuild and (BuildRc <> 0) then Result := 10;
 end;
 
+{ ENHANCEMENT (online): the firewall task. The rule names the program path, which need not exist yet (the build makes it). A refused UAC
+  prompt or a failed netsh only goes to the log: the game still works online without the rule.
+  FIX (review): ownership. The old rule of this installation is removed first so a reinstall leaves one rule, but only by the exact owned
+  name AND this installation's program path (netsh deletes the rules that match every filter given), never every rule of the program, so other rules for
+  the same program (the player's, Windows' own) and another installation's rule (same name, other path) are kept. }
+function FirewallExe: String;
+begin
+  Result := ExpandConstant('{app}\game\jsp.exe');
+end;
+
+function FirewallDeleteParams(Exe: String): String;
+begin
+  Result := 'advfirewall firewall delete rule name="{#FirewallRule}" program="' + Exe + '"';
+end;
+
+{ True when a rule named FirewallRule has Exe as its program (uninstall; reading needs no admin). netsh's "show rule" has no program
+  filter, so the verbose listing of every rule of that name (any installation's) goes to a file in the setup's temp folder and is searched for a line that
+  ends in " <Exe>", case-insensitive like Windows paths. A listing that cannot be made or read counts as no rule: nothing is deleted. }
+function OwnFirewallRuleExists(Exe: String): Boolean;
+var
+  OutFile: String;
+  Raw: AnsiString;
+  Listing: String;
+  Rc: Integer;
+begin
+  Result := False;
+  OutFile := ExpandConstant('{tmp}\jsp-firewall-rules.txt');
+  if not Exec(ExpandConstant('{cmd}'), '/C ""' + ExpandConstant('{sys}\netsh.exe') + '" advfirewall firewall show rule name="{#FirewallRule}" verbose > "' +
+              OutFile + '""', '', SW_HIDE, ewWaitUntilTerminated, Rc) or (Rc <> 0) then Exit;
+  if not LoadStringFromFile(OutFile, Raw) then Exit;
+  Listing := Uppercase(String(Raw)) + #13#10;
+  StringChangeEx(Listing, #13#10, #10, True);
+  Result := Pos(' ' + Uppercase(Exe) + #10, Listing) > 0;
+end;
+
+procedure AddFirewallRule;
+var
+  Exe, Params: String;
+  Rc: Integer;
+begin
+  Exe := FirewallExe;
+  Params := '/C netsh ' + FirewallDeleteParams(Exe) + ' >nul 2>&1 & ' +
+            'netsh advfirewall firewall add rule name="{#FirewallRule}" dir=in action=allow protocol=UDP profile=private,public program="' + Exe + '" enable=yes';
+  if ShellExec('runas', ExpandConstant('{cmd}'), Params, '', SW_HIDE, ewWaitUntilTerminated, Rc) then
+    Log('firewall: rule command ran, exit ' + IntToStr(Rc))
+  else
+    Log('firewall: not added (UAC refused or failed, code ' + IntToStr(Rc) + '); Windows will ask on the first online start');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then begin
     SaveImportRun;
+    if WizardIsTaskSelected('firewall') and not WizardSilent then AddFirewallRule;
     RunBuildStep;
   end;
 end;
@@ -937,6 +996,8 @@ begin
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
+var
+  SvcIni, SvcBtn: String;
 begin
   if (CurPageID = RpcsPage.ID) and not RpcsAuto and not WizardSilent then begin
     RpcsAuto := True;   { first time here: look in the usual places once }
@@ -946,9 +1007,25 @@ begin
   if CurPageID = wpFinished then begin
     if SkipBuild then
       WizardForm.FinishedLabel.Caption := 'The files are in place; the build step was skipped (test switch), so the game does not start yet.'
-    else if BuildRc = 0 then
-      WizardForm.FinishedLabel.Caption := 'The game was built on this PC. Start it from the shortcut. The first start installs the game data from your disc, which takes a few minutes.'
-    else
+    else if BuildRc = 0 then begin
+      WizardForm.FinishedLabel.Caption := 'The game was built on this PC. Start it from the shortcut. The first start installs the game data from your disc, which takes a few minutes.' + #13#10#13#10;
+      { FIX (review): online is off until the player selects a service. FIX (offer only): a build that ships online-service.ini only offers it;
+        nothing is set up until the player clicks its button in the settings window's Online tab (JStarsLauncher.cs UseService, firstrun.py service_button) }
+      SvcIni := ExpandConstant('{app}\online-service.ini');
+      if FileExists(SvcIni) then begin
+        SvcBtn := 'Use ' + GetIniString('service', 'label', '', SvcIni);
+        if GetIniString('service', 'test_build', '0', SvcIni) = '1' then begin
+          SvcBtn := SvcBtn + ' (TEST BUILD)';
+          WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + 'This build offers an online test service. ';
+        end else
+          WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + 'This build offers an online service. ';
+        WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + 'Online play stays off until you turn it on: start the game from its shortcut ' +
+          '(it opens the settings window), go to the Online tab and click "' + SvcBtn + '" (one click). ' +
+          'Then: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2). One player picks Create a Room, the other Search for a Room.';
+      end else
+        WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + 'Online play is off until you choose an online server in the settings window''s Online tab. ' +
+          'Then: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2).';
+    end else
       WizardForm.FinishedLabel.Caption := 'The build did not finish (code ' + IntToStr(BuildRc) + '). Read the newest file in ' + ExpandConstant('{app}') +
         '\logs for the step that stopped. Fix it, then run "Build again" from the Start menu: finished steps are kept.';
     if SaveNote <> '' then WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + SaveNote;
@@ -993,9 +1070,19 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Data: String;
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then begin
     WasPortable := GetIniInt('install', 'portable', 0, 0, 1, ExpandConstant('{app}\jsp-install.ini')) = 1;
+    { ENHANCEMENT (online): remove the firewall task's rule; only when this installation owns one (reading rules needs no admin), so most
+      uninstalls see no UAC prompt. FIX (review): by the exact name AND this installation's program path, as setup adds it (AddFirewallRule) }
+    if OwnFirewallRuleExists(FirewallExe) then begin
+      if ShellExec('runas', ExpandConstant('{sys}\netsh.exe'), FirewallDeleteParams(FirewallExe), '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+        Log('uninstall: firewall rule of ' + FirewallExe + ' removed, exit ' + IntToStr(ResultCode))
+      else
+        Log('uninstall: firewall rule of ' + FirewallExe + ' kept (UAC refused or failed, code ' + IntToStr(ResultCode) + ')');
+    end else
+      Log('uninstall: no firewall rule of this installation (' + FirewallExe + ')');
     Exit;
   end;
   if CurUninstallStep <> usPostUninstall then Exit;

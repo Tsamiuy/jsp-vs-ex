@@ -1,11 +1,11 @@
 # Rollback netcode: how it works and how this port will do it
 
-Status: **experimental, opt-in.** A first version for two PCs connected by IP address is in the build, off unless you turn
-it on ([section 5](#5-try-it-experimental-direct-ip-rollback)). Turned off, the game runs exactly as before. Today's
-online play is still the game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server
-([ONLINE.md](ONLINE.md)). That uses the game's original peer-to-peer code, not rollback. This page explains rollback in
-general, then how this port adds it, what it is built on, and what we fall back to. The roadmap item is
-[ROADMAP.md, section 4](ROADMAP.md).
+Status: **experimental.** A new install turns it on for Online Battle: the players meet in the game's own Friendly Match room
+over a [re-psn](https://github.com/undecuple/re-psn) server and rollback runs the fight (US 1.00 disc only; [ONLINE.md](ONLINE.md),
+[TESTING_ONLINE.md](TESTING_ONLINE.md)). The settings window's Online tab turns it off, and Online Battle then uses the game's
+original peer-to-peer code. Turned off, the game runs exactly as before. The start-up paths for tests (direct IP, a re-psn room
+by role) are in [section 5](#5-try-it-experimental-direct-ip-rollback). This page explains rollback in general, then how this
+port adds it, what it is built on, and what we fall back to. The roadmap item is [ROADMAP.md, section 4](ROADMAP.md).
 
 ## 1. What rollback netcode is
 
@@ -167,8 +167,8 @@ flowchart LR
 | 6. Two PCs | Opt-in for testing ([section 5](#5-try-it-experimental-direct-ip-rollback)). One match has run on two PCs on one home network, meeting through a room on a re-psn server, with no desync (see [Tested so far](#tested-so-far)); a typed IP address has not been tried on two PCs |
 | 7 | Not started |
 
-What does not change: rollback play stays opt-in. The port connects only when you choose online play, and only to the
-players or server you pick. Every gameplay option in a match is the same for all players.
+What does not change: the port connects only for online play, and only to the server and players in the settings. Every
+gameplay option in a match is the same for all players.
 
 ## 5. Try it: experimental direct-IP rollback
 
@@ -193,6 +193,7 @@ Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice
 | Off | no online play | none |
 | Delay (the game's own online) | the game's own netcode over re-psn or a community server (`repsn.ini` / `community.ini`, as before) | Method (re-psn / Community server), Server, Online name, Community preset |
 | Rollback (experimental) | the rollback path of this section, two players, direct IP or through a re-psn room | Connection (Direct IP / re-psn), Role (Host / Join), then Port (host) or Host address (join) for direct IP, or Allow relay for re-psn |
+| Online Battle + rollback | the default after install: the game's own Online Battle over re-psn (`repsn.ini` `enabled=1`) with `JSP_ROLLBACK=1` and no role key; a Friendly Match room pairs the players and rollback runs the fight (US 1.00 disc only) | Server, Online name, Allow relay |
 
 Cross on Port, Host address, Server or Online name opens the pad letter picker the page already had. **Save (applies on
 the next start)** writes the choice; Discard changes reads the files again; Circle leaves without saving. Under the rows
@@ -218,8 +219,13 @@ the page says which method is on and what this session runs against what is save
   and the other online keys stay inert without it. The page then shows "This session: refused" and, for the saved pair, Off
   with a message: it never picks for the player. Because the original value is gone after a refusal, saving Off or Delay
   while `JSP_NET_REFUSED` is set writes `JSP_ROLLBACK=0` even with no line in the file, so the next start is not refused
-  again. The same decision refuses Rollback alone when there is not exactly one valid role key (it also sets
-  `JSP_NET_REFUSED`). "Online on" is the runtime's own test: any value of `PS3_NET_ONLINE`, even `0`.
+  again. The same decision refuses Rollback alone when a role key is invalid (both `LISTEN` and `JOIN`, a bad port or
+  address, `VIA=repsn` without `ROLE`; it also sets `JSP_NET_REFUSED`). `JSP_ROLLBACK=1` with no role key at all is the lobby
+  start: everything is set up as for a match, but no session opens at start. With the game's own online on (re-psn) it is
+  Online Battle + rollback, not a refused pair: once this game is in a Friendly Match room with exactly one other player, the
+  port opens a rollback link to that player through re-psn (`jsp_net_lobby.h`, native-room pairing in `jsp_net_game.cpp`; `JSP_ROLLBACK_NATIVE=0`
+  turns it off), and rollback runs the room's fights. Without the game's own online such a start plays offline. "Online on" is the
+  runtime's own test: any value of `PS3_NET_ONLINE`, even `0`.
 - A refused start is shown on screen, not only in the log: see "If rollback does not start" below.
 - ASSUMPTION: the runtime reads `PS3_NET_ONLINE` lazily (after `main()`) and nothing in the jsp exe sets it later, so
   removing it before `main()` is enough; the thread registry's TLS callback still reads `JSP_ROLLBACK` at process attach,
@@ -250,7 +256,7 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
 **What happens:**
 
 1. Both games start as usual. Once each has finished starting up, the client connects to the host. The client shows
-   *Waiting for host...* and the host *Waiting for client...*; F9 cancels.
+   *Waiting for host...* and the host *Waiting for client...*; holding F9 for 1.5 s cancels (a tap does nothing).
 2. The host's match rules (input delay `JSP_INPUT_DELAY`, 0 to 8 ticks, default 2; the reconnect grace time
    `JSP_NET_GRACE_S`, 1 to 30 s, default 5; the match timer) are sent to the client for this match only. The client shows
    *Settings received: controlled by host*. Your own settings come back when the match ends; nothing is saved. Settings that
@@ -268,8 +274,9 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
   but the game side is not wired for it yet.
 - Barely tested on two PCs: one match on one home network, through a re-psn room (see [Tested so far](#tested-so-far)).
   Two copies on one PC have passed two Free Battle runs with rollbacks and no desync (see step 5 above).
-- A warm pipeline cache is recommended: on a first launch, building the graphics pipelines can take seconds per frame,
-  which stalls the session. Play an offline fight first on each PC.
+- On a first launch (or after an update that empties `pipelines.bin`) the graphics pipelines are built in the background, as offline:
+  a new effect may be missing for a few frames on that PC, but its builds no longer hold the drawing thread and so the other PC.
+  An offline fight first still makes the first match look complete.
 - Workaround to replace: the snapshot waits for the game's frame threads to pause before each save; if they have not
   paused within 15 s of waiting between two session updates, the match ends as hung. The session keeps its connection
   alive while it waits.
@@ -312,6 +319,187 @@ of the original HUD size; it was not checked against every stage, a smaller HUD 
 the port closes the overlay layer during the match, the badge is drawn again within a quarter of a second; a part that draws
 its own page on that layer while a match runs would lose it when the badge text changes (none is known to do so during a fight).
 
+### Ping counter
+
+On by default (display only; `JSP_ROLLBACK_PING=0` in `play_settings.txt` hides it, read once at start-up). While a rollback
+match runs, the round trip to the other player shows in small game-font text right under the fight timer, at the bottom right,
+for example `62 ms`, so players see what kind of connection they are in. The value is GekkoNet's averaged round trip, the one the
+adaptive input delay reads; over the relay it is the round trip through the server. It includes up to one tick (33 ms) of answer
+wait, so a 30 ms link reads about 60-95 ms. Nothing shows until the first measurement; above 999 ms it reads `999+ ms`. The
+tint follows the input delay the link needs: green below 100 ms (1 tick), yellow below 180 ms (2), red above. The text is
+rebuilt at most twice a second, on the same overlay layer as the badge and the match messages, and goes away when the match ends.
+
+The place (1280x720 overlay space: right edge x 1204, box y 680-704) was measured on fight screenshots below the timer bar's
+lower rule (y 675), clear of the minimap above it and the player panel at the bottom left. Text, rounding, clamping, tint,
+refresh and layout are in `installer/port/jsp/jsp_net_badge.h` with a host test (`bash installer/tools/net_badge_test.sh`).
+**Not seen on screen yet:** no game was run with it, and it was not checked against a smaller HUD size or every stage.
+
+### Replays of rollback matches and the rollback bench
+
+Opt-in, off by default. Both use the session library's own replay and stress sessions, so they need no extra game code beyond
+what a rollback match already runs.
+
+**Record a match.** With `JSP_ROLLBACK_RECORD=1` in `play_settings.txt`, each PC saves its rollback match when the match ends,
+to the folder `replays` in the game's working folder (`game\run\replays\`, next to `play_stderr.txt`), or to the folder
+`JSP_ROLLBACK_RECORD_DIR` names. The file is `rollback-<date>-<time>-<build>-<host|join>.gkrp`: the confirmed inputs of every
+tick and the state hash of every confirmed tick, about 12 KB for 700 ticks of two players. It also stores the build number,
+the base tick, the slots and every agreed setting of the match. The log says `[net] replay saved: <path> (<bytes> bytes)`.
+
+What a replay is for, in order:
+
+1. **Desync hunting:** played back, a replay names the first tick whose state differs from the recording.
+2. **The rollback bench:** the same inputs, run again with forced rollbacks of a chosen depth, give the cost of a rollback in
+   this game (restore, re-simulated ticks, saves) on a real fight. Those numbers decide the input delay, the prediction
+   window and whether run-ahead fits in a 33 ms tick.
+3. Later: watching a match again, spectators, and checking ranked results.
+
+**What runs today:** the session layer records, plays back and runs the forced-rollback (stress) mode, tested on the host
+(`bash installer/tools/net_session_test.sh`: the `record_replay` scenario plays both peers' recordings of a match with 20 %
+packet loss back, and every one of the 684 replayed ticks had the live run's hash; a state flipped at tick 300 is reported at
+exactly tick 300; the stress runs roll back 1 to 10 ticks every tick, and a re-simulation that differs is reported at its tick).
+The game saves the recording (compile-checked only, not run in a game). **Not yet:** playing a replay back inside the game,
+which needs the same fight start (characters, stage, seed) the recording began from.
+
+**The rollback bench (test tooling).** `JSP_ROLLBACK=1` with `JSP_ROLLBACK_BENCH=N` (N from 1 to 8) in `play_settings.txt`, and no
+`JSP_ROLLBACK_LISTEN`, `JOIN` or `VIA`: no peer and no socket. From the first tick of the next fight, every tick rolls the fight
+back N ticks and runs them again, the worst case of a match whose remote inputs are always N ticks late. Play the fight against
+the CPU: only player 1's pad goes through the rollback path, and a second human pad would be read live on a re-run. F9 held
+for 1.5 s ends it. Every 10 s the log gets one line, and one more for the whole run when it ends:
+
+`[bench] window depth=4 secs=10.0 live_ticks=300 (30.0/s) rerun_ticks=900 | iter ms live avg … max …, rerun avg … max …, idle … | save avg … max … (n), restore avg … max … (n) | desyncs 0 first -1`
+
+| Value | What it tells |
+|---|---|
+| live ticks per second | 30 means this rollback depth fits in the frame budget; below 30 the game slows down under it |
+| iter ms live / rerun | the wall time of a main-loop iteration that ran the live tick or a re-run tick (re-runs are not drawn) |
+| save / restore | the snapshot ring's commit and restore calls |
+| desyncs | ticks whose re-run differed from their first run: fight state the snapshot does not cover. Should be 0 |
+
+Run it at depths 1, 2, 4 and 8 on the same stage. The numbers decide the input delay, the prediction window and whether
+run-ahead fits (see [ROADMAP.md, section 4](ROADMAP.md)). Host tests: the start decision in `net_online_test.sh`; the stress
+session in `net_session_test.sh`.
+
+**Run in the game (one PC, 2 vs 2 Free Battle, all four CPUs, 2026-11-20/21).** 0 desyncs in every run. Depth 1 saves every tick
+and never restores (a rollback to the tick just saved is skipped: restoring it only undid what background threads wrote since,
+and the loading screen before the fight never finished), so it measures what a match with no late inputs costs:
+
+| Depth | Before | After the save-cost work below |
+|---|---|---|
+| 1 (save every tick) | 29.0 ticks/s, save 21 ms | 29.7 ticks/s, save about 12 ms |
+| 2 (every tick rolled back 2) | 11-13 ticks/s, save 15-18 ms, restore 13-22 ms | 15-18 ticks/s, save 11-12 ms, restore 10-14 ms |
+
+Where a save's time goes (depth 1, averages): freezing the threads until the job server and the frame pipeline are parked about
+6.9 ms (2 to 3 freezes), copying about 3,500 dirty pages 2.1 ms. The worst save was 50 ms every 2 s (the thread audit's
+Toolhelp listing), now about 17 ms.
+
+**Save-cost switches.** Rollback sets these by default; each can be set to 0 (or another value) for an A/B run:
+`JSP_SNAPSHOT_LWM_CACHE=keep` (the lwmutex census keeps its page-readability cache: 2.3 ms to 0.007 ms per frozen sample, with
+toolkit patch 7921), `JSP_SNAPSHOT_LAYOUT_GEN=1` (no per-tick layout walk while patch 7920's generation is unchanged: 2.8 ms),
+`JSP_SNAPSHOT_QUICK=1` with `JSP_SNAPSHOT_QUICK_WAIT_US=0` (a frozen sample whose job words block is refused before the full
+census; waiting unfrozen for the jobs did not help, they did not drain in 4 ms), `JSP_SNAPSHOT_AUDIT_ASYNC=1` (the thread audit's
+listing on its own thread). Off by default, for tests: `JSP_PAD_PEEK=1` (the local pad is read from the device at the tick
+boundary instead of from the game's read one tick earlier, toolkit patch 7922), `JSP_NET_LINK=delay_ms,jitter_ms,loss_permille`
+(two copies on one PC: impairs this copy's sends after the plan exchange). `JSP_SNAPSHOT_CENSUS_PROF=1` logs the census parts.
+
+**Restore waits for the helper threads (`JSP_SNAPSHOT_SITE=1`, on by default in rollback matches).** A restore rewinds memory, including a helper
+thread's stack and the work queue it serves, but not the thread itself. Example: a CRI loader worker takes a job after a save,
+then a restore rewinds memory while the worker is parked inside that job. The worker then runs on with a stack from before the
+job, and the main thread's load wait never ends. This happened once in a replay-driven depth-2 run, at tick 798.
+
+With the switch on, a restore waits until every thread that was parked at the target tick's save is parked at the same wait
+site again (marker kind, id and caller). After `JSP_SNAPSHOT_SITE_MS` (default 50 ms) it goes ahead anyway, so a thread that
+has moved on for good cannot stall the match. The log line `[snap] site ...` names the thread and both wait sites.
+
+**Soak result (replay-driven depth 2, about 3,200 restores).** About a third of all restores found a moved thread. Most were the CRI
+server's polling thread caught awake. A few were a loader worker caught inside its file read (from its idle wait at `0x004D3D4C` to
+`0x004B7908`), the case behind the freeze. Desyncs stayed at 0, restores averaged 10.7 ms, and 4 waits ran past 50 ms.
+`JSP_SNAPSHOT_SITE=0` turns it off.
+
+**GekkoNet's sparse saving does not pay here (`JSP_ROLLBACK_LIMITED_SAVING`, tried 2026-11-21).** A state can only be saved while the game is at
+that tick, and a peer that predicts is always ahead of the confirmed tick. So to save a confirmed tick, GekkoNet rolls back to its last save and runs
+the whole prediction window again: in a two-copy match over a 66 ms link it went back 9 ticks about every 9 ticks, twice the simulation to skip a save.
+Instead, two cheaper changes are on by default in rollback (2026-11-21):
+
+- **Saves that can never be loaded take no snapshot (`JSP_ROLLBACK_SKIP_FINAL=1`).** A rollback always loads the frame before the first
+  wrongly predicted one, and that frame's inputs are not confirmed yet. So once every player's inputs past a frame have arrived, its save is never
+  loaded again: it gets its checksum (desync detection still sees every tick) but no freeze and no copy. This needs `gekko_final_frame`, a small local
+  addition to the vendored GekkoNet (`installer/port/jsp/gekkonet/PIN.md`), and a snapshot ring that accepts gaps. The more input delay covers the
+  latency, the more saves are skipped: in a two-copy match over a 66 ms link, 58% of one copy's saves and 8% of the other's.
+- **The save gate waits for the job threads without freezing (`JSP_SNAPSHOT_QUICK_WAIT_US=20000`) and the frozen layout walk runs every 30th gate
+  (`JSP_SNAPSHOT_FROZEN_WALK_EVERY=30`).** Replay-driven depth 2, same build: 13.1 → 16.1 ticks/s, save 12.9 → 8.3 ms, restore 16.4 → 12.7 ms,
+  0 desyncs.
+
+**Determinism between two PCs: everything the game times must follow the game tick.** Two copies on one PC (66 ms simulated link, recorded inputs)
+desynced 30-80 s into every fight while every input matched. Each cause below was found with the two-copy logs (per-tick checksum parts, then a hardware
+write watchpoint on the word or camera that split) and fixed in turn; the first run with all of them matched on all 7,860 compared ticks over the full
+10-minute test window, through the round's time-up (where every earlier run split). In order of discovery:
+
+1. *Audio clock* (patch 3005, `JSP_AUDIO_TICKLOCK`): the mix thread mixes 6.25 blocks per tick; the boundary waits until the game's audio thread took
+   them; a rollback rewinds the host read index to what the save holds (the save of tick T is taken before the boundary raises the audio to tick T, so the
+   rewind goes to the blocks of T-1: rewinding to T dropped 6-7 blocks per rollback); re-runs are muted. About 0.1 ms per tick.
+2. *Guest clock of the main thread* (patch 3006, `JSP_NET_GUEST_CLOCK`): session start + 1/30 s per tick (+1 us per read), for the timebase and
+   `sys_time_get_system_time` (one reading).
+3. *vblanks* (`jsp_stepper.cpp` lockstep clock): the game counts vblanks; in a match every flip gets exactly 2 (as in re-runs), held to 33.3 ms; the idle
+   vblank only after 500 ms without a flip (at 50 ms, slow rollback ticks added 150-200 extra per copy); and an iteration where no tick may run waits at the
+   boundary (up to 400 ms) instead of running a render-only frame that flips.
+4. *The sound library's server thread* ("CRI Server Manager", `JSP_NET_CRI_LOCK`): the only other thread reading the clock; its sleep (usleep from
+   0x004D4F2C) waits for the game (patch 3006 `g_ps3_usleep_hook`) and runs one cycle per tick at the tick's time. About 1 ms per tick.
+5. *Background work finishes before the next tick*: the sound library's file threads ("CRI FS ...", idle at lr 0x004D3D4C) and SPU jobs
+   (`jsp_snapshot_spu_busy`) are idle at every boundary, before and after the server's cycle.
+6. *Registers of parked threads* (patch 7923 `ps3_ppu_thread_ctx`, `JSP_NET_THREAD_REGS`): saved at every commit and written back at a rollback for the
+   sound library's threads parked in the same wait (a loop keeps values in registers, which the memory snapshot does not cover).
+
+The playback count at `0x0094DEC4` (once taken for a scene step) is also out of the per-tick checksum. Diagnostics used, all off by default:
+`JSP_NET_TASK_WATCH` / `JSP_NET_CAM_WATCH` (watchpoints with the writer's call chain, symbolized with llvm-nm), `JSP_NET_CLOCK_DIAG` (who reads the
+clock), `JSP_NET_LOAD_DIAG`, `JSP_NET_PAGE_DUMP=N` (fingerprints of guest pages, to find the first that stop matching between two copies),
+`JSP_NET_TICK_LOG=1` (the per-tick commit / rollback lines the two-copy test compares; off in play, they are an unbuffered write each).
+
+Ruled out on the way: a session start at the first fight HUD draw (`JSP_ROLLBACK_START=fight`) gives each PC a different number of pre-session ticks,
+and per-tick state the checksum does not cover drifts (the CPU opponent acted on one copy only); neutral input until the fight HUD
+(`JSP_NET_LOAD_NEUTRAL=1`) leaves the first pre-fight screen waiting for a press forever.
+
+**Match reports for testers.** A match that ends on a desync, a failure or a disconnect writes `reports/jsp-match-report-<date>-<time>.txt`
+(`JSP_NET_REPORT_DIR`): build, settings in effect, session facts, the last 120 confirmed-tick checksums and rollbacks, the end reason. IP addresses,
+the user's folders and the machine and user names are removed (`jsp_net_report.h`, host test `net_report_test`).
+
+### Switches
+
+Each is a `play_settings.txt` line (or an environment variable). Test-only switches are for two-copy and A/B runs, not for play.
+
+| Switch | What it does | Test-only |
+|---|---|---|
+| `JSP_ROLLBACK_NATIVE` | native-room pairing in the lobby start (Online Battle + rollback); on by default, `0` turns it off | no |
+| `JSP_ROLLBACK_RELAY` | allow the server's relay when the direct link fails (the defaults after install set `1`) | no |
+| `JSP_INPUT_DELAY_AUTO` | input delay follows the measured link (each PC sets only its own); on by default, `0` keeps the start value | no |
+| `JSP_INPUT_DELAY_AUTO_MIN`, `_MAX`, `_MARGIN_MS` | its range (default 1 to 4 ticks) and margin (default 8 ms) | no |
+| `JSP_INPUT_DELAY_RULE` | `2` (default): ticks = ceil((one way from the median of the last 8 s of round trips + (90th percentile - median) + margin) / 33.3 ms), margin 16 ms from a median of 80 ms, first reading 4 s after the sync (before 10 s: the spread mirrored from the low side, and at most start + 1 tick), one tick up after two rollbacks deeper than 2 ticks within 10 s (then held 20 s), down one tick after 10 calm seconds (`jsp_net_delay_rule.h`). `1`: the earlier rule (GekkoNet's average ping and an EMA of its jitter, first reading at 10 s) | A/B |
+| `JSP_INPUT_DELAY_AUTO_FIRST_MS`, `_PCT`, `_SAMPLES`, `_HIGH_PING_MS`, `_HIGH_MARGIN_MS`, `_UP_VOTES`, `_DOWN_VOTES`, `_DEEP_TICKS`, `_DEEP_COUNT`, `_DEEP_WINDOW_MS`, `_HOLD_MS` | rule 2's tuning (defaults 4000, 90, 16, 80, 16, 1, 5, 2, 2, 10000, 20000; `_DEEP_COUNT=0` turns the depth trigger off) | A/B |
+| `JSP_ROLLBACK_PREDICTION` | how many ticks a PC may run ahead on predicted inputs before it waits, which caps the deepest rollback (1 to 8, default 6; `8` = as before); each PC alone | no |
+| `JSP_ROLLBACK_PING` | the [ping counter](#ping-counter) under the fight timer; on by default, `0` hides it | no |
+| `JSP_POSTGAME_IDLE_SECS` | after a fight, seconds without a locked pick before the side leaves (10 to 3600, default 180) | no |
+| `JSP_ROLLBACK_RECORD`, `JSP_ROLLBACK_RECORD_DIR` | save each match's confirmed inputs as a replay (off by default) | no |
+| `JSP_NET_REPORT_DIR` | folder of the match reports (default `reports`) | no |
+| `JSP_AUDIO_TICKLOCK`, `JSP_NET_GUEST_CLOCK`, `JSP_NET_CRI_LOCK`, `JSP_NET_THREAD_REGS` | the determinism fixes above; on in a match, `0` turns each off | A/B only |
+| `JSP_ROLLBACK_SKIP_FINAL`, `JSP_SNAPSHOT_COPY_THREADS` (3), `JSP_SNAPSHOT_PRECHECK_US` (20000), `JSP_SNAPSHOT_AUDIT_EXEMPT`, `JSP_SNAPSHOT_LWM_CACHE`, `JSP_SNAPSHOT_LAYOUT_GEN`, `JSP_SNAPSHOT_QUICK`, `JSP_SNAPSHOT_QUICK_WAIT_US`, `JSP_SNAPSHOT_FROZEN_WALK_EVERY`, `JSP_SNAPSHOT_AUDIT_ASYNC`, `JSP_SNAPSHOT_SITE`, `JSP_SNAPSHOT_SITE_MS` | snapshot speed-ups, set by default in rollback; `0` turns each off | A/B only |
+| `PSO_ASYNC` | pipelines built on worker threads, on as offline (rollback no longer sets `0`: the bench crash was the blob count race toolkit patch 2072 fixed); `0` builds them on the drawing thread | no |
+| `JSP_STEP_SKIP_DRAWS` | skip the draws of re-run frames (with `JSP_STEP_TURBO`); off offline, a rollback match sets `1` (`jsp_net_online.h`), `0` draws them | no |
+| `JSP_NET_STICK_DEADZONE`, `JSP_NET_STICK_LEVELS` | send the sticks with a dead zone or fewer steps (off by default) | yes |
+| `JSP_ROLLBACK_LIMITED_SAVING`, `JSP_ROLLBACK_START=fight`, `JSP_NET_LOAD_NEUTRAL`, `JSP_PAD_PEEK`, `JSP_SNAPSHOT_PREWAIT`, `JSP_SNAPSHOT_QUICK_SLEEP` | alternatives that were tried; off by default | yes |
+| `JSP_FIGHT_HASH_SCENE`, `JSP_FIGHT_HASH_FIGHTER`, `JSP_FIGHT_HASH_CAM_CACHE` | `1` puts the playback count, the fighter part or the old camera range back into the checksum | yes |
+| `JSP_ROLLBACK_BENCH` | the local rollback bench (no peer) | yes |
+| `JSP_ROLLBACK_INPUTS`, `JSP_ROLLBACK_INPUTS_SKIP` | feed the local player from a recorded fight (`replay_dump` csv) | yes |
+| `JSP_NET_LINK` | simulated delay, jitter and loss on this copy's sends | yes |
+| `JSP_ROLLBACK_NATIVE_COMM` | `same` keeps the title's communication id for the rollback rooms | yes |
+| `JSP_ROLLBACK_ROOM` | join that rollback room id, not the oldest (set by a Discord Join) | internal |
+| `JSP_ROLLBACK_ALLOW_DEBUG` | turns off the handshake's debug-switch refusal and allows the test knobs below | yes |
+| `JSP_ROLLBACK_FORCE_RELAY` | skip the direct try and use the relay at once (only with `JSP_ROLLBACK_ALLOW_DEBUG=1`) | yes |
+| `JSP_ONLINE_VERSUS_DEFAULT` | `1`: with two humans in a Friendly Match, put them on opposite teams (off by default) | no |
+| `JSP_NATIVE_TRACE` | trace of the game's own online and an autopilot into a Friendly Match | yes |
+| `JSP_NET_TICK_LOG`, `JSP_NET_PAGE_DUMP`, `JSP_NET_TASK_WATCH`, `JSP_NET_CAM_WATCH`, `JSP_CAM_DUMP`, `JSP_NET_CLOCK_DIAG`, `JSP_NET_LOAD_DIAG`, `JSP_SNAPSHOT_CENSUS_PROF`, `JSP_SNAPSHOT_COST_WINDOW_S`, `JSP_SNAPSHOT_AUDIT_PERIOD_MS` | diagnostics and measurement lines | yes |
+
+The Discord switches (`JSP_DISCORD`, `JSP_DISCORD_APP_ID`, `JSP_DISCORD_AUTO_ACCEPT`, `JSP_DISCORD_AUTO_NAV`, `JSP_DISCORD_CHAR_ART`,
+`JSP_DISCORD_REGISTER`, `JSP_DISCORD_JOIN`) are in [DISCORD.md](DISCORD.md).
+
 ### Rollback over re-psn (experimental)
 
 Instead of typing an address, the two players can meet in a room on a re-psn server (the same server and online name as the
@@ -346,7 +534,7 @@ still waiting (for example a gameplay mod refusal), the waiting band goes and th
 | `re-psn: no host with this version found within 2 minutes: ...` | The joining game read the room list for 2 minutes and found no room from the same build with rollback: the host's game had not started, had already given up, or runs another version or other gameplay mods. When it saw a rollback room of another build it says so: `(seen: a rollback room with build xxxxxxxx)` | Start both games at about the same time; compare the build numbers |
 | `re-psn: no player with this version joined within 2 minutes: ...` | The host's room was open for 2 minutes and nobody with the same build joined (a player with another build is refused and counted) | The same |
 | `re-psn: the host's room did not answer within 2 minutes: ...` | The joining game joined a room but the host's details for a direct link never came within 2 minutes | Start both games again |
-| `re-psn: the re-psn server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
+| `re-psn: the online server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
 
 Each of these lines ends with what to check: `start both games at about the same time (the host first is best; each waits
 2 minutes after its own start-up); both need the same version (build xxxxxxxx) and the same gameplay mods (or none)`. Version 0.6.0 used a 30 second window

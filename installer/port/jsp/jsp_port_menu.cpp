@@ -290,14 +290,14 @@ struct Menu {
     {
         if (nc == jpno::NC_DELAY && be->method()) delay_method = be->method();   // remember the Delay method before leaving it
         nc = v;
-        be->set_method(v == jpno::NC_DELAY ? delay_method : 0);
+        be->set_method(v == jpno::NC_DELAY ? delay_method : v == jpno::NC_NATIVE ? 1 : 0);   // NC_NATIVE: the game's own online over re-psn, with rollback
         osel = 0; edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
         events.push_back(std::string("online edit: netcode ") + jpno::name_of(nc));
     }
     // Save: the method that goes OFF is written first, so a failed or interrupted save never leaves both on.
     bool net_save(std::string& m)
     {
-        const bool rbon = nc == jpno::NC_ROLLBACK;
+        const bool rbon = nc == jpno::NC_ROLLBACK, native = nc == jpno::NC_NATIVE;
         std::string why = rbon ? rb.check() : be->check();
         if (why.empty() && rbon && rb.repsn && (be->get_text(ROW_SERVER).empty() || be->get_text(ROW_NAME).empty()))
             why = "Rollback over re-psn needs the server and online name of repsn.ini: set them under Delay first (they are kept).";
@@ -308,11 +308,15 @@ struct Menu {
             jps::File f = jps::File::parse(text);
             // off writes JSP_ROLLBACK=0 when the line exists or the environment holds one (a file line wins over it). After a refused start resolve_env has set the process variable to 0 and
             // JSP_NET_REFUSED=1, so the original value is unknown: write the 0 then too, or the next start would inherit the old non-zero value and be refused again.
-            rb.store(f, rbon, jpno::flag_on(io->active(jpno::kKeyOn)) || jpno::flag_on(io->active(jpno::kKeyRefused)));
+            if (native) rb.store_native(f);   // NC_NATIVE: JSP_ROLLBACK=1 without a role key
+            else rb.store(f, rbon, jpno::flag_on(io->active(jpno::kKeyOn)) || jpno::flag_on(io->active(jpno::kKeyRefused)));
             return io->save(f.text(), err);
         };
         std::string err;
-        if (rbon) {
+        if (native) {   // both on: the online settings first, then the rollback line
+            if (!be->save(m)) return false;
+            if (!write_file(err)) { m = "The online settings were saved, but the rollback line could not be: " + err; return false; }
+        } else if (rbon) {
             if (!be->save(m)) return false;
             if (!write_file(err)) { if (nc_saved == jpno::NC_DELAY) nc_saved = jpno::NC_OFF; m = "The game's own online was switched off, but Rollback could not be saved: " + err; return false; }   // edited stays set: the choice is not saved
         } else {
@@ -320,7 +324,8 @@ struct Menu {
             if (!be->save(m)) { if (nc_saved == jpno::NC_ROLLBACK) nc_saved = jpno::NC_OFF; m = "Rollback was switched off, but the online settings could not be saved: " + m; return false; }
         }
         nc_saved = nc;
-        m = nc == jpno::NC_ROLLBACK ? std::string("Saved. Rollback (") + (rb.host ? "host, port " + rb.port : "join " + rb.join) + ") applies on the next start."
+        m = native ? "Saved. Online Battle + rollback applies on the next start (Online Battle > Friendly Match)."
+          : nc == jpno::NC_ROLLBACK ? std::string("Saved. Rollback (") + (rb.host ? "host, port " + rb.port : "join " + rb.join) + ") applies on the next start."
           : nc == jpno::NC_DELAY ? "Saved. Delay (the game's own online) applies on the next start."
           : "Saved. Online play is off from the next start.";
         return true;
@@ -336,7 +341,7 @@ struct Menu {
         if (edge & BTN_DOWN) { osel = (osel + 1) % n; dirty = true; }
         if (edge & BTN_UP) { osel = (osel + n - 1) % n; dirty = true; }
         const int row = orow();   // ENHANCEMENT (in-game netcode option): the older page is the identity (row == osel)
-        if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_NETCODE) net_choose((nc + ((edge & BTN_LEFT) ? 2 : 1)) % 3);
+        if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_NETCODE) net_choose((nc + ((edge & BTN_LEFT) ? jpno::kNetcodeChoices - 1 : 1)) % jpno::kNetcodeChoices);
         else if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && (row == jpno::R_CONN || row == jpno::R_RELAY)) {   // ENHANCEMENT (rollback over re-psn)
             if (row == jpno::R_CONN) { rb.repsn = !rb.repsn; if (osel >= (int)orows().size()) osel = (int)orows().size() - 1; }
             else rb.relay = !rb.relay;

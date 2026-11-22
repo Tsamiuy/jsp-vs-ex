@@ -227,6 +227,7 @@ add_executable(${PROJECT_NAME}
     jsp_autopilot.cpp  # test auto-pilot (AUTO_FIGHT / AUTO_MENU), off unless set
     jsp_game.cpp       # the v0.15 jstars_game.cpp: PC text, Exit Game, menus, HUD size, FPS counter, Training
     jsp_net_probe.cpp  # experimental default-off socket-call discovery
+    jsp_net_native.cpp # test only: trace of the game's own online (JSP_NATIVE_TRACE=1) and its auto-pilot (AUTO_ONLINE=host|join)
     jsp_online.cpp     # ENHANCEMENT: reads repsn.ini / community.ini at startup, sets the runtime's online environment
     jsp_unlock.cpp     # ENHANCEMENT: unlock-everything cheat, JSP_UNLOCK_ALL=1 (the launcher's Cheats tab)
     jsp_port_menu.cpp  # ENHANCEMENT: in-game Port Settings page, on by default, JSP_PORT_MENU=0 turns it off (needs toolkit patches 2516-2518 and 6501; US build only)
@@ -234,6 +235,7 @@ add_executable(${PROJECT_NAME}
     jsp_session_startup.cpp # ENHANCEMENT: actual startup state; no session/ACK activation
     jsp_lod_lifetime.cpp # verified emitted entries + actual loader-buffer identity
     jsp_roster.cpp # ENHANCEMENT: roster section of mod.json (added fighters on the character select), only with a roster mod
+    jsp_discord.cpp    # ENHANCEMENT: Discord Rich Presence and Join/Invite over the local Discord app's IPC pipe (JSP_DISCORD=0 off)
     jsp_mods.cpp       # ENHANCEMENT: the mods folder (mods.txt, JSP_MODS_LIST/JSP_MODS_DIR, JSP_MODS=0 off): virtual CPK archives through toolkit patch 6502
     feat_menu_pages.cpp  # ENHANCEMENT: two-page main menu, on by default (MENU_PAGES=0 off); Battle Modes page with Training Mode and Impossible Mode rows
     feat_3v3.cpp  # ENHANCEMENT: 3v3 Free Battle, on by default with the two-page menu (SIX=0 or MENU_PAGES=0 off); the team size window, 3v3 Character Select, six fighters in the fight
@@ -245,6 +247,7 @@ add_executable(${PROJECT_NAME}
     jsp_snapshot.cpp   # the write-watched snapshot ring the session saves to and rolls back with (toolkit patches 7910-7917)
     jsp_thread_registry.cpp # thread table for the snapshot's freeze (TLS callback in every build; it registers threads only with JSP_ROLLBACK=1 or JSP_SNAPSHOT_THREADS=registry)
     jsp_fight_hash.cpp # fight tick counter and per-tick state hash (the session's tick number and checksum)
+    jsp_net_native_fight.cpp # the rollback takes over the game's own online fight (pad take, share pad, net errors); pass-through until armed
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -274,6 +277,12 @@ if(NOT MSVC)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE jsp_gekkonet)
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_ROLLBACK_BUILD=1)
+# FIX (rematch black screen): test-only debug knobs (JSP_SHAREPAD_SKIP_PUSH) are compiled in only with -DJSP_TEST_KNOBS=ON; never in a release or tester build.
+option(JSP_TEST_KNOBS "Compile the test-only debug knobs (JSP_SHAREPAD_SKIP_PUSH); never for a release" OFF)
+if(JSP_TEST_KNOBS)
+    message(WARNING "JSP_TEST_KNOBS=ON: test-only debug knobs are compiled in; do not ship this build")
+    set_property(SOURCE jsp_net_native_fight.cpp APPEND PROPERTY COMPILE_DEFINITIONS JSP_TEST_KNOBS=1)
+endif()
 # The rollback build id from the release content (jsp_build_id.cmake), on the one file that reads it.
 include("${CMAKE_CURRENT_SOURCE_DIR}/jsp_build_id.cmake")
 jsp_build_id(JSP_NET_BUILD_ID "${PROJECT_VERSION}" "${JSP_GAME_REGION}" "${CMAKE_CURRENT_SOURCE_DIR}" "${PS3RECOMP_DIR}")
@@ -311,6 +320,8 @@ endif()
 
 set_source_files_properties(jsp_net_probe.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/network")
+set_source_files_properties(jsp_stepper.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/input")
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"              # verified LOD capability header

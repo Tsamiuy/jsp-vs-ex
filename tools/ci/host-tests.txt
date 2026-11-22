@@ -13,6 +13,7 @@ all     | installer/tools/portable_selftest.py {scratch}
 all     | installer/tools/lan_discover_test.py
 all     | installer/tools/online_option_test.py
 all     | installer/tools/quote_arg_test.py
+all     | installer/tools/firewall_rule_test.py
 all     | installer/tools/support_bundle_test.py
 all     | installer/tools/unlock_option_test.py
 all     | installer/tools/menu_option_test.py
@@ -27,13 +28,24 @@ posix   | tools/ci/test_release_tag.py
 posix   | installer/tools/online_settings_test.sh
 posix   | installer/tools/port_menu_test.sh
 posix   | installer/tools/net_online_test.sh
+posix   | installer/tools/net_postgame_test.sh
+posix   | installer/tools/net_report_test.sh
 posix   | installer/tools/build_id_test.py {scratch}
 posix   | installer/tools/net_repsn_test.sh {toolkit} {scratch}
 posix   | installer/tools/np_dialogs_test.sh {toolkit} {scratch}
 posix   | installer/tools/fs_vfile_test.sh {toolkit} {scratch}
 posix   | installer/tools/np_log_test.sh {toolkit} {scratch}
+# toolkit patch 7928 (sys_net_abort_socket, SO_RCVTIMEO, per-thread errno): the toolkit's own test_sys_net.c, built against the export
+posix   | installer/tools/sys_net_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/net_badge_test.sh
+posix   | installer/tools/net_delay_rule_test.sh
+posix   | installer/tools/net_perf_test.sh
+posix   | installer/tools/discord_test.sh
+posix   | installer/tools/native_fight_test.sh
+posix   | installer/tools/fight_setup_rule_test.sh
+posix   | installer/tools/stall_rule_test.sh
+posix   | installer/tools/sharepad_wd_test.sh
 posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py
 posix   | installer/tools/session_startup_test.py
@@ -55,18 +67,32 @@ posix   | installer/tools/net_session_test.sh {scratch}
 posix   | installer/tools/net_session_driver_test.py
 posix   | installer/tools/stepper_test.sh
 posix   | installer/tools/snapshot_ring_test.sh
+posix   | installer/tools/thread_audit_test.sh
 posix   | installer/tools/mods_overlay_test.sh {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
+# toolkit patches 3005/3007: the tick-locked audio path is the WASAPI mix thread, so its race test is a Windows exe (MINGW_CC, llvm-mingw)
+windows | installer/tools/audio_lock_test.sh {toolkit} {scratch}
+# toolkit patch 7928 on the game's own platform (Winsock): the same test_sys_net.c as the posix row, a Windows exe (MINGW_CC, llvm-mingw)
+windows | installer/tools/sys_net_test.sh {toolkit} {scratch}
 exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py
 exclude | installer/tools/matching2_stale_test.c | optional baseline fixture compiled and run by matching2_context_test.py only with --baseline-sdk; not run by regular CI
 exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
 exclude | installer/tools/port_menu_test.cpp | compiled and run by port_menu_test.sh
 exclude | installer/tools/net_online_test.cpp | compiled and run by net_online_test.sh
+exclude | installer/tools/net_postgame_test.cpp | compiled and run by net_postgame_test.sh
+exclude | installer/tools/net_report_test.cpp | compiled and run by net_report_test.sh
 exclude | installer/tools/net_repsn_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/net_repsn_client_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
 exclude | installer/tools/net_badge_test.cpp | compiled and run by net_badge_test.sh
+exclude | installer/tools/net_delay_rule_test.cpp | compiled and run by net_delay_rule_test.sh
+exclude | installer/tools/net_perf_test.cpp | compiled and run by net_perf_test.sh
+exclude | installer/tools/discord_test.cpp | compiled and run by discord_test.sh
+exclude | installer/tools/native_fight_test.cpp | compiled and run by native_fight_test.sh
+exclude | installer/tools/fight_setup_rule_test.cpp | compiled and run by fight_setup_rule_test.sh
+exclude | installer/tools/stall_rule_test.cpp | compiled and run by stall_rule_test.sh
+exclude | installer/tools/sharepad_wd_test.cpp | compiled and run by sharepad_wd_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh
 exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh
 exclude | installer/tools/session_manifest_test.cpp | compiled and run by session_manifest_test.sh
@@ -74,7 +100,11 @@ exclude | installer/tools/net_transport_test.cpp | compiled and run by net_sessi
 exclude | installer/tools/net_m2_link_test.cpp | compiled and run by net_session_test.sh
 exclude | installer/tools/net_session_test.cpp | compiled by net_session_test.sh and run by net_session_test.py
 exclude | installer/tools/net_session_test.py | the two-process driver net_session_test.sh runs (its deadline handling: net_session_driver_test.py)
+exclude | installer/tools/net_replay_test.cpp | compiled and run by net_session_test.sh (stress runs, and the playback of net_session_test.py's record_replay scenario)
+exclude | installer/tools/replay_dump.cpp | compiled and run by net_session_test.sh (decodes a stress recording for replay_inputs.py)
+exclude | installer/tools/replay_inputs.py | the replay input reader; run by net_session_test.sh on a decoded stress recording
 exclude | installer/tools/stepper_test.cpp | compiled and run by stepper_test.sh
 exclude | installer/tools/snapshot_ring_test.cpp | compiled and run by snapshot_ring_test.sh
+exclude | installer/tools/thread_audit_test.cpp | compiled and run by thread_audit_test.sh
 exclude | installer/tools/mods_overlay_test.cpp | compiled and run by mods_overlay_test.sh
 exclude | docs/archive/jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner

@@ -55,16 +55,18 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 
 ## 4. Online with rollback netcode  🔧
 
-An experimental first version is in the build, off by default. It needs fights that run the same on every machine and a way to save and restore the fight state
-each frame. How it works and the plan, with what we use and fall back to: [ROLLBACK.md](ROLLBACK.md). Online is opt-in: the port connects only when you choose online play, and only to the players or server you
-pick.
+An experimental first version is in the build. A new install turns it on for Online Battle (setup writes the online settings when there are none; the settings
+window's Online tab turns it off). It needs fights that run the same on every machine and a way to save and restore the fight state each frame. How it works and
+the plan, with what we use and fall back to: [ROLLBACK.md](ROLLBACK.md). The port connects only for online play, and only to the server and players in the
+settings (none by default: online is off until the player chooses a server).
 Every gameplay option in a match is the same for all players; ranked uses one fixed rule set.
 
-- 🔧 **The game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server** (a fork of psnr) (experimental, opt-in; how
+- 🔧 **The game's own Online Battle over a [re-psn](https://github.com/undecuple/re-psn) server** (a fork of psnr) (experimental, on after a new install; how
   to try it: `installer/README.md`, "Online Battle"): in a test of two copies on one PC, both reached a Friendly Match
   room and played into the fight. Play testers report online matches on their Windows PCs since 0.1.0 (no logs yet); the EU build, two real PCs with different settings or versions, and the Impossible mode online are not tried
-- 🔧 **Online matches with rollback netcode** (experimental, opt-in; how to try it: [ROLLBACK.md, section 5](ROLLBACK.md#5-try-it-experimental-direct-ip-rollback)):
-  a Free Battle fight between two PCs connected by IP address, one player per PC, tested as two copies on one PC and in one fight between two PCs on one home network (test-harness settings; slow, cause not known yet); no complete match has run yet.
+- 🔧 **Online matches with rollback netcode** (experimental, on after a new install; [ROLLBACK.md](ROLLBACK.md)): the game's own Friendly Match room
+  pairs the two players (one per PC, 2 vs 2) and rollback runs the fight, US 1.00 disc only; tried with two copies on one Windows 11 PC, not between two PCs.
+  The earlier direct-IP and re-psn role starts stay for tests ([ROLLBACK.md, section 5](ROLLBACK.md#5-try-it-experimental-direct-ip-rollback)); one such fight ran between two PCs on one home network.
   Then 2v2 and 3v3 (3v3 Free Battle works offline, see section 3; not tried online); lobbies over re-psn ([details](FEATURES.md#online-rollback))
 - 📋 **Spectating** (opt-in): the host opens the lobby to watchers; each watcher's camera changes only what they see ([details](FEATURES.md#spectating))
 - 📋 Lobbies, matchmaking, ranked ([details](FEATURES.md#lobbies-ranked))

@@ -1,0 +1,32 @@
+Patch 7923: ps3_ppu_thread_ctx, the live register context of a PPU thread slot (rollback).
+
+Symptom (two-copy rollback tests, with the clock, the audio and the sound server already following the game tick): the sound library's
+server thread keeps its loop values in registers while it sleeps. A rollback restores guest memory, not those registers, so after a
+rollback the thread went on with the values of the undone timeline and its timers fired 2-8 ticks apart on the two copies, depending
+on each copy's own rollback history.
+
+Now: ps3_ppu_thread_ctx(tid) returns the slot's context (NULL when the slot is not alive). The port copies the registers of every
+helper thread parked in an HLE wait at each snapshot commit, and writes them back at a rollback to each thread that is parked in the
+same wait (same call site) again.
+
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 78d8a90..ed3a0ab 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -1516,6 +1516,16 @@ int ps3_ppu_thread_view(uint32_t tid, uint64_t* out, char* name)
+ 
+ /* Patch 7916 (rollback netcode, read only): the callee-saved register file of one PPU thread slot: io[0..17] = r14..r31, io[18] = lr, io[19] = ctr, io[20] = cr,
+  * io[21] = r1. `set` must be 0: a write request returns 0 (there is no write path). Returns 1 when the slot's thread is alive, else 0 and io is untouched. No lock. */
++/* J-Stars patch 3006 (rollback): the live register context of one PPU thread slot (NULL when the slot is not alive). The port copies the
++ * context of helper threads parked in a wait at every snapshot commit and writes it back at a rollback when the thread is parked in the
++ * same wait again: a loop's registers (a sound server's last time, a counter) are not in guest memory, which the snapshot restores. */
++ppu_context* ps3_ppu_thread_ctx(uint32_t tid)
++{
++    if (tid == 0 || tid > PPU_THREAD_MAX) return 0;
++    ppu_thread_info* t = &g_ppu_threads[tid - 1];
++    if (t->state != PPU_THREAD_STATE_RUNNING && t->state != PPU_THREAD_STATE_DETACHED) return 0;
++    return &t->ctx;
++}
+ int ps3_ppu_thread_regs(uint32_t tid, uint64_t* io, int set)
+ {
+     if (set) return 0;   /* read only: there is no write path */

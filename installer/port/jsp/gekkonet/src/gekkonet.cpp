@@ -106,6 +106,11 @@ float gekko_frames_ahead(GekkoSession* session)
     return session->FramesAhead();
 }
 
+int gekko_final_frame(GekkoSession* session)
+{
+    return session->FinalFrame();
+}
+
 int gekko_spectator_buffered_frames(GekkoSession* session)
 {
     return session->SpectatorBufferedFrames();

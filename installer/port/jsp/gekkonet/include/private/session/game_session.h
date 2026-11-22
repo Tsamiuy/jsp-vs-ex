@@ -41,6 +41,8 @@ namespace Gekko {
 
         f32 FramesAhead() override;
 
+        i32 FinalFrame() override;   // jsp-vs-ex local addition (PIN.md)
+
         void NetworkStats(i32 player, GekkoNetworkStats* stats) override;
 
         void RollbackStats(GekkoRollbackStats* stats) override;

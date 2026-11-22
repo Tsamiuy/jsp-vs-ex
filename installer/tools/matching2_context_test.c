@@ -558,6 +558,45 @@ static void tick_member(void)
     for(int i=0;i<SIG_PENDING_MAX;++i)if(s_sig[i].used)s_sig[i].due=0;
     m2_tick();assert(sign==3 && signals[2].up==1);
 }
+/* Patch 7924: the room view and the join target (Discord join): a search lists only the target, and the target's fate is recorded. */
+static u8 list_buf[256];
+static u32 room_list(u64 a, u8 cur_a, u64 b, u8 cur_b)
+{
+    u8 *p=psnr_put16(list_buf,2);p=psnr_put16(p,2);
+    const u64 id[2]={a,b};const u8 cur[2]={cur_a,cur_b};
+    for(int i=0;i<2;++i){p=psnr_put64(p,id[i]);memset(p,0,16);memcpy(p,"host",4);p+=16;*p++=cur[i];*p++=2;p=psnr_put32(p,0);p=psnr_put16(p,0);}
+    *p++=0;*p++=0;return (u32)(p-list_buf);
+}
+static u32 search_total(u64 a, u8 cur_a, u64 b, u8 cur_b)
+{
+    memset(vm_base+REQ,0,112);vm_write32(REQ+20,10);int s=nsends,c=cbn;
+    assert(sceNpMatching2SearchRoom(context,REQ,0,REQID)==0);
+    queue_reply(s,PSNR_ROOM_LIST,list_buf,room_list(a,cur_a,b,cur_b));np_psnr_pump();
+    assert(cbn==c+1 && (u32)callbacks[c].a[4]==0);
+    assert(sceNpMatching2GetEventData(context,(u32)callbacks[c].a[3],0x10000,4096)>0);
+    return vm_read32(0x10000+4);
+}
+static void join_target(void)
+{
+    u64 room=1;int members=-1,max=-1,own=-1;char peer[17]="x";
+    assert(ps3_np_matching2_room(&room,&members,&max,&own,peer,sizeof peer)==1 && room==0 && members==0 && !peer[0]);
+    assert(ps3_np_matching2_join_target(&room)==PS3_M2_JOIN_NONE && room==0);
+    assert(search_total(54,1,55,1)==2);                                     /* no target: every room */
+    ps3_np_matching2_set_join_target(55);
+    assert(ps3_np_matching2_join_target(&room)==PS3_M2_JOIN_PENDING && room==55);
+    assert(search_total(54,1,55,1)==1 && ps3_np_matching2_join_target(0)==PS3_M2_JOIN_LISTED);
+    assert(search_total(54,1,56,1)==0 && ps3_np_matching2_join_target(0)==PS3_M2_JOIN_NOT_FOUND);   /* stale room */
+    search_total(54,1,55,2);assert(ps3_np_matching2_join_target(0)==PS3_M2_JOIN_FULL);           /* full room */
+    int s=nsends;memset(vm_base+REQ,0,64);vm_write64(REQ,55);
+    assert(sceNpMatching2JoinRoom(context,REQ,0,REQID)==0);u8 e[4];psnr_put32(e,PSNR_E_ROOM_FULL);
+    queue_reply(s,PSNR_ERROR,e,4);np_psnr_pump();assert(ps3_np_matching2_join_target(0)==PS3_M2_JOIN_FULL);
+    s=nsends;assert(sceNpMatching2JoinRoom(context,REQ,0,REQID)==0);
+    u8 b[128];queue_reply(s,PSNR_ROOM_JOINED,b,room_body(b,55));np_psnr_pump();
+    assert(ps3_np_matching2_join_target(0)==PS3_M2_JOIN_JOINED);
+    assert(ps3_np_matching2_room(&room,&members,&max,&own,peer,sizeof peer)==2 && room==55 && members==2 && max==4 && own==1 && !strcmp(peer,"peer"));
+    ps3_np_matching2_set_join_target(55);assert(ps3_np_matching2_join_target(0)==PS3_M2_JOIN_JOINED);   /* already there */
+    ps3_np_matching2_set_join_target(0);assert(ps3_np_matching2_join_target(&room)==PS3_M2_JOIN_NONE && room==0);
+}
 int main(int argc,char **argv)
 {
     assert(argc==2);alarm(15);setup();const char *s=argv[1];
@@ -593,6 +632,7 @@ int main(int argc,char **argv)
     else if(!strcmp(s,"done-error"))current_error(0);
     else if(!strcmp(s,"search-commit"))search_commit();
     else if(!strcmp(s,"repeat-start"))repeat_start();
+    else if(!strcmp(s,"join-target"))join_target();
     else assert(!"unknown scenario");
     printf("PASS %s: actual Matching2 + NP adapter\n",s);return 0;
 }

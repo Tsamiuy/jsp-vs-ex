@@ -62,7 +62,9 @@ NOTICE = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
 This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental), which is off unless you turn it on and give a re-psn server (see the installer README).
+(experimental), which is off until you choose an online server in the settings window's Online tab, and Discord Rich
+Presence, which is off until a Discord application is set (JSP_DISCORD_APP_ID). Online settings you already have are kept.
+ONLINE-GUIDE.md says how to play online.
 
 The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
 Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.19.0 with this project's patches).
@@ -175,6 +177,11 @@ def main(argv=None):
                     help="a release build (release.yml passes the tag's version): must equal installer/VERSION; writes release.txt, "
                          "which the game shows in its main menu. Without it the payload has no release.txt and the game shows no version")
     ap.add_argument("--no-fetch", action="store_true", help="do not fetch the current tree's toolkit tag when the checkout lacks it")
+    # FIX (review): no online service unless the packager selects one. This repository ships none and its workflows pass none.
+    ap.add_argument("--online-service", default="", metavar="FILE",
+                    help="ship FILE as online-service.ini: the one online service (re-psn server, optional Discord application id) this build "
+                         "offers (firstrun.py read_service checks it). It is only offered: online stays off until the player clicks its "
+                         "\"Use <label>\" button in the settings window's Online tab. Without it, a fresh install is offline")
     a = ap.parse_args(argv)
     a.tree = TREE_IDS[a.tree]   # tree.txt and firstrun.py use the internal id "v18"
     if a.tree == "v15":
@@ -190,6 +197,16 @@ def main(argv=None):
             sys.exit(f"--release {a.release} differs from installer/VERSION")
         (out / "release.txt").write_text(a.release + "\n")
     (out / "NOTICE.txt").write_text(NOTICE)
+    if a.online_service:
+        sys.path.insert(0, str(ROOT / "installer/tools"))
+        import firstrun
+        shutil.copy2(a.online_service, out / firstrun.SERVICE_FILE)
+        svc, bad = firstrun.read_service(out)
+        if bad:
+            sys.exit(f"--online-service {a.online_service}: {bad}")
+        print(f"online service: {svc['label']}" + (" (TEST BUILD)" if svc["test"] else "") + f", server {svc['server']}"
+              + (", Discord application set" if svc["app_id"] else ""))
+    shutil.copy2(ROOT / "docs/TESTING_ONLINE.md", out / "ONLINE-GUIDE.md")   # ENHANCEMENT: the online guide ships with the game (setup and portable)
     (out / "tree.txt").write_text(a.tree + "\n")
     (out / "tools").mkdir()
     for n in ("firstrun.py", "lift_jobs.py", "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder

@@ -283,6 +283,94 @@ def units():
     check("settings window: changed source is stale", firstrun.settings_window_stale(sw))
     (sw / "tools" / "jsp-settings.cs").unlink()
     check("settings window: missing source counts as stale (and the build then does nothing)", firstrun.settings_window_stale(sw))
+    # FIX (review): a fresh install is offline. FIX (offer only): online-service.ini (a package's service) is only OFFERED: the first run writes
+    # nothing for it (no repsn.ini, no rollback line, no JSP_DISCORD_APP_ID), it only logs the offer and the settings window's button; the
+    # player's click in the Online tab turns it on (online_option_test.py checks that side). Present settings are never touched.
+    import re
+    SRV = "srv.example.test:36100"
+    SVC = ("; TEST BUILD ONLY\n[service]\nlabel=Example test service\ntest_build=1\n[repsn]\nserver=" + SRV + "\nrollback=1\nrelay=1\n"
+           "[discord]\napp_id=123456789012345678\n")
+
+    def svc_in(d, text=SVC):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / firstrun.SERVICE_FILE).write_text(text)
+        return d
+
+    def rd(p):
+        return p.read_text() if p.is_file() else ""
+
+    def files(d):   # every file under d (relative), to prove nothing was written
+        return sorted(str(x.relative_to(d)).replace("\\", "/") for x in pathlib.Path(d).rglob("*") if x.is_file()) if pathlib.Path(d).exists() else []
+
+    off = tmp / "off"; env0 = {"APPDATA": str(off / "roaming")}
+    (off / "inst").mkdir(parents=True)
+    l0 = firstrun.online_defaults(off / "inst", False, env0)
+    check("online: no service file -> offline, nothing written", not (off / "roaming").exists() and "no online service selected" in l0[0], " | ".join(l0))
+    check("online: the repository names no server and no Discord application",
+          not hasattr(firstrun, "ONLINE_SERVER") and not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+", pathlib.Path(firstrun.__file__).read_text(encoding="utf-8")))
+    for bad in ("[service]\nlabel=x\n", "[service]\nlabel=x\n[repsn]\nserver=a b\n", "[service]\nlabel=x\n[repsn]\nserver=h:70000\n",
+                "[service]\nlabel=x\n[repsn]\nserver=h\n[discord]\napp_id=12ab\n", "[repsn]\nserver=h\n", "[service]\nlabel=\x01bad\n[repsn]\nserver=h\n"):
+        bd = svc_in(tmp / ("bad%d" % len(bad)) / "inst", bad)
+        lb = firstrun.online_defaults(bd, True, {})
+        check(f"online: an invalid service file offers nothing ({bad.strip()[-20:]!r})", files(bd) == [firstrun.SERVICE_FILE]
+              and "no online service offered" in lb[0] and firstrun.read_service(bd)[0] is None, " | ".join(lb))
+    big = svc_in(tmp / "big" / "inst", SVC + ";" + "x" * (64 * 1024) + "\n")
+    check("online: a service file over 64 KB offers nothing", "over 64 KB" in firstrun.online_defaults(big, True, {})[0] and files(big) == [firstrun.SERVICE_FILE])
+    # a valid test service on a fresh install (AppData layout): the log offers it, names the button and writes nothing anywhere
+    od = tmp / "od"
+    env = {"APPDATA": str(od / "roaming")}
+    inst = svc_in(od / "inst")
+    svc, why = firstrun.read_service(inst)
+    check("online service: a valid file is read (label, server, test build, rollback, relay, Discord id)",
+          why is None and svc == {"label": "Example test service", "server": SRV, "app_id": "123456789012345678", "test": True, "rollback": True, "relay": True}, repr((svc, why)))
+    check("online service: the button text names the service and TEST BUILD", firstrun.service_button(svc) == "Use Example test service (TEST BUILD)")
+    check("online service: a normal build's button has no TEST BUILD", firstrun.service_button(dict(svc, test=False)) == "Use Example test service")
+    lines = firstrun.online_defaults(inst, False, env)
+    check("online service (fresh): nothing written, no repsn.ini, no settings file, no AppData folder",
+          not (od / "roaming").exists() and files(inst) == [firstrun.SERVICE_FILE] and not firstrun.settings_file(inst, False, env).exists(), " | ".join(lines))
+    check("online service (fresh): the log offers it as a TEST BUILD and names the one click",
+          lines[0].startswith("[online] TEST BUILD: ") and "offers the online service \"Example test service\"" in lines[0]
+          and "Online tab, click \"Use Example test service (TEST BUILD)\" (one click)" in lines[0] and "online stays off" in lines[0], " | ".join(lines))
+    check("online service (fresh): no line claims online, rollback or Discord was turned on",
+          not any(w in " ".join(lines) for w in ("JSP_ROLLBACK", "JSP_DISCORD", "added to the settings file", "online on")), " | ".join(lines))
+    again = firstrun.online_defaults(inst, False, env)
+    check("online service: a second run still writes nothing", not (od / "roaming").exists() and files(inst) == [firstrun.SERVICE_FILE], " | ".join(again))
+    # portable fresh install: the shared folder and the settings file would be in the install folder; neither appears
+    pf = svc_in(tmp / "portfresh")
+    lp = firstrun.online_defaults(pf, True, {}, region="US")
+    check("online service (portable, fresh): no shared\\repsn.ini, no play_settings.txt", files(pf) == [firstrun.SERVICE_FILE]
+          and not (pf / "shared").exists() and not (pf / "play_settings.txt").exists(), " | ".join(lp))
+    # upgrade: the player's own server and Off, and a player's JSP_DISCORD=0, are kept byte for byte; the log says they are kept
+    up = tmp / "up"; envu = {"APPDATA": str(up)}
+    (up / "PS3Recomp").mkdir(parents=True); (up / "PS3Recomp" / "repsn.ini").write_text("[repsn]\nenabled=0\nserver=mine.example\nname=Me123\n")
+    (up / firstrun.APPDIR).mkdir(parents=True); (up / firstrun.APPDIR / "play_settings.txt").write_text("JSP_DISCORD=0\n")
+    lu = firstrun.online_defaults(svc_in(up / "inst"), False, envu)
+    check("online service: an upgrade keeps the player's repsn.ini and Discord choice",
+          rd(up / "PS3Recomp" / "repsn.ini") == "[repsn]\nenabled=0\nserver=mine.example\nname=Me123\n" and rd(up / firstrun.APPDIR / "play_settings.txt") == "JSP_DISCORD=0\n"
+          and any("already present (repsn.ini): kept" in l for l in lu), " | ".join(lu))
+    # an upgrade with no Discord line and an older rollback-free settings file: still nothing added (before: JSP_DISCORD_APP_ID was added on upgrades)
+    od2 = tmp / "od2"; env2 = {"APPDATA": str(od2)}
+    (od2 / "PS3Recomp").mkdir(parents=True); (od2 / "PS3Recomp" / "community.ini").write_text("[community]\nenabled=0\n")
+    (od2 / firstrun.APPDIR).mkdir(parents=True); (od2 / firstrun.APPDIR / "play_settings.txt").write_text("RES_SCALE=2\n")
+    firstrun.online_defaults(svc_in(od2 / "inst"), False, env2)
+    check("online service: an upgrade gets no repsn.ini and no JSP_DISCORD_APP_ID or rollback line", not (od2 / "PS3Recomp" / "repsn.ini").exists()
+          and rd(od2 / firstrun.APPDIR / "play_settings.txt") == "RES_SCALE=2\n" and rd(od2 / "PS3Recomp" / "community.ini") == "[community]\nenabled=0\n")
+    # portable with the player's own lines: unchanged
+    pr = svc_in(tmp / "port")
+    (pr / "play_settings.txt").write_text("RES_SCALE=2\nJSP_ROLLBACK=0\n")
+    firstrun.online_defaults(pr, True, {})
+    check("online service: the player's settings file is not touched (JSP_ROLLBACK=0 kept, nothing appended)",
+          rd(pr / "play_settings.txt") == "RES_SCALE=2\nJSP_ROLLBACK=0\n" and not (pr / "shared").exists(), repr(rd(pr / "play_settings.txt")))
+    # FIX (region): an EU disc: the log says rollback is US-disc only; still nothing written
+    pr4 = svc_in(tmp / "port4")
+    eu = firstrun.online_defaults(pr4, True, {}, region="EU")
+    check("online service (EU): the log says rollback is US-disc only, nothing written", any("US-disc only" in l for l in eu) and files(pr4) == [firstrun.SERVICE_FILE], " | ".join(eu))
+    check("online: JSP_ONLINE_DEFAULTS=0 skips", "skipped" in firstrun.online_defaults(svc_in(tmp / "nope"), True, {"JSP_ONLINE_DEFAULTS": "0"})[0]
+          and not (tmp / "nope" / "shared").exists())
+    # the source: no seeding left (no repsn.ini write, no settings-file append) in the online step
+    src = pathlib.Path(firstrun.__file__).read_text(encoding="utf-8")
+    step = src[src.index("def online_defaults("):src.index("SETTINGS_HASH = ")]
+    check("online: the first-run online step has no write call", not any(w in step for w in ("write_text", "write_bytes", "open(", "mkdir", "_settings_append")))
     print("RESULT:", "ok" if ok else "FAILED")
     return 0 if ok else 1
 

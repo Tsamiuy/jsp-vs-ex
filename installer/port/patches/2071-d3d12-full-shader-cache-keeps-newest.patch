@@ -1,0 +1,115 @@
+Patch 2071 (fix line): a full shader_cache.bin keeps its newest records instead of refusing every new one.
+
+shader_cache.bin holds at most 16384 records (patch 2055). When it was full, a new shader text was compiled and not kept,
+in every run, so each such fragment program cost a D3DCompile on the drawing thread (100-400 ms) every time a run met it.
+The maintainer's file had been full for days (16384 records; 16305 fragment-program texts for 8121 distinct compiled
+programs), and every online match logged "shader_cache.bin full (16384), new entries are not kept": the first fight
+frames and the first appearance of an effect stalled the drawing thread, and with rollback (PSO_ASYNC=0) the game thread
+waited for it (a 2 s replay at tick 3, ping readings of 140-400 ms).
+
+Now a file that is full at the start is trimmed to its newest 12288 records (three quarters of the capacity), written to
+shader_cache.bin.tmp and swapped in, so a run has room for 4096 new texts. An entry that a run takes from the older half
+of the kept records is written again at the end of the file (once per run), so the programs a player keeps meeting stay
+and the ones nobody meets any more are dropped first. If the trimmed copy cannot be written, the old file stays and new
+records go after its last whole one, as before. The same code serves pso_cache.bin (opt-in, PSO_CACHE=1).
+
+Log: "[SHADERCACHE] shader_cache.bin: was full (N records): the oldest N dropped, N kept, room for N new".
+
+Tested: syntax check only (llvm-mingw clang -fsyntax-only, no new diagnostics); not run in a game yet.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 75a3361..03dfd47 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2416,7 +2416,11 @@ static void compile_vp(void)
+  * shader past the 4096th was compiled again in every run and never kept, a 100-400 ms hitch each time a fight met
+  * one (HITCH=50 log, bench/exp/2026-11-08_0033-quickroute). A full cache now says so once. */
+ #define SC_SLOTS 32768u
+-typedef struct { u64 key; u8* data; u32 size; } SCSlot;
++/* Patch 2071: a full file keeps its newest records (SC_KEEP, three quarters of the capacity) instead of refusing every new
++ * one, and an entry the run uses from the older half of the file is written again at its end (once per run), so the
++ * entries a player keeps meeting stay and the ones nobody meets any more are the ones dropped. */
++#define SC_KEEP ((SC_SLOTS / 2u) * 3u / 4u)
++typedef struct { u64 key; u8* data; u32 size; u32 old; } SCSlot;   /* old (2071): loaded from the older half of the file */
+ typedef struct {
+     const char* file; const char* env;
+     FILE* out; int on; u32 n;
+@@ -2439,7 +2443,7 @@ static SCSlot* sc_find(SCache* c, u64 key)
+ static void sc_set(SCache* c, SCSlot* sl, u64 key, u8* data, u32 size)
+ {
+     if (sl->key) free(sl->data); else c->n++;
+-    sl->key = key; sl->data = data; sl->size = size;
++    sl->key = key; sl->data = data; sl->size = size; sl->old = 0;
+ }
+ static void sc_open(SCache* c)
+ {
+@@ -2452,20 +2456,54 @@ static void sc_open(SCache* c)
+     FILE* in = fopen(c->file, "rb");
+     const int existed = in != NULL;
+     psw_off good = 0;   /* patch 2069: 64-bit (a long is 32 bits on Windows and reads 2 GiB or more as negative) */
++    /* Patch 2071: a full file (SC_SLOTS / 2 records or more) is trimmed to its newest SC_KEEP records, written to <file>.tmp
++     * and swapped in; if that fails the old file stays and new records go after its last whole one, as before. The dev PC's
++     * shader_cache.bin had been full for days: every fragment program text it had not met before was compiled again in
++     * every run, on the drawing thread, 100-400 ms each, and never kept ("full, new entries are not kept" in every match). */
++    u32 total = 0, skip = 0, kept = 0, half = 0; FILE* trim = NULL; int trim_ok = 0; char tmp[512];
+     if (in) {
+         struct { u32 magic, size; u64 key; } h;
++        while (fread(&h, sizeof h, 1, in) == 1 && h.magic == 0x31435344u && h.size && h.size < (1u << 24) &&
++               psw_seek(in, (psw_off)h.size, SEEK_CUR) == 0)
++            total++;
++        rewind(in);
++        if (total >= SC_SLOTS / 2u) {
++            skip = total - SC_KEEP;
++            if (snprintf(tmp, sizeof tmp, "%s.tmp", c->file) < (int)sizeof tmp) trim = fopen(tmp, "wb");
++            trim_ok = trim != NULL;
++        }
++        if (total >= SC_KEEP) half = skip + (total - skip) / 2u;   /* the older half of what is kept: used again = written again */
++        u32 idx = 0;
+         while (fread(&h, sizeof h, 1, in) == 1 && h.magic == 0x31435344u &&
+                h.size && h.size < (1u << 24) && c->n < SC_SLOTS / 2u) {
++            if (idx < skip) { idx++; if (psw_seek(in, (psw_off)h.size, SEEK_CUR) != 0) break; continue; }   /* 2071: dropped */
+             u8* data = (u8*)malloc(h.size);
+             if (!data) break;
+             if (fread(data, 1, h.size, in) != h.size) { free(data); break; }
+-            sc_set(c, sc_find(c, h.key), h.key, data, h.size);
++            SCSlot* sl = sc_find(c, h.key);
++            sc_set(c, sl, h.key, data, h.size);
++            sl->old = idx < half;
++            idx++; kept++;
++            if (trim && (fwrite(&h, sizeof h, 1, trim) != 1 || fwrite(data, 1, h.size, trim) != h.size)) trim_ok = 0;
+             const psw_off at = psw_tell(in);
+             if (at < 0) { fprintf(stderr, "[SHADERCACHE] %s: cannot read the file position (errno %d), loading stops at %u entries%c", c->file, errno, c->n, 10); break; }
+             good = at;
+         }
+         fclose(in);
+     }
++    if (trim) {
++        if (fflush(trim) != 0 || ferror(trim) || psw_sync(trim) != 0) trim_ok = 0;
++        const psw_off tsz = trim_ok ? psw_tell(trim) : -1;
++        if (fclose(trim) != 0) trim_ok = 0;
++        if (trim_ok && tsz >= 0 && PSW_REPLACE(tmp, c->file) == 0) {
++            good = tsz;
++            fprintf(stderr, "[SHADERCACHE] %s: was full (%u records): the oldest %u dropped, %u kept, room for %u new%c",
++                    c->file, total, skip, kept, SC_SLOTS / 2u - c->n, 10);
++        } else {
++            remove(tmp);
++            fprintf(stderr, "[SHADERCACHE] %s: full (%u records) and not trimmed (errno %d): the file is kept as it is%c", c->file, total, errno, 10);
++        }
++    }
+     /* Later records go after the last whole one. */
+     c->out = fopen(c->file, existed ? "r+b" : "wb");
+     if (c->out && psw_seek(c->out, good, SEEK_SET) != 0) { fclose(c->out); c->out = NULL; }
+@@ -2508,6 +2546,13 @@ static int sc_lookup_blob(SCache* c, u64 key, ID3DBlob** out)
+     if (sl->key && SUCCEEDED(D3DCreateBlob(sl->size, out))) {
+         memcpy((*out)->lpVtbl->GetBufferPointer(*out), sl->data, sl->size);
+         hit = 1;
++        if (sl->old && c->out) {   /* 2071: used again, so written again at the end: the next trim keeps it */
++            struct { u32 magic, size; u64 key; } h = { 0x31435344u, sl->size, sl->key };
++            fwrite(&h, sizeof h, 1, c->out);
++            fwrite(sl->data, 1, sl->size, c->out);
++            fflush(c->out);
++        }
++        sl->old = 0;
+     }
+     ReleaseSRWLockExclusive(&s_sc_lock);
+     return hit;

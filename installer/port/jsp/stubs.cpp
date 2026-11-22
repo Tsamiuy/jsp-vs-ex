@@ -40,6 +40,7 @@ extern "C" void jsp_register_game_overrides(void);        /* jsp_game.cpp */
 extern "C" void jsp_register_unlock_overrides(void);      /* jsp_unlock.cpp */
 extern "C" void jsp_register_roster_overrides(void);      /* jsp_roster.cpp (ENHANCEMENT, only with a roster mod in the mods folder) */
 extern "C" void jsp_register_port_menu_overrides(void);   /* jsp_port_menu.cpp (ENHANCEMENT, on by default, JSP_PORT_MENU=0 turns it off) */
+extern "C" void jsp_register_native_online(void);         /* jsp_net_native.cpp (test only, JSP_NATIVE_TRACE / AUTO_ONLINE) */
 extern "C" void jsp_rollback_register_overrides(void);    /* jsp_rollback.cpp (EXPERIMENTAL rollback netcode, off unless JSP_ROLLBACK=1) */
 
 /* Context handlers registered here precede the runtime's (ppu_hle_init runs after this). */
@@ -55,6 +56,7 @@ extern "C" void ps3_load_prx_modules(void)
     jsp_register_roster_overrides();   /* ENHANCEMENT, does nothing without an applied roster mod; after the unlock cheat (it shares the save-update hook) */
     jsp_register_port_menu_overrides(); /* ENHANCEMENT, on by default, JSP_PORT_MENU=0 turns it off; after jsp_register_game_overrides: it chains behind the pad filters set there */
     jsp_rollback_register_overrides();  /* after the registrations above: the fight tick hash the rollback session reads (JSP_ROLLBACK=1 only) */
+    jsp_register_native_online();       /* test only (JSP_NATIVE_TRACE=1 / AUTO_ONLINE): chains behind the icall hook and pad filters set above */
 }
 
 /* ---------------------------------------------------------------------------

@@ -6,7 +6,12 @@ re-psn is a small matchmaking server that one player, or anyone else, hosts.
 - **Peer to peer:** the match itself goes directly between the players' games. If a direct link fails, it goes through
   the server's relay, but only when the host turned the relay on.
 
-Online is experimental and off by default. It needs the installer's only tree (`--tree current`; the earlier legacy tree is retired, tag `legacy-v15`), which builds the port on ps3recomp v0.19.0; see [installer/README.md](../installer/README.md#online-battle-experimental)).
+Online is experimental. **It is off after install** until you choose a server: the settings window's **Online** tab, re-psn, then a
+server you type or find with **Find on LAN** (this project names no server), and Save. The tab's rollback box (on by default) turns rollback on
+for Online Battle (the game's Friendly Match room pairs the players, rollback runs the fight); see [TESTING_ONLINE.md](TESTING_ONLINE.md).
+A test build offers its own server instead: one click on **Use** *server name* **(TEST BUILD)** at the top of the **Online** tab turns it
+on, with rollback. Nothing changes before that click. An install that already had online settings keeps them. To host your own server instead,
+follow the steps below. It needs the installer's only tree (`--tree current`; the earlier legacy tree is retired, tag `legacy-v15`), which builds the port on ps3recomp v0.19.0; see [installer/README.md](../installer/README.md#online-battle-experimental)).
 
 ## 1. One player hosts a server
 
@@ -31,7 +36,8 @@ To turn online off again, choose **Off**.
 
 ## 3. Play
 
-1. Main Menu > **Online Battle** > **Friendly Match**.
+1. Main Menu > **Battle Modes** > **Online Battle** > **Friendly Match** (with the two-page menu off, `MENU_PAGES=0`: Main Menu >
+   **Online Battle**). Online fights are 2 vs 2; 3 vs 3 is offline Free Battle only.
 2. One player picks **Create a Room**; the others pick **Search for a Room** and join it.
 3. When everyone is in the room, start the battle.
 
@@ -59,11 +65,19 @@ Limits:
 
 ## Rollback over re-psn (experimental)
 
-The same re-psn server can also arrange a match for the port's experimental rollback netcode instead of the game's own
-online. The two are separate methods and only one can be on: for rollback, `repsn.ini` keeps the server and your online
-name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The full recipe is in
-[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn); Port Settings > Online
-(on by default) writes the same files.
+By default the game's own online and the port's experimental rollback netcode run together: `repsn.ini` says `enabled=1`
+and `play_settings.txt` has `JSP_ROLLBACK=1` with no role key (plus `JSP_ROLLBACK_RELAY`). The players meet in a Friendly
+Match room as usual; once the room has both players, each game opens a second, hidden re-psn connection as
+`<online name>-rb`, and the two meet in a rollback room keyed by the Friendly Match room's id (the room owner hosts). Rollback
+then runs the fight, directly or through the server's relay when the direct link fails and the relay is allowed. US 1.00 disc
+only; on another disc Online Battle plays on the game's own netcode. The settings window's Online tab (**Rollback netcode
+for Online Battle fights**) and Options > Port Settings > Online (**Online Battle + rollback**) turn it on and off; see
+[TESTING_ONLINE.md](TESTING_ONLINE.md).
+
+The older rollback starts with a role key (`JSP_ROLLBACK_VIA=repsn` with `JSP_ROLLBACK_ROLE`, or direct IP) are a separate
+method for tests: with a role key the game's own online must be off (`enabled = 0` in `repsn.ini`, which keeps the server and
+online name), or the start is refused. The recipe is in
+[ROLLBACK.md, "Set up rollback over re-psn"](ROLLBACK.md#set-up-rollback-over-re-psn).
 
 ## If it does not work
 

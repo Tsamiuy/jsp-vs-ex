@@ -74,7 +74,12 @@ void vsn_arena_fix();   /* the VS loader's two arenas made larger (defined with 
  * set up is a 3v3. Without SIX_ASK it is always on (the older launchers); with SIX_ASK=1 it is off until the team size
  * window on Free Battle's 1 Player / 2 Players list says 3 vs 3, and off again on the main menu. */
 static std::atomic<int> g_six_live{-1};
-static inline bool six_live() { int v = g_six_live.load(); if (v < 0) { v = (kExp && std::getenv("SIX_ASK")) ? 0 : 1; g_six_live.store(v); } return v != 0; }
+/* FIX (online is 2 vs 2): never 3v3 while an online rollback match runs (g_ko_track, set by jsp_net_game.cpp from the session's start to its
+ * end). Online Battle is reached from the main menu, where the answer is already forgotten (six_ask_pad), and the rollback arms only in the
+ * game's own online mode; this keeps every 3v3 hook below (each gated on six_live) from writing guest memory during that fight whatever
+ * happened before, since the other PC would not write it (the fight hash would catch the difference). */
+extern "C" volatile int g_ko_track;   /* jsp_game.cpp */
+static inline bool six_live() { if (g_ko_track) return false; int v = g_six_live.load(); if (v < 0) { v = (kExp && std::getenv("SIX_ASK")) ? 0 : 1; g_six_live.store(v); } return v != 0; }
 
 /* parked name boxes (see jsp_six_boxpos_enter): park centre in 1280x720 px, and per box the shift kx, ky (px) and a
  * "valid" flag, written by the game thread, read by the draw hook */

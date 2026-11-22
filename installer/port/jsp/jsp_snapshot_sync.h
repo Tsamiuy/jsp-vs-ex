@@ -29,6 +29,7 @@
 #pragma once
 #include <chrono>
 #include <cstdint>
+#include "jsp_thread_bit.h"   // jtb::thread_bit: the park roles' member masks (bit tid - 1)
 
 namespace jsy {
 
@@ -66,11 +67,12 @@ enum Reason : unsigned {
     LwmHeld = 1, MutexHeld = 2, RwHeld = 4, EvqWoken = 8, SemWoken = 16, ThreadTransit = 32, ThreadRunning = 64, PauseFailed = 128, LwmUnowned = 256,
     RoleAway = 512, RoleAbsent = 1024, RoleQueue = 2048, RsxPending = 4096,   // only with Cfg::roles set and Cfg::quiesce_block (else notes)
     JobsInFlight = 8192, FiberAway = 16384, FlipPending = 32768, JobServerBusy = 65536,            // block only with the matching Cfg::block_* flag (else notes)
+    SiteMoved = 131072,   // a restore: a thread parked at the save is parked elsewhere now (Cfg::block_site, bounded by Cfg::site_wait_ms)
 };
 enum Note : unsigned {
     NLwmAbandoned = 1, NLwmStale = 2, NLwmUnreadable = 4, NEvqBuffered = 8, NEvqDrift = 16, NSemDrift = 32, NThreadsRunning = 64, NNoSavedView = 128, NMarkerUnreliable = 256,
     NRoleAway = 512, NRoleAbsent = 1024, NRoleQueue = 2048, NRsxPending = 4096,
-    NJobsInFlight = 8192, NFiberAway = 16384, NFlipPending = 32768, NAsyncRunning = 65536, NHostObjDrift = 131072, NJobServerBusy = 262144,   // async SPU threads running; fibers / job chains / SPURS instances differ from the save's view
+    NJobsInFlight = 8192, NFiberAway = 16384, NFlipPending = 32768, NAsyncRunning = 65536, NHostObjDrift = 131072, NJobServerBusy = 262144, NSiteMoved = 524288,   // async SPU threads running; fibers / job chains / SPURS instances differ from the save's view
 };
 
 // Marker kinds (patch 7911, sys_snapshot_census.c): 1 = HLE import (id = NID), 2 = lv2 syscall (id = number), 3 = internal in-transit window
@@ -98,9 +100,25 @@ struct Roles {
 struct Cfg {
     Roles* roles = nullptr;                 // frame-pipeline park points (learned membership lives in the pointee); nullptr = not checked
     bool quiesce_block = false;             // JSP_SNAPSHOT_QUIESCE=2: role violations block (else notes only)
-    bool rsx_idle = false;                  // JSP_SNAPSHOT_QUIESCE_RSX=1: GCM put != get blocks
+    // ENHANCEMENT (rollback latency, A/B, 0 = off): gate() first waits UNFROZEN, at most this long, while an unfrozen precheck (judged against a scratch copy of the roles,
+    // as gate_ev does) is blocked, sleeping on the runtime's gate sequence between prechecks; only then the frozen loop runs. A rollback re-run tick reaches its save with the SPU
+    // jobs and the frame-pipeline threads still busy (measured: first try blocked by JobsInFlight|JobServerBusy|RoleAway|RoleAbsent on ~90% of depth-2 saves, ~3 freezes per
+    // save). The frozen judge still decides: a wrong precheck only costs a freeze. Needs Ops::seq / presample / wait (the port's GateOps); other Ops skip it.
+    unsigned prewait_ms = 0;
+    // ENHANCEMENT (rollback latency, JSP_SNAPSHOT_PRECHECK_US, 0 = off): gate() runs the unfrozen precheck before EVERY freeze in Wait mode, polling in short spins
+    // (Ops::spin, ~0.1 ms) while it is blocked, at most precheck_us in all per gate; then the frozen loop goes on exactly as before. A two-copy run (it-repeat-l66,
+    // host) had the first freeze refused on 66% of commits (RoleAway|RoleAbsent) and 99% of rollbacks (RsxPending, SiteMoved): each refusal is a full suspend
+    // and resume of ~69 threads plus Sleep(1). The frozen judge still decides what is captured; the precheck only picks the moment of the freeze.
+    unsigned precheck_us = 0;
+    bool rsx_idle = false;                 // JSP_SNAPSHOT_QUIESCE_RSX=1: GCM put != get blocks
     bool block_jobserver = false;   // SPU job server work outstanding (mgr+0x6C != 0 or a job record in state 2) blocks (JSP_SNAPSHOT_QUIESCE_JOBS or GATE_JOBSERVER)
     bool block_jobs = false, block_fibers = false, block_flip = false;   // SPURS jobs in flight / fibers away / flip outstanding block (JSP_SNAPSHOT_QUIESCE=2 sets all three; JSP_SNAPSHOT_QUIESCE_JOBS|FIBERS|FLIP=0 clears one)
+    // ENHANCEMENT (rollback, JSP_SNAPSHOT_SITE=1): a RESTORE waits until every thread that was parked at the target tick's save is parked at the SAME wait site
+    // (marker kind, id and caller lr) again. Restoring memory rewinds a helper thread's stack and the work queues it serves, not the thread itself: a CRI loader
+    // worker that took a job after the save and is parked inside that job when the memory goes back runs on with a stack from before the job (seen: the main
+    // thread's load wait never ended, 2026-11-21 R1). Once the thread is back at its save-time site, the rewound memory and the thread agree again. Bounded:
+    // after site_wait_ms the restore goes ahead with the note (a thread that moved for good, e.g. a new loading phase, must not stall the match).
+    bool block_site = false; unsigned site_wait_ms = 50;
     bool strict = false;                    // JSP_SNAPSHOT_SYNC_STRICT=1: threads running guest code or unclassified HLE calls also block
     uint32_t self_tid = 0;                  // the calling (main) thread: not suspended, not judged
     uint32_t nid_parked[16]; int n_parked = 0;     // HLE imports that block waiting for something (sys_lwcond_wait, timers, ...)
@@ -132,6 +150,7 @@ struct Verdict {
     uint32_t n_parked = 0, n_transit = 0, n_running = 0, n_outside = 0, n_unknown = 0;
     uint32_t evq_woken = 0, evq_buffered = 0, evq_drift = 0, sem_woken = 0, sem_drift = 0;
     uint32_t role_away = 0, role_absent = 0, role_queue = 0, role_at = 0, rsx_pending = 0;
+    uint32_t site_moved = 0, site_tid = 0, site_lr_was = 0, site_lr_now = 0;   // threads parked elsewhere than at the save (first one for the log)
     uint32_t host_drift = 0;   // fb_total / jc_total / spurs_inst that differ from the saved view (host objects created or destroyed in the window)
     uint32_t jobsrv = 0;   // (js_bits != 0) + job records in state 2
     uint32_t jobs = 0, fibers_away = 0, flip_pending = 0;   // jobs in flight (+ HLE queue pending); fibers running elsewhere + scheduler lock held; flip outstanding (status WAITING, command ahead of the drain, direct flip, undelivered flip pump, flip lock)
@@ -177,12 +196,21 @@ inline Verdict judge(const View& v, const View* saved, const Cfg& c)
         }
     for (int t = 1; t < kThr; t++)
         if (v.t_alive[t] && (uint32_t)t != c.self_tid && cls(t) == TC::Parked) d.n_parked++;
+    if (saved)   // wait sites against the save's (threads parked at the save only; a thread born or ended in between is not compared)
+        for (int t = 1; t < kThr; t++) {
+            if (!saved->t_alive[t] || !v.t_alive[t] || (uint32_t)t == c.self_tid || saved->t_unrel[t] || v.t_unrel[t]) continue;
+            if (classify_thread(saved->t_kind[t], saved->t_id[t], c) != TC::Parked) continue;
+            if (saved->t_kind[t] == v.t_kind[t] && saved->t_id[t] == v.t_id[t] && saved->t_lr[t] == v.t_lr[t]) continue;
+            if (!d.site_moved) { d.site_tid = (uint32_t)t; d.site_lr_was = saved->t_lr[t]; d.site_lr_now = v.t_lr[t]; }
+            d.site_moved++;
+        }
+    if (d.site_moved) { d.notes |= NSiteMoved; if (c.block_site) d.reasons |= SiteMoved; }
     if (c.roles) {   // park points
         for (int i = 0; i < c.roles->n; i++) {
             Role& ro = c.roles->r[i];
             uint32_t at = 0;
             for (int t = 1; t < kThr; t++) {
-                const uint64_t bit = 1ull << (t - 1);
+                const uint64_t bit = jtb::thread_bit((uint32_t)t);
                 if (!v.t_alive[t]) { ro.members &= ~bit; continue; }          // an ended thread: ids are reused, forget it
                 if ((uint32_t)t == c.self_tid) continue;
                 bool here = false;
@@ -251,6 +279,8 @@ struct GateResult {
     // persist[b] = prechecks that were woken by a bump and still blocked by reason bit b (a bump that did not end that reason: noise, or a reason with no site of its own);
     // timeout_by[b] = waits that ended by the timeout while reason bit b blocked (a reason that ended without any bump).
     unsigned retry_immediate = 0, persist[16] = {0}, timeout_by[16] = {0};
+    bool site_waited = false, site_gave_up = false;   // SiteMoved blocked at least once / was dropped after Cfg::site_wait_ms
+    uint32_t site_tid = 0, site_lr_was = 0, site_lr_now = 0;   // the first moved thread of the first sample that saw one (the log)
 };
 
 // Ops: bool suspend() / bool resume() (all other threads), void sample(View*) (while suspended: no allocation, no logging), void yield().
@@ -264,21 +294,80 @@ struct GateResult {
 template<class O> auto rsx_busy_(O& o, int) -> decltype(o.rsx_busy()) { return o.rsx_busy(); }
 template<class O> bool rsx_busy_(O&, long) { return false; }
 // max_ms (0 = no bound; when set it replaces max_tries as the limit): wall-time bound on the whole wait (rollback mode: the match's grace window is the budget, the gate must give up well inside it, loudly, like running out of tries).
+// ENHANCEMENT (Cfg::prewait_ms): the unfrozen pre-wait of gate(), for Ops that have the gate_ev calls (seq / presample / wait); others get the no-op overload.
+// FiberAway is judged only frozen (the unfrozen presample does not walk the fiber lists), as in gate_ev.
+template<class O> auto prewait_(O& ops, const View* saved, const Cfg& cfg, GateResult& g, int) -> decltype(ops.seq(), ops.presample((View*)nullptr), ops.wait(0u, 0u), void())
+{
+    if (!cfg.prewait_ms) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    Roles scratch; Cfg pc = cfg; View pv;
+    for (;;) {
+        const uint32_t s0 = ops.seq();
+        if (cfg.roles) { scratch = *cfg.roles; pc.roles = &scratch; }
+        ops.presample(&pv);
+        const unsigned r = judge(pv, saved, pc).reasons & ~(unsigned)FiberAway;
+        g.prechecks++;
+        if (!r) return;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() >= (long long)cfg.prewait_ms) return;
+        g.wakes++;
+        if (!ops.wait(s0, 1)) g.wake_timeouts++;
+    }
+}
+template<class O> void prewait_(O&, const View*, const Cfg&, GateResult&, long) {}
+// ENHANCEMENT (Cfg::precheck_us): before a freeze, wait UNFROZEN while the precheck is blocked (FiberAway is judged frozen only; SiteMoved is dropped after
+// site_wait_ms, as the frozen loop does). *used_us = precheck time spent by this gate so far (the budget is per gate). Counted in prechecks / wakes (wakes =
+// spins here). For Ops with presample() and spin(); others skip it.
+template<class O> auto precheck_(O& ops, const View* saved, const Cfg& cfg, GateResult& g, std::chrono::steady_clock::time_point t_start, unsigned max_ms, double* used_us, int)
+    -> decltype(ops.presample((View*)nullptr), ops.spin(), void())
+{
+    using SC = std::chrono::steady_clock;
+    if (!cfg.precheck_us || *used_us >= (double)cfg.precheck_us) return;
+    const auto t0 = SC::now();
+    Roles scratch; Cfg pc = cfg; View pv;
+    for (;;) {
+        if (cfg.roles) { scratch = *cfg.roles; pc.roles = &scratch; }   // membership is learned by the frozen judge only
+        ops.presample(&pv);
+        const Verdict d = judge(pv, saved, pc);
+        unsigned r = d.reasons & ~(unsigned)FiberAway;
+        const long long since_ms = std::chrono::duration_cast<std::chrono::milliseconds>(SC::now() - t_start).count();
+        if (r & SiteMoved) {
+            if (!g.site_tid) { g.site_tid = d.site_tid; g.site_lr_was = d.site_lr_was; g.site_lr_now = d.site_lr_now; }
+            g.site_waited = true;
+            if (since_ms >= (long long)cfg.site_wait_ms) r &= ~(unsigned)SiteMoved;
+        }
+        g.prechecks++;
+        const double us = std::chrono::duration<double, std::micro>(SC::now() - t0).count();
+        if (!r || *used_us + us >= (double)cfg.precheck_us || (max_ms && since_ms >= (long long)max_ms)) { *used_us += us; return; }
+        g.wakes++;
+        ops.spin();
+    }
+}
+template<class O> void precheck_(O&, const View*, const Cfg&, GateResult&, std::chrono::steady_clock::time_point, unsigned, double*, long) {}
+
 template<class Ops> GateResult gate(Ops& ops, Mode mode, const View* saved, unsigned max_tries, const Cfg& cfg, unsigned max_ms = 0)
 {
     const auto t_start = std::chrono::steady_clock::now();
     GateResult g;
+    if (mode == Mode::Wait) prewait_(ops, saved, cfg, g, 0);
     if (mode == Mode::Off) { g.ok = ops.suspend(); g.suspended = g.ok; g.freezes = g.ok ? 1u : 0u; g.reasons = g.ok ? 0u : (unsigned)PauseFailed; g.verdict.reasons = g.reasons; return g; }
     // With a time bound the bound is the only limit: a tries limit (2000 tries at ~4.4 ms was ~9 s) would end a commit gate before its budget and misstate why
     const unsigned limit = max_ms ? 0xFFFFFFFFu : (max_tries ? max_tries : 1);
+    double precheck_used_us = 0;
     for (unsigned t = 1; t <= limit; t++) {
         g.tries = t;
+        if (mode == Mode::Wait) precheck_(ops, saved, cfg, g, t_start, max_ms, &precheck_used_us, 0);
         if (!ops.suspend()) { g.ok = false; g.reasons = PauseFailed; g.verdict.reasons = PauseFailed; g.suspended = false; return g; }
         g.suspended = true; g.freezes = t;
         ops.sample(&g.view);
         g.verdict = judge(g.view, saved, cfg);
         g.reasons = g.verdict.reasons;
         if (t == 1) { g.first_reasons = g.reasons; g.first_notes = g.verdict.notes; }
+        if (g.verdict.site_moved && !g.site_tid) { g.site_tid = g.verdict.site_tid; g.site_lr_was = g.verdict.site_lr_was; g.site_lr_now = g.verdict.site_lr_now; }
+        if (g.reasons & SiteMoved) {
+            g.site_waited = true;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_start).count() >= (long long)cfg.site_wait_ms) {
+                g.reasons &= ~(unsigned)SiteMoved; g.verdict.reasons = g.reasons; g.site_gave_up = true; }
+        }
         if (mode == Mode::Log || g.reasons == 0) { g.ok = true; return g; }
         if (t == limit) break;
         if (max_ms && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_start).count() >= (long long)max_ms) break;

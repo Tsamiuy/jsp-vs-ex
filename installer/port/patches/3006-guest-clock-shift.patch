@@ -1,0 +1,78 @@
+Patch 3006: a per-thread shift of the guest clock (timebase and sys_time_get_system_time) for rollback matches.
+
+Symptom (two-copy rollback tests, with the audio already locked to the tick by patch 3005): the pre-fight intro camera started on
+different ticks on the two copies (tick 879) while every input matched. The guest reads the timebase (mftb, 129 sites in the game)
+and sys_time_get_system_time, and both are the PC's own clock, so game logic timed off them runs differently on every PC.
+
+Now: g_ps3_guest_tb_shift (NULL = off, the default) is asked for the calling thread's shift on every timebase read and every
+sys_time_get_system_time call, and the value is added to the real reading. The port's rollback layer shifts only the game's main
+thread, to a clock that advances 1/30 s per game tick, so a rollback re-run reads the same times as the first run.
+ppu_timebase_real_now gives the unshifted timebase.
+
+Also g_ps3_usleep_hook (NULL = off): asked first by sys_timer_usleep; 1 = the port handled the sleep. A rollback match runs the
+sound library's server thread (it sleeps, reads the clock and runs the library's timers) one cycle per game tick through it.
+
+
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index e0f8997..10f59f3 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -64,7 +64,19 @@ int lv2_deadline_passed(int64_t deadline)
+  * polled. Overflow-safe split multiply (rem < qpf, so
+  * rem * 79.8e6 < ~8e14 << 2^63).
+  * -----------------------------------------------------------------------*/
++/* J-Stars patch 3006 (rollback): the port can shift the guest clock of a thread. g_ps3_guest_tb_shift(real) returns the timebase
++ * ticks to add for the CALLING thread (0 = real time): a rollback match gives the game's main thread a clock that advances with
++ * the game tick, so game logic timed off mftb or sys_time_get_system_time runs alike on every PC. NULL = off (the default). */
++int64_t (*g_ps3_guest_tb_shift)(uint64_t real_tb) = 0;
++static uint64_t ppu_timebase_real(void);
+ uint64_t ppu_timebase_now(void)
++{
++    const uint64_t r = ppu_timebase_real();
++    int64_t (*f)(uint64_t) = g_ps3_guest_tb_shift;
++    return f ? r + (uint64_t)f(r) : r;
++}
++uint64_t ppu_timebase_real_now(void) { return ppu_timebase_real(); }
++static uint64_t ppu_timebase_real(void)
+ {
+ #ifdef _WIN32
+     static LONGLONG t0 = 0;
+@@ -134,9 +146,13 @@ static void write_be64(uint32_t addr, uint64_t val)
+  *
+  * r3 = microseconds
+  * -----------------------------------------------------------------------*/
++/* J-Stars patch 3006 (rollback): the port may take over a sleep (1 = handled: it returned when the port released it). A rollback match
++ * runs the sound library's server thread one cycle per game tick this way (its timed sleep waits for the tick instead of the clock). */
++int (*g_ps3_usleep_hook)(ppu_context* ctx, uint64_t usec) = 0;
+ int64_t sys_timer_usleep(ppu_context* ctx)
+ {
+     uint64_t usec = LV2_ARG_U64(ctx, 0);
++    { int (*h)(ppu_context*, uint64_t) = g_ps3_usleep_hook; if (h && h(ctx, usec)) return CELL_OK; }
+     ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
+     { extern unsigned long long ps3_qpc_us(void);
+       static int n=0; if (PS3_LOG_FIRST(n, 60))
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index dc8c89f..157b636 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -68,6 +68,8 @@ static void sys_initialize_tls(ppu_context* ctx)
+  * lands here) paced the intro at ~1/10th speed: video decoded at <1 fps,
+  * the audio preload threshold took forever to fill (movie stayed silent),
+  * and every frontend animation timed off it crawled. */
++extern "C" int64_t (*g_ps3_guest_tb_shift)(uint64_t real_tb);   /* patch 3006 (sys_timer.c) */
++extern "C" uint64_t ppu_timebase_real_now(void);
+ static void sys_time_get_system_time(ppu_context* ctx)
+ {
+ #ifdef _WIN32
+@@ -75,6 +77,11 @@ static void sys_time_get_system_time(ppu_context* ctx)
+     if (!s_freq.QuadPart) { QueryPerformanceFrequency(&s_freq); QueryPerformanceCounter(&s_base); }
+     LARGE_INTEGER now; QueryPerformanceCounter(&now);
+     ctx->gpr[3] = (uint64_t)((now.QuadPart - s_base.QuadPart) * 1000000ull / (uint64_t)s_freq.QuadPart);
++    /* patch 3006: the calling thread's clock shift (sys_timer.c), in microseconds */
++    if (int64_t (*f)(uint64_t) = g_ps3_guest_tb_shift) {   /* one reading: the shifted timebase in microseconds, on the timebase's own start point */
++        const uint64_t r = ppu_timebase_real_now(); const int64_t sh = f(r);
++        if (sh) ctx->gpr[3] = (r + (uint64_t)sh) * 10 / 798;   /* 79.8 timebase ticks per us */
++    }
+ #else
+     /* The same host clock as the timebase (sys_timer.h), so guest code that
+      * mixes mftb and this stays consistent. */

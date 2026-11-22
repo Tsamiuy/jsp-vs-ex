@@ -3,7 +3,8 @@ Patch 7915 (experimental, rollback netcode): canonical pad record hook, pad-info
 g_cellpad_canon_hook(port, button, len, setting_len, host_connected) runs at the end of cellPadGetData, after the host layer and the 6501
 filters built the record, and may replace it whole (len and button[]). The stepper (installer/port/jsp/jsp_stepper.cpp) uses it to hand
 the game the same bytes on every machine and to give a replayed tick its recorded input instead of a fresh device read.
-g_cellpad_info_hook(info) runs in cellPadGetInfo2 before the copy to guest memory (not used by the port yet).
+g_cellpad_info_hook(info) runs in cellPadGetInfo2 on the host CellPadInfo2, before the copy to guest memory (the stepper reports the session's slots as
+connected with it). libs/input/cellPad.h declares both hooks with the toolkit's types, so a port includes the header instead of redeclaring them.
 cellGcm_vblank_delivered() counts the vblank notifications the GCM pump delivered to the guest: two back-to-back cellGcmTickVBlank calls
 coalesce into one pending bit, so the replay clock waits for this counter after each tick.
 All hooks NULL by default; the counter is always counted (one increment per delivered vblank) and unread unless the port reads it
@@ -50,6 +51,23 @@ index 1d31c70..639de84 100644
  
      /* copy to guest big-endian (CellPadInfo2 is all u32 fields) */
      {
+diff --git a/libs/input/cellPad.h b/libs/input/cellPad.h
+index b35fcb6..d683542 100644
+--- a/libs/input/cellPad.h
++++ b/libs/input/cellPad.h
+@@ -202,6 +202,12 @@ s32 cellPadClearBuf(u32 port_no);
+ /* Internal: call once per frame to update pad state from host input */
+ void cellPad_poll(void);
+ 
++/* 7915 (rollback netcode): the pad hooks a title port sets (defined in cellPad.c, NULL by default). g_cellpad_canon_hook may replace the record
++ * cellPadGetData built for a port (returns 1 when it wrote len and button[]); g_cellpad_info_hook sees the host CellPadInfo2 of cellPadGetInfo2
++ * before the copy to guest memory and may change it. */
++extern int (*g_cellpad_canon_hook)(u32 port_no, u16* button, s32* len, int setting_len, int host_connected);
++extern void (*g_cellpad_info_hook)(CellPadInfo2* info);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
 index 10397d2..bc3fe7e 100644
 --- a/libs/video/cellGcmSys.c

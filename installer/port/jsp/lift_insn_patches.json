@@ -6,6 +6,76 @@
    "new": "0x3B200006",
    "guard": "g_port_menu_six_rows",
    "note": "id 8 (Options) row count in func_001E6E98: li r25,5 -> li r25,6. US 1.00 only; the switch is set by jsp_port_menu.cpp (JSP_PORT_MENU=1)"
+  },
+  {
+   "addr": "0x0045238C",
+   "orig": "0x48032305",
+   "new": "0x60000000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): manager update 0x45222C: bl share pad update 0x484690 -> nop; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x00452294",
+   "orig": "0x4802F059",
+   "new": "0x60000000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): manager update 0x45222C: bl scheduler 0x4812EC -> nop; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x00454F50",
+   "orig": "0x80039078",
+   "new": "0x38000000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): net error 0x454EE8: lwz r0,-0x6F88(r3) -> li r0,0 (every report path ends there: no error is raised); only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x004516E4",
+   "orig": "0x38800001",
+   "new": "0x38800000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): li r4,1 -> li r4,0 before bl 0x466794 @0x4516E8: it stores +0xFC = 0, no error; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x004666E8",
+   "orig": "0x38800001",
+   "new": "0x38800000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): li r4,1 -> li r4,0 before bl 0x466794 @0x4666EC; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x00466830",
+   "orig": "0x38800001",
+   "new": "0x38800000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): li r4,1 -> li r4,0 for bl 0x466794 @0x46685C (r4 is used by that call only); only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x004673B8",
+   "orig": "0x38800001",
+   "new": "0x38800000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): li r4,1 -> li r4,0 before bl 0x466794 @0x4673BC; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x00468178",
+   "orig": "0x4BFFE965",
+   "new": "0x38600001",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): bl 0x466ADC -> li r3,1; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x004682D4",
+   "orig": "0x4BFFE809",
+   "new": "0x38600001",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): bl 0x466ADC -> li r3,1; only while rollback runs an online fight"
+  },
+  {
+   "addr": "0x0047DFD8",
+   "orig": "0x480082D9",
+   "new": "0x38600000",
+   "guard": "g_jsp_native_fight_armed",
+   "note": "online rollback (jsp_net_native_fight.cpp, US 1.00): bl 0x4862B0 -> li r3,0; only while rollback runs an online fight"
   }
  ]
 }

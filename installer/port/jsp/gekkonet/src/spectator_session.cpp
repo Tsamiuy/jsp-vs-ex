@@ -173,6 +173,8 @@ void Gekko::SpectatorSession::NetworkStats(i32 player, GekkoNetworkStats* stats)
             stats->last_ping = actor->stats.LastRTT();
             stats->jitter = actor->stats.CalculateJitter();
             stats->avg_ping = actor->stats.CalculateAvgRTT();
+            stats->rtt_count = actor->stats.rtt_count;   // jsp-vs-ex local addition (PIN.md)
+            stats->last_acked_frame = actor->stats.last_acked_frame;
             return;
         }
     }
