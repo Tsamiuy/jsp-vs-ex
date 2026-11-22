@@ -1,0 +1,532 @@
+Patch 7928 (fix, online): sys_net_abort_socket ends a receive blocked on that socket (EINTR), and errno is per thread, as on a PS3.
+
+After a lost opponent (the other PC quit mid-fight, "Connection has timed out." box, OK), the next Online Battle sat on
+"Communicating..." for good. The main thread was not waiting on the server: J-Stars' P2P teardown (0x46A2B8, reached from the
+server-select step 0x47253C -> 0x459124) sets its receive thread's stop flag, calls sys_net_abort_socket(fd, 0), then
+sys_ppu_thread_join on that thread ("UDPP2P Recive Thread", blocked in recvfrom on the P2P UDP socket; it leaves when errno is EINTR),
+then shutdown and socketclose. sys_net_abort_socket was not implemented (no export, the call did nothing), the host recvfrom never
+woke, and the join never returned ("[WAIT] ppu_thread_join(tid=25)", the main thread's trace stops).
+libs/network/sysNet.c:
+- sys_net_abort_socket is exported; a blocking recv/recvfrom waits in poll slices of at most 100 ms (wait_readable) and returns -1 / EINTR
+  when the socket is aborted. The poll still returns the moment a datagram arrives, so a receive is no slower.
+- The abort is not lost: it stays pending (abort_gen / abort_seen per socket) until a blocking receive consumes it, so it also ends a
+  receive that starts just after it (the moment between the title's stop-flag check and its recvfrom), and the abort state and the
+  SO_RCVTIMEO deadline are taken once per call, not once per pass of recvfrom's loop over psnr's own packets. Every receive waiting on
+  the socket at that moment returns EINTR; alloc_slot clears a pending abort, so a reused fd never inherits one.
+- socketclose and sys_net_finalize_network also end a receive blocked on the socket with EINTR (what the blocking host recv gave on
+  Windows when another thread closed the socket), and each slice checks that the slot is still in use with the same host socket, so a
+  waiter never reads the data of a socket that took over its fd.
+- SO_RCVTIMEO is kept per socket and ends the wait with EWOULDBLOCK after the time asked for, measured on a monotonic clock (each slice
+  waits min(100 ms, what is left)). On Windows a receive timeout now gives EWOULDBLOCK (35), as on a PS3 and as Linux already did,
+  where Winsock's own timeout gave ETIMEDOUT (60). The guest value is converted saturating (guest_timeout_us, also used for
+  SO_SNDTIMEO): sec * 1000000 + usec no longer wraps, and anything past 2^32 - 1 ms (about 49.7 days) means no timeout, as such a
+  timeout never runs out on a PS3. The socket keeps the value only when the host setsockopt took it.
+- A poll interrupted by a signal (EINTR) loops back to the abort check instead of falling into a blocking host recv; any other poll
+  error is returned. Nonblocking sockets and MSG_DONTWAIT are unchanged.
+- errno (the _sys_net_errno_loc cell and the value behind it) is per thread. The receive thread tests errno == EINTR at the top of
+  its loop, before its first recvfrom: with one errno for every thread, the EINTR that ended one session's receive thread ended the
+  next session's at once, and the host never heard its new opponent (the joiner left the room every ~15 s). Guest scratch (the errno
+  cells among it) is allocated under a lock, since the runtime's bump allocator is not thread-safe and two threads' first errno calls
+  could otherwise get the same cell.
+- an accepted socket's slot keeps the listener's blocking mode (what Winsock's accept gives the host socket), so wait_readable
+  sees the mode the socket really has.
+libs/network/tests/test_sys_net.c: a recvfrom blocked on another thread ends with EINTR in that thread's errno when the socket is
+aborted, the main thread's errno is untouched, and a new receive thread starts at errno 0 and still receives; an abort with no receiver
+waiting ends the next receive, once; SO_RCVTIMEO gives EWOULDBLOCK in well under a 100 ms slice; closing the socket ends a blocked
+receive; an abort lands while recvfrom loops past a psnr packet. The receivers have a 5 s SO_RCVTIMEO and start in step with the main
+thread (no sleep to win a race), so a lost abort fails the test instead of hanging it. Huge SO_RCVTIMEO values (one that used to
+wrap to about 0.45 s, all ones, and just past 2^32 - 1 ms) leave the receiver waiting until an abort 0.7 s later ends it with EINTR.
+Applies after 7927.
+
+diff --git a/libs/network/sysNet.c b/libs/network/sysNet.c
+--- a/libs/network/sysNet.c
++++ b/libs/network/sysNet.c
+@@ -83,16 +83,53 @@ typedef struct {
+     int           stream;   /* SOCK_STREAM or SOCK_STREAM_P2P */
+     uint16_t      vport;    /* the P2P vport it was bound to */
+     int           listening;
++    /* abort_gen is bumped by sys_net_abort_socket, close and finalize_network. abort_seen is the generation the last aborted receive
++     * consumed (alloc_slot sets it to abort_gen). While they differ an abort is pending: every blocking receive waiting on the socket,
++     * and the next one to start if none was waiting, returns EINTR. A pending abort is not lost in the moment between the title's own
++     * stop-flag check and its recvfrom, nor while recvfrom loops past psnr's packets. */
++    volatile long abort_gen;
++    volatile long abort_seen;
++    uint32_t      rcvtimeo_ms;  /* SO_RCVTIMEO the title set, 0 = wait forever */
+ } net_socket_slot;
+ 
+ static net_socket_slot s_sockets[SYS_NET_MAX_SOCKETS];
+ static int s_net_initialized = 0;
+ 
++/* abort_gen / abort_seen and the scratch lock are touched by several threads. */
++#ifdef _WIN32
++#define net_atomic_inc(p)          InterlockedIncrement(p)
++#define net_atomic_load(p)         InterlockedCompareExchange((p), 0, 0)
++#define net_atomic_cas(p, old, nw) InterlockedCompareExchange((p), (nw), (old))   /* returns the previous value */
++#define net_atomic_store(p, v)     InterlockedExchange((p), (v))
++#define net_yield()                SwitchToThread()
++#else
++#include <sched.h>
++#define net_atomic_inc(p)          __atomic_add_fetch((p), 1, __ATOMIC_SEQ_CST)
++#define net_atomic_load(p)         __atomic_load_n((p), __ATOMIC_SEQ_CST)
++static inline long net_atomic_cas_(volatile long* p, long old, long nw)
++{
++    __atomic_compare_exchange_n(p, &old, nw, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
++    return old;
++}
++#define net_atomic_cas(p, old, nw) net_atomic_cas_((p), (old), (nw))
++#define net_atomic_store(p, v)     __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
++#define net_yield()                sched_yield()
++#endif
++
+ /* Guest scratch, allocated on first use through the allocator the runtime
+  * handed ps3_net_host_register. */
+ static unsigned int (*s_alloc)(unsigned int, unsigned int) = NULL;
+-static uint32_t s_errno_ea = 0, s_h_errno_ea = 0, s_hostent_ea = 0, s_ntoa_ea = 0;
+-static int32_t  s_errno = 0;   /* ponytail: one errno for every thread, per-thread cells if a title races on it */
++static uint32_t s_h_errno_ea = 0, s_hostent_ea = 0, s_ntoa_ea = 0;
++/* errno is per thread, as on a PS3: J-Stars' P2P receive thread leaves when it reads EINTR, so another thread's error must not
++ * reach it (with one cell, the EINTR that ended one session's receive thread ended the next session's at once). MinGW GCC ignores
++ * __declspec(thread), so it is for MSVC only. */
++#if defined(_MSC_VER) && !defined(__clang__)
++#define NET_TLS __declspec(thread)
++#else
++#define NET_TLS _Thread_local
++#endif
++static NET_TLS int32_t  t_errno = 0;
++static NET_TLS uint32_t t_errno_ea = 0;   /* this thread's guest errno cell */
+ 
+ /* hostent scratch layout: struct at +0, h_aliases[] at +32, h_addr_list[] at
+  * +40, the address at +48, the name at +64. */
+@@ -102,9 +139,16 @@ static int32_t  s_errno = 0;   /* ponytail: one errno for every thread, per-thre
+ 
+ static int net_trace(void);   /* PS3_NET_TRACE; defined with the send/recv paths */
+ 
++/* The runtime's allocator (gcm_guest_alloc, a bare bump pointer) is not thread-safe, and with a per-thread errno cell two threads can
++ * now make their first _sys_net_errno_loc call at once: unguarded, both could read the same bump value and share one cell. Every
++ * allocation sysNet makes goes through here, under this lock (the allocator's only other caller is GCM init, before any socket). */
++static volatile long s_scratch_lock = 0;
+ static uint32_t scratch(uint32_t* ea, uint32_t size)
+ {
+-    if (!*ea && s_alloc) *ea = s_alloc(size, 16);
++    if (*ea || !s_alloc) return *ea;
++    while (net_atomic_cas(&s_scratch_lock, 0, 1) != 0) net_yield();
++    if (!*ea) *ea = s_alloc(size, 16);
++    net_atomic_store(&s_scratch_lock, 0);
+     return *ea;
+ }
+ 
+@@ -116,8 +160,8 @@ static uint32_t scratch(uint32_t* ea, uint32_t size)
+ #define SYS_NET_RET_BASE 0x80010200u
+ static int32_t fail(int32_t err)
+ {
+-    s_errno = err;
+-    if (s_errno_ea) vm_write32(s_errno_ea, (uint32_t)err);
++    t_errno = err;
++    if (t_errno_ea) vm_write32(t_errno_ea, (uint32_t)err);
+     return (int32_t)(SYS_NET_RET_BASE | (uint32_t)err);
+ }
+ 
+@@ -181,6 +225,8 @@ static int alloc_slot(host_socket_t fd)
+             s_sockets[i].stream = 0;
+             s_sockets[i].vport = 0;
+             s_sockets[i].listening = 0;
++            s_sockets[i].rcvtimeo_ms = 0;
++            net_atomic_store(&s_sockets[i].abort_seen, net_atomic_load(&s_sockets[i].abort_gen));   /* no stale abort */
+             return i;
+         }
+     return -1;
+@@ -245,6 +291,88 @@ static int would_block(int32_t s, int32_t flags, short ev)
+     return host_poll(&p, 1, 0) == 0;
+ }
+ 
++/* A blocking receive waits here, in short poll slices, instead of inside the host recv, so sys_net_abort_socket can end it: on a PS3
++ * the aborted call returns -1 with errno EINTR. J-Stars' P2P teardown (0x46A2B8, after a lost opponent) sets its stop flag, aborts the
++ * UDP socket and joins the receive thread, which sits in a blocking recvfrom and leaves on EINTR. The host recvfrom never woke (the
++ * abort was not implemented), the join never returned and the next Online Battle sat on "Communicating..." for good.
++ * The poll still returns the moment the socket turns readable; the slices only bound how long an abort or close takes to be seen.
++ * wait_begin runs once per recv/recvfrom call, so the abort state and the SO_RCVTIMEO deadline hold across recvfrom's passes over
++ * psnr's own packets. */
++typedef struct {
++    long          seen;       /* abort_seen when the call started: an abort_gen other than this one is an abort */
++    host_socket_t fd;         /* the host socket the call started on */
++    uint64_t      deadline;   /* monotonic ms when SO_RCVTIMEO runs out, 0 = none */
++} recv_wait;
++
++static uint64_t mono_ms(void)
++{
++#ifdef _WIN32
++    static LARGE_INTEGER f;
++    LARGE_INTEGER c;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (uint64_t)(c.QuadPart / f.QuadPart) * 1000u + (uint64_t)(c.QuadPart % f.QuadPart) * 1000u / (uint64_t)f.QuadPart;
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
++#endif
++}
++
++static void wait_begin(int32_t s, recv_wait* w)
++{
++    w->seen = net_atomic_load(&s_sockets[s].abort_seen);
++    w->fd = s_sockets[s].host_fd;
++    w->deadline = s_sockets[s].rcvtimeo_ms ? mono_ms() + s_sockets[s].rcvtimeo_ms : 0;
++}
++
++/* Aborted since the call started, or closed under it (close and finalize_network bump abort_gen; the in_use and host_fd checks also
++ * catch a slot or host socket that was reused). A closed socket ends the wait with EINTR, as the blocking host recv did on Windows
++ * when another thread closed the socket (WSAEINTR); a guest loop that leaves on EINTR still leaves. */
++static int wait_aborted(int32_t s, recv_wait* w)
++{
++    const long gen = net_atomic_load(&s_sockets[s].abort_gen);
++    if (gen != w->seen) {
++        net_atomic_cas(&s_sockets[s].abort_seen, w->seen, gen);   /* consumed; other waiters keep their own snapshot */
++        return 1;
++    }
++    return !s_sockets[s].in_use || s_sockets[s].host_fd != w->fd;
++}
++
++/* Returns 0 = data (or an error) is ready for the host call, -1 = SO_RCVTIMEO ran out (EWOULDBLOCK), -2 = aborted or closed (EINTR),
++ * -3 = the poll itself failed (host_fail() gives the error). */
++static int wait_readable(int32_t s, int32_t flags, recv_wait* w)
++{
++    if (s_sockets[s].nonblocking || (flags & SYS_NET_MSG_DONTWAIT)) return 0;
++    for (;;) {
++        if (wait_aborted(s, w)) return -2;
++        int slice = 100;
++        if (w->deadline) {
++            const uint64_t now = mono_ms();
++            if (now >= w->deadline) return -1;
++            if (w->deadline - now < 100) slice = (int)(w->deadline - now);
++        }
++        host_pollfd p;
++        p.fd = w->fd;
++        p.events = POLLIN;
++        p.revents = 0;
++        const int r = host_poll(&p, 1, slice);
++        if (wait_aborted(s, w)) return -2;
++        if (r > 0) return 0;
++        if (r < 0) {
++#ifndef _WIN32
++            if (errno == EINTR) continue;   /* a signal: look at the abort state again, never fall into a blocking recv */
++#endif
++            return -3;
++        }
++    }
++}
++
++static int32_t wait_fail(int w)
++{
++    return w == -3 ? host_fail() : fail(w == -2 ? SYS_NET_EINTR : SYS_NET_EWOULDBLOCK);
++}
++
+ static int set_nonblocking(host_socket_t fd, int on)
+ {
+ #ifdef _WIN32
+@@ -271,6 +399,7 @@ int32_t sys_net_finalize_network(void)
+ {
+     for (int i = 1; i < SYS_NET_MAX_SOCKETS; i++)
+         if (s_sockets[i].in_use) {
++            net_atomic_inc(&s_sockets[i].abort_gen);   /* a receive blocked on it ends (EINTR) */
+             host_closesocket(s_sockets[i].host_fd);
+             s_sockets[i].in_use = 0;
+         }
+@@ -380,6 +509,7 @@ int32_t sys_net_bnet_close(int32_t s)
+         s_p2p_dgram = -1;
+         np_psnr_set_p2p_sender(NULL);
+     }
++    net_atomic_inc(&s_sockets[s].abort_gen);   /* a receive blocked on it ends (EINTR) */
+     host_closesocket(s_sockets[s].host_fd);
+     s_sockets[s].in_use = 0;
+     return 0;
+@@ -497,6 +627,10 @@ int32_t sys_net_bnet_accept(int32_t s, sys_net_sockaddr* addr, uint32_t* addrlen
+     }
+     s_sockets[slot].p2p = s_sockets[s].p2p;
+     s_sockets[slot].stream = 1;
++    /* The listener's blocking mode, as a BSD (and Winsock) accept gives it; the slot must say what the host socket does, since a
++     * blocking receive waits in wait_readable. */
++    s_sockets[slot].nonblocking = s_sockets[s].nonblocking;
++    if (s_sockets[slot].nonblocking) set_nonblocking(fd, 1);
+     if (net_trace()) printf("[sys_net] accept(%d) -> %d\n", s, slot);
+     s_sockets[slot].vport = s_sockets[s].vport;
+     write_sockaddr(EA(addr), EA(addrlen), &a);
+@@ -543,12 +677,23 @@ int32_t sys_net_bnet_connect(int32_t s, const sys_net_sockaddr* addr, uint32_t a
+         if (WSAGetLastError() == WSAEWOULDBLOCK) return fail(SYS_NET_EINPROGRESS);
+ #endif
+         int32_t r = host_fail();
+-        if (net_trace()) printf("[sys_net] connect(%d) failed, errno %d\n", s, s_errno);
++        if (net_trace()) printf("[sys_net] connect(%d) failed, errno %d\n", s, t_errno);
+         return r;
+     }
+     return 0;
+ }
+ 
++/* sys_net_abort_socket(s, flags): end the blocking calls waiting on s now (they return EINTR); with none waiting, the next blocking
++ * receive on s returns EINTR instead (see abort_gen). Receives only: J-Stars aborts nothing else, and sends never block here for long. */
++int32_t sys_net_bnet_abort_socket(int32_t s, int32_t flags)
++{
++    (void)flags;
++    if (!valid_socket(s)) return fail(SYS_NET_EBADF);
++    net_atomic_inc(&s_sockets[s].abort_gen);
++    if (net_trace()) printf("[sys_net] abort_socket(%d)\n", s);
++    return 0;
++}
++
+ int32_t sys_net_bnet_shutdown(int32_t s, int32_t how)
+ {
+     if (!valid_socket(s)) return fail(SYS_NET_EBADF);
+@@ -635,6 +780,10 @@ int32_t sys_net_bnet_recv(int32_t s, void* buf, uint32_t len, int32_t flags)
+ {
+     if (!valid_socket(s)) return fail(SYS_NET_EBADF);
+     if (would_block(s, flags, POLLIN)) return fail(SYS_NET_EWOULDBLOCK);
++    recv_wait rw;
++    wait_begin(s, &rw);
++    int w = wait_readable(s, flags, &rw);
++    if (w < 0) return wait_fail(w);
+     int n = recv(s_sockets[s].host_fd, GUEST_PTR(EA(buf), char*), (int)len, host_recv_flags(flags));
+     if (net_trace() && n != HOST_SOCKET_ERROR) trace("recv", s, n, NULL);
+     return n == HOST_SOCKET_ERROR ? host_fail() : n;
+@@ -647,11 +796,15 @@ int32_t sys_net_bnet_recvfrom(int32_t s, void* buf, uint32_t len, int32_t flags,
+     socklen_t alen;
+     int n;
+     if (!valid_socket(s)) return fail(SYS_NET_EBADF);
++    recv_wait rw;
++    wait_begin(s, &rw);   /* once: an abort or the timeout is not reset by psnr's packets below */
+ 
+     /* psnr's own packets (probe replies, peers' punches) are consumed here;
+      * the title only ever sees its own traffic. */
+     do {
+         if (would_block(s, flags, POLLIN)) return fail(SYS_NET_EWOULDBLOCK);
++        int w = wait_readable(s, flags, &rw);
++        if (w < 0) return wait_fail(w);
+         memset(&a, 0, sizeof(a));
+         alen = sizeof(a);
+         n = recvfrom(s_sockets[s].host_fd, GUEST_PTR(EA(buf), char*), (int)len,
+@@ -678,10 +831,22 @@ int32_t sys_net_bnet_recvfrom(int32_t s, void* buf, uint32_t len, int32_t flags,
+  * -----------------------------------------------------------------------*/
+ 
+ /* Timeouts arrive as a PS3 timeval {s64 sec, s64 usec}. */
++/* A guest SO_RCVTIMEO / SO_SNDTIMEO in microseconds: a sys_net_timeval { u64 sec, u64 usec } (len >= 16) or a u32 of ms. Saturating: a
++ * value past SYS_NET_TIMEO_MAX_US (2^32 - 1 ms, about 49.7 days, what a Winsock DWORD of ms holds) is 0, "no timeout", as such a
++ * timeout never runs out on a PS3 either; sec * 1000000 + usec used to wrap, so a huge timeout became a short one. */
++#define SYS_NET_TIMEO_MAX_US (0xFFFFFFFFull * 1000ull)
++static uint64_t guest_timeout_us(uint32_t val_ea, uint32_t len)
++{
++    if (len < 16) return (uint64_t)vm_read32(val_ea) * 1000ull;   /* at most SYS_NET_TIMEO_MAX_US */
++    const uint64_t sec = vm_read64(val_ea), usec = vm_read64(val_ea + 8);
++    if (sec > SYS_NET_TIMEO_MAX_US / 1000000ull || usec > SYS_NET_TIMEO_MAX_US) return 0;
++    const uint64_t us = sec * 1000000ull + usec;   /* no wrap: both bounded above */
++    return us > SYS_NET_TIMEO_MAX_US ? 0 : us;
++}
++
+ static int set_timeout(host_socket_t fd, int name, uint32_t val_ea, uint32_t len)
+ {
+-    uint64_t us = (len >= 16) ? vm_read64(val_ea) * 1000000ull + vm_read64(val_ea + 8)
+-                              : (uint64_t)vm_read32(val_ea) * 1000ull;
++    uint64_t us = guest_timeout_us(val_ea, len);
+ #ifdef _WIN32
+     DWORD ms = (DWORD)(us / 1000);
+     return setsockopt(fd, SOL_SOCKET, name, (const char*)&ms, sizeof(ms));
+@@ -718,7 +883,14 @@ int32_t sys_net_bnet_setsockopt(int32_t s, int32_t level, int32_t optname,
+             case SYS_NET_SO_RCVBUF:
+                 ret = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char*)&val, sizeof(val)); break;
+             case SYS_NET_SO_SNDTIMEO: ret = set_timeout(fd, SO_SNDTIMEO, v_ea, optlen); break;
+-            case SYS_NET_SO_RCVTIMEO: ret = set_timeout(fd, SO_RCVTIMEO, v_ea, optlen); break;
++            case SYS_NET_SO_RCVTIMEO: {
++                ret = set_timeout(fd, SO_RCVTIMEO, v_ea, optlen);
++                if (ret == 0) {   /* kept only when the host took it: a refused setsockopt leaves the old timeout, as it does on the host socket */
++                    const uint64_t us = guest_timeout_us(v_ea, optlen);   /* <= 2^32 - 1 ms, so the rounded-up ms fit */
++                    s_sockets[s].rcvtimeo_ms = us ? (uint32_t)((us + 999) / 1000) : 0;
++                }
++                break;
++            }
+             case SYS_NET_SO_LINGER: {
+                 struct linger l;
+                 l.l_onoff  = (unsigned short)vm_read32(v_ea);
+@@ -1019,8 +1191,8 @@ uint32_t sys_net_bnet_gethostbyname(const char* name)
+ 
+ uint32_t sys_net_errno_loc(void)
+ {
+-    if (scratch(&s_errno_ea, 4)) vm_write32(s_errno_ea, (uint32_t)s_errno);
+-    return s_errno_ea;
++    if (scratch(&t_errno_ea, 4)) vm_write32(t_errno_ea, (uint32_t)t_errno);
++    return t_errno_ea;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -1040,6 +1212,7 @@ static void h_listen(ppu_context* ctx)      { RET_S(sys_net_bnet_listen(S32(3),
+ static void h_accept(ppu_context* ctx)      { RET_S(sys_net_bnet_accept(S32(3), PTR(4), PTR(5))); }
+ static void h_connect(ppu_context* ctx)     { RET_S(sys_net_bnet_connect(S32(3), PTR(4), R32(5))); }
+ static void h_shutdown(ppu_context* ctx)    { RET_S(sys_net_bnet_shutdown(S32(3), S32(4))); }
++static void h_abort(ppu_context* ctx)       { RET_S(sys_net_bnet_abort_socket(S32(3), S32(4))); }
+ static void h_send(ppu_context* ctx)        { PROBE_SOCKET_RETURN(PS3_NET_PROBE_SEND, sys_net_bnet_send(S32(3), PTR(4), R32(5), S32(6))); }
+ static void h_sendto(ppu_context* ctx)      { PROBE_SOCKET_RETURN(PS3_NET_PROBE_SENDTO, sys_net_bnet_sendto(S32(3), PTR(4), R32(5), S32(6), PTR(7), R32(8))); }
+ static void h_recv(ppu_context* ctx)        { PROBE_SOCKET_RETURN(PS3_NET_PROBE_RECV, sys_net_bnet_recv(S32(3), PTR(4), R32(5), S32(6))); }
+@@ -1083,6 +1256,7 @@ void ps3_net_host_register(unsigned int (*guest_alloc)(unsigned int size, unsign
+         { "sys_net_finalize_network", h_finalize },
+         { "sys_net_free_thread_context", h_ok },
+         { "sys_net_abort_resolver", h_ok },
++        { "sys_net_abort_socket", h_abort },
+     };
+     s_alloc = guest_alloc;
+     net_startup();
+diff --git a/libs/network/sysNet.h b/libs/network/sysNet.h
+--- a/libs/network/sysNet.h
++++ b/libs/network/sysNet.h
+@@ -28,6 +28,7 @@ extern "C" {
+  * cell _sys_net_errno_loc points at. A failing call also returns them in-band
+  * as 0x80010200 | errno (0x80010223 for EWOULDBLOCK), which titles compare
+  * against directly. */
++#define SYS_NET_EINTR               4
+ #define SYS_NET_EBADF               9
+ #define SYS_NET_ENOMEM              12
+ #define SYS_NET_EFAULT              14
+@@ -153,6 +154,7 @@ int32_t sys_net_bnet_recv(int32_t s, void* buf, uint32_t len, int32_t flags);
+ int32_t sys_net_bnet_recvfrom(int32_t s, void* buf, uint32_t len, int32_t flags,
+                               sys_net_sockaddr* from, uint32_t* fromlen);
+ int32_t sys_net_bnet_shutdown(int32_t s, int32_t how);
++int32_t sys_net_bnet_abort_socket(int32_t s, int32_t flags);
+ int32_t sys_net_bnet_close(int32_t s);
+ 
+ /* Socket options */
+diff --git a/libs/network/tests/test_sys_net.c b/libs/network/tests/test_sys_net.c
+--- a/libs/network/tests/test_sys_net.c
++++ b/libs/network/tests/test_sys_net.c
+@@ -98,6 +98,59 @@ enum { ADDR_A = 0x1000, ADDR_B = 0x1100, LEN = 0x1200, OPT = 0x1300,
+ 
+ static uint32_t errno_cell(void) { return vm_read32((uint32_t)call("_sys_net_errno_loc", 0, 0, 0, 0, 0, 0)); }
+ 
++/* A receiver blocked in recvfrom on another thread (a title's receive thread), and what it saw. The main thread acts once the
++ * receiver says it is about to call recvfrom; an abort that lands before the call starts still ends it (the abort stays pending), so
++ * the result does not depend on timing. Every rx socket has a 5 s SO_RCVTIMEO, so a lost abort fails the test (EWOULDBLOCK) instead
++ * of hanging it. */
++static struct { int32_t s; uint32_t ret, err, err0; volatile long started; } s_rx;
++static void rx_body(void)
++{
++    s_rx.err0 = errno_cell();   /* a new thread's errno: 0, whatever other threads left */
++    net_atomic_store(&s_rx.started, 1);
++    s_rx.ret = (uint32_t)call("recvfrom", s_rx.s, BUF + 0x400, 64, 0, 0, 0);
++    s_rx.err = errno_cell();
++}
++static void wait_rx_started(void)
++{
++    while (!net_atomic_load(&s_rx.started)) net_yield();
++}
++#ifdef _WIN32
++static DWORD WINAPI rx_thread(LPVOID u) { (void)u; rx_body(); return 0; }
++static void run_rx(int (*mid)(void))
++{
++    net_atomic_store(&s_rx.started, 0);
++    HANDLE h = CreateThread(NULL, 0, rx_thread, NULL, 0, NULL);
++    wait_rx_started(); mid();
++    assert(WaitForSingleObject(h, 15000) == WAIT_OBJECT_0);   /* watchdog: never hang the suite */
++    CloseHandle(h);
++}
++#else
++static void* rx_thread(void* u) { (void)u; rx_body(); return NULL; }
++static void run_rx(int (*mid)(void))
++{
++    pthread_t t;
++    net_atomic_store(&s_rx.started, 0);
++    pthread_create(&t, NULL, rx_thread, NULL);
++    wait_rx_started(); mid(); pthread_join(t, NULL);   /* returns within the 5 s SO_RCVTIMEO at worst */
++}
++#endif
++static int abort_rx(void) { return C3("sys_net_abort_socket", s_rx.s, 0, 0); }
++static int send_rx(void) { return (int)call("sendto", s_rx.s, BUF + 0x500, 2, 0, ADDR_A + 0x40, 16); }
++static int close_rx(void) { sleep_ms(20); return C1("socketclose", s_rx.s); }
++static int late_abort_rx(void) { sleep_ms(700); return abort_rx(); }
++static int psnr_then_abort_rx(void)
++{
++    const uint8_t lo[4] = { 127, 0, 0, 1 };
++    assert(s_sender("PSNR\x02zzzz", 9, lo, np_psnr_p2p_port()) == 9);   /* wakes the receiver; the filter eats it and recvfrom loops */
++    return abort_rx();
++}
++static void set_rcvtimeo(int32_t s, uint64_t sec, uint64_t usec)
++{
++    vm_write64(OPT, sec);
++    vm_write64(OPT + 8, usec);
++    assert(C5("setsockopt", s, SYS_NET_SOL_SOCKET, SYS_NET_SO_RCVTIMEO, OPT, 16) == 0);
++}
++
+ static void put_sockaddr(uint32_t ea, uint32_t ip_be, uint16_t port)
+ {
+     memset(vm_base + ea, 0, 16);
+@@ -354,6 +407,76 @@ int main(void)
+     assert(C1("socketclose", in) == 0 && C1("socketclose", out) == 0);
+     assert(C1("socketclose", l2) == 0 && C1("socketclose", l1) == 0);
+ 
++    /* sys_net_abort_socket ends a recvfrom blocked on another thread with -1 / EINTR (4) in that thread's errno, and errno is per
++     * thread: the main thread's stays as it was, and the next receive thread starts at 0 and still receives (J-Stars' P2P receive
++     * thread leaves on EINTR; the teardown aborts it and joins it, and the next session's thread must not see that EINTR). */
++    {
++        s_rx.s = C3("socket", SYS_NET_AF_INET, SYS_NET_SOCK_DGRAM, 0);
++        put_sockaddr(ADDR_A + 0x40, LOOP, 0);
++        assert(C3("bind", s_rx.s, ADDR_A + 0x40, 16) == 0);
++        vm_write32(LEN, 16);
++        assert(C3("getsockname", s_rx.s, ADDR_A + 0x40, LEN) == 0);
++        set_rcvtimeo(s_rx.s, 5, 0);
++        assert((uint32_t)C1("socketclose", 98) == 0x80010209u && errno_cell() == SYS_NET_EBADF);
++        run_rx(abort_rx);
++        assert(s_rx.ret == 0x80010204u && s_rx.err == SYS_NET_EINTR && s_rx.err0 == 0);   /* EINTR, not the 5 s timeout */
++        assert(errno_cell() == SYS_NET_EBADF);   /* the main thread's errno is its own */
++        memcpy(vm_base + BUF + 0x500, "ok", 2);
++        run_rx(send_rx);
++        assert(s_rx.ret == 2 && s_rx.err0 == 0 && memcmp(vm_base + BUF + 0x400, "ok", 2) == 0);
++        assert(C3("sys_net_abort_socket", 97, 0, 0) == (int32_t)0x80010209u);
++
++        /* An abort with no receiver waiting is not lost: the next blocking receive returns EINTR, once. */
++        assert(C3("sys_net_abort_socket", s_rx.s, 0, 0) == 0);
++        assert((uint32_t)call("recvfrom", s_rx.s, BUF + 0x400, 64, 0, 0, 0) == 0x80010204u && errno_cell() == SYS_NET_EINTR);
++        assert((uint32_t)call("recvfrom", s_rx.s, BUF + 0x400, 64, SYS_NET_MSG_DONTWAIT, 0, 0) == 0x80010223u);
++
++        /* SO_RCVTIMEO ends a receive with EWOULDBLOCK (35, as on a PS3) after about the time asked for, not a whole 100 ms slice. */
++        {
++            uint64_t best = ~0ull;
++            set_rcvtimeo(s_rx.s, 0, 20000);   /* 20 ms */
++            for (int i = 0; i < 3; i++) {
++                const uint64_t t0 = mono_ms();
++                assert((uint32_t)call("recvfrom", s_rx.s, BUF + 0x400, 64, 0, 0, 0) == 0x80010223u);
++                assert(errno_cell() == SYS_NET_EWOULDBLOCK);
++                const uint64_t dt = mono_ms() - t0;
++                assert(dt >= 15);
++                if (dt < best) best = dt;
++            }
++            assert(best < 95);
++            set_rcvtimeo(s_rx.s, 5, 0);
++        }
++
++        /* A huge SO_RCVTIMEO saturates to "no timeout" instead of wrapping: 18446744073710 s * 1000000 wraps to about 0.45 s, and
++         * ~0 s / ~0 us wrapped too. The receiver must still be waiting at 0.7 s, when the abort ends it (EINTR, not EWOULDBLOCK). */
++        {
++            const uint64_t huge[][2] = { { 18446744073710ull, 0 }, { ~0ull, ~0ull }, { 4294968ull, 0 } };
++            for (int i = 0; i < 3; i++) {
++                set_rcvtimeo(s_rx.s, huge[i][0], huge[i][1]);
++                run_rx(late_abort_rx);
++                assert(s_rx.ret == 0x80010204u && s_rx.err == SYS_NET_EINTR);
++            }
++            set_rcvtimeo(s_rx.s, 5, 0);
++        }
++
++        /* Closing the socket under a blocked receiver ends it (EINTR, as Winsock's closesocket did; EBADF if the close beat the
++         * call), and the receiver never reads a later socket's data. */
++        run_rx(close_rx);
++        assert(s_rx.ret == 0x80010204u || s_rx.ret == 0x80010209u);
++    }
++
++    /* An abort is not lost while recvfrom loops past psnr's own packets on the P2P socket. */
++    {
++        s_rx.s = C3("socket", SYS_NET_AF_INET, 6 /* SOCK_DGRAM_P2P */, 0);
++        put_sockaddr(ADDR_A + 0x40, LOOP, 3658);
++        assert(C3("bind", s_rx.s, ADDR_A + 0x40, 16) == 0);
++        set_rcvtimeo(s_rx.s, 5, 0);
++        assert(s_sender);
++        run_rx(psnr_then_abort_rx);
++        assert(s_rx.ret == 0x80010204u && s_rx.err == SYS_NET_EINTR);
++        assert(C1("socketclose", s_rx.s) == 0);
++    }
++
+     /* A bad fd is EBADF (9), and closing works. */
+     assert((uint32_t)C1("socketclose", 99) == 0x80010209u && errno_cell() == SYS_NET_EBADF);
+     assert(C1("socketclose", a) == 0 && C1("socketclose", b) == 0);
