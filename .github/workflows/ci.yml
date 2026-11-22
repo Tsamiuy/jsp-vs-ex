@@ -325,8 +325,13 @@ jobs:
           "$cc" -O2 -mwindows -s -o "$RUNNER_TEMP/exes/jsp-launcher.exe" installer/launcher/launcher.c
           "$cc" -O2 -municode -o "$RUNNER_TEMP/exes/fake_tool.exe" installer/tools/fake_tool.c   # wmain entry point
 
+      - name: Patched ps3recomp folder (audio_lock_test builds the toolkit's own Windows test from it)
+        run: python installer/tools/export_toolkit.py --out "$RUNNER_TEMP/ps3recomp"
+
       - name: Host tests on Windows (one result per test)
-        run: python tools/ci/run_host_tests.py --strict-skip --launcher "$RUNNER_TEMP/exes/jsp-launcher.exe" --fake-tool "$RUNNER_TEMP/exes/fake_tool.exe" --scratch "$RUNNER_TEMP/host-tests"
+        run: |
+          export MINGW_CC="$PWD/build/installer/toolchain-cache/trees/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe"
+          python tools/ci/run_host_tests.py --strict-skip --toolkit "$RUNNER_TEMP/ps3recomp" --launcher "$RUNNER_TEMP/exes/jsp-launcher.exe" --fake-tool "$RUNNER_TEMP/exes/fake_tool.exe" --scratch "$RUNNER_TEMP/host-tests"
 
   # The port's own sources against the patched toolkit, with the compiler the installer bundles. Syntax only: the lifted game code
   # and the runtime library link are made on the player's PC from their EBOOT, so a full build and link are not possible here.

@@ -66,6 +66,8 @@ posix   | installer/tools/thread_audit_test.sh
 posix   | installer/tools/mods_overlay_test.sh {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
+# toolkit patches 3005/3007: the tick-locked audio path is the WASAPI mix thread, so its race test is a Windows exe (MINGW_CC, llvm-mingw)
+windows | installer/tools/audio_lock_test.sh {toolkit} {scratch}
 exclude | installer/tools/matching2_context_test.c | compiled and run by matching2_context_test.py
 exclude | installer/tools/matching2_stale_test.c | optional baseline fixture compiled and run by matching2_context_test.py only with --baseline-sdk; not run by regular CI
 exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
