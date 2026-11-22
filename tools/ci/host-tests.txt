@@ -106,3 +106,5 @@ posix | installer/tools/host_abort_test.sh
 exclude | installer/tools/host_abort_test.cpp | compiled and run by host_abort_test.sh
 
 posix | installer/tools/recovery_notice_test.py
+
+posix | installer/tools/installed_recovery_test.py
