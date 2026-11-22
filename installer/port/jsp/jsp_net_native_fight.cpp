@@ -37,6 +37,7 @@
 // first save, disarmed after the last tick). Everything the replacement writes (records, +0x6D8/+0x6DC) is guest memory and rolls back.
 #include "jsp_net_native_fight.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -58,6 +59,12 @@ constexpr uint32_t kToc = 0x008D3888u;
 constexpr uint32_t kOnlineVt = 0x00878A70u, kOfflineVt = 0x008789D0u;
 
 bool armed() { return g_jsp_native_fight_armed != 0; }
+// FIX (swapped controls): jsp_native_fight_map's net slot -> port (rollback slot) table, constant for a whole session like g_armed; g_local_port = this PC's
+// rollback slot; g_me = this PC's battle player; g_drove[i] = pad takes in which this PC's port gave battle player i a non-neutral sample (diagnostic only).
+bool g_port_on = false;
+int8_t g_port[jnf::kRecCount] = { -1, -1, -1, -1 };
+int32_t g_local_port = -1, g_me = -1;
+std::atomic<uint32_t> g_drove[jnf::kPlayers];
 bool plausible(uint32_t p) { return p >= 0x10000u && p < 0xF0000000u && !(p & 3u); }
 void drain(ppu_context* c) { while (g_trampoline_fn) { void (*f)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; f((void*)c); } }
 // a call of a lifted function from here: lr as the lifted code sets it before a bl, then the tail-call drain (DRAIN_TRAMPOLINE)
@@ -114,6 +121,10 @@ uint32_t take_armed(ppu_context* c, uint32_t mode)
             const int32_t slot = (int32_t)vm_read32(pl + jnf::kOffNetSlot);   // < 0: COM / no net player: no pad read, record untouched (as the original)
             c->gpr[3] = sp;
             call(c, func_00484A1C, 0x000F7340u);         // member count: sp+0x10 if sp+0 != 0, else 0
+            // FIX (swapped controls): the pad of net slot `slot` is the rollback slot (room record) of the human whose fighter has it (jsp_native_fight_map;
+            // the builder numbers net slots in team placement order, not record order). Without a map (never in a session: map refuses) port = slot as before.
+            const int32_t port = g_port_on && slot >= 0 && slot < (int32_t)jnf::kRecCount ? g_port[slot] : slot;
+            if (port < 0) continue;
             if (!jnf::take_slot(slot, (int32_t)c->gpr[3], &seen)) continue;
             const uint32_t rec = mode + jnf::kRecBase + (uint32_t)slot * jnf::kRecStride;   // 0x0F7344..0x0F7364: slot*16 + slot*4 + mode + 0x14C
             // The 12-byte sample, built as the send 0x4844DC builds the LOCAL one (0x48452C..0x484588) but into the record, from port `slot`:
@@ -127,13 +138,16 @@ uint32_t take_armed(ppu_context* c, uint32_t mode)
             // pad object of port `slot` (the ctor used 0x3F485C(0x3F4624(), 0) = user 0's port -> 0x43F430): *(padmgr + 0xC20 + port*4 + 0xC),
             // padmgr = *(*(TOC + 0x58AC)) (0x43F41C). share pad +0x6CC holds this object pointer for the local port (the trace's 0x19E2C1C0).
             call(c, func_0043F41C, 0x000F7AD0u);
-            c->gpr[4] = (uint32_t)slot;
+            c->gpr[4] = (uint32_t)port;
             call(c, func_0043F430, 0x003F4898u);
             const uint32_t pad = (uint32_t)c->gpr[3];
+            const uint32_t neutral_sticks = vm_read32(rec + 4u);
             // 0x484480(sp, rec, 12, pad, sp+0x6C8): 0x0BE3D4(rec, pad, *(TOC+0x61CC) + 0x10 = the DEFAULT button table, ..) then
             // 0x0F6E10(0x0F6B28(), rec) (flags bits 0/1). pad 0 -> 0x0BE3D4 returns at once (neutral sample).
             c->gpr[3] = sp; c->gpr[4] = rec; c->gpr[5] = 12; c->gpr[6] = pad; c->gpr[7] = (uint64_t)(int64_t)(int32_t)vm_read32(sp + 0x6C8u);
             call(c, func_00484480, 0x00484588u);
+            // FIX (swapped controls), the ownership check: which fighter this PC's own pad moves (host state only, never read by the game)
+            if (port == g_local_port && (vm_read32(rec + 0x0u) || vm_read32(rec + 4u) != neutral_sticks)) g_drove[i]++;
             // 0x0F738C..0x0F7398: previous / newly pressed
             const jnf::Edges e = jnf::edges(vm_read32(rec + 0x0u), vm_read32(rec + jnf::kOffPrev));
             vm_write32(rec + jnf::kOffPrev, e.prev);
@@ -226,6 +240,64 @@ extern "C" int jsp_native_fight_slot(void)
     return s >= 0 && s < (int32_t)jnf::kRecCount ? s : -1;
 }
 
+// FIX (swapped controls): see the header. Guest reads only: G = *(*(TOC - 0x7A90)) (0x00030A14), players G+0x60+i*0x94 (+0x70 net slot, +0x78 member id),
+// "me" = *(G + 0x48158) (the builder 0x002EF6B8 stores the battle index of the record whose member id is this PC's), room records R+0x68+0x24*r.
+extern "C" int jsp_native_fight_map(int local_slot, char* msg, int n)
+{
+    g_port_on = false; g_local_port = -1; g_me = -1;
+    for (auto& d : g_drove) d = 0;
+    for (int8_t& p : g_port) p = -1;
+    auto say = [&](const char* fmt, auto... a) { if (msg && n > 0) std::snprintf(msg, (size_t)n, fmt, a...); };
+    if (!g_supported) { say("%s", "not the US disc"); return 0; }
+    const uint32_t gp = vm_read32(kToc - 0x7A90u);
+    const uint32_t G = plausible(gp) ? vm_read32(gp) : 0;
+    const uint32_t R = vm_read32(0x0095839Cu);
+    if (!plausible(G) || !plausible(R)) { say("no battle player table (%08X) or room data (%08X)", G, R); return 0; }
+    int32_t net[jnf::kPlayers]; uint16_t pm[jnf::kPlayers], rm[4]; uint8_t rc[4], rt[4];
+    for (uint32_t i = 0; i < jnf::kPlayers; i++) {
+        const uint32_t pl = G + jnf::kPlayerBase + i * jnf::kPlayerStride;
+        net[i] = (int32_t)vm_read32(pl + jnf::kOffNetSlot); pm[i] = (uint16_t)vm_read16(pl + 0x78u);
+    }
+    for (uint32_t r = 0; r < 4; r++) {
+        const uint32_t a = R + 0x68u + 0x24u * r;
+        rm[r] = (uint16_t)vm_read16(a + 0x08u); rt[r] = (uint8_t)vm_read8(a + 0x16u); rc[r] = (uint8_t)vm_read8(a + 0x1Au);
+    }
+    const int32_t me = (int32_t)vm_read32(G + 0x48158u);
+    int8_t port[jnf::kRecCount];
+    const bool ok = jnf::net_ports(net, pm, rm, rc, port);
+    const int32_t me_net = me >= 0 && me < (int32_t)jnf::kPlayers ? net[me] : -1;
+    const int me_port = me_net >= 0 && me_net < (int32_t)jnf::kRecCount ? port[me_net] : -1;
+    int p = std::snprintf(msg, (size_t)n, "my fighter = battle player %d (net slot %d, member %u) -> rollback slot %d, mine %d; net slot -> rollback slot:", me, me_net,
+                          me >= 0 && me < (int32_t)jnf::kPlayers ? (unsigned)pm[me] : 0u, me_port, local_slot);
+    for (uint32_t s = 0; s < jnf::kRecCount && p > 0 && p < n; s++) p += std::snprintf(msg + p, (size_t)(n - p), " %u->%d", s, port[s]);
+    for (uint32_t i = 0; i < jnf::kPlayers && p > 0 && p < n; i++)
+        if (net[i] >= 0) p += std::snprintf(msg + p, (size_t)(n - p), "; player %u net %d member %u", i, net[i], (unsigned)pm[i]);
+    for (uint32_t r = 0; r < 4 && p > 0 && p < n; r++) p += std::snprintf(msg + p, (size_t)(n - p), "; record %u member %u team %u%s", r, (unsigned)rm[r], rt[r], rc[r] ? " COM" : "");
+    if (!ok || me_port != local_slot) {
+        if (p > 0 && p < n) std::snprintf(msg + p, (size_t)(n - p), " -> MISMATCH (%s)", !ok ? "the fighters do not match the room's human records" : "my fighter is not on my rollback slot");
+        return 0;
+    }
+    for (uint32_t s = 0; s < jnf::kRecCount; s++) g_port[s] = port[s];
+    g_local_port = local_slot; g_me = me; g_port_on = true;
+    return 1;
+}
+
+extern "C" int jsp_native_fight_owner_check(char* msg, int n)
+{
+    uint32_t total = 0, mine = 0; int top = -1; uint32_t topn = 0;
+    for (uint32_t i = 0; i < jnf::kPlayers; i++) {
+        const uint32_t d = g_drove[i].load();
+        total += d;
+        if ((int32_t)i == g_me) mine = d;
+        if (d > topn) { topn = d; top = (int)i; }
+    }
+    const int r = !total ? -1 : mine == total ? 1 : 0;
+    if (msg && n > 0)
+        std::snprintf(msg, (size_t)n, "my pad (rollback slot %d) moved battle player %d in %u of %u takes; my fighter is battle player %d -> %s", g_local_port, top, topn, total, g_me,
+                      r < 0 ? "no local input yet" : r ? "OK" : "SWAPPED");
+    return r;
+}
+
 // FIX: arm returns 1 armed / 0 refused, and refuses unless the battle mode object is the ONLINE one (vtable 0x00878A70) and a share pad exists
 // (g_jsp_native_fight_armed is set only when armed, as before). FIX: arm saves share pad +0x6D8 / +0x6DC and the object they came from; disarm
 // writes them back when that same object is still the share pad (same pointer, same vtable, same manager).
@@ -263,6 +335,7 @@ extern "C" int jsp_native_fight_arm(int on)
     }
     const bool was = g_jsp_native_fight_armed != 0;
     g_jsp_native_fight_armed = 0;
+    g_port_on = false;   // FIX (swapped controls): the next session maps its own fight (jsp_native_fight_map); the counts stay for a last owner check
     if (was) {
         const uint32_t sp = share_pad();
         const bool same = sp && sp == g_arm_sp && vm_read32(sp) == g_arm_vt && vm_read32(vm_read32(kToc + 0x59F8u)) == g_arm_mgr;

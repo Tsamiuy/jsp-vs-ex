@@ -260,6 +260,10 @@ static const KV kDefaults[] = {
     // two runs of 14 windows (~200 s) did not. The writer is not found yet. Off in rollback until it is: a new program is built on the drawing thread (a hitch
     // once per program; the pipeline cache on disk removes it the next time).
     {"PSO_ASYNC", "0"},
+    // Re-run cost (2026-11-21, two copies, --rollback --link 80,10,10, one 10,000-tick match each): the frames of a rollback re-run are never shown, so the
+    // RSX command handler skips their draws, clears and state flushes (patch 7919; labels, reports, flips still run; the D3D12 backend only reads guest memory).
+    // Re-run FIFO drain 14-22 -> 0.6-0.8 ms per tick, re-run tick 18.6 -> 10.4 ms (222 rollbacks), 0 differing of 9,863 compared ticks.
+    {"JSP_STEP_SKIP_DRAWS", "1"},
 };
 enum class Boot { NotRequested, Go, Refused };
 

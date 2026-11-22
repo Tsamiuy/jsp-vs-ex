@@ -1285,6 +1285,14 @@ void start_session(ppu_context* c)
         const int slot = jsp_native_fight_slot();
         if (slot != (int)g.plan.local_first)
             why = "the game's battle slot (" + std::to_string(slot) + ") is not the rollback slot (" + std::to_string((int)g.plan.local_first) + "): the native room owner must host";
+        // FIX (swapped controls, testers on 0.7.0-test1): the builder numbers the fighters' net slots in team placement order, not record order, so each
+        // net slot is mapped to its owner's rollback slot (room record) for the pad take, and this PC's own fighter must come out on this PC's slot.
+        if (why.empty()) {
+            char om[600] = {};
+            const int ok = jsp_native_fight_map((int)g.plan.local_first, om, sizeof om);
+            std::fprintf(stderr, "[net] ownership: %s\n", om);
+            if (!ok) why = "this PC's fighter is not the one its pad would drive (the game's fighter slots do not match the rollback slots)";
+        }
     }
     if (why.empty()) {
         if (!jsp_snapshot_ext_active()) why = "the snapshot ring is not active (JSP_SNAPSHOT_EXT/WW did not start)";
@@ -1594,7 +1602,13 @@ void boundary(ppu_context* c)
         const float ms = g.sess.stats().ping_ms; const std::string pt = jpnb::ping_text(ms); const uint32_t col = jpnb::ping_rgba(ms);
         if (pt != g.ping_shown || (!pt.empty() && (col != g.ping_rgba || !jsp_overlay_active()))) { g.ping_shown = pt; g.ping_rgba = col; redraw(); }
     }
-    if (g.status_every.due(now, jpnb::kLogMs) && now - g.started_ms >= 1000) log_status();
+    if (g.status_every.due(now, jpnb::kLogMs) && now - g.started_ms >= 1000) {
+        log_status();
+        if (g_jsp_native_fight_armed) {   // FIX (swapped controls): the ownership check of the running fight, for the logs and the test drivers
+            char om[256] = {}; jsp_native_fight_owner_check(om, sizeof om);
+            std::fprintf(stderr, "[net] ownership check: %s\n", om);
+        }
+    }
     if (!g.bench) adapt_delay(now);   // not at the session's first iteration: the line at the end covers a short one
 }
 

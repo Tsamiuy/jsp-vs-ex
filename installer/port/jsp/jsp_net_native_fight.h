@@ -20,6 +20,18 @@ int  jsp_native_fight_arm(int on);     // 1 at the rollback session's first tick
 // which writes share pad +0x6D8 / +0x6DC back while the same share pad object still exists (the .cpp says why).
 // The guard of the guarded instruction patches (jnf::kPatches, for lift_insn_patches.json): 1 while armed. The lifted code reads it.
 extern int g_jsp_native_fight_armed;
+// FIX (swapped controls, testers on 0.7.0-test1): which pad drives which fighter. The battle builder 0x002EEE90 numbers the humans' net slots
+// (player +0x70) in PLACEMENT order, team-0 records first, then team-1, each in record order (0x002EF350 stw r20,0x70; r20++), while a PC's rollback slot
+// is its room RECORD index (share pad +0x6E0, 0x0F7880 by member id; checked == plan.local_first). They differ when a lower record is on team 1 (the
+// versus default put the joiner, record 1, on team 0: net slot 0 = the joiner's fighter, fed from GekkoNet slot 0 = the host's pad, and back).
+// jsp_native_fight_map reads the fight's battle players (net slot, member id) and the room records (member id) at the session start and fixes, for the
+// whole session, net slot s -> the rollback slot (record index) of the human whose fighter has it; the armed pad take reads that port. It also checks
+// this PC's own fighter (the builder's "me", G+0x48158, by member id) gets this PC's rollback slot. 1 = ok, 0 = refused (*msg says why; the map is off).
+// msg always gets the "[net] ownership" line's text. Main thread, before arm; jsp_native_fight_arm(0) clears it.
+int  jsp_native_fight_map(int local_slot, char* msg, int n);
+// The ownership check of a running session: the battle players the LOCAL pad's non-neutral samples went to (counted in the armed pad take) against this
+// PC's own fighter. 1 = only my fighter got them, 0 = another fighter got them (SWAPPED), -1 = no local input seen yet. *msg = the line's text.
+int  jsp_native_fight_owner_check(char* msg, int n);
 #ifdef __cplusplus
 }
 #endif
@@ -47,6 +59,44 @@ inline bool take_slot(int32_t slot, int32_t members, uint32_t* seen)
     if (slot >= (int32_t)kRecCount) return false;
     if (*seen & (1u << slot)) return false;
     *seen |= 1u << slot;
+    return true;
+}
+
+// FIX (swapped controls): the builder's net slot of room record `rec` (0x002EEE90: team-0 records, then team-1, each in record order; a COM gets none).
+// team[i] = record +0x16 (0 / 1; anything else is not placed), com[i] = record +0x1A != 0. -1: rec is a COM or not placed.
+inline int placement_net_slot(const uint8_t team[4], const uint8_t com[4], int rec)
+{
+    if (rec < 0 || rec > 3 || com[rec] || team[rec] > 1) return -1;
+    int n = 0;
+    for (int t = 0; t <= 1; t++)
+        for (int i = 0; i < 4; i++) {
+            if (team[i] != t || com[i]) continue;
+            if (i == rec) return n;
+            n++;
+        }
+    return -1;
+}
+// FIX (swapped controls): port[s] = the room record (= rollback slot) of the human whose battle player has net slot s, matched by member id
+// (player +0x78 == record +0x08, human records only); -1 = no player has s. false: a net slot outside 0..3 or used twice, a player whose member is not
+// exactly one human record, or two slots naming one record.
+inline bool net_ports(const int32_t net[kPlayers], const uint16_t pmember[kPlayers], const uint16_t rmember[4], const uint8_t rcom[4], int8_t port[kRecCount])
+{
+    for (uint32_t s = 0; s < kRecCount; s++) port[s] = -1;
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < kPlayers; i++) {
+        const int32_t s = net[i];
+        if (s < 0) continue;
+        if (s >= (int32_t)kRecCount || port[s] >= 0) return false;
+        int rec = -1;
+        for (int r = 0; r < 4; r++) {
+            if (rcom[r] || !rmember[r] || rmember[r] != pmember[i]) continue;
+            if (rec >= 0) return false;
+            rec = r;
+        }
+        if (rec < 0 || (used & (1u << rec))) return false;
+        used |= 1u << rec;
+        port[s] = (int8_t)rec;
+    }
     return true;
 }
 

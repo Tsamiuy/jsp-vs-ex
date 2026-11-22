@@ -230,11 +230,15 @@ void versus_apply()
              nh != 2 ? "not 2 humans set, wait" : t[hum[0]] != t[hum[1]] ? "humans already on opposite teams" : "humans on one team: swap");
     }
     if (nh != 2 || t[hum[0]] != t[hum[1]]) return;
-    const uint8_t other = (uint8_t)(t[hum[1]] ^ 1);
+    // FIX (swapped controls, testers on 0.7.0-test1): the builder 0x002EEE90 numbers the humans' net slots in placement order (team 0 first), so the
+    // LOWER record (the owner, record 0) must end up on team 0: humans on team 1 move the owner to team 0, humans on team 0 move the other one to team 1.
+    // (Moving record 1 to team 0 gave the joiner net slot 0, so each PC's pad drove the other's fighter; the rollback pad take maps net slots by owner now too,
+    // jsp_native_fight_map, so this keeps the game's own netcode right as well.)
+    const int h = t[hum[0]] == 1 ? hum[0] : hum[1];
+    const uint8_t other = (uint8_t)(t[h] ^ 1);
     int com = -1;
     for (int i = 0; i < 4; i++) if (c[i] != 0 && t[i] == other) { com = i; break; }
     if (com < 0) return;
-    const int h = hum[1];
     vm_write8(R + 0x68u + 0x24u * (uint32_t)h + 0x16u, other);
     vm_write8(R + 0x68u + 0x24u * (uint32_t)com + 0x16u, t[h]);
     if (s[h] <= 1 && s[com] <= 1 && s[h] != s[com]) { vm_write8(R + 0x56u + (uint32_t)h, s[com]); vm_write8(R + 0x56u + (uint32_t)com, s[h]); }
