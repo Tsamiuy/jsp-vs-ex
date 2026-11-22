@@ -21,7 +21,7 @@ thread never waits on the device in the lock):
 The mix thread adopts the free-running fill setting with its device, refreshes room before capacity, and limits concealment to the available device space. Device output delay and perceived audio quality need measurement on this composition.
 
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index 09b763a..567d0bd 100644
+index 09b763a..a8b63e9 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -241,6 +241,7 @@ typedef struct {
@@ -50,7 +50,7 @@ index 09b763a..567d0bd 100644
 +    { const char* e = getenv("AUDIO_LOCK_BUF_MS"); const int ms = (e && *e) ? atoi(e) : 150;
 +      if (ms >= 10 && ms <= 500 && (REFERENCE_TIME)ms * 10000 > buf_duration) buf_duration = (REFERENCE_TIME)ms * 10000; }
      d->event = CreateEventW(NULL, FALSE, FALSE, NULL);
- 
+
      /* Shared mode only takes the device's own mix format unless the stream
 @@ -385,6 +392,7 @@ static void wasapi_adopt(const wasapi_dev* d)
  {
@@ -60,10 +60,10 @@ index 09b763a..567d0bd 100644
      wcsncpy(s_wasapi_dev_id, d->id, 127); s_wasapi_dev_id[127] = 0;
  }
 
-@@ -775,6 +783,196 @@ void ps3_audio_lock_rewind(long long blocks)
+@@ -775,6 +783,202 @@ void ps3_audio_lock_rewind(long long blocks)
      g_ps3_audio_lock_done = blocks; g_ps3_audio_lock_target = blocks;
  }
- 
+
 +#ifdef _WIN32
 +/* J-Stars patch 3007 (rollback audio, AUDIO_LOCK_SMOOTH=0 turns it off): the output side of the tick-locked mode (patch 3005). There the blocks of a tick
 + * reach the device in one burst at the tick boundary (6-7 blocks, 32-37 ms). With no reserve in the device buffer, a late tick (a rollback re-run, a long
@@ -91,7 +91,7 @@ index 09b763a..567d0bd 100644
 +static float  s_lk_out[LK_OUTMAX * 2], s_lk_tmp[LK_OUTMAX * 2], s_lk_fill[LK_N * 2];
 +static float  s_lk_prev[2]; static double s_lk_pos = 0.0, s_lk_ema = -1.0, s_lk_skew = 0.0;
 +static float  s_lk_ring[LK_H * 2]; static unsigned long long s_lk_ring_w = 0;   /* the last LK_H frames sent */
-+static float  s_lk_seg[LK_H * 2]; static int s_lk_conc = 0, s_lk_conc_p = 0, s_lk_conc_first = 0; static long s_lk_conc_t = 0;
++static float  s_lk_seg[LK_H * 2]; static int s_lk_conc = 0, s_lk_conc_p = 0, s_lk_conc_first = 0; static int64_t s_lk_conc_t = 0;
 +static unsigned long long s_lk_blocks, s_lk_dry, s_lk_conceals, s_lk_conc_frames, s_lk_long_gaps, s_lk_drops, s_lk_squeezed, s_lk_bursts;
 +static double s_lk_trough_sum, s_lk_skew_min, s_lk_skew_max; static long s_lk_trough_min = -1;
 +static int lk_cap_frames(void)
@@ -124,12 +124,17 @@ index 09b763a..567d0bd 100644
 +    s_lk_blocks = s_lk_dry = s_lk_conceals = s_lk_conc_frames = s_lk_long_gaps = s_lk_drops = s_lk_squeezed = s_lk_bursts = 0;
 +    s_lk_trough_sum = 0; s_lk_trough_min = -1; s_lk_skew_min = s_lk_skew_max = 0;
 +}
++static int64_t lk_ms_frames(int ms)
++{
++    return ms > 0 ? (int64_t)ms * (CELL_AUDIO_SAMPLE_RATE / 1000) : 0;
++}
 +static int lk_cushion_frames(void)
 +{
-+    int c = s_lk_cushion_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
-+    const int fits = lk_cap_frames() - 9 * LK_N;   /* a 7-block burst, stretched, plus slack must still fit on top of it */
-+    if (c > fits) c = fits;
-+    return c < 0 ? 0 : c;
++    const int cap = lk_cap_frames();
++    if (cap <= (int)(9 * LK_N)) return 0;
++    const int fits = cap - (int)(9 * LK_N);   /* reserve a stretched seven-block burst plus slack */
++    const int64_t requested = lk_ms_frames(s_lk_cushion_ms);
++    return requested > fits ? fits : (int)requested;
 +}
 +static void lk_report(const char* why)
 +{
@@ -162,9 +167,10 @@ index 09b763a..567d0bd 100644
 +               for (int c = 0; c < 2; c++) v[c] = s_lk_seg[(LK_X + p) * 2 + c] * (1.0f - w) + s_lk_seg[j * 2 + c] * w; }
 +        if (++s_lk_conc_p == LK_L) s_lk_conc_p = 0;
 +    }
-+    const long lim = (long)s_lk_conceal_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
++    const int64_t lim = lk_ms_frames(s_lk_conceal_ms);
 +    const float g = s_lk_conc_t >= lim ? 0.0f : expf(-(float)s_lk_conc_t / (50.0f * (CELL_AUDIO_SAMPLE_RATE / 1000)));   /* -8.7 dB per 50 ms */
-+    o[0] = v[0] * g; o[1] = v[1] * g; s_lk_conc_t++;
++    o[0] = v[0] * g; o[1] = v[1] * g;
++    if (s_lk_conc_t < INT64_MAX) s_lk_conc_t++;
 +}
 +static void lk_conc_start(void)
 +{
@@ -174,7 +180,7 @@ index 09b763a..567d0bd 100644
 +static void lk_conc_stop(void)
 +{
 +    s_lk_conc_frames += (unsigned long long)s_lk_conc_t;
-+    if (s_lk_conc_t > (long)s_lk_conceal_ms * (CELL_AUDIO_SAMPLE_RATE / 1000)) s_lk_long_gaps++;
++    if (s_lk_conc_t > lk_ms_frames(s_lk_conceal_ms)) s_lk_long_gaps++;
 +    s_lk_conc = 0;
 +}
 +/* Idle between ticks (every ~2 ms): keep the device over the low-water mark with concealment while no real block comes. */
@@ -186,11 +192,11 @@ index 09b763a..567d0bd 100644
 +    if (cap <= 0 || rm < 0) return;
 +    int level = cap - rm;
 +    if (level == 0 && !s_lk_conc) s_lk_dry++;
-+    const int low = s_lk_low_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
++    const int64_t low = lk_ms_frames(s_lk_low_ms);
 +    if (level >= low) return;
 +    if (!s_lk_conc) lk_conc_start();
-+    int target = low + (int)LK_N;
-+    if (target > cap) target = cap;
++    const int64_t requested = low + LK_N;
++    const int target = requested > cap ? cap : (int)requested;
 +    while (level < target) {
 +        int frames = target - level;
 +        if (frames > (int)LK_N) frames = (int)LK_N;
@@ -257,7 +263,7 @@ index 09b763a..567d0bd 100644
  #ifdef _WIN32
  static unsigned long long g_audio_underruns;
  static unsigned __stdcall audio_mix_thread_func(void* arg)
-@@ -806,21 +1004,25 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -806,21 +1010,25 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      if (!s_lock_wake) s_lock_wake = CreateEventW(NULL, FALSE, FALSE, NULL);   /* patch 3005 */
      while (s_mix_thread_running) {
          if (g_ps3_audio_lock_target >= 0) {   /* patch 3005: tick-locked (see ps3_audio_lock_idle) */
