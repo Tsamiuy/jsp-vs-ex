@@ -1,5 +1,8 @@
 # Rollback netcode: how it works and how this port will do it
 
+Native Friendly Match pairs only the two players in the same game room. Custom automatic pairing searches compatible rollback rooms with the same match code, or an empty code if neither player entered one. These groups use distinct tags in the JRB2 record. The rollback handshake verifies the full effective-content identity again. Native online still refuses gameplay mods at startup. A verified pre-fight hold and safe abort would be needed to support them.
+
+
 Status: **experimental.** A new install turns it on for Online Battle: the players meet in the game's own Friendly Match room
 over a [re-psn](https://github.com/undecuple/re-psn) server and rollback runs the fight (US 1.00 disc only; [ONLINE.md](ONLINE.md),
 [TESTING_ONLINE.md](TESTING_ONLINE.md)). The settings window's Online tab turns it off, and Online Battle then uses the game's
@@ -182,28 +185,46 @@ This is for testers. Expect rough edges, and report what you see (with the suppo
 | Host | `JSP_ROLLBACK=1` and `JSP_ROLLBACK_LISTEN=36200` (any free UDP port) |
 | Client | `JSP_ROLLBACK=1` and `JSP_ROLLBACK_JOIN=<host IP>:36200` |
 
-Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice is also in the game's own menu: see
-"Choose it in the game" below.
+Remove the lines (or set `JSP_ROLLBACK=0`) to turn it off again. The same choice is also in the launcher's Online tab and
+the game's own menu: see "One choice everywhere" below.
 
-**Choose it in the game.** Port Settings (Options, the top row, above Control Settings; on by default, `JSP_PORT_MENU=0` hides it) -> Online. The first row is **Netcode**
-(Left/Right):
+**One choice everywhere.** The launcher's Online tab and the game's own Port Settings (Options, the top row, above Control
+Settings; on by default, `JSP_PORT_MENU=0` hides it) -> Online page offer the same single choice (Left/Right on the first row
+in the game):
 
-| Netcode | What it is | Rows under it |
+| Choice | What it is | Rows under it (in the game) |
 |---|---|---|
 | Off | no online play | none |
 | Delay (the game's own online) | the game's own netcode over re-psn or a community server (`repsn.ini` / `community.ini`, as before) | Method (re-psn / Community server), Server, Online name, Community preset |
 | Rollback (experimental) | the rollback path of this section, two players, direct IP or through a re-psn room | Connection (Direct IP / re-psn), Role (Host / Join), then Port (host) or Host address (join) for direct IP, or Allow relay for re-psn |
 | Online Battle + rollback | the default after install: the game's own Online Battle over re-psn (`repsn.ini` `enabled=1`) with `JSP_ROLLBACK=1` and no role key; a Friendly Match room pairs the players and rollback runs the fight (US 1.00 disc only) | Server, Online name, Allow relay |
+| re-psn (standard) | the game's own netcode over a re-psn server (`repsn.ini`, as before) | Server, Online name |
+| re-psn (rollback) | the rollback path of this section through a re-psn room (experimental, two players) | Connection (re-psn; Direct IP is the advanced setting), Server, Online name, Match code (optional), Allow relay; no Host or Join: the two games find each other |
+| Community | the game's own netcode over a community server (`community.ini`, as before) | Community preset |
+
+Saving a choice sets everything, so two methods can never be on together: re-psn (standard) writes `enabled = 1` in
+`repsn.ini`; re-psn (rollback) writes `JSP_ROLLBACK=1` with `enabled = 0` in both ini files; Community writes `enabled = 1` in
+`community.ini`; the other two are switched off (`JSP_ROLLBACK=0` is written when `play_settings.txt` already has the line).
+
+**Direct IP (advanced).** Rollback over a typed address (no re-psn server) still works and is not a fifth choice: in the game,
+the Connection row under re-psn (rollback) switches it to Direct IP (the choice then reads "Rollback (direct IP)") and shows
+Port (host) or Host address (join); in the launcher it is the "Advanced: connect by IP address" box in the re-psn (rollback)
+panel. A file with `JSP_ROLLBACK_LISTEN` or `JSP_ROLLBACK_JOIN` and no `JSP_ROLLBACK_VIA=repsn` is read as this.
 
 Cross on Port, Host address, Server or Online name opens the pad letter picker the page already had. **Save (applies on
 the next start)** writes the choice; Discard changes reads the files again; Circle leaves without saving. Under the rows
 the page says which method is on and what this session runs against what is saved.
 
-- One method at a time. Netcode is one choice, so the page never turns both on. Save writes the method that is going off
-  first (Rollback: the online files, then `play_settings.txt`; Delay or Off: `play_settings.txt`, then the online files),
-  so a failed or interrupted save never leaves both on.
+- One method at a time. The choice is one choice, so the page and the launcher never turn two on. Save writes the method
+  that is going off first (re-psn (rollback): the online files, then `play_settings.txt`; the others: `play_settings.txt`,
+  then the online files), so a failed or interrupted save never leaves two on. The settings keys and file formats are
+  the same as in 0.6.1, so older builds read the files.
+- Older files. Version 0.6.1 and earlier kept the two apart (the launcher wrote only the ini files). A file where two methods are on
+  (rollback and re-psn (standard) or Community, or re-psn (standard) and Community, from a hand edit or an older version) loads
+  in the launcher and the page as **Off** with a note ("... both on ... shown as Off. Pick one and save."); saving that
+  choice, or any other, fixes the files. The game itself still refuses such a start (next bullet), as a guard.
 - Rollback is stored in `play_settings.txt`: `JSP_ROLLBACK=1` plus `JSP_ROLLBACK_LISTEN=PORT` (host) or
-  `JSP_ROLLBACK_JOIN=IP:PORT` (join). Turning it off writes `JSP_ROLLBACK=0` when the file already has the line or the
+  `JSP_ROLLBACK_JOIN=IP:PORT` (join). Turning rollback off writes `JSP_ROLLBACK=0` when the file already has the line or the
   environment holds `JSP_ROLLBACK` (the launcher's file line wins over an inherited variable, so a removed line could leave
   it on); otherwise the line stays absent. `0` is off for every reader. The remembered port or address stays (inert without
   `JSP_ROLLBACK=1`); other lines of the file are kept. The launcher turns every line into an environment variable before
@@ -217,7 +238,7 @@ the page says which method is on and what this session runs against what is save
   `JSP_NET_REFUSED=1` (for the pair it also removes `PS3_NET_ONLINE`), so neither runs: the game's own online needs
   `PS3_NET_ONLINE` in every gate (`np_psnr_enabled`, the net-control state, the host socket registration), so `PSNR_SERVER`
   and the other online keys stay inert without it. The page then shows "This session: refused" and, for the saved pair, Off
-  with a message: it never picks for the player. Because the original value is gone after a refusal, saving Off or Delay
+  with a message: it never picks for the player. Because the original value is gone after a refusal, saving Off, re-psn (standard) or Community
   while `JSP_NET_REFUSED` is set writes `JSP_ROLLBACK=0` even with no line in the file, so the next start is not refused
   again. The same decision refuses Rollback alone when a role key is invalid (both `LISTEN` and `JOIN`, a bad port or
   address, `VIA=repsn` without `ROLE`; it also sets `JSP_NET_REFUSED`). `JSP_ROLLBACK=1` with no role key at all is the lobby
@@ -236,14 +257,22 @@ the page says which method is on and what this session runs against what is save
   `installer/port/jsp/jsp_build_id.cmake`), so two
   PCs that each built the same release agree. Before 0.5.1 it came from the compile time, so two installs refused each
   other. CMake prints it at configure ("Rollback build id"); the game logs it in the `[net] rollback opt-in` line.
-- Mods (the mods folder, in progress): a set of gameplay mods is folded into that build id (the first 32 bits of SHA-256 of
-  the id and the set's digest, `installer/port/jsp/jsp_mods_glue.h`), so two games match only with the same release and
-  the same gameplay mods; with no gameplay mod the id is unchanged. Gameplay mods that were listed but could not all be
-  applied refuse rollback (`[mods] rollback refused`), and so does a copy of an archive a gameplay mod changes (the disc copy
-  or an hdd0 install copy, all checked at start) that differs from the planned copy. Such a copy that the game first opens
-  later stops a rollback session that has not sent its settings Hello yet (`[net] rollback refused: the mod set does not
-  run as listed`); a session already past it is not ended. The game logs the folded id as
-  `[mods] set: gameplay digest ..., net build 0x... (stock 0x...)`. Host-tested, not yet run in a game.
+- Rollback peers compare the release build and a separate SHA-256 identity for the executable and loaded mods.
+  Both peers must use the same executable and effective mod set. The identity includes the winning overrides in
+  load order (archive, entry and hash of served bytes), mod IDs and versions, and roster additions. A stock game
+  contributes only its executable. Fully shadowed entries contribute no bytes.
+- Rollback includes cosmetic overrides such as logos, movies and sounds in this check. A failed listed mod, a
+  differing copy of a modded archive or missing executable evidence prevents admission. Before joining, rollback
+  verifies and keeps up to 256 MiB of winning replacement and alias bytes in memory for the session. Larger sets
+  can still play offline. Unmodified archive entries continue to come from the local installation. If the loader later finds
+  that agreed content cannot be served, the session ends. Players resolve differences locally.
+- Settings schema 3 carries only the digest in Hello and in the host's canonical proposal. ACK and Start confirm
+  the proposal digest. Older schemas require an update. The game's original Ranked and Free modes retain their
+  existing gameplay-mod restriction. Native Online Battle requires game online before its room can pair the
+  rollback peers. Gameplay mods therefore remain available only on a separate rollback link outside that native
+  mode. Native rollback checks stock and cosmetic content when it opens the link and on each same-link rematch.
+  Room discovery still uses the release tag. Peers verify the full identity before rollback starts.
+  existing gameplay-mod restriction because they use a different protocol.
 - Not covered: the page has not been run in the game and there is no screenshot of it (layout is from the code: rows at
   pitch 40, 188 + 40 i; the longest new strings are 38 characters at scale 1.0 and were checked by the host test); the
   start decision and the refusal are host-tested and the wiring is compile-checked, not run in a game; hostnames in the join
@@ -262,7 +291,7 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
    *Settings received: controlled by host*. Your own settings come back when the match ends; nothing is saved. Settings that
    only apply at start-up must already be the same on both PCs (for example the KO count, the 60 fps drawing mode, and the
    cheats, which must be off); otherwise the match does not start and both PCs show which setting differs.
-3. Both players set up the same **Free Battle** fight on their own PC: menus and character select are not linked yet. The
+3. Matches start from **Free Battle**, not from the game's own Online menu (with rollback chosen, that menu says you were signed out of PSN: it is for re-psn (standard)). Both players set up the same **Free Battle** fight on their own PC: menus and character select are not linked yet. The
    rollback session starts at the first tick of the fight. The host plays as player 1, the client as player 2.
 4. During the fight only inputs travel. If no input arrives for over a second the screen shows *Reconnecting... N s*;
    holding F9 for 1.5 s ends the match. If the other PC stays silent past the grace time (5 s by default), the match ends
@@ -289,8 +318,8 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
 
 ### Rollback status badge
 
-Opt-in, off by default (display only). With `JSP_ROLLBACK_BADGE=1` in `play_settings.txt` (the launcher passes the line on, as
-for every key; there is no box in the launcher or row in Port Settings yet), a running rollback match shows one small line in
+On by default during a rollback match (display only). Set `JSP_ROLLBACK_BADGE=0` in `play_settings.txt` to hide it;
+an explicit empty value also hides it. There is no launcher checkbox or Port Settings row for this preference yet. The badge shows one small line in
 the top-left corner, above the fight HUD's top bar:
 
 `Rollback | direct | delay 2f | last 3f`
@@ -471,17 +500,16 @@ Each is a `play_settings.txt` line (or an environment variable). Test-only switc
 | `JSP_ROLLBACK_RELAY` | allow the server's relay when the direct link fails (the defaults after install set `1`) | no |
 | `JSP_INPUT_DELAY_AUTO` | input delay follows the measured link (each PC sets only its own); on by default, `0` keeps the start value | no |
 | `JSP_INPUT_DELAY_AUTO_MIN`, `_MAX`, `_MARGIN_MS` | its range (default 1 to 4 ticks) and margin (default 8 ms) | no |
-| `JSP_INPUT_DELAY_RULE` | `2` (default): ticks = ceil((one way from the median of the last 8 s of round trips + (90th percentile - median) + margin) / 33.3 ms), margin 16 ms from a median of 80 ms, first reading 4 s after the sync (before 10 s: the spread mirrored from the low side, and at most start + 1 tick), one tick up after two rollbacks deeper than 2 ticks within 10 s (then held 20 s), down one tick after 10 calm seconds (`jsp_net_delay_rule.h`). `1`: the earlier rule (GekkoNet's average ping and an EMA of its jitter, first reading at 10 s) | A/B |
+| `JSP_INPUT_DELAY_RULE` | `2` (default): ticks = ceil((one way from the median of the last 8 s of round trips + (90th percentile - median) + margin) / 33.3 ms), margin 16 ms from a median of 80 ms, first reading 4 s after the sync (before 10 s: the spread mirrored from the low side, and at most start + 1 tick), one tick up after two rollbacks deeper than 2 ticks within 10 s (then held 20 s), down one tick after five fresh calm readings (normally 10 s). Uses measurement identities and receipt times: cached polls do not add samples or votes, and expired round trips leave the window (`jsp_net_delay_rule.h`). `1`: the earlier rule (GekkoNet's average ping and an EMA of its jitter, first reading at 10 s) | A/B |
 | `JSP_INPUT_DELAY_AUTO_FIRST_MS`, `_PCT`, `_SAMPLES`, `_HIGH_PING_MS`, `_HIGH_MARGIN_MS`, `_UP_VOTES`, `_DOWN_VOTES`, `_DEEP_TICKS`, `_DEEP_COUNT`, `_DEEP_WINDOW_MS`, `_HOLD_MS` | rule 2's tuning (defaults 4000, 90, 16, 80, 16, 1, 5, 2, 2, 10000, 20000; `_DEEP_COUNT=0` turns the depth trigger off) | A/B |
 | `JSP_ROLLBACK_PREDICTION` | how many ticks a PC may run ahead on predicted inputs before it waits, which caps the deepest rollback (1 to 8, default 6; `8` = as before); each PC alone | no |
 | `JSP_ROLLBACK_PING` | the [ping counter](#ping-counter) under the fight timer; on by default, `0` hides it | no |
-| `JSP_POSTGAME_IDLE_SECS` | after a fight, seconds without a locked pick before the side leaves (10 to 3600, default 180) | no |
 | `JSP_ROLLBACK_RECORD`, `JSP_ROLLBACK_RECORD_DIR` | save each match's confirmed inputs as a replay (off by default) | no |
 | `JSP_NET_REPORT_DIR` | folder of the match reports (default `reports`) | no |
 | `JSP_AUDIO_TICKLOCK`, `JSP_NET_GUEST_CLOCK`, `JSP_NET_CRI_LOCK`, `JSP_NET_THREAD_REGS` | the determinism fixes above; on in a match, `0` turns each off | A/B only |
 | `JSP_ROLLBACK_SKIP_FINAL`, `JSP_SNAPSHOT_COPY_THREADS` (3), `JSP_SNAPSHOT_PRECHECK_US` (20000), `JSP_SNAPSHOT_AUDIT_EXEMPT`, `JSP_SNAPSHOT_LWM_CACHE`, `JSP_SNAPSHOT_LAYOUT_GEN`, `JSP_SNAPSHOT_QUICK`, `JSP_SNAPSHOT_QUICK_WAIT_US`, `JSP_SNAPSHOT_FROZEN_WALK_EVERY`, `JSP_SNAPSHOT_AUDIT_ASYNC`, `JSP_SNAPSHOT_SITE`, `JSP_SNAPSHOT_SITE_MS` | snapshot speed-ups, set by default in rollback; `0` turns each off | A/B only |
 | `PSO_ASYNC` | rollback sets `0` (asynchronous shader builds crashed in bench runs; a workaround) | no |
-| `JSP_STEP_SKIP_DRAWS` | skip the draws of re-run frames (with `JSP_STEP_TURBO`; off by default) | no |
+| `JSP_STEP_SKIP_DRAWS` | skip draws during rollback replays with `JSP_STEP_TURBO` (test 2 default on, 0 disables) | no |
 | `JSP_NET_STICK_DEADZONE`, `JSP_NET_STICK_LEVELS` | send the sticks with a dead zone or fewer steps (off by default) | yes |
 | `JSP_ROLLBACK_LIMITED_SAVING`, `JSP_ROLLBACK_START=fight`, `JSP_NET_LOAD_NEUTRAL`, `JSP_PAD_PEEK`, `JSP_SNAPSHOT_PREWAIT`, `JSP_SNAPSHOT_QUICK_SLEEP` | alternatives that were tried; off by default | yes |
 | `JSP_FIGHT_HASH_SCENE`, `JSP_FIGHT_HASH_FIGHTER`, `JSP_FIGHT_HASH_CAM_CACHE` | `1` puts the playback count, the fighter part or the old camera range back into the checksum | yes |
@@ -506,21 +534,21 @@ game's own online, `repsn.ini`; see `docs/ONLINE.md`). **It has run once against
 home network (see [Tested so far](#tested-so-far)). It has not been tried across real routers (NATs), and the relay has not
 been used yet.** Host tests also run it against a fake server that speaks the server's documented wire format (below).
 
+**Quick steps.** Both players pick **re-psn (rollback)** (launcher or Port Settings > Online), with the same Server and, if you want one, the same **match code**, and save. Start both games, then each starts a **Free Battle** with the same fight (not the game's Online menu, which is for re-psn (standard) and says you were signed out of PSN). Nobody is Host or Join: each game searches the re-psn server first, joins a matching room if there is one and opens its own if not, and keeps searching while its room is open; if two rooms are open at once, the one with the higher room id (the newer; the server numbers rooms in creation order, so the order is the same for both) closes and joins the other, so exactly one side gives way. A room that filled or vanished between the list and the join, or an owner who left before the link started, sends the game back to searching inside the window. A match code is a short word of 4 to 8 letters or digits (case does not matter); only games with the same code meet, and no code meets only no code. It is a way to keep strangers apart, not a password (it travels in the room list as a hash, never in clear text, is never written to the log, and a support bundle only says set or not set). The version still has to match; the code is not part of it. `JSP_ROLLBACK_ROLE=host` or `join` still works as an advanced override (in the launcher: Role next to the Advanced box).
+
 **Start both games at about the same time.** Each game looks for the other one for 2 minutes (120 seconds, the
 same for both roles), counted from when it has finished starting up, not from when you start it. Two games meet when they
 finish starting up less than about 2 minutes apart (a little less: the host's connection and the 2-second list interval
-count too). The joining game reads the room list again every
-2 seconds until the host's room appears, so either game may start first; starting the host first is still best, because the
-joining game then meets it at its first look. The host's room stays listed the whole time it waits. Start-up takes a
+count too). With the auto role each game reads the room list again every
+2 seconds until the other's room appears, so either game may start first; an explicit Join does the same. A game's own room stays listed the whole time it waits. Start-up takes a
 different time on every PC (the first start after an update builds the graphics pipelines), which is why the window is
 2 minutes and not shorter. If one side gives up, close both games and start again.
 
-**While they wait,** the main menu's top list shows a notice band ("Rollback: room open, waiting for the other player" or
-"Rollback: looking for the host's room", with the seconds waited), updated every 10 seconds, and the log gets one line every
-10 seconds (`[net] re-psn: room open, waiting for a player with build xxxxxxxx (40 s of 120 s)` or `[net] re-psn: looking for
+**While they wait,** the main menu's top list shows a notice band ("re-psn (rollback): room open, waiting for the other player" or
+"re-psn (rollback): looking for the host's room", with the seconds waited), updated every 10 seconds, and the log gets one line every
+10 seconds (`[net] re-psn (rollback): room open, waiting for a player with build xxxxxxxx (40 s of 120 s)` or `[net] re-psn (rollback): looking for
 a host with build xxxxxxxx (40 s of 120 s, 20 room lists read)`). The build number (8 hex digits) is the same one the
-`[net] rollback opt-in: ... build xxxxxxxx` line shows: the two players compare it. It includes the gameplay mods, so two
-copies of the same version with different gameplay mods have different numbers. These notices have not been seen in a game yet.
+`[net] rollback opt-in: ... build xxxxxxxx` line shows. It identifies the port release for discovery. Room discovery also compares the full applied-content SHA-256, including cosmetic overrides; executable and effective-mod agreement is checked again before readiness and Start. These notices have not been seen in a game yet.
 
 **When they do not meet** (on the same notice band and in the log, after `rendezvous failed:`). The band is drawn on the
 main menu's top list only: a player who is in another menu or a fight then sees the message when they return to the top list
@@ -534,9 +562,14 @@ still waiting (for example a gameplay mod refusal), the waiting band goes and th
 | `re-psn: no player with this version joined within 2 minutes: ...` | The host's room was open for 2 minutes and nobody with the same build joined (a player with another build is refused and counted) | The same |
 | `re-psn: the host's room did not answer within 2 minutes: ...` | The joining game joined a room but the host's details for a direct link never came within 2 minutes | Start both games again |
 | `re-psn: the online server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
+| `re-psn (rollback): no other player with this version found within 2 minutes: ...` | (auto role) Neither a matching room appeared nor did anyone join this game's room: the other game had not started, had already given up, or runs another version, another match code or other gameplay mods. When it saw a rollback room of another build or another match code it says so (`seen: a rollback room with another match code (or none)`; the code itself is never shown). | The same |
+| `re-psn (rollback): no host with this version found within 2 minutes (is the other player set to Host?): ...` | The joining game read the room list for 2 minutes and found no room from the same build with rollback: the host's game had not started, had already given up, or runs another version or other gameplay mods. When it saw a rollback room of another build it says so: `(seen: a rollback room with build xxxxxxxx)` | Start both games at about the same time; compare the build numbers |
+| `re-psn (rollback): no player with this version joined within 2 minutes: ...` | The host's room was open for 2 minutes and nobody with the same build joined (a player with another build is refused and counted) | The same |
+| `re-psn (rollback): the host's room did not answer within 2 minutes: ...` | The joining game joined a room but the host's details for a direct link never came within 2 minutes | Start both games again |
+| `re-psn (rollback): the re-psn server did not answer within 2 minutes: ...` | The game connected to no server in that time | Check the server in `repsn.ini` (see `docs/ONLINE.md`) |
 
-Each of these lines ends with what to check: `start both games at about the same time (the host first is best; each waits
-2 minutes after its own start-up); both need the same version (build xxxxxxxx) and the same gameplay mods (or none)`. Version 0.6.0 used a 30 second window
+Each of these lines ends with what to check: `start both games at about the same time (each waits
+2 minutes after its own start-up); both need the same version (build xxxxxxxx), the same match code (when one is set) and the same enabled mods in the same order` (with an explicit Host or Join role the text also says "the host first is best"). Version 0.6.0 used a 30 second window
 and the lines `re-psn: timed out waiting for the other player` and `re-psn: no rollback room for this build`; in 0.6.0 the
 joining game looked only once and gave up at once when the host's room was not there yet. A 0.6.1 game and a 0.6.0 game
 cannot meet (their build numbers differ).
@@ -557,17 +590,14 @@ comes up well within that time, so the match runs direct even with the relay all
 - Not tried yet: across real routers, the relay, a typed IP address on two PCs, a match played by hand.
 
 - Set it up by hand, or check what the page wrote: see "Set up rollback over re-psn" just below.
-- Turn it on: Port Settings -> Online -> Netcode = Rollback -> Connection = re-psn, Role = Host (creates a room) or Join (joins the
-  oldest matching room), Allow relay Yes or No, Save, restart. The server and online name must already be set in `repsn.ini`
-  (set them under Delay first; they are kept). By hand: `play_settings.txt` lines `JSP_ROLLBACK=1`, `JSP_ROLLBACK_VIA=repsn`,
-  `JSP_ROLLBACK_ROLE=host` or `join`, `JSP_ROLLBACK_RELAY=1` to allow the server's relay (default 0); optionally
+- Turn it on: Port Settings -> Online -> choice = re-psn (rollback), Server and Online name, Match code (optional), Allow relay Yes or No (the Role row only shows when a Host or Join override is set in the file), Save, restart (the launcher's Online tab has the same). By hand: `play_settings.txt` lines `JSP_ROLLBACK=1`, `JSP_ROLLBACK_VIA=repsn`,
+  `JSP_ROLLBACK_ROLE=auto` (the default when the line is absent; `host` or `join` is the advanced override), `JSP_ROLLBACK_CODE=ABCD1234` (optional), `JSP_ROLLBACK_RELAY=1` to allow the server's relay (default 0); optionally
   `JSP_ROLLBACK_LISTEN=PORT` to pin the UDP port (firewalls; otherwise any free port).
 - One method at a time still holds: the game's own online stays off while rollback runs (the page saves Rollback with the
   game's own online off, and a start with both on is refused).
 - How it works (`jsp_net_repsn.h`, `jsp_net_repsn_client.h`): the rollback session's own UDP socket is the peer-to-peer
-  socket. The host creates a room that carries a rollback flag and a record `rb=1;ver=<build>` (ASSUMPTION: room flag bit 30,
-  `kRoomFlagRollback`); the joiner searches, keeps only rooms with the flag, the same record and a free seat (it looks at
-  most at the first 64 rooms of a search), joins the oldest and checks the owner's record. Both then send punch datagrams
+  socket. The host creates a room that carries a rollback flag and a binary JRB2 record containing the big-endian release ID, full 32-byte applied-content digest and optional 64-byte match-code tag (ASSUMPTION: room flag bit 30,
+  `kRoomFlagRollback`); the joiner searches, keeps only rooms with the flag, the same record and a free seat. It reads the available list in pages of 64, joins the oldest compatible room and checks the owner's record. Both then send punch datagrams
   from that socket every 200 ms while the normal handshake runs. If nothing arrives within 4 s the connection goes
   through the server's relay only when the player allowed it and the server offers it; otherwise it ends with the reason.
   The path ("direct" or "relay") is shown for the first seconds of the match (and never replaces a later message). Nothing
@@ -591,8 +621,9 @@ comes up well within that time, so the match runs direct even with the relay all
 #### Set up rollback over re-psn
 
 Both players do this, with the same server. Rollback over re-psn uses the server and online name from `repsn.ini`, but
-the game's own online in that file must stay **off** (`enabled = 0`): `enabled = 1` turns on the game's own online
-(Delay), only one online method can be on at a time, and a start with both on is refused, so neither runs.
+the game's own online in that file must stay **off** (`enabled = 0`): `enabled = 1` is re-psn (standard), only one online
+method can be on at a time, and a start with both on is refused, so neither runs. Choosing re-psn (rollback) in the launcher or
+the game sets all of this for you.
 
 1. `repsn.ini` holds the server and your online name, with `enabled = 0`:
 
@@ -606,24 +637,23 @@ the game's own online in that file must stay **off** (`enabled = 0`): `enabled =
    It is in `<install folder>\shared\repsn.ini` for a portable install, else in `%APPDATA%\PS3Recomp\repsn.ini`
    (`PS3RECOMP_SHARED_DIR` picks another folder). A second `repsn.ini` in the game folder (`<install folder>` for a
    portable install, else `%APPDATA%\JSP Fan Revival\`) can override these keys, so it must not say `enabled = 1` either.
-   The easy way: in the launcher's **Online** tab leave the method on **Off**, fill in Server and Online name and save;
-   Off writes `enabled = 0` and keeps a valid server and name. Do not choose re-psn or Community there while rollback
-   is on: the launcher refuses to save it ("Rollback is on ... only one online method can be active"), and Start Game
-   stops with the same message. To use the game's own online again, turn rollback off in Port Settings > Online first.
+   The easy way: in the launcher's **Online** tab choose **re-psn (rollback)**, fill in Server and Online name, optionally a match code, and save: that writes `enabled = 0`, the server and name here and the `play_settings.txt` lines of step 2 together.
+   Choosing re-psn (standard) or Community later turns rollback off (`JSP_ROLLBACK=0`) in the same save, and the other way round.
 2. `play_settings.txt` (in the install folder, or `%APPDATA%\JSP Fan Revival\`) gets these lines:
 
    ```
    JSP_ROLLBACK=1
    JSP_ROLLBACK_VIA=repsn
-   JSP_ROLLBACK_ROLE=host
+   JSP_ROLLBACK_ROLE=auto
    JSP_ROLLBACK_RELAY=0
+   JSP_ROLLBACK_CODE=ABCD1234
    ```
 
-   One player uses `JSP_ROLLBACK_ROLE=host` (creates the room), the other `JSP_ROLLBACK_ROLE=join`. `JSP_ROLLBACK_RELAY=1`
+   Both players use the same lines (`JSP_ROLLBACK_ROLE=auto` is the default; the line may be left out). `JSP_ROLLBACK_CODE` is optional: leave it out for no code, or give 4 to 8 letters or digits (the same on both PCs). `JSP_ROLLBACK_ROLE=host` (creates the room) or `join` is an advanced override: two Joins, or two Hosts, never meet; the page row and the waiting notice then name the role. `JSP_ROLLBACK_RELAY=1
    allows the server's relay when a direct link fails (the server must offer it). Leave out `JSP_ROLLBACK_LISTEN` unless a
    firewall needs a fixed UDP port.
-3. Start the game. Port Settings > Online (on by default) writes the same two files: Netcode = Rollback, Connection =
-   re-psn and Save write the `play_settings.txt` lines and `enabled = 0` in `repsn.ini`.
+3. Start the game. Port Settings > Online (on by default) writes the same two files: the choice re-psn (rollback) and Save
+   write the `play_settings.txt` lines and `enabled = 0` in `repsn.ini`.
 
 #### If rollback does not start
 
@@ -631,12 +661,12 @@ When rollback was asked for but cannot start, the main menu shows why at the top
 the menu's top list comes up (ENHANCEMENT, display only, on by default; it needs the US 1.00 build, like Port Settings).
 The first line says what is wrong, the second how to fix it, for example:
 
-> Rollback is off: repsn.ini has enabled=1 (the game's own online).
-> Set enabled=0 in repsn.ini to use rollback (keep server= and name=).
+> Rollback is off: re-psn (standard) is on too (repsn.ini has enabled=1).
+> Set enabled=0 in repsn.ini to use rollback (keep server= and name=), or Port Settings > Online.
 
 The same reasons are in the log (`[net] REFUSED: ...` or a `[net] ...: off` line in `game\run\play_stderr.txt`); on the EU build, which has no notice, the log is the only place. When both methods were on, the game's
-own online is off for that session too, so Online Battle cannot connect either. Other reasons the notice names: no
-`JSP_ROLLBACK_ROLE` with `JSP_ROLLBACK_VIA=repsn`; a `JSP_ROLLBACK_LISTEN` that is not a port from 1 to 65535; not exactly
+own online is off for that session too, so Online Battle cannot connect either. Other reasons the notice names: a
+`JSP_ROLLBACK_ROLE` that is not auto, host or join, or a `JSP_ROLLBACK_CODE` that is not 4 to 8 letters or digits, with `JSP_ROLLBACK_VIA=repsn`; a `JSP_ROLLBACK_LISTEN` that is not a port from 1 to 65535; not exactly
 one of `JSP_ROLLBACK_LISTEN` and `JSP_ROLLBACK_JOIN` for direct IP; a `JSP_ROLLBACK_JOIN` that is not IP:port; no valid
 `server` or `name` in `repsn.ini`; an online name longer than 16 characters; a UDP port that could not be opened. The
 texts are host-tested (`installer/tools/net_online_test.sh`); the notice was seen in one Proton run on US 1.00 with the both-on refusal (shown on the main menu, gone in Options, back after leaving it); other reasons and the EU build were not run.
@@ -666,3 +696,13 @@ texts are host-tested (`installer/tools/net_online_test.sh`); the notice was see
 - [Rollback Networking in Fighting Games](https://words.infil.net/w02-netcode.html): an illustrated explanation of rollback.
 - [GekkoNet](https://github.com/HeatXD/GekkoNet), [GGPO](https://github.com/pond3r/ggpo), [GGRS](https://github.com/gschup/ggrs), [iroh](https://github.com/n0-computer/iroh)
 - [ONLINE.md](ONLINE.md): today's online play over re-psn.
+
+The runtime can re-arm an existing link for another match. The host-tested postgame helper models result-menu agreement and idle departure. The live result menu still needs to call it before those choices or the idle timeout can govern a running game.
+
+Test 2 enables `JSP_STEP_SKIP_DRAWS` during rollback replays by default. Set it to 0 to disable replay draw skipping. The first visible frame after replay and the performance impact still need target validation.
+Match codes select a rendezvous group, not access control. Use 4 to 8 letters or digits (case is ignored). A domain-separated SHA-256 tag selects the group; the raw code is not written to connection logs. Codes are not passwords or encrypted secrets. Empty codes use the existing uncoded room record and only pair with other uncoded rooms.
+
+The Online settings page now refreshes observed connection progress without button presses: preparing, finding an opponent,
+checking content/settings, ready, synchronizing, playing, reconnecting or ended. Unknown path and delay stay unknown.
+The menu owns the retained overlay while visible; network notices and the badge resume after it closes. These states are
+display observations, not admission decisions. Host models and production Windows syntax were checked; live/game UI remains untested.

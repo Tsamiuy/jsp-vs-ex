@@ -806,7 +806,10 @@ SessionStats NetSession::stats() const
         for (unsigned sl = 0; sl < plan_.total_players; sl++) {
             if (sl >= plan_.local_first && sl < (unsigned)plan_.local_first + plan_.local_count) continue;
             GekkoNetworkStats ns{}; gekko_network_stats((GekkoSession*)gs_, (int)sl, &ns);
-            if (ns.avg_ping > 0) { s.ping_ms = ns.avg_ping; s.jitter_ms = ns.jitter; s.last_ping_ms = ns.last_ping; }
+            if (ns.rtt_samples) {
+                s.ping_ms = ns.avg_ping; s.jitter_ms = ns.jitter; s.last_ping_ms = ns.last_ping;
+                s.rtt_samples = ns.rtt_samples; s.last_ping_received_ms = ns.last_ping_received_ms;
+            }
             break;
         }
     }

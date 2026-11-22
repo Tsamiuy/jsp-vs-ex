@@ -139,6 +139,8 @@ namespace Gekko {
         u64 last_bandwidth_update = 0;
 
         std::vector<u16> rtt;
+        u64 rtt_samples = 0;
+        u64 last_rtt_ms = 0;
 
         void AddRTT(u16 rtt_ms);
         void UpdateBandwidth();

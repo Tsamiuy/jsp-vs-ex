@@ -2,6 +2,7 @@
 #include "net.h"
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 
@@ -87,6 +88,9 @@ void Gekko::NetStats::AddRTT(u16 rtt_ms)
     while (rtt.size() > RTT_HISTORY_SIZE) {
         rtt.erase(rtt.begin());
     }
+    ++rtt_samples;
+    last_rtt_ms = (u64)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 void Gekko::NetStats::UpdateBandwidth()

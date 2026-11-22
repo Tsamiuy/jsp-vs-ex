@@ -9,6 +9,10 @@
 // switched OFF first, so a failed or interrupted save never leaves both on. A hand-edited pair (JSP_ROLLBACK=1 and the game's online both on) shows as
 // Off with a message and is refused at start (jsp_net_game.cpp): the page never picks for the player.
 //
+// ENHANCEMENT (one online choice): the page's one choice is Off / re-psn (standard) / re-psn (rollback) / Community, the same four as the
+// launcher's Online tab. re-psn (standard) and Community are the two methods of Delay (the game's own online); re-psn (rollback) is Rollback over re-psn. Rollback over a direct IP
+// address (JSP_ROLLBACK_LISTEN / JSP_ROLLBACK_JOIN) stays: it is the Connection row under re-psn (rollback), marked "advanced", and the choice then reads "Rollback (direct IP)".
+//
 // Everything here applies at the NEXT START: jsp_net_game.cpp's EnvInit and jsp_online.cpp's boot read the environment before main().
 #ifndef JSP_NET_ONLINE_H
 #define JSP_NET_ONLINE_H
@@ -30,13 +34,14 @@ enum Netcode { NC_CONFLICT = -1, NC_OFF = 0, NC_DELAY = 1, NC_ROLLBACK = 2, NC_N
 static const int kNetcodeChoices = 4;   // the Netcode row cycles Off, Delay, Rollback, Online Battle + rollback
 
 // Row ids of the Online page. 0..5 are the page's older rows (jsp_port_menu.cpp: method, server, name, preset, save, discard).
-enum : int { R_METHOD = 0, R_SERVER = 1, R_NAME = 2, R_PRESET = 3, R_SAVE = 4, R_DISCARD = 5, R_NETCODE = 6, R_ROLE = 7, R_PORT = 8, R_JOIN = 9, R_CONN = 10, R_RELAY = 11 };
+enum : int { R_METHOD = 0, R_SERVER = 1, R_NAME = 2, R_PRESET = 3, R_SAVE = 4, R_DISCARD = 5, R_NETCODE = 6, R_ROLE = 7, R_PORT = 8, R_JOIN = 9, R_CONN = 10, R_RELAY = 11, R_CODE = 12 };
 
 static const char* const kKeyOn = "JSP_ROLLBACK";
 static const char* const kKeyListen = "JSP_ROLLBACK_LISTEN";
 static const char* const kKeyJoin = "JSP_ROLLBACK_JOIN";
 static const char* const kKeyVia = "JSP_ROLLBACK_VIA";       // "repsn": the session is arranged through a re-psn room (jsp_net_repsn.h); absent or "direct": direct IP (LISTEN / JOIN)
-static const char* const kKeyRole = "JSP_ROLLBACK_ROLE";     // re-psn only: "host" (create the room) or "join"
+static const char* const kKeyRole = "JSP_ROLLBACK_ROLE";     // re-psn only: absent or "auto" (the default: search first, join a matching room or open one), or the advanced override "host" / "join"
+static const char* const kKeyCode = "JSP_ROLLBACK_CODE";     // re-psn only (ENHANCEMENT, match code): 4 to 8 letters or digits, case ignored; only games with the same code meet; absent = none
 static const char* const kKeyRelay = "JSP_ROLLBACK_RELAY";   // re-psn only: 1 = the player allows the server's relay when a direct path fails
 // ENHANCEMENT (rollback bench, test tooling): JSP_ROLLBACK=1 with JSP_ROLLBACK_BENCH=N (1..8) runs the fight through a LOCAL stress session that rolls back N ticks on every
 // tick, with no peer and no socket; it logs the cost (jsp_net_game.cpp, bench_report). It replaces the role keys: with LISTEN, JOIN or VIA also set it is refused.
@@ -51,24 +56,24 @@ static const char* const kDefaultPort = "36200";   // ASSUMPTION: any free UDP p
 // the same test as jsp_net_game.cpp env_on(): set, not empty, first character not '0'
 inline bool flag_on(const char* v) { return v && *v && v[0] != '0'; }
 
-inline const char* name_of(int nc)
+// The one choice's cycle order (Left / Right on the Netcode row).
+enum Mode { M_OFF = 0, M_REPSN = 1, M_REPSN_RB = 2, M_COMMUNITY = 3, M_NATIVE = 4, kModes = 5 };
+inline int mode_of(int nc, int method) { return nc == NC_NATIVE ? M_NATIVE : nc == NC_ROLLBACK ? M_REPSN_RB : nc == NC_DELAY ? (method == 2 ? M_COMMUNITY : M_REPSN) : M_OFF; }
+// method: the backend's (1 re-psn, 2 community); direct: the rollback connection is a direct IP address
+inline const char* name_of(int nc, int method = 1, bool direct = false)
 {
-    return nc == NC_OFF ? "Off" : nc == NC_DELAY ? "Delay (the game's own online)" : nc == NC_ROLLBACK ? "Rollback (experimental)"
-         : nc == NC_NATIVE ? "Online Battle + rollback" : "Conflict";
+    return nc == NC_NATIVE ? "Online Battle + rollback" : nc == NC_OFF ? "Off" : nc == NC_DELAY ? (method == 2 ? "Community" : "re-psn (standard)")
+         : nc == NC_ROLLBACK ? (direct ? "Rollback (direct IP)" : "re-psn (rollback)") : "Conflict";
 }
 
-// A rollback ROLE key is set (a start-up session: direct LISTEN / JOIN, VIA=repsn, or the bench). Without one, JSP_ROLLBACK=1 is the lobby start, which may run
-// next to the game's own online (NC_NATIVE). Get: const char*(const char*) (std::getenv or a fake).
-template <class Get> bool role_keys(Get get)
+// The match code: empty (none) or 4 to 8 of A-Z 0-9 (any letter case; stored upper case). Returns false when not valid; *out gets the upper-case form.
+inline bool normalize_code(const std::string& in, std::string* out)
 {
-    for (const char* k : { kKeyListen, kKeyJoin, kKeyVia, kKeyBench }) { const char* v = get(k); if (v && *v) return true; }
-    return false;
-}
-inline bool role_keys(const jps::File& f)
-{
-    std::string v;
-    for (const char* k : { kKeyListen, kKeyJoin, kKeyVia, kKeyBench }) if (f.get(k, v) && !v.empty()) return true;
-    return false;
+    std::string r;
+    for (char c : in) { if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A'); if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false; r += c; }
+    if (!r.empty() && (r.size() < 4 || r.size() > 8)) return false;
+    if (out) *out = r;
+    return true;
 }
 
 inline bool valid_port(const std::string& p)
@@ -98,13 +103,37 @@ inline bool valid_join(const std::string& s)
     return parts == 4;
 }
 
+// The rollback configuration as one comparable text (connection, role, relay, code, port or address): the saved one against what this process started with decides
+// "Restart to apply" together with the method. Over re-psn the LISTEN pin is not part of it (the page never writes it there). The text holds the match code, so it is never printed.
+inline std::string rb_signature(bool repsn, bool role_auto, bool host, bool relay, const std::string& code, const std::string& port, const std::string& join)
+{
+    return repsn ? std::string("repsn;role=") + (role_auto ? "auto" : host ? "host" : "join") + ";relay=" + (relay ? "1" : "0") + ";code=" + code
+                 : std::string("direct;") + (host ? "listen=" + port : "join=" + join);
+}
+// the same from the environment the process started with (std::getenv or a fake), read like Rollback::load and the game do
+template <class Get> std::string running_rb_signature(Get get)
+{
+    const char* v = get(kKeyVia); const char* ro = get(kKeyRole); const char* rl = get(kKeyRelay); const char* cd = get(kKeyCode);
+    const char* l = get(kKeyListen); const char* j = get(kKeyJoin);
+    const bool hl = l && *l, hj = j && *j;
+    if (v && jps::ieq(v, "repsn")) {
+        const bool a = !(ro && (jps::ieq(ro, "host") || jps::ieq(ro, "join")));
+        std::string code; normalize_code(cd ? cd : "", &code);
+        return rb_signature(true, a, !(ro && jps::ieq(ro, "join")), flag_on(rl), code, "", "");
+    }
+    return rb_signature(false, false, hl || !hj, false, "", hl ? l : "", hj ? j : "");
+}
+
 // The Rollback working copy of the page.
 struct Rollback {
     bool host = true;
     std::string port = kDefaultPort;   // host: the UDP port to bind
     std::string join;                  // client: IP:PORT of the host
     bool repsn = false, relay = false;  // Connection: re-psn rendezvous (host = create the room, !host = join one) and "allow relay"
+    bool role_auto = true;             // re-psn: nobody picks Host or Join (key absent or "auto"); false = the advanced override (host / join below)
+    std::string code;                  // re-psn: the match code (upper case), "" = none
     bool both_set = false;             // the file held LISTEN and JOIN (the game refuses that); Save keeps only the chosen role
+    std::string signature() const { return rb_signature(repsn, role_auto, host, relay, code, port, join); }
 
     // the file's saved state (a missing key leaves the default)
     void load(const jps::File& f)
@@ -117,14 +146,16 @@ struct Rollback {
         host = hl || !hj;
         std::string v;
         repsn = f.get(kKeyVia, v) && ieq_(v, "repsn");
-        if (repsn && f.get(kKeyRole, v)) host = !ieq_(v, "join");
+        role_auto = true;
+        if (repsn && f.get(kKeyRole, v) && (ieq_(v, "host") || ieq_(v, "join"))) { role_auto = false; host = !ieq_(v, "join"); }
+        if (f.get(kKeyCode, v)) { if (!normalize_code(v, &code)) code = v; }   // an invalid saved code stays as it is (check() says so)
         relay = f.get(kKeyRelay, v) && flag_on(v.c_str());
     }
     static bool ieq_(const std::string& a, const char* b) { return jps::ieq(a, b); }
     // "" when it can be saved, else the player-visible reason
     std::string check() const
     {
-        if (repsn) return "";   // the server and online name come from repsn.ini (checked by the page)
+        if (repsn) { std::string c; return normalize_code(code, &c) ? "" : "Match code: 4 to 8 letters or digits (or leave it empty)."; }   // the server and online name come from repsn.ini (checked by the page)
         if (host) return valid_port(port) ? "" : "Rollback host: the port is a number from 1 to 65535.";
         return valid_join(join) ? "" : "Rollback join: the host address is IP:port, for example 192.0.2.10:36200.";
     }
@@ -134,13 +165,15 @@ struct Rollback {
     void store(jps::File& f, bool enable, bool zero = false) const
     {
         if (!enable) { std::string v; if (zero || f.get(kKeyOn, v)) f.set(kKeyOn, "0"); return; }
-        f.set(kKeyOn, "1");
+        f.set(kKeyOn, "1"); f.erase(kKeyBench);
         if (repsn) {
-            f.set(kKeyVia, "repsn"); f.set(kKeyRole, host ? "host" : "join"); f.set(kKeyRelay, relay ? "1" : "0");
+            std::string c; normalize_code(code, &c);
+            f.set(kKeyVia, "repsn"); f.set(kKeyRole, role_auto ? "auto" : host ? "host" : "join"); f.set(kKeyRelay, relay ? "1" : "0");
+            if (c.empty()) f.erase(kKeyCode); else f.set(kKeyCode, c);
             f.erase(kKeyListen); f.erase(kKeyJoin);
             return;
         }
-        f.erase(kKeyVia); f.erase(kKeyRole); f.erase(kKeyRelay);
+        f.erase(kKeyVia); f.erase(kKeyRole); f.erase(kKeyRelay); f.erase(kKeyCode);
         if (host) { f.set(kKeyListen, port); f.erase(kKeyJoin); }
         else { f.set(kKeyJoin, join); f.erase(kKeyListen); }
     }
@@ -148,10 +181,24 @@ struct Rollback {
     // removed: a role key with the game's own online on is refused at start.
     void store_native(jps::File& f) const
     {
-        f.set(kKeyOn, "1"); f.set(kKeyRelay, relay ? "1" : "0");
+        f.set(kKeyOn, "1"); f.set(kKeyRelay, relay ? "1" : "0"); f.erase(kKeyCode); f.erase(kKeyBench);
         f.erase(kKeyVia); f.erase(kKeyRole); f.erase(kKeyListen); f.erase(kKeyJoin);
     }
 };
+
+// A rollback ROLE key is set (a start-up session: direct LISTEN / JOIN, VIA=repsn, or the bench). Without one, JSP_ROLLBACK=1 is the lobby start, which may run
+// next to the game's own online (NC_NATIVE). Get: const char*(const char*) (std::getenv or a fake).
+template <class Get> bool role_keys(Get get)
+{
+    for (const char* k : { kKeyListen, kKeyJoin, kKeyVia, kKeyBench }) { const char* v = get(k); if (v && *v) return true; }
+    return false;
+}
+inline bool role_keys(const jps::File& f)
+{
+    std::string v;
+    for (const char* k : { kKeyListen, kKeyJoin, kKeyVia, kKeyBench }) if (f.get(k, v) && !v.empty()) return true;
+    return false;
+}
 
 // what the saved files hold: method = the backend's saved method (0 off, 1 re-psn, 2 community)
 // With re-psn (method 1): JSP_ROLLBACK=1 without a role key is NC_NATIVE; with a role key it is the refused pair.
@@ -174,25 +221,29 @@ template <class Get> int running_netcode(Get get)
 }
 
 // the rows of the page for the working choice (Online page row ids), top to bottom
-inline std::vector<int> rows_for(int nc, bool host, bool repsn = false)
+// method: the backend's (1 re-psn, 2 community). re-psn (standard): Server and Online name; Community: the preset; re-psn (rollback): Connection, Role, Server, Online name, Relay
+// (at most 9 rows: the page draws them at a pitch of 30 when there are more than 8, 34 for 8); direct IP rollback: Connection, Role, Port or Host address.
+inline std::vector<int> rows_for(int nc, bool host, bool repsn = false, int method = 1, bool role_auto = true)
 {
     std::vector<int> r{ R_NETCODE };
-    if (nc == NC_DELAY) { r.push_back(R_METHOD); r.push_back(R_SERVER); r.push_back(R_NAME); r.push_back(R_PRESET); }
-    else if (nc == NC_NATIVE) { r.push_back(R_SERVER); r.push_back(R_NAME); r.push_back(R_RELAY); }   // always re-psn (the community method has no client)
+    if (nc == NC_NATIVE) { r.push_back(R_SERVER); r.push_back(R_NAME); r.push_back(R_RELAY); }
+    else if (nc == NC_DELAY) { if (method == 2) r.push_back(R_PRESET); else { r.push_back(R_SERVER); r.push_back(R_NAME); } }
     else if (nc == NC_ROLLBACK) {
-        r.push_back(R_CONN); r.push_back(R_ROLE);
-        if (repsn) r.push_back(R_RELAY); else r.push_back(host ? R_PORT : R_JOIN);
+        r.push_back(R_CONN);
+        if (repsn) { if (!role_auto) r.push_back(R_ROLE); r.push_back(R_SERVER); r.push_back(R_NAME); r.push_back(R_CODE); r.push_back(R_RELAY); }   // the Role row only shows an advanced override that is set
+        else { r.push_back(R_ROLE); r.push_back(host ? R_PORT : R_JOIN); }
     }
     r.push_back(R_SAVE); r.push_back(R_DISCARD);
     return r;
 }
 
-inline std::string row_text(int row, int nc, const Rollback& rb)
+inline std::string row_text(int row, int nc, const Rollback& rb, int method = 1)
 {
     switch (row) {
-    case R_NETCODE: return std::string("Netcode: ") + name_of(nc);
-    case R_CONN: return std::string("Connection: ") + (rb.repsn ? (kRepsnWired ? "re-psn" : "re-psn (not wired yet)") : "Direct IP");
-    case R_ROLE: return std::string("Role: ") + (rb.repsn ? (rb.host ? "Host (create a room)" : "Join (oldest room)")
+    case R_NETCODE: return std::string("Online: ") + name_of(nc, method, !rb.repsn) + (nc == NC_ROLLBACK && (!rb.repsn || !rb.role_auto) ? (rb.host ? ", Host" : ", Join") : "");   // the role, plainly (two Joins never meet)
+    case R_CONN: return std::string("Connection: ") + (rb.repsn ? (kRepsnWired ? "re-psn" : "re-psn (not wired yet)") : "Direct IP (advanced)");
+    case R_CODE: return "Match code: " + (rb.code.empty() ? std::string("(none)") : rb.code);
+    case R_ROLE: return std::string("Role: ") + (rb.repsn ? (rb.role_auto ? "Auto (advanced)" : rb.host ? "Host (advanced)" : "Join (advanced)")
                                                          : (rb.host ? "Host (others join you)" : "Join (a host's address)"));
     case R_RELAY: return std::string("Allow relay: ") + (rb.relay ? "Yes" : "No");
     case R_PORT: return "Port: " + rb.port;
@@ -205,28 +256,32 @@ inline std::string row_text(int row, int nc, const Rollback& rb)
 // the one-line statement of the exclusion rule for the working choice (shown under the rows)
 inline const char* exclusion_line(int nc)
 {
-    return nc == NC_NATIVE ? "Online Battle > Friendly Match (2 vs 2) on the online server; rollback runs the fight."
-         : nc == NC_ROLLBACK ? "Rollback replaces Delay: the game's own online is off once saved."
-         : nc == NC_DELAY ? "Delay is the game's own online: Rollback is off once saved."
-         : "Online play is off. Only one netcode can be on at a time.";
+    return nc == NC_NATIVE ? "Use Online Battle > Friendly Match for native rollback."
+         : nc == NC_ROLLBACK ? "Rollback matches start from Free Battle; the Online menu is for re-psn (standard)."
+         : nc == NC_DELAY ? "One choice: Rollback is off once saved."
+         : "Online play is off. Only one online method can be on at a time.";
 }
 
 // "This session: X. Saved: Y." and whether a restart is needed (the saved choice differs from what this process started with)
-inline std::string status_line(int running, int saved, bool* restart)
+// run_m / saved_m: the game's own online method of each side (1 re-psn, 2 community); saved_direct: the saved rollback is a direct IP one.
+// A restart is needed when the one choice differs (the saved choice as a Mode against what this process runs).
+inline std::string status_line(int running, int saved, bool* restart, int run_m = 1, int saved_m = 1, bool saved_direct = false, const std::string& run_sig = "", const std::string& saved_sig = "")
 {
-    auto nm = [](int n) { return n == NC_CONFLICT ? "refused" : n == NC_NATIVE ? "Online Battle + rollback" : n == NC_ROLLBACK ? "Rollback" : n == NC_DELAY ? "Delay" : "Off"; };
-    if (restart) *restart = running != saved;
-    return std::string("This session: ") + nm(running) + ".  Saved: " + nm(saved) + (running != saved ? ".  Restart to apply." : ".");
+    auto nm = [](int n, int m, bool d) -> std::string { return n == NC_CONFLICT ? "refused" : name_of(n, m, d); };
+    // Rollback saved and running: any difference of the saved configuration (connection, role, relay, port or address) needs a restart too, not only the method
+    const bool differ = running != saved || (running == NC_DELAY && run_m != saved_m) || (running == NC_ROLLBACK && run_sig != saved_sig);
+    if (restart) *restart = differ;
+    return std::string("This session: ") + nm(running, run_m, running == NC_ROLLBACK && run_sig.rfind("direct;", 0) == 0) + ".  Saved: " + nm(saved, saved_m, saved_direct) + (differ ? ".  Restart to apply." : ".");
 }
 // The same, when a gameplay mod set turned the game's own online off for this session (kKeyModsOff): with Delay saved, a restart would not
 // turn it on while the mods are on, so the line names the cause instead of "Restart to apply".
-inline std::string status_line(int running, int saved, bool* restart, bool mods_off)
+inline std::string status_line(int running, int saved, bool* restart, bool mods_off, int run_m = 1, int saved_m = 1, bool saved_direct = false, const std::string& run_sig = "", const std::string& saved_sig = "")
 {
-    if (mods_off && saved == NC_DELAY) {
+    if (mods_off && (saved == NC_DELAY || saved == NC_NATIVE)) {
         if (restart) *restart = false;
         return "This session: off (gameplay mods are on); turn the mods off to play online.";
     }
-    return status_line(running, saved, restart);
+    return status_line(running, saved, restart, run_m, saved_m, saved_direct, run_sig, saved_sig);
 }
 
 // ---- the start decision (jsp_net_game.cpp EnvInit side; host-tested) -------------------------------------------------------------------------------------------
@@ -272,7 +327,7 @@ enum class Boot { NotRequested, Go, Refused };
 enum class Refusal : int {
     None = 0,
     BothOn,           // JSP_ROLLBACK=1 and the game's own online (PS3_NET_ONLINE) both on: neither runs
-    RepsnNoRole,      // JSP_ROLLBACK_VIA=repsn without JSP_ROLLBACK_ROLE=host or join
+    RepsnNoRole,      // JSP_ROLLBACK_VIA=repsn with a JSP_ROLLBACK_ROLE that is not auto, host or join
     BadListen,        // JSP_ROLLBACK_LISTEN is not a port from 1 to 65535
     RoleKeys,         // direct IP: both JSP_ROLLBACK_LISTEN and JSP_ROLLBACK_JOIN (neither is the lobby start, see resolve_env); a bench with a role key or a bad depth
     BadJoin,          // JSP_ROLLBACK_JOIN is not IP:PORT
@@ -283,6 +338,7 @@ enum class Refusal : int {
     // FIX (region): not a US 1.00 disc (jsp_native_fight_supported() == 0): the Online Battle + rollback takeover is off and the game's own netcode plays.
     // jsp_net_native_fight.cpp turns native-room pairing off itself; jsp_net_game.cpp sets this code for the notice (note_off) when it reads that.
     NativeUsOnly,
+    BadCode,          // over re-psn: JSP_ROLLBACK_CODE is not 4 to 8 letters or digits
     Count
 };
 // Where the game's own online came from (jsp_online.cpp's start-up reading), for the BothOn text.
@@ -300,15 +356,16 @@ inline Notice notice_text(Refusal r, int src = SRC_REPSN_INI)
         if (src == SRC_PSNR_FLAG) put("the --psnr launch option turns on the game's own online.", "Remove --psnr to use rollback. Only one online method can be on.");
         else if (src == SRC_ENVIRONMENT) put("PSNR_SERVER is set (the game's own online).", "Remove PSNR_SERVER to use rollback. Only one online method can be on.");
         else if (src == SRC_REPSN_INI) put("repsn.ini has enabled=1 (the game's own online) and a rollback role key is set.", "Remove JSP_ROLLBACK_LISTEN/JOIN/VIA for Online Battle + rollback, or set enabled=0 in repsn.ini.");
-        else put("the game's own online (PS3_NET_ONLINE) is on too.", "Turn the game's own online off to use rollback. Only one online method can be on.");
+        else put("the game's own online is on and a rollback role key is set.", "Turn the game's own online off to use custom rollback.");
         break;
-    case Refusal::RepsnNoRole: put("JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join.", "Add JSP_ROLLBACK_ROLE=host or join to play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::RepsnNoRole: put("JSP_ROLLBACK_ROLE is not auto, host or join.", "Use JSP_ROLLBACK_ROLE=auto (or no line) in play_settings.txt, or Port Settings > Online."); break;
+    case Refusal::BadCode: put("JSP_ROLLBACK_CODE is not 4 to 8 letters or digits.", "Fix or remove JSP_ROLLBACK_CODE in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::BadListen: put("JSP_ROLLBACK_LISTEN is not a port from 1 to 65535.", "Set JSP_ROLLBACK_LISTEN=36200 (any free port) in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::RoleKeys: put("set at most one of JSP_ROLLBACK_LISTEN (host) or JSP_ROLLBACK_JOIN (join).", "Keep only one of the two lines in play_settings.txt, or Options > Port Settings > Online."); break;
     case Refusal::BadJoin: put("JSP_ROLLBACK_JOIN is not IP:PORT (for example 192.0.2.10:36200).", "Set JSP_ROLLBACK_JOIN=IP:PORT of the host in play_settings.txt, or Port Settings > Online."); break;
     case Refusal::NotWired: put("this build cannot reach re-psn rooms.", "Use a direct IP connection (JSP_ROLLBACK_LISTEN or JSP_ROLLBACK_JOIN)."); break;
-    case Refusal::RepsnNoIdentity: put("repsn.ini has no valid server= or name=.", "Set server= and name= in repsn.ini (keep enabled=0 for rollback), or Port Settings > Online."); break;
-    case Refusal::RepsnLongName: put("the online name is longer than 16 characters.", "Pick a shorter online name: settings window, Online tab (or name= in repsn.ini)."); break;
+    case Refusal::RepsnNoIdentity: put("re-psn (rollback) needs a valid server= and name= in repsn.ini.", "Set server= and name= in repsn.ini (keep enabled=0 for rollback), or Port Settings > Online."); break;
+    case Refusal::RepsnLongName: put("the online name for re-psn (rollback) is longer than 16 characters.", "Use a shorter name= in repsn.ini, or Port Settings > Online."); break;
     case Refusal::NoSocket: put("the UDP port could not be opened.", "Close the program that uses it, or pick another JSP_ROLLBACK_LISTEN port."); break;
     case Refusal::NativeUsOnly: put("rollback needs the US disc (BLUS31519).", "Online Battle still works on this disc, with the game's own netcode."); break;
     default: break;
@@ -374,7 +431,9 @@ Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* w
     }
     if (via && jps::ieq(via, "repsn")) {
         const char* role = get(kKeyRole);
-        if (!role || !(jps::ieq(role, "host") || jps::ieq(role, "join"))) return refuse(Refusal::RepsnNoRole, "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off");
+        if (role && *role && !(jps::ieq(role, "auto") || jps::ieq(role, "host") || jps::ieq(role, "join"))) return refuse(Refusal::RepsnNoRole, "JSP_ROLLBACK_ROLE is not auto, host or join: rollback off");   // absent or auto: nobody picks, the games find each other
+        const char* code = get(kKeyCode);
+        if (code && *code && !normalize_code(code, nullptr)) return refuse(Refusal::BadCode, "JSP_ROLLBACK_CODE is not 4 to 8 letters or digits: rollback off");   // the value is not logged
         if (hl && !valid_port(l)) return refuse(Refusal::BadListen, "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off");   // optional over re-psn (0 = any port when absent)
         if (!kRepsnWired) return refuse(Refusal::NotWired, "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off");
         goto defaults;

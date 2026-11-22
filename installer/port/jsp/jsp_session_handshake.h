@@ -150,6 +150,7 @@ public:
     // Opens a session for a room. Fresh session id per match; roster includes the host.
     Reason begin(uint64_t session, uint8_t roster, uint64_t seed, uint64_t now)
     {
+        if (caps_.content == Digest{}) return Reason::ContentUnavailable;
         if (!session || !(roster & (1u << slot_)) || (roster & ~0x0f)) return Reason::Malformed;
         release();
         rs_.drop(Msg::Propose); rs_.drop(Msg::Start); rs_.drop(Msg::Cancel);
@@ -216,7 +217,7 @@ public:
             r = detail::check_caps(peers_caps_[p], v, &id);
             if (r != Reason::None) { bad_peer_ = p; bad_id_ = id; return r; }
         }
-        Manifest m; m.session = session_; m.revision = revision_ + 1; m.host = slot_; m.roster = roster_; m.seed = seed_; m.values = v;
+        Manifest m; m.session = session_; m.revision = revision_ + 1; m.host = slot_; m.roster = roster_; m.seed = seed_; m.values = v; m.content = caps_.content;
         Digest applied;
         Reason why;
         if (detail::install_local(local_, m, &applied, &why, &id, this) != Res::Ok) {
@@ -299,7 +300,6 @@ public:
             uint8_t slot; Caps pc;
             if (decode_hello(d, n, &slot, &pc) != Reason::None || slot != from) { ++dropped_; return; }
             if (state_ == State::Started) { ++dropped_; return; }                 // a mid-match Hello never ends the match
-            if (pc.build != caps_.build) { fail(State::Failed, Reason::BuildMismatch, from); return; }
             const bool rejoin = pc.epoch != peers_caps_[from].epoch;
             if (rejoin) {
                 // A late Hello of an older join must not rebind the peer to the old epoch: only an epoch not seen before is accepted.
@@ -308,6 +308,16 @@ public:
                 for (uint32_t e : seen) if (e == pc.epoch) { ++dropped_; return; }
                 if (seen.size() >= 16) seen.erase(seen.begin());
                 seen.push_back(pc.epoch);
+            }
+            // Bind the Cancel to this Hello even when its identity prevents admission.
+            Reason mismatch = Reason::None;
+            if (pc.content == Digest{}) mismatch = Reason::ContentUnavailable;
+            else if (pc.content != caps_.content) mismatch = Reason::ContentMismatch;
+            else if (pc.build != caps_.build) mismatch = Reason::BuildMismatch;
+            if (mismatch != Reason::None) {
+                peers_caps_[from].epoch = pc.epoch;
+                fail(State::Failed, mismatch, from);
+                return;
             }
             last_heard_[from] = now;              // a new join of this peer (or its first Hello)
             if (state_ != State::Open) {
@@ -435,6 +445,7 @@ public:
     // Local join binds the session id; a proposal cannot choose it.
     Reason join(uint64_t session, uint8_t host_peer, uint64_t now)
     {
+        if (caps_.content == Digest{}) return Reason::ContentUnavailable;
         if (!session || host_peer >= kMaxRoster || host_peer == slot_ || slot_ >= kMaxRoster) return Reason::Malformed;
         release();
         rs_.drop(Msg::Hello); rs_.drop(Msg::Ack); rs_.drop(Msg::Reject); rs_.drop(Msg::Cancel);
@@ -576,6 +587,7 @@ private:
         }
         Id id = Id::Rollback;
         if (m.host != host_ || !(m.roster & (1u << slot_))) { reject(m.revision, Reason::NotInRoster, id); return; }
+        if (m.content != caps_.content) { reject(m.revision, Reason::ContentMismatch, id); return; }
         if (host_build != caps_.build) { reject(m.revision, Reason::BuildMismatch, id); return; }
         if (local_.debug_switch() || caps_.debug_active) { reject(m.revision, Reason::DebugSwitch, id); return; }
         Reason r = detail::check_caps(caps_, m.values, &id);
@@ -623,6 +635,15 @@ private:
     Manifest manifest_; Digest digest_{}, applied_{};
     detail::Resender rs_;
 };
+
+// The game adapter calls this under the pump mutex before processing or starting a match.
+inline bool require_live_content(bool available, Host* host, Client* client)
+{
+    if (available) return true;
+    if (host && !terminal(host->state())) host->cancel(Reason::ContentChanged);
+    if (client && !terminal(client->state())) client->abort(Reason::ContentChanged);
+    return false;
+}
 
 } // namespace jpsm
 #endif

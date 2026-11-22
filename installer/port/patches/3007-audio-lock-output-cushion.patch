@@ -18,11 +18,21 @@ thread never waits on the device in the lock):
 - one "[audio-lock]" line when the lock ends (device underruns, concealed gaps, squeezed / dropped blocks, rate range, level), every ~5 s
   with AUDIO_LOCK_LOG=1, also with the smoothing off.
 
+The mix thread adopts the free-running fill setting with its device, refreshes room before capacity, and limits concealment to the available device space. Device output delay and perceived audio quality need measurement on this composition.
+
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index fe85113..4be76f5 100644
+index 09b763a..567d0bd 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
-@@ -248,6 +248,7 @@ static IAudioClient*        s_wasapi_client = NULL;
+@@ -241,6 +241,7 @@ typedef struct {
+     IAudioRenderClient* render;
+     HANDLE              event;
+     UINT32              buf_frames;
++    int                 fill_ms;
+     wchar_t             id[128];   /* endpoint id the stream was opened on */
+ } wasapi_dev;
+
+@@ -248,6 +249,7 @@ static IAudioClient*        s_wasapi_client = NULL;
  static IAudioRenderClient*  s_wasapi_render = NULL;
  static HANDLE               s_wasapi_event  = NULL;
  static UINT32               s_wasapi_buf_frames = 0;
@@ -30,19 +40,27 @@ index fe85113..4be76f5 100644
  static wchar_t              s_wasapi_dev_id[128];
  /* J-Stars patch 3004: re-open after a lost device. State is touched by the mix thread only, except the staging
   * struct, which the opener thread owns until it publishes s_wasapi_open_state 2 or 3. */
-@@ -323,6 +324,11 @@ static HRESULT wasapi_open_default(wasapi_dev* d)
+@@ -323,6 +325,11 @@ static HRESULT wasapi_open_default(wasapi_dev* d)
      REFERENCE_TIME buf_duration = 600000; /* 60 ms in 100 ns units */
      { const char* e = getenv("PS3_AUDIO_BUF_MS"); const int ms = e ? atoi(e) : 0;
        if (ms >= 10 && ms <= 500) buf_duration = (REFERENCE_TIME)ms * 10000; }
 +    /* patch 3007: the tick-locked mode of a rollback match keeps a cushion on top of a whole tick's burst: open the device with AUDIO_LOCK_BUF_MS
 +     * (default 150, 0 = off) when that is bigger; the free-running mode still fills only the PS3_AUDIO_BUF_MS above, so its latency is unchanged. */
-+    s_lk_fill_ms = (int)(buf_duration / 10000);
++    d->fill_ms = (int)(buf_duration / 10000);
 +    { const char* e = getenv("AUDIO_LOCK_BUF_MS"); const int ms = (e && *e) ? atoi(e) : 150;
 +      if (ms >= 10 && ms <= 500 && (REFERENCE_TIME)ms * 10000 > buf_duration) buf_duration = (REFERENCE_TIME)ms * 10000; }
      d->event = CreateEventW(NULL, FALSE, FALSE, NULL);
  
      /* Shared mode only takes the device's own mix format unless the stream
-@@ -772,6 +778,190 @@ void ps3_audio_lock_rewind(long long blocks)
+@@ -385,6 +392,7 @@ static void wasapi_adopt(const wasapi_dev* d)
+ {
+     s_wasapi_client = d->client; s_wasapi_render = d->render; s_wasapi_event = d->event;
+     s_wasapi_buf_frames = d->buf_frames;
++    s_lk_fill_ms = d->fill_ms;   /* publish when the mix thread adopts this device */
+     wcsncpy(s_wasapi_dev_id, d->id, 127); s_wasapi_dev_id[127] = 0;
+ }
+
+@@ -775,6 +783,196 @@ void ps3_audio_lock_rewind(long long blocks)
      g_ps3_audio_lock_done = blocks; g_ps3_audio_lock_target = blocks;
  }
  
@@ -163,16 +181,21 @@ index fe85113..4be76f5 100644
 +static void lk_idle_tail(void)
 +{
 +    if (!s_lk_smooth || s_lk_ring_w < LK_H) return;
-+    const int cap = lk_cap_frames(), rm = audio_backend_room();
++    const int rm = audio_backend_room();   /* may adopt a reopened device */
++    const int cap = lk_cap_frames();
 +    if (cap <= 0 || rm < 0) return;
 +    int level = cap - rm;
 +    if (level == 0 && !s_lk_conc) s_lk_dry++;
 +    const int low = s_lk_low_ms * (CELL_AUDIO_SAMPLE_RATE / 1000);
 +    if (level >= low) return;
 +    if (!s_lk_conc) lk_conc_start();
-+    while (level < low + (int)LK_N) {
-+        for (u32 i = 0; i < LK_N; i++) lk_conc_frame(&s_lk_fill[i * 2]);
-+        audio_backend_submit(s_lk_fill, LK_N); level += LK_N;   /* not into the history: the loop keeps its source */
++    int target = low + (int)LK_N;
++    if (target > cap) target = cap;
++    while (level < target) {
++        int frames = target - level;
++        if (frames > (int)LK_N) frames = (int)LK_N;
++        for (int i = 0; i < frames; i++) lk_conc_frame(&s_lk_fill[i * 2]);
++        audio_backend_submit(s_lk_fill, (u32)frames); level += frames;   /* not into the history: the loop keeps its source */
 +    }
 +}
 +/* One mixed, unmuted block (s_mix_buffer) to the device. */
@@ -180,8 +203,9 @@ index fe85113..4be76f5 100644
 +{
 +    s_lk_blocks++;
 +    if (s_lk_log && (s_lk_blocks % 938) == 0) lk_report("running");
-+    const int cap = lk_cap_frames(), rm = audio_backend_room();
-+    if (rm < 0 || cap <= 0) { audio_backend_submit(s_mix_buffer, LK_N); s_lk_burst = 0; return; }   /* no device: as before */
++    const int rm = audio_backend_room();   /* may adopt a reopened device */
++    const int cap = lk_cap_frames();
++    if (rm < 0 || cap <= 0) { audio_backend_submit(s_mix_buffer, LK_N); s_lk_burst = 1; return; }   /* no device: as before */
 +    const int level = cap - rm, cushion = lk_cushion_frames();
 +    if (s_lk_burst) {   /* the first block after an idle wait: the level now is the low point before this tick's burst */
 +        s_lk_burst = 0; s_lk_bursts++; s_lk_trough_sum += level; if (s_lk_trough_min < 0 || level < s_lk_trough_min) s_lk_trough_min = level;
@@ -233,7 +257,7 @@ index fe85113..4be76f5 100644
  #ifdef _WIN32
  static unsigned long long g_audio_underruns;
  static unsigned __stdcall audio_mix_thread_func(void* arg)
-@@ -803,21 +993,25 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -806,21 +1004,25 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      if (!s_lock_wake) s_lock_wake = CreateEventW(NULL, FALSE, FALSE, NULL);   /* patch 3005 */
      while (s_mix_thread_running) {
          if (g_ps3_audio_lock_target >= 0) {   /* patch 3005: tick-locked (see ps3_audio_lock_idle) */
@@ -243,8 +267,9 @@ index fe85113..4be76f5 100644
              audio_mix_one_block();
 -            if (!g_ps3_audio_lock_mute) { const int rm = audio_backend_room(); if (rm < 0 || rm >= CELL_AUDIO_BLOCK_SAMPLES) audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES); }
 +            if (!g_ps3_audio_lock_mute) lk_submit_block();   /* patch 3007: the output side (cushion, rate control, concealment, counters) */
-             g_ps3_audio_lock_done++;
              audio_notify_event_queues();
+-            g_ps3_audio_lock_done++;   /* publish the block only after its notification has been queued */
++            g_ps3_audio_lock_done++;   /* publish only after the notification is queued */
              QueryPerformanceCounter(&q0); blocks = 0;   /* back on the clock from here when the lock ends */
              continue;
          }

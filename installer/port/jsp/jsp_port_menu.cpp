@@ -52,6 +52,7 @@
 //     (pad_filter returns early for any other port), so while the page is open the game still sees port 1's input. Not checked: needs a
 //     run with both on (both are on by default now).
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -59,7 +60,10 @@
 #include <string>
 #include <vector>
 #include "jsp_version_line.h"   // the version line (text and value choice, host-tested: installer/tools/version_line_test.cpp)
-#include "jsp_net_online.h"      // ENHANCEMENT (in-game netcode option): the Netcode choice Off / Delay / Rollback (host-tested: installer/tools/net_online_test.cpp)
+#include "jsp_online_status.h"
+#include "jsp_overlay_owner.h"
+#include "jsp_net_online.h"      // ENHANCEMENT (in-game netcode option): the one choice Off / re-psn (standard) / re-psn (rollback) / Community (host-tested: installer/tools/net_online_test.cpp)
+#include "jsp_overlay_api.h"
 #include "jsp_settings.h"        // the launcher's settings as data and the settings file model (host-tested: installer/tools/settings_test.cpp)
 
 #ifndef JSP_PORT_MENU_TEST
@@ -69,6 +73,7 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void
 #endif
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
+#include "jsp_overlay_owner.h"
 #include "jsp_overlay_api.h"
 extern "C" uint32_t cellGcm_flip_request_count(void);
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
@@ -85,6 +90,7 @@ extern "C" int jsp_online_edit_get(int field, char* out, int n);
 extern "C" int jsp_online_edit_set(int field, const char* v, char* hint, int n);
 extern "C" void jsp_online_edit_cycle(int field, int dir);
 extern "C" int jsp_online_edit_save(char* msg, int n);
+extern "C" int jsp_online_running_method(void);
 extern "C" int jsp_online_edit_method(void);                      // ENHANCEMENT (in-game netcode option): 0 off, 1 re-psn, 2 community (the working copy)
 extern "C" void jsp_online_edit_set_method(int m);
 extern "C" int jsp_online_edit_check(char* why, int n);            // 0 the working copy can be saved, 1 not (reason in why)
@@ -118,7 +124,9 @@ struct Backend {
     virtual bool save(std::string& msg) = 0;                           // writes the files; msg: confirmation or reason
     virtual const char* charset(int field) = 0;                        // the letters the picker offers, in order
     virtual size_t max_len(int field) = 0;
-    // ENHANCEMENT (in-game netcode option): the Netcode choice drives the method directly (defaults: a backend without them has no Netcode row use)
+    // ENHANCEMENT (in-game netcode option): the one choice drives the method directly (defaults: a backend without them has no Netcode row use)
+    virtual bool connection_status(JspOnlineStatus&) { return false; }
+    virtual int running_method() { return 1; }                          // immutable startup backend
     virtual int method() { return 0; }                                   // 0 off, 1 re-psn, 2 community
     virtual void set_method(int) {}
     virtual std::string check() { return ""; }                           // "" when the working copy can be saved, else the reason
@@ -165,6 +173,9 @@ struct Menu {
     size_t cpos = 0;              // picker position; == buf.size() is the empty slot after the last letter
     std::string msg;              // line under the rows
     bool msg_err = false, edited = false;
+    bool connection_have = false, connection_sampled = false;
+    uint64_t connection_sample_ms = 0;
+    JspOnlineStatus connection_observed = jpon::empty();
     std::vector<std::string> events;   // for the log, drained by the glue
     // the settings pages (Display, Graphics, Controls, Launcher only). io == nullptr: no such pages (JSP_PORT_MENU_EDIT=0).
     SettingsIO* io = nullptr;
@@ -180,7 +191,11 @@ struct Menu {
     int nc = 0, nc_saved = 0, nc_running = 0;   // working choice, saved choice, what this process started with (jpno::Netcode)
     bool nc_mods_off = false;                   // a gameplay mod set turned the game's own online off for this session (jpno::kKeyModsOff)
     jpno::Rollback rb;
-    int delay_method = 1;               // the last Delay method (1 re-psn, 2 community): leaving Delay and coming back keeps it
+    std::string run_sig, saved_sig;     // rollback configuration the process started with / as saved (jpno::rb_signature): a role-only change needs a restart too
+    int run_method = 1;                 // immutable startup backend, independent of the edited choice
+    int saved_method = 1;               // the backend's method as saved (for the status line)
+    bool saved_direct = false;          // the saved rollback is a direct IP one
+    bool direct_pref = false;           // the saved rollback is a direct IP one (or the Connection row was set to it): choosing re-psn (rollback) again keeps it
     std::string net_note;
 
     bool active() const { return page != CLOSED || wait_release; }
@@ -241,15 +256,37 @@ struct Menu {
     }
     void close() { page = CLOSED; sel = 0; editing = false; capturing = false; wait_release = true; dirty = true; }
     bool take_dirty() { const bool d = dirty; dirty = false; return d; }
+    bool poll_connection_status(uint64_t now_ms)
+    {
+        if (page != ONLINE || !be) return false;
+        if (connection_sampled && now_ms >= connection_sample_ms && now_ms - connection_sample_ms < 250) return false;
+        connection_sample_ms = now_ms;
+        connection_sampled = true;
+        JspOnlineStatus next = jpon::empty();
+        const bool have = be->connection_status(next);
+        const auto before = jpon::describe(connection_observed), after = jpon::describe(next);
+        const bool changed = have != connection_have || (have && (before.title != after.title || before.detail != after.detail || before.tone != after.tone));
+        connection_have = have;
+        connection_observed = next;
+        if (changed) dirty = true;
+        return changed;
+    }
+
 
     void enter_online()
     {
+        connection_have = connection_sampled = false;
         page = ONLINE; dirty = true; osel = 0; editing = false; edited = false; msg.clear(); msg_err = false;
         net_on = false; net_note.clear();
         if (be) { std::string note; const bool ok = be->begin(note); msg = note; msg_err = !ok; if (ok && io) { net_load(); if (!net_note.empty()) { msg = net_note; msg_err = true; } } }
     }
     // ENHANCEMENT (in-game netcode option): reads the saved Netcode (play_settings.txt + the backend's method) and what this process started with. A saved pair that is
     // both on (hand edit) shows as Off: the page never picks for the player, the game refuses it at start.
+    std::string online_status(bool* restart) const
+    {
+        return jpno::status_line(nc_running, nc_saved, restart, nc_mods_off, run_method, saved_method,
+                                 nc_saved == jpno::NC_ROLLBACK && saved_direct, run_sig, saved_sig);
+    }
     void net_load()
     {
         std::string text, note;
@@ -257,50 +294,62 @@ struct Menu {
         const jps::File f = jps::File::parse(text);
         rb = jpno::Rollback(); rb.load(f);
         nc_saved = jpno::saved_netcode(f, be->method());
-        delay_method = be->method() ? be->method() : 1;
+        direct_pref = saved_direct = nc_saved == jpno::NC_ROLLBACK && !rb.repsn;
+        saved_method = be->method() ? be->method() : 1;
+        run_method = be->running_method();
         nc_running = jpno::running_netcode([&](const char* k) { return io->active(k); });
         nc_mods_off = jpno::flag_on(io->active(jpno::kKeyModsOff));
+        run_sig = jpno::running_rb_signature([&](const char* k) { return io->active(k); }); saved_sig = rb.signature();
         nc = nc_saved == jpno::NC_CONFLICT ? jpno::NC_OFF : nc_saved;
-        if (nc_saved == jpno::NC_CONFLICT) { be->set_method(0); net_note = "Rollback and the game's own online are both on in the saved files; the game refuses both. Pick one and save."; }
+        if (nc_saved == jpno::NC_CONFLICT) {
+            be->set_method(0);
+            net_note = std::string("Rollback and ") + jpno::name_of(jpno::NC_DELAY, saved_method)
+                     + " were both on in the saved files; shown as Off. Pick one and save.";
+        }
         else if (rb.both_set) net_note = "Both a Rollback host port and a join address are saved; saving keeps only the one for the chosen role.";
         net_on = true; osel = 0;
     }
     // the rows of the Online page, top to bottom (row ids of jpno): the older page without net_on
     std::vector<int> orows() const
     {
-        if (net_on) return jpno::rows_for(nc, rb.host, rb.repsn);
+        if (net_on) return jpno::rows_for(nc, rb.host, rb.repsn, be->method(), rb.role_auto);
         return std::vector<int>{ ROW_METHOD, ROW_SERVER, ROW_NAME, ROW_PRESET, ROW_SAVE, ROW_DISCARD };
     }
     int orow() const { const std::vector<int> r = orows(); return r[(size_t)(osel < (int)r.size() ? osel : 0)]; }
-    bool field_is_text_row(int row) const { return field_is_text(row) || (net_on && (row == jpno::R_PORT || row == jpno::R_JOIN)); }
+    bool field_is_text_row(int row) const { return field_is_text(row) || (net_on && (row == jpno::R_PORT || row == jpno::R_JOIN || row == jpno::R_CODE)); }
     const char* field_charset(int f) const
     {
         if (net_on && f == jpno::R_PORT) return "0123456789";
         if (net_on && f == jpno::R_JOIN) return "0123456789.:";
+        if (net_on && f == jpno::R_CODE) return "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";   // the match code: 4 to 8 letters or digits, upper case
         return be->charset(f);
     }
     size_t field_max_len(int f) const
     {
         if (net_on && f == jpno::R_PORT) return 5;
         if (net_on && f == jpno::R_JOIN) return 21;   // 255.255.255.255:65535
+        if (net_on && f == jpno::R_CODE) return 8;
         return be->max_len(f);
     }
-    // Netcode: Off / Delay / Rollback. Only one is on: the backend's method follows (Delay needs re-psn or a community server; Off and Rollback switch it off).
-    void net_choose(int v)
+    // The one choice: Off / re-psn (standard) / re-psn (rollback) / Community (jpno::Mode). Only one is on: the backend's method follows (re-psn (standard) = method 1,
+    // Community = method 2; Off and Rollback switch it off).
+    void net_choose(int mode)
     {
-        if (nc == jpno::NC_DELAY && be->method()) delay_method = be->method();   // remember the Delay method before leaving it
-        nc = v;
-        be->set_method(v == jpno::NC_DELAY ? delay_method : v == jpno::NC_NATIVE ? 1 : 0);   // NC_NATIVE: the game's own online over re-psn, with rollback
+        const int before = nc;
+        nc = mode == jpno::M_NATIVE ? jpno::NC_NATIVE : mode == jpno::M_REPSN_RB ? jpno::NC_ROLLBACK : (mode == jpno::M_REPSN || mode == jpno::M_COMMUNITY) ? jpno::NC_DELAY : jpno::NC_OFF;
+        be->set_method((mode == jpno::M_REPSN || mode == jpno::M_NATIVE) ? 1 : mode == jpno::M_COMMUNITY ? 2 : 0);
+        if (nc == jpno::NC_ROLLBACK && before != jpno::NC_ROLLBACK) rb.repsn = !direct_pref;   // re-psn unless the direct IP connection was chosen before
         osel = 0; edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
-        events.push_back(std::string("online edit: netcode ") + jpno::name_of(nc));
+        events.push_back(std::string("online edit: choice ") + jpno::name_of(nc, be->method(), !rb.repsn));
     }
+    int mode() const { return jpno::mode_of(nc, be->method()); }
     // Save: the method that goes OFF is written first, so a failed or interrupted save never leaves both on.
     bool net_save(std::string& m)
     {
         const bool rbon = nc == jpno::NC_ROLLBACK, native = nc == jpno::NC_NATIVE;
         std::string why = rbon ? rb.check() : be->check();
         if (why.empty() && rbon && rb.repsn && (be->get_text(ROW_SERVER).empty() || be->get_text(ROW_NAME).empty()))
-            why = "Rollback over re-psn needs the server and online name of repsn.ini: set them under Delay first (they are kept).";
+            why = "re-psn (rollback) needs the Server and Online name above (3 to 16 of A-Z a-z 0-9 _ -, starting with a letter).";
         if (!why.empty()) { m = why; return false; }
         auto write_file = [&](std::string& err) {
             std::string text, note;
@@ -324,9 +373,13 @@ struct Menu {
             if (!be->save(m)) { if (nc_saved == jpno::NC_ROLLBACK) nc_saved = jpno::NC_OFF; m = "Rollback was switched off, but the online settings could not be saved: " + m; return false; }
         }
         nc_saved = nc;
-        m = native ? "Saved. Online Battle + rollback applies on the next start (Online Battle > Friendly Match)."
-          : nc == jpno::NC_ROLLBACK ? std::string("Saved. Rollback (") + (rb.host ? "host, port " + rb.port : "join " + rb.join) + ") applies on the next start."
-          : nc == jpno::NC_DELAY ? "Saved. Delay (the game's own online) applies on the next start."
+        direct_pref = saved_direct = nc == jpno::NC_ROLLBACK && !rb.repsn;
+        saved_method = be->method() ? be->method() : 1;
+        saved_sig = rb.signature();
+        m = native ? "Saved. On the next start, choose Online Battle > Friendly Match for rollback."
+          : nc == jpno::NC_ROLLBACK ? (rb.repsn ? std::string("Saved. re-psn (rollback)") + (rb.role_auto ? "" : rb.host ? ", Host" : ", Join") + " applies on the next start."
+                                                : std::string("Saved. Rollback (direct IP, ") + (rb.host ? "host, port " + rb.port : "join " + rb.join) + ") applies on the next start.")
+          : nc == jpno::NC_DELAY ? std::string("Saved. ") + jpno::name_of(nc, be->method()) + " applies on the next start."
           : "Saved. Online play is off from the next start.";
         return true;
     }
@@ -341,27 +394,30 @@ struct Menu {
         if (edge & BTN_DOWN) { osel = (osel + 1) % n; dirty = true; }
         if (edge & BTN_UP) { osel = (osel + n - 1) % n; dirty = true; }
         const int row = orow();   // ENHANCEMENT (in-game netcode option): the older page is the identity (row == osel)
-        if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_NETCODE) net_choose((nc + ((edge & BTN_LEFT) ? jpno::kNetcodeChoices - 1 : 1)) % jpno::kNetcodeChoices);
+        if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_NETCODE) net_choose((mode() + ((edge & BTN_LEFT) ? jpno::kModes - 1 : 1)) % jpno::kModes);
         else if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && (row == jpno::R_CONN || row == jpno::R_RELAY)) {   // ENHANCEMENT (rollback over re-psn)
-            if (row == jpno::R_CONN) { rb.repsn = !rb.repsn; if (osel >= (int)orows().size()) osel = (int)orows().size() - 1; }
+            if (row == jpno::R_CONN) { rb.repsn = !rb.repsn; direct_pref = !rb.repsn; if (osel >= (int)orows().size()) osel = (int)orows().size() - 1; }
             else rb.relay = !rb.relay;
             edited = true; msg = row == jpno::R_RELAY ? "Relay: used only if a direct path fails and the server offers it." : "Not saved yet."; msg_err = false; dirty = true;
-            events.push_back(std::string("online edit: rollback ") + (row == jpno::R_CONN ? (rb.repsn ? "connection re-psn" : "connection direct IP") : (rb.relay ? "relay allowed" : "relay not allowed")));
+            events.push_back(std::string("online edit: rollback ") + (row == jpno::R_CONN ? (rb.repsn ? "connection re-psn" : "connection direct IP (advanced)") : (rb.relay ? "relay allowed" : "relay not allowed")));
         }
         else if ((edge & (BTN_LEFT | BTN_RIGHT)) && net_on && row == jpno::R_ROLE) {
-            rb.host = !rb.host; edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
-            events.push_back(std::string("online edit: rollback role ") + (rb.host ? "host" : "join"));
+            // over re-psn the row only shows an advanced override: Auto -> Host -> Join -> Auto; direct IP: Host / Join
+            if (rb.repsn) { if (rb.role_auto) { rb.role_auto = false; rb.host = true; } else if (rb.host) rb.host = false; else { rb.role_auto = true; rb.host = true; } }
+            else rb.host = !rb.host;
+            if (osel >= (int)orows().size()) osel = (int)orows().size() - 1;
+            edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
+            events.push_back(std::string("online edit: rollback role ") + (rb.repsn && rb.role_auto ? "auto" : rb.host ? "host" : "join"));
         }
         else if ((edge & (BTN_LEFT | BTN_RIGHT)) && (row == ROW_METHOD || row == ROW_PRESET)) {
-            if (net_on && row == ROW_METHOD) be->set_method(be->method() == 1 ? 2 : 1);   // Delay: re-psn or a community server (Off is the Netcode row)
-            else be->cycle(row, (edge & BTN_LEFT) ? -1 : 1);
+            be->cycle(row, (edge & BTN_LEFT) ? -1 : 1);   // (the method is the one choice's row: with net_on only the preset row reaches this)
             edited = true; msg = "Not saved yet."; msg_err = false; dirty = true;
             events.push_back("online edit: " + be->row_text(row));
         }
         if (edge & BTN_CROSS) {
             if (field_is_text_row(row)) {
                 editing = true; ef = row; cpos = 0; dirty = true;
-                buf = net_on && row == jpno::R_PORT ? rb.port : net_on && row == jpno::R_JOIN ? rb.join : be->get_text(row);
+                buf = net_on && row == jpno::R_PORT ? rb.port : net_on && row == jpno::R_JOIN ? rb.join : net_on && row == jpno::R_CODE ? rb.code : be->get_text(row);
                 cpos = buf.size();
                 events.push_back(std::string("online edit: picker opened on ") + field_name(row));
             } else if (row == ROW_SAVE) {
@@ -384,7 +440,7 @@ struct Menu {
     }
     static const char* field_name(int row)
     {
-        return row == ROW_SERVER ? "server" : row == jpno::R_PORT ? "rollback port" : row == jpno::R_JOIN ? "rollback host address" : "name";
+        return row == ROW_SERVER ? "server" : row == jpno::R_PORT ? "rollback port" : row == jpno::R_JOIN ? "rollback host address" : row == jpno::R_CODE ? "match code" : "name";
     }
 
     // ---- the settings pages ----
@@ -576,17 +632,337 @@ struct Menu {
         if (edge & BTN_CROSS) {
             std::string hint;
             if (net_on && ef == jpno::R_PORT) { rb.port = buf; if (!buf.empty() && !jpno::valid_port(buf)) hint = "Not a valid port: a number from 1 to 65535."; }
+            else if (net_on && ef == jpno::R_CODE) { rb.code = buf; std::string c; if (!buf.empty() && !jpno::normalize_code(buf, &c)) hint = "Match code: 4 to 8 letters or digits, or empty for none."; }
             else if (net_on && ef == jpno::R_JOIN) { rb.join = buf; if (!buf.empty() && !jpno::valid_join(buf)) hint = "Not a valid address: IP:port, for example 192.0.2.10:36200."; }
             else hint = be->set_text(ef, buf);
             editing = false; edited = true; dirty = true;
             msg = hint.empty() ? "Not saved yet." : hint; msg_err = !hint.empty();
-            events.push_back(std::string("online edit: ") + field_name(ef) + " set to '" + buf + "'" + (hint.empty() ? " (valid)" : " (not valid yet)"));
+            if (net_on && ef == jpno::R_CODE) events.push_back(std::string("online edit: match code ") + (buf.empty() ? "cleared" : "set") + (hint.empty() ? " (valid)" : " (not valid yet)"));   // the code is never logged
+            else events.push_back(std::string("online edit: ") + field_name(ef) + " set to '" + buf + "'" + (hint.empty() ? " (valid)" : " (not valid yet)"));
         } else if (edge & BTN_CIRCLE) {
             editing = false; dirty = true;
             events.push_back("online edit: picker cancelled");
         }
     }
 };
+
+// The in-game pages and the synthetic host preview use the same layout. The sink
+// measures and draws the overlay font in the game's 1280x720 coordinate space.
+namespace menu_view {
+constexpr uint32_t white = 0xFFFFFFFF, gold = JSP_RGBA(255, 202, 76, 255);
+constexpr uint32_t muted = JSP_RGBA(190, 199, 217, 255), error = JSP_RGBA(255, 158, 130, 255);
+constexpr uint32_t rule = JSP_RGBA(64, 74, 96, 255);
+constexpr uint32_t caret_ink = JSP_RGBA(12, 16, 24, 255);
+constexpr int left = 212, right = 1068, text_x = 228, width = 824;
+constexpr int rows_y = 165, pitch = 34, detail_y = 454, footer_y = 619;
+
+const char* title(Page p)
+{
+    switch (p) {
+    case MAIN: return "Port Settings";
+    case ONLINE: return "Online";
+    case LAUNCHER: return "Mods & Launcher";
+    case CLOSED: return "Close";
+    default: return Menu::page_name(p);
+    }
+}
+
+const char* hub_detail(Page p)
+{
+    switch (p) {
+    case DISPLAY: return "Choose your render resolution, window size and display mode.";
+    case GRAPHICS: return "Adjust shadows, draw distance, edge smoothing and the fight HUD.";
+    case CONTROLS: return "Choose an input mode, change bindings or set the order of your controllers.";
+    case ONLINE: return "Choose how you connect and see which settings will apply on the next start.";
+    case LAUNCHER: return "Find Mods and settings that the launcher applies before the game starts.";
+    default: return "Return to the game's Options menu.";
+    }
+}
+
+const char* online_detail(int row)
+{
+    switch (row) {
+    case ROW_METHOD: case jpno::R_NETCODE: return "Choose the online method for the next game session.";
+    case ROW_SERVER: return "Set the server address. A port can follow the hostname.";
+    case ROW_NAME: return "Set the name other players will see.";
+    case ROW_PRESET: return "Choose a saved Community server preset.";
+    case jpno::R_CONN: return "Choose matchmaking via re-psn or a direct IP connection.";
+    case jpno::R_ROLE: return "Choose whether to host or join the match.";
+    case jpno::R_CODE: return "Use the same match code as your opponent to find each other.";
+    case jpno::R_RELAY: return "Allow a relay when a direct peer connection is unavailable.";
+    case jpno::R_PORT: return "Choose the port your opponent will connect to.";
+    case jpno::R_JOIN: return "Enter the host's IP address and port.";
+    case ROW_SAVE: return "Save your choices for the next game session.";
+    default: return "Reload the saved choices.";
+    }
+}
+
+struct Note { std::string text; uint32_t color; };
+
+template<class Sink>
+struct View {
+    Sink& out;
+
+    std::string clip(const std::string& text, float scale, float max, const char* suffix = "...") const
+    {
+        if (out.width(text, scale) <= max) return text;
+        size_t end = text.size();
+        while (end && out.width(text.substr(0, end) + suffix, scale) > max) --end;
+        return text.substr(0, end) + suffix;
+    }
+
+    std::vector<std::string> wrap(const std::string& text, float scale, float max) const
+    {
+        std::vector<std::string> lines;
+        size_t start = text.find_first_not_of(" \r\n\t");
+        while (start != std::string::npos) {
+            const size_t newline = text.find_first_of("\r\n", start);
+            const size_t limit = newline == std::string::npos ? text.size() : newline;
+            size_t end = start + 1;
+            while (end < limit && out.width(text.substr(start, end + 1 - start), scale) <= max) ++end;
+            if (end < limit) {
+                const size_t space = text.rfind(' ', end);
+                if (space != std::string::npos && space > start + (end - start) / 2) end = space;
+            }
+            lines.push_back(text.substr(start, end - start));
+            start = text.find_first_not_of(" \r\n\t", end);
+        }
+        return lines;
+    }
+
+    void frame(Page page)
+    {
+        out.rect(0, 0, 1280, 720, JSP_RGBA(0, 0, 0, 143));
+        out.rect(184, 66, 912, 602, JSP_RGBA(18, 23, 37, 248));
+        out.rect(184, 66, 912, 5, gold);
+        out.rect(184, 666, 912, 2, rule);
+        const char* trail = page == MAIN ? "Options" : page == KEYS || page == PADBTNS ? "Port Settings  >  Controls" : "Port Settings";
+        out.text(text_x, 85, trail, 0.71f, gold, 0);
+        out.text(text_x, 111, title(page), 1.46f, white, 0);
+        for (const int y : { 152, 446, 606 }) out.rect(left, y, right - left, 1, rule);
+    }
+
+    void row(int slot, bool selected)
+    {
+        const int y = rows_y + slot * pitch;
+        out.rect(left, y, right - left, pitch - 2, selected ? JSP_RGBA(246, 244, 232, 255) : JSP_RGBA(28, 35, 52, 255));
+        if (selected) out.rect(left, y, 5, pitch - 2, gold);
+    }
+
+    void row_text(int slot, int x, int max, const std::string& text, bool selected, float scale = 0.9f)
+    {
+        out.text(x, rows_y + slot * pitch + 6, clip(text, scale, max), scale, white, selected ? 1 : 0);
+    }
+
+    void scroll(int top, int count, int total)
+    {
+        if (total <= count) return;
+        const std::string range = "Rows " + std::to_string(top + 1) + "-" + std::to_string(top + count) + " of " + std::to_string(total);
+        auto right_text = [&](int y, const std::string& s, uint32_t color) {
+            out.text(right - 15 - out.width(s, 0.69f), y, s, 0.69f, color, 0);
+        };
+        right_text(102, range, muted);
+        right_text(123, top == 0 ? "More below" : top + count == total ? "More above" : "More above and below", gold);
+    }
+
+    void context(const std::vector<Note>& notes)
+    {
+        // Reserve the entire block before drawing. Messages are the first notes so
+        // even unexpectedly large input cannot push them out behind the controls.
+        std::vector<Note> lines;
+        float scale = 0.74f;
+        int step = 21, capacity = 7;
+        for (const int size : { 74, 64, 57 }) {
+            scale = size / 100.0f;
+            step = size == 74 ? 21 : size == 64 ? 18 : 16;
+            capacity = (606 - detail_y) / step;
+            lines.clear();
+            for (const Note& note : notes)
+                for (const std::string& line : wrap(note.text, scale, width)) lines.push_back({ line, note.color });
+            if ((int)lines.size() <= capacity) break;
+        }
+        if ((int)lines.size() > capacity) {
+            lines.resize((size_t)capacity);
+            lines.back() = { "More text was shortened to fit this panel.", muted };
+        }
+        for (size_t i = 0; i < lines.size(); ++i)
+            out.text(text_x, detail_y + (int)i * step, lines[i].text, scale, lines[i].color, 0);
+    }
+
+    void footer(const char* controls, const char* hint = "")
+    {
+        out.text(text_x, footer_y, clip(controls, 0.71f, width), 0.71f, white, 0);
+        if (*hint) out.text(text_x, footer_y + 22, clip(hint, 0.65f, width), 0.65f, muted, 0);
+    }
+
+    void hub(const Menu& m)
+    {
+        const auto pages = m.main_rows();
+        for (int i = 0; i < (int)pages.size(); ++i) {
+            const bool on = i == m.sel;
+            row(i, on);
+            row_text(i, text_x, width, title(pages[(size_t)i]), on, 0.98f);
+        }
+        const Page selected = pages[(size_t)m.sel];
+        std::vector<Note> notes{ { m.smsg, m.smsg_err ? error : gold }, { hub_detail(selected), white } };
+        notes.push_back({ "Choose a category. Changes marked * apply after restarting the game.", muted });
+        context(notes);
+        footer(selected == CLOSED ? "Up / Down  Select     Cross  Close     Circle  Close"
+                                  : "Up / Down  Select     Cross  Open     Circle  Close");
+    }
+
+    void settings(const Menu& m)
+    {
+        const int total = (int)m.srows.size();
+        const int count = std::min(kSettingsVisible, total);
+        const int top = std::min(m.stop, total - count);
+        for (int slot = 0; slot < count; ++slot) {
+            const SRow& r = m.srows[(size_t)(top + slot)];
+            const bool on = top + slot == m.ssel;
+            row(slot, on);
+            row_text(slot, text_x, 435, m.row_label(r), on);
+            std::string value = m.row_value(r);
+            if (m.row_pending(r)) value += " *";
+            if (!value.empty()) row_text(slot, 688, 364, value, on, 0.84f);
+        }
+        scroll(top, count, total);
+        const SRow& selected = m.srows[(size_t)m.ssel];
+        const char* action = "Left / Right  Change";
+        const char* detail = "Changes are saved immediately. * applies on the next start.";
+        switch (selected.kind) {
+        case SRow::ITEM: detail = jps::k_items[selected.idx].apply == jps::LIVE
+                                  ? "Changes take effect as soon as they are saved." : "Changes take effect the next time you start the game."; break;
+        case SRow::KEY: action = "Cross  Change binding"; detail = "Assign a key for the selected action."; break;
+        case SRow::PADBTN: detail = "Choose a controller button for the selected action."; break;
+        case SRow::OPEN: action = "Cross  Open"; detail = "Open the bindings for the saved input mode."; break;
+        case SRow::RESET: action = "Cross  Reset"; detail = "Restore the defaults on this page."; break;
+        case SRow::JOIN: action = "Cross  Start"; detail = "Press a button on each controller in order, or hold Select + L3 + R3 for 2 seconds to start."; break;
+        }
+        if (m.capturing) {
+            context({ { m.smsg, m.smsg_err ? error : gold },
+                      { m.model.mode() == 1 ? "Press a key or mouse button." : "Press a key.", white } });
+            footer("Esc or Circle  Cancel", "F11 stays the fullscreen key.");
+        } else {
+            context({ { m.smsg, m.smsg_err ? error : gold }, { detail, white } });
+            const std::string controls = std::string("Up / Down  Select     ") + action + "     Circle  Back";
+            footer(controls.c_str(), "* Saved for next start");
+        }
+    }
+
+    void picker(const Menu& m, int slot, const std::string& label)
+    {
+        constexpr float scale = 0.9f;
+        const size_t cursor = std::min(m.cpos, m.buf.size());
+        size_t start = 0;
+        while (start < cursor && out.width(label + "..." + m.buf.substr(start, cursor - start), scale) > width * 0.72f) ++start;
+        const std::string lead = label + (start ? "..." : "");
+        const std::string before = lead + m.buf.substr(start, cursor - start);
+        const bool empty = cursor == m.buf.size();
+        const std::string text = lead + m.buf.substr(start) + (empty ? " " : "");
+        row_text(slot, text_x, width, text, true, scale);
+        const float caret = empty ? 13.0f : out.width(m.buf.substr(cursor, 1), scale);
+        out.rect(text_x + (int)out.width(before, scale), rows_y + slot * pitch + 27, std::max(3, (int)caret), 3, caret_ink);
+    }
+
+    void online(const Menu& m, const std::vector<std::string>& startup)
+    {
+        const auto ids = m.orows();
+        const int total = (int)ids.size(), count = std::min(kSettingsVisible, total);
+        const int cursor = std::clamp(m.osel, 0, total - 1);
+        const int top = std::clamp(cursor - count / 2, 0, total - count);
+        std::string long_value;
+        for (int slot = 0; slot < count; ++slot) {
+            const int i = top + slot, id = ids[(size_t)i];
+            const bool on = i == cursor;
+            row(slot, on);
+            std::string text = id <= ROW_PRESET ? m.be->row_text(id)
+                              : m.net_on ? jpno::row_text(id, m.nc, m.rb, m.be->method())
+                              : id == ROW_SAVE ? "Save" : "Discard changes";
+            if (on && m.editing && id == m.ef) {
+                const size_t sep = text.find(": ");
+                picker(m, slot, sep == std::string::npos ? std::string() : text.substr(0, sep + 2));
+            } else {
+                row_text(slot, text_x, width, text, on);
+                if (on && out.width(text, 0.9f) > width) long_value = text;
+            }
+        }
+        scroll(top, count, total);
+        const int selected = ids[(size_t)cursor];
+        std::vector<Note> notes{ { !m.msg.empty() ? m.msg : m.edited ? "Not saved yet." : "", m.msg_err ? error : gold },
+                                 { online_detail(selected), white } };
+        if (m.net_on) {
+            bool restart = false;
+            const std::string status = m.online_status(&restart);
+            notes.push_back({ status, restart ? gold : muted });
+            notes.push_back({ jpno::exclusion_line(m.nc), muted });
+        } else if (!startup.empty()) {
+            notes.push_back({ startup.front(), muted });
+        }
+        if (m.connection_have) {
+            const auto connection = jpon::describe(m.connection_observed);
+            const uint32_t color = connection.tone == jpon::Tone::Warning ? error : connection.tone == jpon::Tone::Good ? gold : white;
+            notes.insert(notes.begin() + 1, { connection.title, color });
+            notes.push_back({ connection.detail, muted });
+        }
+        notes.push_back({ long_value, white });
+        context(notes);
+        if (m.editing) {
+            footer("Up / Down  Letter     Left / Right  Position     L1 / R1  Ten letters",
+                   "Square  Delete     Cross  Accept     Circle  Cancel");
+        } else {
+            const char* action = m.field_is_text_row(selected) ? "Cross  Edit" : selected == ROW_SAVE ? "Cross  Save"
+                               : selected == ROW_DISCARD ? "Cross  Discard" : "Left / Right  Change";
+            const std::string controls = std::string("Up / Down  Select     ") + action + "     Circle  Back";
+            footer(controls.c_str(), "Saved changes apply on the next start. Going back drops unsaved changes.");
+        }
+    }
+
+    void launcher()
+    {
+        for (int i = 0; i <= jps::k_launcher_only_count; ++i) {
+            const int y = rows_y + i * 38;
+            out.rect(left, y, right - left, 36, JSP_RGBA(28, 35, 52, 255));
+            const char* name = i == 0 ? "Mods" : jps::k_launcher_only[i - 1].what;
+            const char* why = i == 0 ? "Manage and enable mod packages from the launcher's Mods tab." : jps::k_launcher_only[i - 1].why;
+            out.text(text_x, y + 8, clip(name, 0.76f, 354), 0.76f, gold, 0);
+            const auto lines = wrap(why, 0.60f, 451);
+            for (int j = 0; j < (int)lines.size() && j < 2; ++j) {
+                const std::string line = j == 1 && lines.size() > 2 ? clip(lines[1] + "...", 0.60f, 451) : lines[(size_t)j];
+                out.text(601, y + 2 + j * 17, line, 0.60f, white, 0);
+            }
+        }
+        context({ { "Open the launcher to manage these features before your next game session.", white } });
+        footer("Cross or Circle  Back");
+    }
+
+    void readonly(const std::vector<std::string>& startup)
+    {
+        std::vector<std::string> lines;
+        for (const auto& text : startup)
+            for (auto& line : wrap(text, 0.82f, width)) lines.push_back(std::move(line));
+        if (lines.empty()) lines.push_back("No online settings were read at start.");
+        if (lines.size() > 11) { lines.resize(11); lines.back() = "Additional startup text was shortened."; }
+        for (size_t i = 0; i < lines.size(); ++i)
+            out.text(text_x, 172 + (int)i * 24, lines[i], 0.82f, white, 0);
+        context({ { "Read only. Change the online settings in the launcher and start the game again.", white } });
+        footer("Circle  Back");
+    }
+};
+
+template<class Sink>
+void draw(Sink& out, const Menu& m, const std::vector<std::string>& startup = {})
+{
+    if (m.page == CLOSED) return;
+    View<Sink> view{out};
+    view.frame(m.page);
+    if (m.page == MAIN) view.hub(m);
+    else if (m.page == LAUNCHER) view.launcher();
+    else if (m.page != ONLINE) view.settings(m);
+    else if (m.be) view.online(m, startup);
+    else view.readonly(startup);
+}
+
+}  // namespace menu_view
 
 }  // namespace jpm
 
@@ -630,6 +1006,15 @@ struct GameBackend : jpm::Backend {
     const char* charset(int f) override { return f == jpm::ROW_SERVER ? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_:"
                                                                       : "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"; }
     size_t max_len(int f) override { return f == jpm::ROW_SERVER ? 260 : 16; }
+    bool connection_status(JspOnlineStatus& status) override
+    {
+        status = jpon::empty();
+        if (jsp_net_status_snapshot(&status, sizeof status)) return true;
+        const int method = jsp_online_running_method();
+        status.phase = static_cast<uint32_t>(method == 1 ? jpon::Phase::NativeEnabled : method == 0 ? jpon::Phase::Offline : jpon::Phase::Unavailable);
+        return true;
+    }
+    int running_method() override { return jsp_online_running_method(); }
     int method() override { return jsp_online_edit_method(); }
     void set_method(int m) override { jsp_online_edit_set_method(m); }
     std::string check() override { char b[300] = ""; return jsp_online_edit_check(b, sizeof b) ? b : ""; }
@@ -720,132 +1105,15 @@ void poll_panel(int* panel, int* open, int* row)
     }
 }
 
-// ---- drawing: 1280x720 layout space, the game's own look where cheap (Fira Sans Heavy Italic art; white-grey with
-// black rim = the menu's "off" label, black with white glow = "on" on the highlight bar) ----
-
-// the editable Online page (same panel, font and colours as before). Rows at y 190 + 48 i; the picker underlines the letter at its position.
-void draw_online_edit(uint32_t white, uint32_t gold)
-{
-    using namespace jpm;
-    jsp_overlay_text_style(260, 120, "Port Settings - Online", 1.4f, white, 0);
-    // ENHANCEMENT (in-game netcode option): with the Netcode rows the list is shorter or longer by the choice (up to 7 rows), so the pitch is 40 instead of 48
-    const std::vector<int> orows = g_menu.orows();
-    const int pitch = g_menu.net_on ? 40 : 48;
-    for (int k = 0; k < (int)orows.size(); k++) {
-        const int i = orows[(size_t)k];
-        const int y = 188 + k * pitch;
-        const bool on = k == g_menu.osel;
-        if (on) jsp_overlay_fill_rect(250, y - 12, 780, pitch - 2, JSP_RGBA(255, 255, 255, 235));
-        std::string text;
-        if (i <= ROW_PRESET) text = g_backend.row_text(i);
-        else if (i >= jpno::R_NETCODE || g_menu.net_on) text = jpno::row_text(i, g_menu.nc, g_menu.rb);
-        else text = i == ROW_SAVE ? "Save" : "Discard changes";
-        const bool pick = g_menu.editing && g_menu.ef == i;
-        std::string label;
-        if (pick) {
-            label = i == ROW_SERVER ? "Server: " : i == jpno::R_PORT ? "Port: " : i == jpno::R_JOIN ? "Host address: " : "Online name: ";
-            text = label + g_menu.buf;
-        }
-        jsp_overlay_text_style(290, (float)y, text.c_str(), 1.0f, white, on ? 1 : 0);
-        if (pick) {
-            const float x0 = 290 + jsp_overlay_text_width(label.c_str(), 1.0f);
-            const float cx = x0 + jsp_overlay_text_width(g_menu.buf.substr(0, g_menu.cpos).c_str(), 1.0f);
-            const bool slot = g_menu.cpos >= g_menu.buf.size();
-            const float cw = slot ? 22.0f : jsp_overlay_text_width(g_menu.buf.substr(g_menu.cpos, 1).c_str(), 1.0f);
-            jsp_overlay_fill_rect((int)cx, y + 28, (int)cw, 4, gold);
-        }
-    }
-    char line[200];
-    if (g_menu.net_on) {
-        // the exclusion rule and what this session runs against what is saved (a restart applies a changed choice)
-        bool restart = false;
-        const std::string st = jpno::status_line(g_menu.nc_running, g_menu.nc_saved, &restart, g_menu.nc_mods_off);
-        jsp_overlay_text_style(260, 476, jpno::exclusion_line(g_menu.nc), 0.6f, white, 0);
-        jsp_overlay_text_style(260, 502, st.c_str(), 0.6f, restart ? gold : white, 0);
-    } else
-    if (jsp_online_describe(5, line, sizeof line) >= 0) jsp_overlay_text_style(290, 480, line, 0.7f, white, 0);
-    // the message under the rows, wrapped at 60 characters (the launcher's refusal texts run to ~80) so it stays inside the panel
-    const std::string m = !g_menu.msg.empty() ? g_menu.msg : g_menu.edited ? std::string("Not saved yet.") : std::string();
-    const uint32_t mc = g_menu.msg_err ? JSP_RGBA(255, 150, 110, 255) : white;
-    size_t from = 0; int ly = g_menu.net_on ? 530 : 510;
-    while (from < m.size() && ly < 574) {
-        size_t to = from + 60;
-        if (to >= m.size()) to = m.size();
-        else { size_t sp = m.rfind(' ', to); if (sp != std::string::npos && sp > from) to = sp; }
-        jsp_overlay_text_style(260, (float)ly, m.substr(from, to - from).c_str(), 0.7f, mc, 0);
-        from = to; while (from < m.size() && m[from] == ' ') from++;
-        ly += 28;
-    }
-    jsp_overlay_text_style(260, 578, g_menu.editing ? "Up/Down: letter  Left/Right: place  Square: delete  Cross: ok  Circle: cancel"
-                                                    : "Left/Right: change  Cross: edit or save  Circle: back (unsaved changes are dropped)", 0.5f, white, 0);
-    jsp_overlay_text_style(260, 598, g_menu.editing ? "L1 / R1: ten letters at a time" : g_menu.net_on ? "Netcode settings cannot change in a session: saved settings apply on the next start of the game." : "Online play cannot change in a session: saved settings apply on the next start.", 0.5f, white, 0);
-}
-
-// Text wrapped at `width` characters; returns the next y. Words are not split.
-int draw_wrapped(float x, int y, const std::string& m, size_t width, float scale, uint32_t col, int line_h, int max_y)
-{
-    size_t from = 0;
-    while (from < m.size() && y < max_y) {
-        size_t to = from + width;
-        if (to >= m.size()) to = m.size();
-        else { size_t sp = m.rfind(' ', to); if (sp != std::string::npos && sp > from) to = sp; }
-        jsp_overlay_text_style(x, (float)y, m.substr(from, to - from).c_str(), scale, col, 0);
-        from = to; while (from < m.size() && m[from] == ' ') from++;
-        y += line_h;
-    }
-    return y;
-}
-
-// A settings page: label left, value right, 8 rows at a time. "*" after a value: saved, the running game has not picked it up.
-void draw_settings(uint32_t white, uint32_t gold)
-{
-    using namespace jpm;
-    const Menu& m = g_menu;
-    jsp_overlay_text_style(260, 112, (std::string("Port Settings - ") + Menu::page_name(m.page)).c_str(), 1.4f, white, 0);
-    const int n = (int)m.srows.size();
-    for (int i = m.stop; i < n && i < m.stop + kSettingsVisible; i++) {
-        const SRow& r = m.srows[(size_t)i];
-        const int y = 170 + (i - m.stop) * 44;
-        const bool on = i == m.ssel;
-        if (on) jsp_overlay_fill_rect(250, y - 10, 780, 42, JSP_RGBA(255, 255, 255, 235));
-        jsp_overlay_text_style(290, (float)y, m.row_label(r).c_str(), 0.95f, white, on ? 1 : 0);
-        const std::string v = m.row_value(r);
-        if (!v.empty()) {
-            const std::string shown = m.row_pending(r) ? v + " *" : v;
-            jsp_overlay_text_style(640, (float)y, shown.c_str(), 0.85f, white, on ? 1 : 0);
-        }
-    }
-    if (m.stop > 0) jsp_overlay_text_style(930, 112, "more above", 0.5f, white, 0);
-    if (m.stop + kSettingsVisible < n) jsp_overlay_text_style(930, 536, "more below", 0.5f, white, 0);
-    const uint32_t mc = m.smsg_err ? JSP_RGBA(255, 150, 110, 255) : white;
-    if (!m.smsg.empty()) draw_wrapped(260, 536, m.smsg, 60, 0.7f, mc, 24, 572);
-    const SRow& cur = m.srows[(size_t)m.ssel];
-    if (m.capturing) {
-        jsp_overlay_text_style(260, 578, m.model.mode() == 1 ? "Press a key or a mouse button.  Esc or Circle: cancel" : "Press a key.  Esc or Circle: cancel", 0.5f, white, 0);
-        jsp_overlay_text_style(260, 598, "F11 stays the fullscreen key.", 0.5f, white, 0);
-    } else {
-        const char* h1 = cur.kind == SRow::KEY ? "Up/Down: select  Cross: change the key  Circle: back"
-                       : cur.kind == SRow::OPEN || cur.kind == SRow::RESET ? "Up/Down: select  Cross: open or reset  Circle: back"
-                       : cur.kind == SRow::JOIN ? "Up/Down: select  Cross: start  Circle: back.  Or hold Select + L3 + R3 for 2 s on a pad."
-                       : "Up/Down: select  Left/Right or Cross: change  Circle: back";
-        jsp_overlay_text_style(260, 578, h1, 0.5f, white, 0);
-        jsp_overlay_text_style(260, 598, "Every change is saved at once. * = saved; applies on the next start.", 0.5f, white, 0);
-    }
-    (void)gold;
-}
-
-// What the launcher keeps for itself, and why.
-void draw_launcher_only(uint32_t white)
-{
-    jsp_overlay_text_style(260, 112, "Port Settings - Launcher only", 1.4f, white, 0);
-    int y = 168;
-    for (int i = 0; i < jps::k_launcher_only_count; i++) {
-        jsp_overlay_text_style(290, (float)y, jps::k_launcher_only[i].what, 0.8f, JSP_RGBA(240, 190, 30, 255), 0);
-        y = draw_wrapped(310, y + 30, jps::k_launcher_only[i].why, 78, 0.55f, white, 22, 580);
-        y += 12;
-    }
-    jsp_overlay_text_style(260, 598, "Circle: back", 0.5f, white, 0);
-}
+// Production sink for the shared menu layout.
+struct Overlay {
+    void rect(int x, int y, int w, int h, uint32_t color) const
+    { jsp_overlay_fill_rect(x, y, w, h, color); }
+    void text(float x, int y, const std::string& text, float scale, uint32_t color, int style) const
+    { jsp_overlay_text_style(x, (float)y, text.c_str(), scale, color, style); }
+    float width(const std::string& text, float scale) const
+    { return jsp_overlay_text_width(text.c_str(), scale); }
+};
 
 // ---- ENHANCEMENT (display, default on): the version line on the main menu's top list (jsp_version_line.h) ----
 // "Top list up" = jpv::top_menu(): the main-menu object (r3 of 0x001E0830) is alive, and the panel's per-frame update
@@ -964,13 +1232,15 @@ void join_draw()
 void draw_page()
 {
     using namespace jpm;
+    jpo::MenuFrame surface(g_menu.page != CLOSED || (g_joining && g_join_next > 0) || g_help
+                         || jpo::version_surface(g_ver_vis, g_ver.any(), g_note_vis));
     if (g_menu.page == CLOSED) {
         if (g_joining && g_join_next > 0) { join_draw(); return; }
         if (g_help) {
             // ENHANCEMENT: the game's help line for the Options list has no text for a sixth row (the text comes from a message
             // table keyed per row, not found), so the port draws one in the game's help bar (left x 210, y 540 in 1280x720).
             if (!jsp_overlay_begin(1280, 720)) return;
-            jsp_overlay_text_style(210, 528, "Port settings: online options and more.", 0.9f, JSP_RGBA(255, 255, 255, 255), 0);
+            jsp_overlay_text_style(210, 528, "Port settings: display, controls, online and launcher features.", 0.9f, JSP_RGBA(255, 255, 255, 255), 0);
             jsp_overlay_end();
             g_drawn = true;
             return;
@@ -980,49 +1250,16 @@ void draw_page()
         return;
     }
     if (!jsp_overlay_begin(1280, 720)) return;
-    const uint32_t white = JSP_RGBA(255, 255, 255, 255);
-    const uint32_t gold = JSP_RGBA(240, 190, 30, 255);   // ASSUMPTION: close to the menu's yellow
-    jsp_overlay_fill_rect(0, 0, 1280, 720, JSP_RGBA(0, 0, 0, 150));
-    jsp_overlay_fill_rect(220, 90, 840, 540, JSP_RGBA(16, 20, 40, 235));
-    jsp_overlay_fill_rect(220, 90, 840, 6, gold);
-    jsp_overlay_fill_rect(220, 624, 840, 6, gold);
-    if (g_menu.page == MAIN) {
-        jsp_overlay_text_style(260, 130, "Port Settings", 1.6f, white, 0);
-        const std::vector<Page> mr = g_menu.main_rows();
-        const int step = mr.size() > 2 ? 52 : 70, y0 = mr.size() > 2 ? 200 : 250;
-        for (size_t i = 0; i < mr.size(); i++) {
-            const int y = y0 + (int)i * step;
-            const bool on = (int)i == g_menu.sel;
-            const char* name = mr[i] == DISPLAY ? "Display" : mr[i] == GRAPHICS ? "Graphics" : mr[i] == CONTROLS ? "Controls" : mr[i] == ONLINE ? "Online" : mr[i] == LAUNCHER ? "Launcher only" : "Close";
-            if (on) jsp_overlay_fill_rect(250, y - 14, 780, 48, JSP_RGBA(255, 255, 255, 235));
-            jsp_overlay_text_style(290, (float)y, name, 1.2f, white, on ? 1 : 0);
+    std::vector<std::string> startup;
+    if (g_menu.page == ONLINE && !g_menu.net_on) {
+        for (int i = g_menu.be ? 5 : 0; i < 6; ++i) {
+            char line[300];
+            if (jsp_online_describe(i, line, sizeof line) < 0) break;
+            startup.emplace_back(line);
         }
-        if (g_menu.io) {
-            if (!g_menu.smsg.empty()) jsp_overlay_text_style(260, 520, g_menu.smsg.c_str(), 0.7f, g_menu.smsg_err ? JSP_RGBA(255, 150, 110, 255) : white, 0);
-            std::string pth = jps::display_path(g_menu.io->path());
-            if (pth.size() > 78) pth = "..." + pth.substr(pth.size() - 75);
-            jsp_overlay_text_style(260, 548, ("Settings file: " + pth).c_str(), 0.5f, white, 0);
-        }
-        jsp_overlay_text_style(260, 575, "Up/Down: select    Cross: open    Circle: close", 0.8f, white, 0);
-    } else if (g_menu.page >= DISPLAY && g_menu.page <= PADBTNS) {
-        draw_settings(white, gold);
-    } else if (g_menu.page == LAUNCHER) {
-        draw_launcher_only(white);
-    } else if (g_menu.be) {
-        draw_online_edit(white, gold);
-    } else {
-        jsp_overlay_text_style(260, 130, "Port Settings - Online", 1.4f, white, 0);
-        char line[200];
-        for (int i = 0; i < 6; i++) {
-            if (jsp_online_describe(i, line, sizeof line) < 0) {
-                if (i == 0) jsp_overlay_text_style(290, 230, "No settings were read at start.", 1.0f, white, 0);
-                break;
-            }
-            jsp_overlay_text_style(290, (float)(220 + i * 50), line, 1.0f, white, 0);
-        }
-        jsp_overlay_text_style(260, 530, "Read only. Changes apply on the next start.", 0.8f, white, 0);
-        jsp_overlay_text_style(260, 565, "Circle: back", 0.8f, white, 0);
     }
+    Overlay out;
+    menu_view::draw(out, g_menu, startup);
     jsp_overlay_end();
     g_drawn = true;
 }
@@ -1052,6 +1289,8 @@ void pad_filter(uint32_t port, uint16_t* buttons, uint16_t* lx, uint16_t* ly)
     const bool help = in_row && g_menu.page == jpm::CLOSED;
     const bool help_changed = help != g_help;
     g_help = help;
+    const auto status_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    g_menu.poll_connection_status(static_cast<uint64_t>(status_ms));
     if (g_menu.take_dirty() || help_changed) draw_page();
 }
 
@@ -1097,6 +1336,8 @@ void on_build_options(ppu_context* c)
     if (g_obj != obj) std::fprintf(stderr, "[portmenu] main-menu object 0x%08X (was 0x%08X)\n", obj, g_obj);
     g_obj = obj; g_obj_vt = vm_read32(obj); g_dead_logged = false;
     g_ver_seen = false; g_ver_vis = false;   // a new menu object: the panel must be seen again before the line shows
+    g_note_vis = false;
+    draw_page();   // reconcile retained pixels and ownership before ver_refresh can return on unchanged visibility
     if (top_items()) std::fprintf(stderr, "[version] menu object built 0x%08X (flip %u)\n", obj, (unsigned)cellGcm_flip_request_count());
     if (!port_menu_env()) return;            // the hook also runs for the version line alone
     if (jpm::six_rows(&total, &vis, &last)) {

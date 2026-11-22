@@ -618,12 +618,15 @@ def net_mode(s):
         elif net_online:
             mode = "Rollback refused: PS3_NET_ONLINE is set too (the game's own online) with a rollback role key, so neither runs"
         elif p.get("JSP_ROLLBACK_VIA", "").lower() == "repsn":
-            if role not in ("host", "join"):
-                mode = "Rollback re-psn refused: JSP_ROLLBACK_ROLE is not host or join"
+            code = p.get("JSP_ROLLBACK_CODE", "")
+            if role not in ("", "auto", "host", "join"):
+                mode = "Rollback re-psn refused: JSP_ROLLBACK_ROLE is not auto, host or join"
+            elif code and not re.fullmatch(r"[A-Za-z0-9]{4,8}", code):
+                mode = "Rollback re-psn refused: JSP_ROLLBACK_CODE is not 4 to 8 letters or digits"
             elif listen and not _valid_port(listen):
                 mode = "Rollback re-psn refused: JSP_ROLLBACK_LISTEN is not a port from 1 to 65535"
             else:
-                mode = f"Rollback re-psn {role}, relay allowed: " + ("yes" if _flag(p.get("JSP_ROLLBACK_RELAY", "")) else "no")
+                mode = f"Rollback re-psn {role or 'auto'}, relay allowed: " + ("yes" if _flag(p.get("JSP_ROLLBACK_RELAY", "")) else "no") + ", match code: " + ("set" if code else "not set")   # the code itself never
         elif bool(listen) == bool(join):
             mode = "Rollback direct refused: not exactly one of JSP_ROLLBACK_LISTEN (host) / JSP_ROLLBACK_JOIN (join)"
         elif listen and not _valid_port(listen):
@@ -639,7 +642,7 @@ def net_mode(s):
     st = lambda b: "set" if b else "not set"
     return [f"  mode: {mode}",
             f"  re-psn server: {st(server)}   online name: {st(name)}   rollback join address: {st(p.get('JSP_ROLLBACK_JOIN'))}",
-            "  rollback status badge (JSP_ROLLBACK_BADGE): " + ("on" if _flag(p.get("JSP_ROLLBACK_BADGE", "")) else "off"),
+            "  rollback status badge (JSP_ROLLBACK_BADGE): " + ("on" if _flag(p.get("JSP_ROLLBACK_BADGE", "1")) else "off"),
             "  settings files read: " + (", ".join(s["read"]) if s["read"] else "none found")]
 
 
@@ -670,6 +673,8 @@ def net_secrets(s, env=None):
     for k, v in pairs:
         if k == "JSP_ROLLBACK_JOIN":
             add(v, "<join address>", True)
+        elif k == "JSP_ROLLBACK_CODE":
+            add(v, "<match code>")
         elif k == "PSNR_SERVER":
             add(v, "<server>", True)
         elif k == "PS3_NP_ONLINE_ID":
@@ -693,19 +698,19 @@ def net_secrets(s, env=None):
 
 _IPV4 = re.compile(r"(?<![\d.])((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(?![\d]|\.\d)")
 _NET_RULES = (   # always applied, also when the settings files were not found
-    (re.compile(r"(?im)^(\s*[#;]?\s*(?:server|name|address|JSP_ROLLBACK_JOIN|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)\S[^\r\n]*"), r"\1<set>"),   # the whole value: '#' or ';' inside it is part of it
+    (re.compile(r"(?im)^(\s*[#;]?\s*(?:server|name|address|JSP_ROLLBACK_JOIN|JSP_ROLLBACK_CODE|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)\S[^\r\n]*"), r"\1<set>"),   # the whole value: '#' or ';' inside it is part of it
     # an ini section header of its own line that is not one of the program's (a preset label, an unknown section the user wrote)
     (re.compile(r"(?im)^(\s*\[\s*preset\s+)[^\]\r\n]*(\]\s*)(?=\r?$)"), r"\1<preset>\2"),
     (re.compile(r"(?im)^(\s*\[)(?!\s*(?:repsn|community|install|preset\s[^\]\r\n]*)\s*\])[^\]\r\n]*(\]\s*)(?=\r?$)"), r"\1<set>\2"),
     (re.compile(r"(\[online\] community method enabled \(preset )[^\r\n]*?(\): not supported yet)"), r"\1<preset>\2"),
     (re.compile(r"(rejected \(unknown section \[)[^\r\n]*(\]\))"), r"\1<set>\2"),
-    (re.compile(r"(\[online\] re-psn enabled: server )\S+"), r"\1<server>"),
+    (re.compile(r"(\[online\] re-psn(?: \(standard\))? enabled: server )\S+"), r"\1<server>"),
     (re.compile(r"(\[online\] online id )\S+"), r"\1<online name>"),
     (re.compile(r"(\[online\] --psnr )\S+"), r"\1<server>"),
     # jsp_net_game.cpp: the name may hold anything up to the fixed tail; without the tail the rest of the line is the name
-    (re.compile(r"(?m)(\[net\] re-psn: (?:creating|joining) a room on )\S+( as )[^\r\n]*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)(?=\r?$)"),
+    (re.compile(r"(?m)(\[net\] re-psn(?: \(rollback\))?: (?:creating|joining|looking for or opening) a room on )\S+( as )[^\r\n]*?( \(relay (?:allowed|not allowed)(?:, match code set)?\), local UDP port \d+)(?=\r?$)"),
      r"\1<server>\2<online name>\3"),
-    (re.compile(r"(\[net\] re-psn: (?:creating|joining) a room on )(?!<server> as <online name> \(relay)\S+( as )[^\r\n]*"), r"\1<server>\2<online name>"),
+    (re.compile(r"(\[net\] re-psn(?: \(rollback\))?: (?:creating|joining|looking for or opening) a room on )(?!<server> as <online name> \(relay)\S+( as )[^\r\n]*"), r"\1<server>\2<online name>"),
     (re.compile(r"(the online name ')[^\r\n]*(' is longer than 16 characters)"), r"\1<online name>\2"),
     (re.compile(r"(\[net\] rendezvous: )\S+"), r"\1<peer address>"),
     # the toolkit's NP lines (libs/network): this player's and other players' online names, the server
@@ -755,6 +760,9 @@ _RESOLVE_WHY = (   # jpno::resolve_env's refusal reasons (jsp_net_online.h)
     "JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs",
     "JSP_ROLLBACK=1 with a role key (LISTEN, JOIN, VIA or BENCH) and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs",
     "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off",
+    "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off",   # 0.6.x wording
+    "JSP_ROLLBACK_ROLE is not auto, host or join: rollback off",
+    "JSP_ROLLBACK_CODE is not 4 to 8 letters or digits: rollback off",
     "JSP_ROLLBACK_LISTEN is not a port from 1 to 65535: rollback off",
     "JSP_ROLLBACK_VIA=repsn: the re-psn transport is not wired in this build: rollback off",
     "JSP_ROLLBACK=1 needs exactly one of JSP_ROLLBACK_LISTEN=PORT (host) or JSP_ROLLBACK_JOIN=IP:PORT (client): rollback off",
@@ -765,7 +773,7 @@ _NET_STATUS = r"status: path (?:direct|relay|-), delay (?:\d+f|-), last rollback
 _NET_PUBLIC = re.compile("|".join([
     r"env decision: (?:rollback start|REFUSED|rollback not requested) \(static constructors arrived: (?:EnvInit|online boot) first, (?:EnvInit|online boot) last\)",
     "REFUSED: (?:" + "|".join(re.escape(w) for w in _RESOLVE_WHY) + ")",
-    r"rollback opt-in: (?:host|client), build [0-9a-f]{8}, hooks installed",
+    r"rollback opt-in: (?:host|client|auto role), build [0-9a-f]{8}, hooks installed",
     r"re-psn path: (?:direct|relay|punching|-)",
     r"handshake state -> -?\d+ \((?:host|client)\)",
     r"commit tick=\d+ hash=[0-9a-f]{8} raw=[0-9a-f]{8}",
@@ -783,7 +791,7 @@ _NET_PUBLIC = re.compile("|".join([
     _NET_STATUS,
 ]))
 _NET_PRIVATE = (
-    (re.compile(r"(re-psn: (?:creating|joining) a room on )\S+( as ).*?( \(relay (?:allowed|not allowed)\), local UDP port \d+)"), r"\1<server>\2<online name>\3"),
+    (re.compile(r"(re-psn: (?:creating|joining) a room on )\S+( as ).*?( \(relay (?:allowed|not allowed)(?:, match code set)?\), local UDP port \d+)"), r"\1<server>\2<online name>\3"),
     (re.compile(r"(re-psn: the online name ').*(' is longer than 16 characters \(repsn\.ini name=\): off)"), r"\1<online name>\2"),
     (re.compile(r"(listening/joining: )(?!host,).*(, local UDP port \d+)"), r"\1<join address>\2"),
     (re.compile(r"(rendezvous: )\S+((?: via re-psn, path (?:direct|relay|punching|-), room \d+)?)"), r"\1<peer address>\2"),

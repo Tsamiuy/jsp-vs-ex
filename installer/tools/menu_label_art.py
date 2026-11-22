@@ -22,6 +22,7 @@ W, H, SS = 512, 64, 4          # texture size, supersampling
 CAP, BASE, LEFT = 21, 29, 5    # cap height, baseline row, left edge of the letters (texture pixels)
 EXTRA = 0.4                    # extra weight (px each side) on top of Heavy: the game's letters are heavier
 SHEAR = 0.12                  # extra slant (tan) added to the font's own: the game's letters lean more
+WIDTH_SCALE = 0.94             # compact the authored face toward the native menu label proportions
 SIZE = 31                      # px/em giving ~CAP px caps in this font
 
 def find_font(arg):
@@ -50,7 +51,10 @@ def letters(font, text=None, w=None, h=None, left=None, base=None):
     d.text((left * SS - bb[0], base * SS), text, font=f, fill=255, anchor="ls",
            stroke_width=int(EXTRA * SS), stroke_fill=255)
     k = SHEAR   # x' = x - k (y - baseline): input x = x' + k (y - baseline)
-    return m.transform(m.size, Image.AFFINE, (1, k, -k * base * SS, 0, 1, 0), Image.BICUBIC)
+    m = m.transform(m.size, Image.AFFINE, (1, k, -k * base * SS, 0, 1, 0), Image.BICUBIC)
+    # Preserve the label's left origin while narrowing glyphs and their advances together.
+    return m.transform(m.size, Image.AFFINE,
+                       (1 / WIDTH_SCALE, 0, left * SS * (1 - 1 / WIDTH_SCALE), 0, 1, 0), Image.BICUBIC)
 
 def styles(m, w=None, h=None, base=None):
     """The two label styles from a supersampled mask: [off, on] straight-alpha RGBA8 arrays (h, w, 4)."""

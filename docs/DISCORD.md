@@ -1,6 +1,6 @@
 # Discord Rich Presence
 
-ENHANCEMENT, on by default. Your Discord profile shows what you are doing in the game, and the game's own online rooms get
+Set `JSP_DISCORD_APP_ID` to the numeric ID of the Discord application approved for your session to enable presence. Your Discord profile shows what you are doing in the game, and the game's own online rooms get
 Discord's Join, Ask to Join and Invite buttons. The game talks only to the Discord app on your own PC (its local pipe, the way every
 game's Rich Presence works); it sends nothing anywhere else. Without the Discord app running, nothing happens.
 
@@ -12,8 +12,7 @@ game's Rich Presence works); it sends nothing anywhere else. Without the Discord
 JSP_DISCORD=0
 ```
 
-turns it off. The default application id, 1573573702514384977, is a Discord application registered by the contributor who added
-this feature, not by the project. To use your own, create one (Discord Developer Portal, Applications, New Application; the name you
+turns it off. An explicit application ID is required. To use your own, create one (Discord Developer Portal, Applications, New Application; the name you
 give it is the game name your profile shows), upload the pictures below to it and set `JSP_DISCORD_APP_ID=<its application id>`.
 The log (`game\run\play_stderr.txt`) says `[discord] Rich Presence on` and `[discord] connected to the Discord app`.
 
@@ -51,8 +50,7 @@ Assets), with exactly these names, in lower case:
 
 A key with no picture shows none; nothing else changes. Discord can take some minutes to show a newly uploaded picture. No picture
 is part of this repository. The game name in "Playing ..." on the profile is the Discord application's name, set in the Developer
-Portal, not in the game; the pictures must be uploaded to the application whose id the game uses (`JSP_DISCORD_APP_ID`; the
-default, 1573573702514384977, belongs to the contributor who added this feature).
+Portal, not in the game; the pictures must be uploaded to the application whose id the game uses (`JSP_DISCORD_APP_ID`).
 
 ## Join and Invite
 

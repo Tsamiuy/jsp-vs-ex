@@ -8,9 +8,19 @@
 
 namespace jdp {
 
-// The Discord application the presence is shown under when JSP_DISCORD_APP_ID is not set: one registered by the contributor who
-// added this feature, not by the project. An owner who wants their own sets JSP_DISCORD_APP_ID (docs/DISCORD.md).
-constexpr const char* kDefaultAppId = "1573573702514384977";
+// An application ID is a nonzero, unsigned 64-bit Discord snowflake.
+inline std::string presence_app_id(const std::string& enabled, const std::string& id)
+{
+    if (enabled == "0" || id.empty()) return {};
+    uint64_t value = 0;
+    for (char c : id) {
+        if (c < '0' || c > '9') return {};
+        const unsigned digit = static_cast<unsigned>(c - '0');
+        if (value > (UINT64_MAX - digit) / 10) return {};
+        value = value * 10 + digit;
+    }
+    return value ? id : std::string();
+}
 constexpr size_t kSecretMax = 128;   // Discord's limit for a join secret
 constexpr size_t kTextMax = 128;     // and for details / state
 

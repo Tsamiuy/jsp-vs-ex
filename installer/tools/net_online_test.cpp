@@ -15,6 +15,7 @@ using jpno::NC_OFF; using jpno::NC_DELAY; using jpno::NC_ROLLBACK; using jpno::N
 static std::vector<std::string> g_log;   // order of the writes: "be.save" / "file.save"
 
 struct Fake : Backend {
+    int live_m = 1;
     int m = 0, saved_m = 0; std::string server = "example.invalid", name = "tester", preset = "";
     bool refuse = false; std::string check_fail;
     bool begin(std::string&) override { m = saved_m; return true; }
@@ -25,6 +26,7 @@ struct Fake : Backend {
     bool save(std::string& msg) override { g_log.push_back("be.save"); if (refuse) { msg = "refused"; return false; } saved_m = m; msg = "Saved. Applies on the next start."; return true; }
     const char* charset(int) override { return "abc"; }
     size_t max_len(int) override { return 16; }
+    int running_method() override { return live_m; }
     int method() override { return m; }
     void set_method(int v) override { m = v; }
     std::string check() override { return check_fail; }
@@ -53,7 +55,8 @@ int main()
           && !valid_join("192.0.2.10:0") && !valid_join("host.example:5") && !valid_join(":5") && !valid_join("1.2.3.4.5:5") && !valid_join("1..3.4:5"));
     // ---- rows per choice ----
     CHECK(rows_for(NC_OFF, true) == V({ R_NETCODE, R_SAVE, R_DISCARD }));
-    CHECK(rows_for(NC_DELAY, true) == V({ R_NETCODE, R_METHOD, R_SERVER, R_NAME, R_PRESET, R_SAVE, R_DISCARD }));
+    CHECK(rows_for(NC_DELAY, true) == V({ R_NETCODE, R_SERVER, R_NAME, R_SAVE, R_DISCARD }));   // re-psn (standard)
+    CHECK(rows_for(NC_DELAY, true, false, 2) == V({ R_NETCODE, R_PRESET, R_SAVE, R_DISCARD }));   // Community
     CHECK(rows_for(NC_ROLLBACK, true) == V({ R_NETCODE, R_CONN, R_ROLE, R_PORT, R_SAVE, R_DISCARD }));
     CHECK(rows_for(NC_ROLLBACK, false) == V({ R_NETCODE, R_CONN, R_ROLE, R_JOIN, R_SAVE, R_DISCARD }));
     // ---- saved state and running state ----
@@ -123,7 +126,9 @@ int main()
             { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "join" } }, Boot::Go, Refusal::None },
             { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "2" } }, Boot::Go, Refusal::None },
             { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "36200" }, { "JSP_ROLLBACK_JOIN", "192.0.2.1:5" } }, Boot::Refused, Refusal::RoleKeys },
-            { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" } }, Boot::Refused, Refusal::RepsnNoRole },
+            { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" } }, Boot::Go, Refusal::None },
+            { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "auto" } }, Boot::Go, Refusal::None },
+            { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "unknown" } }, Boot::Refused, Refusal::RepsnNoRole },
             { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "0" } }, Boot::Refused, Refusal::BadListen },
             { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_JOIN", "host.example:5" } }, Boot::Refused, Refusal::BadJoin },
             { { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "2" }, { "JSP_ROLLBACK_VIA", "direct" } }, Boot::Refused, Refusal::RoleKeys },
@@ -155,7 +160,7 @@ int main()
         CHECK(!rv.arrive(first, d) && !rv.arrive(3 - first, d) && calls == 1);   // decided once
     }
     { bool r; std::string s = status_line(NC_OFF, NC_OFF, &r); CHECK(!r && s.find("Restart") == std::string::npos);
-      s = status_line(NC_OFF, NC_ROLLBACK, &r); CHECK(r && s.find("Restart to apply") != std::string::npos && s.find("Rollback") != std::string::npos);
+      s = status_line(NC_OFF, NC_ROLLBACK, &r); CHECK(r && s.find("Restart to apply") != std::string::npos && s.find("Saved: re-psn (rollback)") != std::string::npos);
       s = status_line(NC_CONFLICT, NC_OFF, &r); CHECK(r && s.find("refused") != std::string::npos);
       // a gameplay mod set turned the game's own online off: the cause, no "Restart to apply" (a restart does not help while the mods are on)
       s = status_line(NC_OFF, NC_DELAY, &r, true); CHECK(!r && s == "This session: off (gameplay mods are on); turn the mods off to play online.");
@@ -171,18 +176,19 @@ int main()
     Fake fk; FakeIO io; Menu e; e.be = &fk; e.io = &io;
     e.enter_online();
     CHECK(e.net_on && e.nc == NC_OFF && e.nc_saved == NC_OFF && e.orows() == V({ R_NETCODE, R_SAVE, R_DISCARD }) && e.rb.host && e.rb.port == kDefaultPort && e.net_note.empty());
-    // Right: Off -> Delay (re-psn by default), Right: Rollback (method off), Left back
-    press(e, BTN_RIGHT); CHECK(e.nc == NC_DELAY && fk.m == 1 && e.edited && e.osel == 0 && e.orows().size() == 7);
-    press(e, BTN_RIGHT); CHECK(e.nc == NC_ROLLBACK && fk.m == 0 && e.orows() == V({ R_NETCODE, R_CONN, R_ROLE, R_PORT, R_SAVE, R_DISCARD }));   // exclusion: the game's own online is off in the working copy
-    press(e, BTN_RIGHT); CHECK(e.nc == NC_NATIVE && fk.m == 1 && e.orows() == V({ R_NETCODE, R_SERVER, R_NAME, R_RELAY, R_SAVE, R_DISCARD }));   // Online Battle + rollback: re-psn on
-    press(e, BTN_RIGHT); CHECK(e.nc == NC_OFF && fk.m == 0);
-    press(e, BTN_LEFT); CHECK(e.nc == NC_NATIVE && fk.m == 1); press(e, BTN_LEFT); CHECK(e.nc == NC_ROLLBACK && fk.m == 0);
-    // Delay: the Method row only toggles re-psn / Community (Off is the Netcode row)
-    press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 1); press(e, BTN_DOWN); CHECK(e.orow() == R_METHOD);
-    press(e, BTN_RIGHT); CHECK(fk.m == 2); press(e, BTN_RIGHT); CHECK(fk.m == 1);
+    // ONE choice (PM 2026-11-20): Right cycles Off -> re-psn (standard) -> re-psn (rollback) -> Community -> Friendly Match + rollback -> Off
+    press(e, BTN_RIGHT); CHECK(e.nc == NC_DELAY && fk.m == 1 && e.edited && e.osel == 0 && e.orows() == V({ R_NETCODE, R_SERVER, R_NAME, R_SAVE, R_DISCARD }) && e.mode() == M_REPSN);
+    press(e, BTN_RIGHT); CHECK(e.nc == NC_ROLLBACK && fk.m == 0 && e.rb.repsn && e.mode() == M_REPSN_RB
+                               && e.orows() == V({ R_NETCODE, R_CONN, R_SERVER, R_NAME, R_CODE, R_RELAY, R_SAVE, R_DISCARD }));   // exclusion: the game's own online is off in the working copy
+    press(e, BTN_RIGHT); CHECK(e.nc == NC_DELAY && fk.m == 2 && e.mode() == M_COMMUNITY && e.orows() == V({ R_NETCODE, R_PRESET, R_SAVE, R_DISCARD }));
+    press(e, BTN_RIGHT); CHECK(e.nc == NC_NATIVE && fk.m == 1 && e.mode() == M_NATIVE);
+    press(e, BTN_RIGHT); CHECK(e.nc == NC_OFF && fk.m == 0 && e.mode() == M_OFF);
+    press(e, BTN_LEFT); CHECK(e.nc == NC_NATIVE && e.mode() == M_NATIVE);
+    press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 2); press(e, BTN_LEFT); CHECK(e.nc == NC_ROLLBACK); press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 1);
     // ---- Rollback host: port by the picker ----
     e.osel = 0; press(e, BTN_RIGHT); CHECK(e.nc == NC_ROLLBACK);
-    press(e, BTN_DOWN); CHECK(e.orow() == R_CONN); press(e, BTN_DOWN); CHECK(e.orow() == R_ROLE); press(e, BTN_DOWN); CHECK(e.orow() == R_PORT);
+    press(e, BTN_DOWN); CHECK(e.orow() == R_CONN); press(e, BTN_RIGHT); CHECK(!e.rb.repsn && e.direct_pref);   // the advanced Connection row: direct IP
+    press(e, BTN_DOWN); CHECK(e.orow() == R_ROLE); press(e, BTN_DOWN); CHECK(e.orow() == R_PORT);
     press(e, BTN_CROSS); CHECK(e.editing && e.ef == R_PORT && e.buf == kDefaultPort);
     for (int i = 0; i < 6; i++) press(e, BTN_SQUARE);            // clear
     CHECK(e.buf.empty());
@@ -235,7 +241,7 @@ int main()
     e.rb.port = "36200"; e.osel = 0; e.nc = NC_OFF; press(e, BTN_RIGHT); CHECK(e.nc == NC_DELAY && fk.m == 1);
     e.osel = (int)e.orows().size() - 2; g_log.clear(); press(e, BTN_CROSS);
     CHECK(!e.msg_err && g_log == (std::vector<std::string>{ "file.save", "be.save" }) && val(io.text, "JSP_ROLLBACK") == "0" && e.nc_saved == NC_DELAY && fk.saved_m == 1);   // the line existed: JSP_ROLLBACK=0, not removed
-    CHECK(e.msg.find("Delay") != std::string::npos);
+    CHECK(e.msg.find("re-psn (standard)") != std::string::npos);
     // a backend refusal (bad server) stops before any write
     fk.check_fail = "re-psn: the server is host or host:port, port 1 to 65535."; io.text = "JSP_ROLLBACK=1\r\nJSP_ROLLBACK_LISTEN=36200\r\n"; g_log.clear();
     press(e, BTN_RIGHT);   // from the Save row Right does nothing; just keep the selection
@@ -273,13 +279,13 @@ int main()
     CHECK(!e.msg_err && io.text == "JSP_ROLLBACK=1\r\nJSP_ROLLBACK_LISTEN=36200\r\n");
     io.text = "PIPE=1\n"; e.enter_online(); e.nc = NC_ROLLBACK; fk.m = 0; e.rb.host = true; e.rb.port = "36200"; e.osel = (int)e.orows().size() - 2; press(e, BTN_CROSS);
     CHECK(!e.msg_err && io.text.find('\r') == std::string::npos && val(io.text, "JSP_ROLLBACK") == "1");
-    // Delay -> Rollback -> Delay keeps Community
-    fk.saved_m = 2; io.text = ""; e.enter_online(); CHECK(e.nc == NC_DELAY && fk.m == 2);
-    e.osel = 0; press(e, BTN_RIGHT); CHECK(e.nc == NC_ROLLBACK && fk.m == 0); press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 2);
-    e.osel = 0; press(e, BTN_RIGHT); press(e, BTN_RIGHT); press(e, BTN_RIGHT); CHECK(e.nc == NC_OFF && fk.m == 0);
-    press(e, BTN_LEFT); press(e, BTN_LEFT); press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 2);   // via Off and Online Battle + rollback too
-    press(e, BTN_DOWN); press(e, BTN_RIGHT); CHECK(fk.m == 1);                                  // a changed Delay method is the one remembered
-    e.osel = 0; press(e, BTN_RIGHT); press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 1);
+    // A saved Community choice cycles through Friendly Match to Off and back.
+    fk.saved_m = 2; io.text = ""; e.enter_online(); CHECK(e.nc == NC_DELAY && fk.m == 2 && e.mode() == M_COMMUNITY);
+    e.osel = 0; press(e, BTN_RIGHT); CHECK(e.mode() == M_NATIVE && e.nc == NC_NATIVE && fk.m == 1);
+    press(e, BTN_RIGHT); CHECK(e.mode() == M_OFF && e.nc == NC_OFF && fk.m == 0);
+    press(e, BTN_LEFT); CHECK(e.mode() == M_NATIVE && e.nc == NC_NATIVE && fk.m == 1);
+    press(e, BTN_LEFT); CHECK(e.mode() == M_COMMUNITY && e.nc == NC_DELAY && fk.m == 2);
+    press(e, BTN_LEFT); CHECK(e.nc == NC_ROLLBACK && fk.m == 0 && e.rb.repsn); press(e, BTN_LEFT); CHECK(e.nc == NC_DELAY && fk.m == 1);
     // partial failure of the Rollback save: the online files were saved off, the file write failed: nc_saved drops to Off, the choice stays unsaved
     fk.saved_m = 1; io.text = ""; e.enter_online(); CHECK(e.nc_saved == NC_DELAY);
     e.osel = 0; press(e, BTN_RIGHT); CHECK(e.nc == NC_ROLLBACK); io.fail_save = true;
@@ -295,15 +301,16 @@ int main()
     e.osel = (int)e.orows().size() - 2; press(e, BTN_CROSS); CHECK(!e.msg_err && !present(io.text, "JSP_ROLLBACK_JOIN") && val(io.text, "JSP_ROLLBACK_LISTEN") == "36200");
 
     // ---- rollback over re-psn (ENHANCEMENT): Connection / Relay rows, keys, validation, start decision with the transport wired ----
-    CHECK(rows_for(NC_ROLLBACK, true, true) == V({ R_NETCODE, R_CONN, R_ROLE, R_RELAY, R_SAVE, R_DISCARD }));
+    CHECK(rows_for(NC_ROLLBACK, true, true) == V({ R_NETCODE, R_CONN, R_SERVER, R_NAME, R_CODE, R_RELAY, R_SAVE, R_DISCARD }));   // auto role: no Role row
+    CHECK(rows_for(NC_ROLLBACK, true, true, 1, false) == V({ R_NETCODE, R_CONN, R_ROLE, R_SERVER, R_NAME, R_CODE, R_RELAY, R_SAVE, R_DISCARD }));   // the advanced override is set: the row shows
     { Rollback r; r.repsn = true; r.relay = false; CHECK(row_text(R_CONN, NC_ROLLBACK, r).find("re-psn") != std::string::npos);
       // every row text fits the page's row width (about 40 characters at scale 1.0; the Netcode row is the longest of the older ones at 38)
       for (bool repsn : { false, true }) for (bool host : { false, true }) for (bool relay : { false, true }) {
           Rollback q; q.repsn = repsn; q.host = host; q.relay = relay; q.join = "255.255.255.255:65535";
-          for (int row : { R_NETCODE, R_ROLE, R_PORT, R_JOIN, R_CONN, R_RELAY }) for (int nc : { 0, 1, 2 }) CHECK(row_text(row, nc, q).size() <= 40);
+          for (int row : { R_NETCODE, R_ROLE, R_PORT, R_JOIN, R_CONN, R_RELAY, R_CODE }) for (int nc : { 0, 1, 2 }) CHECK(row_text(row, nc, q).size() <= 40);
       }
-      jps::File f; r.host = false; r.store(f, true); CHECK(val(f.text(), "JSP_ROLLBACK_VIA") == "repsn" && val(f.text(), "JSP_ROLLBACK_ROLE") == "join" && val(f.text(), "JSP_ROLLBACK_RELAY") == "0" && !present(f.text(), "JSP_ROLLBACK_LISTEN"));
-      Rollback b; b.load(f); CHECK(b.repsn && !b.host && !b.relay); r.relay = true; r.host = true; r.store(f, true); b.load(f); CHECK(b.repsn && b.host && b.relay);
+      jps::File f; r.role_auto = false; r.host = false; r.store(f, true); CHECK(val(f.text(), "JSP_ROLLBACK_VIA") == "repsn" && val(f.text(), "JSP_ROLLBACK_ROLE") == "join" && val(f.text(), "JSP_ROLLBACK_RELAY") == "0" && !present(f.text(), "JSP_ROLLBACK_LISTEN"));
+      Rollback b; b.load(f); CHECK(b.repsn && !b.host && !b.relay && !b.role_auto); r.relay = true; r.host = true; r.store(f, true); b.load(f); CHECK(b.repsn && b.host && b.relay);
       Rollback d; d.host = true; d.port = "36200"; d.store(f, true); CHECK(!present(f.text(), "JSP_ROLLBACK_VIA") && !present(f.text(), "JSP_ROLLBACK_ROLE") && val(f.text(), "JSP_ROLLBACK_LISTEN") == "36200");   // direct IP leaves no re-psn keys
       Rollback e2; e2.load(f); CHECK(!e2.repsn && e2.host); }
     { std::map<std::string, std::string> env; std::vector<std::string> own; std::string why;
@@ -331,7 +338,12 @@ int main()
       CHECK(run({}) == Boot::NotRequested && code == Refusal::None);
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "36200" } }) == Boot::Go && code == Refusal::None);
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "host" }, { "PS3_NET_ONLINE", "1" } }) == Boot::Refused && code == Refusal::BothOn);
-      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" } }) == Boot::Refused && code == Refusal::RepsnNoRole);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" } }) == Boot::Go && code == Refusal::None);                                  // no role key: the auto role
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "AUTO" }, { "JSP_ROLLBACK_CODE", "ab12cd" } }) == Boot::Go);   // auto written out, a code in any letter case
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "boss" } }) == Boot::Refused && code == Refusal::RepsnNoRole);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_CODE", "abc" } }) == Boot::Refused && code == Refusal::BadCode);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_CODE", "abcdefghi" } }) == Boot::Refused && code == Refusal::BadCode);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_CODE", "ab-12" } }) == Boot::Refused && code == Refusal::BadCode);
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "join" }, { "JSP_ROLLBACK_LISTEN", "0" } }) == Boot::Refused && code == Refusal::BadListen);
       CHECK(run({ { "JSP_ROLLBACK", "1" } }) == Boot::Go && code == Refusal::None);   // ENHANCEMENT (lobby): no role key is the lobby start now, not RoleKeys
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "1" }, { "JSP_ROLLBACK_JOIN", "192.0.2.10:36200" } }) == Boot::Refused && code == Refusal::RoleKeys);
@@ -359,7 +371,9 @@ int main()
             && real.line2.find("set enabled=0 in repsn.ini") != std::string::npos);
       CHECK(notice_text(Refusal::BothOn, SRC_PSNR_FLAG).line1.find("--psnr") != std::string::npos);
       CHECK(notice_text(Refusal::BothOn, SRC_ENVIRONMENT).line1.find("PSNR_SERVER") != std::string::npos);
-      CHECK(notice_text(Refusal::BothOn, SRC_OTHER).line1.find("PS3_NET_ONLINE") != std::string::npos);
+      const Notice unknown = notice_text(Refusal::BothOn, SRC_OTHER);
+      CHECK(unknown.line1.find("rollback role key") != std::string::npos && unknown.line2.find("custom rollback") != std::string::npos);
+      CHECK((unknown.line1 + unknown.line2).find("Community") == std::string::npos);
       CHECK(notice_text(Refusal::RepsnNoIdentity).line1.find("server=") != std::string::npos && notice_text(Refusal::RepsnNoIdentity).line2.find("enabled=0") != std::string::npos);
       CHECK(notice_text(Refusal::RepsnLongName).line1.find("16") != std::string::npos);
       CHECK(notice_text(Refusal::NoSocket).line2.find("JSP_ROLLBACK_LISTEN") != std::string::npos);
@@ -372,7 +386,7 @@ int main()
           const size_t f = l2.find(file), ps = l2.find(tail);
           CHECK(f != std::string::npos && ps != std::string::npos && f < ps && ps + tail.size() == l2.size());
       }
-      CHECK(notice_text(Refusal::RepsnNoRole).line2.find("JSP_ROLLBACK_ROLE=host or join") != std::string::npos);
+      CHECK(notice_text(Refusal::RepsnNoRole).line2.find("JSP_ROLLBACK_ROLE=auto") != std::string::npos);
       CHECK(notice_text(Refusal::BadJoin).line2.find("JSP_ROLLBACK_JOIN=IP:PORT") != std::string::npos);
       for (int c = 1; c < static_cast<int>(Refusal::Count); ++c)
           for (int src : { SRC_OTHER, SRC_REPSN_INI, SRC_PSNR_FLAG, SRC_ENVIRONMENT }) {
@@ -394,19 +408,118 @@ int main()
     }
     // the page: Connection and Relay toggles, saved to the file; re-psn needs a server and a name
     { Fake fk3; FakeIO io3; Menu m; m.be = &fk3; m.io = &io3; m.enter_online(); press(m, BTN_RIGHT); press(m, BTN_RIGHT); CHECK(m.nc == NC_ROLLBACK);
-      press(m, BTN_DOWN); CHECK(m.orow() == R_CONN); press(m, BTN_RIGHT); CHECK(m.rb.repsn && m.orows() == V({ R_NETCODE, R_CONN, R_ROLE, R_RELAY, R_SAVE, R_DISCARD }));
-      press(m, BTN_DOWN); press(m, BTN_RIGHT); CHECK(!m.rb.host);                              // Role: Join
-      press(m, BTN_DOWN); CHECK(m.orow() == R_RELAY); press(m, BTN_RIGHT); CHECK(m.rb.relay && m.msg.find("only if a direct path fails") != std::string::npos);
+      press(m, BTN_DOWN); CHECK(m.orow() == R_CONN && m.rb.repsn && m.orows() == V({ R_NETCODE, R_CONN, R_SERVER, R_NAME, R_CODE, R_RELAY, R_SAVE, R_DISCARD }));
+      m.rb.role_auto = false; m.rb.host = false; CHECK(m.orows().size() == 9 && m.orows()[2] == R_ROLE);   // the advanced override (set by hand in the file): Role: Join
+      for (int i = 0; i < 5; i++) { press(m, BTN_DOWN); } CHECK(m.orow() == R_RELAY); press(m, BTN_RIGHT); CHECK(m.rb.relay && m.msg.find("only if a direct path fails") != std::string::npos);
       press(m, BTN_RIGHT); CHECK(!m.rb.relay); press(m, BTN_RIGHT);
       fk3.server.clear(); m.osel = (int)m.orows().size() - 2; g_log.clear(); press(m, BTN_CROSS);
-      CHECK(m.msg_err && g_log.empty() && m.msg.find("server and online name") != std::string::npos);   // nothing written
+      CHECK(m.msg_err && g_log.empty() && m.msg.find("Server and Online name") != std::string::npos);   // nothing written
       fk3.server = "example.invalid"; g_log.clear(); press(m, BTN_CROSS);
       CHECK(!m.msg_err && val(io3.text, "JSP_ROLLBACK_VIA") == "repsn" && val(io3.text, "JSP_ROLLBACK_ROLE") == "join" && val(io3.text, "JSP_ROLLBACK_RELAY") == "1" && g_log == (std::vector<std::string>{ "be.save", "file.save" }));
       m.enter_online(); CHECK(m.nc == NC_ROLLBACK && m.rb.repsn && !m.rb.host && m.rb.relay);          // persistence
       press(m, BTN_DOWN); press(m, BTN_RIGHT); CHECK(!m.rb.repsn && m.orows().size() == 6 && m.orows()[3] == R_JOIN); }
 
+    // ---- the one choice, each as the file and the ini state it leaves (PM 2026-11-20) ----
+    {   struct Case { int mode; const char* rb; int method; };
+        const Case cases[] = { { M_OFF, "0", 0 }, { M_REPSN, "0", 1 }, { M_REPSN_RB, "1", 0 }, { M_COMMUNITY, "0", 2 }, { M_NATIVE, "1", 1 } };
+        for (const Case& c : cases) {
+            Fake fq; FakeIO iq; Menu q; q.be = &fq; q.io = &iq; fq.server = "example.invalid"; fq.name = "tester";
+            iq.text = "PIPE=1\r\nJSP_ROLLBACK=1\r\nJSP_ROLLBACK_VIA=repsn\r\nJSP_ROLLBACK_ROLE=host\r\n"; q.enter_online(); CHECK(q.nc_saved == NC_ROLLBACK && q.mode() == M_REPSN_RB);
+            q.net_choose(c.mode); q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);
+            CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK") == c.rb && fq.saved_m == c.method && val(iq.text, "PIPE") == "1");
+            // Friendly Match uses native online plus lobby rollback. Other choices enable one backend.
+            const int on = (flag_on(val(iq.text, "JSP_ROLLBACK").c_str()) ? 1 : 0) + (fq.saved_m == 1 ? 1 : 0) + (fq.saved_m == 2 ? 1 : 0);
+            CHECK(on == (c.mode == M_OFF ? 0 : c.mode == M_NATIVE ? 2 : 1));
+            q.enter_online(); CHECK(q.mode() == c.mode && q.nc_saved != NC_CONFLICT);
+        }
+        // re-psn (rollback): the keys; the direct IP one (the advanced Connection row) keeps working
+        Fake fq; FakeIO iq; Menu q; q.be = &fq; q.io = &iq; q.enter_online(); q.net_choose(M_REPSN_RB); q.rb.role_auto = false; q.rb.host = false; q.rb.relay = true; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);
+        CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK_VIA") == "repsn" && val(iq.text, "JSP_ROLLBACK_ROLE") == "join" && val(iq.text, "JSP_ROLLBACK_RELAY") == "1" && fq.saved_m == 0);
+        CHECK(q.msg.find("re-psn (rollback)") != std::string::npos && q.msg.find("Delay") == std::string::npos);
+        q.rb.repsn = false; q.direct_pref = true; q.rb.host = true; q.rb.port = "36200"; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);
+        CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK_LISTEN") == "36200" && !present(iq.text, "JSP_ROLLBACK_VIA") && q.msg.find("direct IP") != std::string::npos);
+        q.enter_online(); CHECK(q.mode() == M_REPSN_RB && !q.rb.repsn && q.direct_pref && row_text(R_NETCODE, q.nc, q.rb) == "Online: Rollback (direct IP), Host");
+        q.net_choose(M_COMMUNITY); q.net_choose(M_REPSN_RB); CHECK(!q.rb.repsn);   // a saved direct IP choice stays direct when chosen again
+        Fake fr; FakeIO ir; Menu r; r.be = &fr; r.io = &ir; r.enter_online(); r.net_choose(M_REPSN_RB); CHECK(r.rb.repsn);   // the default is re-psn
+        // names: the same two everywhere, no "Delay" or "Netcode" left in the page's text
+        CHECK(std::string(name_of(NC_DELAY, 1)) == "re-psn (standard)" && std::string(name_of(NC_ROLLBACK, 0, false)) == "re-psn (rollback)" && std::string(name_of(NC_DELAY, 2)) == "Community");
+        for (int row : { R_NETCODE, R_CONN, R_ROLE, R_RELAY, R_PORT, R_JOIN, R_SAVE, R_DISCARD }) for (int nc : { 0, 1, 2 }) for (int meth : { 1, 2 }) {
+            const std::string t = row_text(row, nc, Rollback(), meth); CHECK(t.find("Delay") == std::string::npos && t.find("Netcode") == std::string::npos);
+        }
+        for (int nc : { 0, 1, 2 }) { const std::string l = exclusion_line(nc); CHECK(l.find("Delay") == std::string::npos && l.size() <= 84); }
+        // every choice fits the rows area: at most 8 rows at the pitch of 34 end above the exclusion line at y 476
+        for (int nc : { 0, 1, 2 }) for (bool rp : { false, true }) for (bool h : { false, true }) for (int meth : { 1, 2 }) CHECK(rows_for(nc, h, rp, meth).size() <= 8);
+        CHECK(188 + 8 * 34 <= 476);
+        { Rollback h; h.repsn = true; h.role_auto = false; h.host = true; Rollback j = h; j.host = false; Rollback au; au.repsn = true;
+          CHECK(row_text(R_NETCODE, NC_ROLLBACK, h) == "Online: re-psn (rollback), Host" && row_text(R_NETCODE, NC_ROLLBACK, j) == "Online: re-psn (rollback), Join" && row_text(R_NETCODE, NC_DELAY, j) == "Online: re-psn (standard)" && row_text(R_NETCODE, NC_ROLLBACK, au) == "Online: re-psn (rollback)"); }   // the role is shown plainly
+        CHECK(std::string(exclusion_line(NC_ROLLBACK)).find("Free Battle") != std::string::npos && std::string(exclusion_line(NC_ROLLBACK)).find("re-psn (standard)") != std::string::npos);   // the hint for the PSN sign-out message
+    }
+    // ---- a role-only (or connection, relay, address) change of a saved rollback needs a restart (tester report) ----
+    {   Fake fq; FakeIO iq; Menu q; q.be = &fq; q.io = &iq;
+        iq.text = "JSP_ROLLBACK=1\r\nJSP_ROLLBACK_VIA=repsn\r\nJSP_ROLLBACK_ROLE=join\r\nJSP_ROLLBACK_RELAY=0\r\n";
+        iq.env = { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_VIA", "repsn" }, { "JSP_ROLLBACK_ROLE", "join" }, { "JSP_ROLLBACK_RELAY", "0" } };
+        q.enter_online();
+        auto restart = [&]() { bool r; status_line(q.nc_running, q.nc_saved, &r, false, 1, 1, false, q.run_sig, q.saved_sig); return r; };
+        CHECK(q.nc_running == NC_ROLLBACK && q.nc_saved == NC_ROLLBACK && !restart());   // same as the running game: no note
+        q.osel = 0; q.rb.host = true; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);   // Join -> Host, saved
+        CHECK(!q.msg_err && q.nc_saved == NC_ROLLBACK && restart());                                 // role only: Restart to apply
+        { bool r; CHECK(status_line(q.nc_running, q.nc_saved, &r, false, 1, 1, false, q.run_sig, q.saved_sig).find("Restart to apply") != std::string::npos); }
+        q.rb.host = false; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(!restart());   // back to what runs: no note
+        q.rb.relay = true; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(restart());   // relay only
+        q.rb.relay = false; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(!restart());
+        q.rb.repsn = false; q.rb.host = true; q.rb.port = "36200"; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(restart());   // connection
+        q.enter_online(); CHECK(restart());   // a new visit reads the same saved configuration
+        // direct IP: address or port only
+        iq.env = { { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_JOIN", "192.0.2.10:7777" } };
+        q.rb.repsn = false; q.rb.host = false; q.rb.join = "192.0.2.10:7777"; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); q.enter_online(); CHECK(!restart());
+        q.rb.join = "192.0.2.11:7777"; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(restart());
+        CHECK(running_rb_signature([&](const char* k) { return iq.active(k); }) == "direct;join=192.0.2.10:7777");
+    }
+    // ---- auto role and match code (PM, 2026-11-20): both players just pick re-psn (rollback); an optional code ----
+    {   Fake fq; FakeIO iq; Menu q; q.be = &fq; q.io = &iq; q.enter_online(); q.net_choose(M_REPSN_RB);
+        CHECK(q.rb.role_auto && q.rb.code.empty() && q.orows() == V({ R_NETCODE, R_CONN, R_SERVER, R_NAME, R_CODE, R_RELAY, R_SAVE, R_DISCARD }));
+        q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);
+        CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK_VIA") == "repsn" && val(iq.text, "JSP_ROLLBACK_ROLE") == "auto" && !present(iq.text, "JSP_ROLLBACK_CODE") && q.msg.find("Host") == std::string::npos);
+        // the code by the picker: letters from the upper-case set, at most 8
+        q.osel = 4; CHECK(q.orow() == R_CODE); press(q, BTN_CROSS); CHECK(q.editing && q.ef == R_CODE && q.buf.empty());
+        press(q, BTN_DOWN); press(q, BTN_RIGHT); press(q, BTN_DOWN); press(q, BTN_DOWN);   // A, then a second place with C
+        CHECK(q.buf.size() >= 1 && q.buf[0] >= 'A' && q.buf[0] <= 'Z');
+        q.buf = "ab"; press(q, BTN_CROSS);   // two characters: accepted by the picker with a hint, refused at Save
+        CHECK(!q.editing && q.msg_err && q.rb.code == "ab");
+        q.osel = (int)q.orows().size() - 2; g_log.clear(); press(q, BTN_CROSS); CHECK(q.msg_err && g_log.empty() && q.msg.find("Match code") != std::string::npos);   // nothing written
+        q.rb.code = "zx81qq"; q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);
+        CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK_CODE") == "ZX81QQ" && val(iq.text, "JSP_ROLLBACK_ROLE") == "auto");               // stored upper case
+        { bool ev_code = false; for (const std::string& ev : q.events) if (ev.find("ZX81QQ") != std::string::npos || ev.find("zx81qq") != std::string::npos || ev.find("ab'") != std::string::npos) ev_code = true; CHECK(!ev_code); }   // never logged
+        q.enter_online(); CHECK(q.rb.code == "ZX81QQ" && q.rb.role_auto && q.mode() == M_REPSN_RB && row_text(R_CODE, q.nc, q.rb) == "Match code: ZX81QQ");
+        q.rb.code.clear(); q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(!q.msg_err && !present(iq.text, "JSP_ROLLBACK_CODE") && row_text(R_CODE, q.nc, q.rb) == "Match code: (none)");   // cleared: the key goes
+        // the other choices keep the code line (inert) and write no role
+        q.rb.code = "ZX81QQ"; q.net_choose(M_REPSN); q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS); CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK") == "0");
+        // an old file with an explicit role loads as the advanced override and keeps it; auto written back out is "auto"
+        fq.saved_m = 0; iq.text = "JSP_ROLLBACK=1\r\nJSP_ROLLBACK_VIA=repsn\r\nJSP_ROLLBACK_ROLE=join\r\n"; q.enter_online();
+        CHECK(!q.rb.role_auto && !q.rb.host && q.orows() == V({ R_NETCODE, R_CONN, R_ROLE, R_SERVER, R_NAME, R_CODE, R_RELAY, R_SAVE, R_DISCARD }) && row_text(R_NETCODE, q.nc, q.rb) == "Online: re-psn (rollback), Join");
+        q.osel = 2; CHECK(q.orow() == R_ROLE); q.rb.host = true; press(q, BTN_RIGHT); CHECK(!q.rb.host && !q.rb.role_auto);            // Host -> Join
+        press(q, BTN_RIGHT); CHECK(q.rb.role_auto && q.orows().size() == 8);                    // Join -> Auto (the row goes: back to the normal view)
+        { Rollback x; x.repsn = true; Rollback y = x; y.role_auto = false; Rollback z = x; z.code = "ABCD";
+          CHECK(x.signature() != y.signature() && x.signature() != z.signature());                                  // a role or code change needs a restart
+          jps::File f; x.store(f, true); CHECK(val(f.text(), "JSP_ROLLBACK_ROLE") == "auto"); }
+        std::string o; CHECK(normalize_code("ab12", &o) && o == "AB12" && normalize_code("", &o) && o.empty() && !normalize_code("abc", nullptr) && !normalize_code("abcdefghi", nullptr) && !normalize_code("ab 12", nullptr) && !normalize_code("ab-12", nullptr));
+    }
+    // ---- MIGRATION: files with two methods on load as Off with a note; saving writes the one choice and fixes them ----
+    {   struct Mig { const char* text; int saved_m; };
+        const Mig cases[] = { { "JSP_ROLLBACK=1\r\nJSP_ROLLBACK_VIA=repsn\r\nJSP_ROLLBACK_ROLE=host\r\nPIPE=1\r\n", 1 }, { "JSP_ROLLBACK=1\r\nJSP_ROLLBACK_LISTEN=36200\r\nPIPE=1\r\n", 2 } };
+        for (const Mig& c : cases) {
+            Fake fq; FakeIO iq; Menu q; q.be = &fq; q.io = &iq; fq.saved_m = c.saved_m; iq.text = c.text; q.enter_online();
+            CHECK(q.nc_saved == NC_CONFLICT && q.nc == NC_OFF && fq.m == 0 && q.msg_err && q.msg.find("both on") != std::string::npos && q.msg.find("shown as Off") != std::string::npos);
+            CHECK(q.msg.find(fq.saved_m == 2 ? "Community" : "re-psn (standard)") != std::string::npos);
+            CHECK(q.msg.find(fq.saved_m == 2 ? "re-psn (standard)" : "Community") == std::string::npos);
+            q.osel = (int)q.orows().size() - 2; press(q, BTN_CROSS);   // Save on the shown choice (Off)
+            CHECK(!q.msg_err && val(iq.text, "JSP_ROLLBACK") == "0" && fq.saved_m == 0 && val(iq.text, "PIPE") == "1");
+            q.enter_online(); CHECK(q.nc_saved == NC_OFF && q.net_note.empty());
+        }
+    }
+
     // ---- Discard re-reads both ----
-    e.enter_online(); press(e, BTN_RIGHT); CHECK(e.nc == NC_NATIVE && e.edited);
+    e.enter_online(); press(e, BTN_RIGHT); CHECK(e.nc == NC_DELAY && fk.m == 2 && e.edited);   // rollback saved: Right is Community
     e.osel = (int)e.orows().size() - 1; CHECK(e.orow() == R_DISCARD); press(e, BTN_CROSS);
     CHECK(!e.edited && e.nc == NC_ROLLBACK && e.msg == "Changes discarded.");
     // Circle leaves without saving (nothing written)
@@ -420,14 +533,30 @@ int main()
       m.osel = (int)m.orows().size() - 2; g_log.clear(); press(m, BTN_CROSS);
       CHECK(!m.msg_err && fk4.saved_m == 1 && val(io4.text, "JSP_ROLLBACK") == "1" && val(io4.text, "JSP_ROLLBACK_RELAY") == "1" && val(io4.text, "PIPE") == "1");
       CHECK(!present(io4.text, "JSP_ROLLBACK_LISTEN") && !present(io4.text, "JSP_ROLLBACK_VIA") && !present(io4.text, "JSP_ROLLBACK_ROLE") && m.nc_saved == NC_NATIVE);
-      CHECK(g_log == (std::vector<std::string>{ "be.save", "file.save" }) && m.msg.find("Friendly Match") != std::string::npos);
+      CHECK(g_log == (std::vector<std::string>{ "be.save", "file.save" }));
+      CHECK(m.msg.find("next start") != std::string::npos && m.msg.find("Online Battle > Friendly Match") != std::string::npos);
       m.enter_online(); CHECK(m.nc == NC_NATIVE && m.rb.relay && m.net_note.empty());   // persistence
       fk4.check_fail = "re-psn: bad name"; m.osel = (int)m.orows().size() - 2; press(m, BTN_CROSS); CHECK(m.msg_err && m.msg == "re-psn: bad name"); fk4.check_fail.clear();
-      m.osel = 0; press(m, BTN_LEFT); press(m, BTN_LEFT); CHECK(m.nc == NC_DELAY && fk4.m == 1);
+      m.osel = 0; press(m, BTN_LEFT); press(m, BTN_LEFT); press(m, BTN_LEFT); CHECK(m.nc == NC_DELAY && fk4.m == 1);
       m.osel = (int)m.orows().size() - 2; press(m, BTN_CROSS);
       CHECK(!m.msg_err && val(io4.text, "JSP_ROLLBACK") == "0" && fk4.saved_m == 1 && m.nc_saved == NC_DELAY);
       CHECK(std::string(exclusion_line(NC_NATIVE)).find("Friendly Match") != std::string::npos && std::string(name_of(NC_NATIVE)) == "Online Battle + rollback");
       { bool r; CHECK(status_line(NC_NATIVE, NC_NATIVE, &r) == "This session: Online Battle + rollback.  Saved: Online Battle + rollback." && !r); } }
+    // Exercise the same page method used by the actual draw caller, not only the formatting helper.
+    { Fake f; FakeIO io; Menu q; q.be = &f; q.io = &io;
+      f.live_m = 2; f.saved_m = 2; io.env["PS3_NET_ONLINE"] = "1";
+      q.enter_online(); bool restart = false;
+      CHECK(q.run_method == 2 && q.online_status(&restart).find("This session: Community") == 0 && !restart);
+      // A different saved backend cannot rewrite the immutable running identity.
+      f.saved_m = 1; q.enter_online();
+      CHECK(q.run_method == 2 && q.online_status(&restart).find("This session: Community") == 0 && restart);
+    }
+    { Fake f; FakeIO io; Menu q; q.be = &f; q.io = &io;
+      io.env = {{"JSP_ROLLBACK", "1"}, {"JSP_ROLLBACK_JOIN", "192.0.2.10:7777"}};
+      io.text = "JSP_ROLLBACK=1\nJSP_ROLLBACK_JOIN=192.0.2.10:7777\n";
+      q.enter_online(); bool restart = false; const std::string status = q.online_status(&restart);
+      CHECK(status.find("direct IP") != std::string::npos && status.find("This session: re-psn") == std::string::npos && !restart);
+    }
 
     if (fails) { std::printf("%d failure(s)\n", fails); return 1; }
     std::printf("net online page: all checks passed\n");

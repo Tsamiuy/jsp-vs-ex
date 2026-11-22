@@ -12,8 +12,10 @@
 namespace jmods {
 
 // ---- the start decision ------------------------------------------------------------------------------------------------------------
-// JSP_MODS=0 is the kill switch; without JSP_MODS_LIST (the launcher sets it when mods.txt exists) nothing is read. JSP_MODS_DIR may be
-// unset: then every listed mod is refused ("no mod.json"), and a listed set that does not run as listed refuses online (DigestKind::Refused).
+// JSP_MODS=0 is the kill switch. ENHANCEMENT (drop-in mods): mods run when JSP_MODS_DIR (the mods folder, the launcher sets it when the folder
+// exists) or JSP_MODS_LIST (mods.txt, optional) is set; with neither, nothing is read. JSP_MODS_DIR unset with a list: every listed mod is
+// refused ("no mod.json"), and a listed set that does not run as listed refuses online (DigestKind::Refused). A list without a file is an
+// empty list (jsp_mods.cpp).
 struct EnvChoice {
     bool on = false;
     std::string dir, list;   // as given
@@ -23,9 +25,10 @@ inline EnvChoice choose_env(const char* mods, const char* dir, const char* list)
 {
     EnvChoice c;
     if (mods && std::strcmp(mods, "0") == 0) { c.why = "[mods] off (JSP_MODS=0): stock game"; return c; }
-    if (!list || !*list) { c.why = "[mods] no mods list (JSP_MODS_LIST is not set): stock game"; return c; }
+    const bool has_list = list && *list, has_dir = dir && *dir;
+    if (!has_list && !has_dir) { c.why = "[mods] no mods folder or list (JSP_MODS_DIR and JSP_MODS_LIST are not set): stock game"; return c; }
     c.on = true;
-    c.list = list;
+    if (has_list) c.list = list;
     if (dir) c.dir = dir;
     return c;
 }
@@ -154,11 +157,35 @@ inline int override_at(const Plan& p, uint64_t pos, uint64_t n)
     return -1;
 }
 
+// Capture winning overrides at rollback admission. A failed capture never publishes a partial set.
+using FrozenOverrides = std::map<std::string, std::vector<Bytes>>;
+inline constexpr uint64_t kFrozenLimit = 256ull << 20;
+inline const char* freeze_overrides(Io& io, const ModSet& set, FrozenOverrides& result, uint64_t limit = kFrozenLimit)
+{
+    uint64_t remaining = limit;
+    for (const auto& [archive, plan] : set.plans) {
+        for (const auto& o : plan.overrides) {
+            if (o.len > remaining) return "verified replacement data exceeds the rollback cache limit (256 MiB)";
+            remaining -= o.len;
+        }
+    }
+    FrozenOverrides pending;
+    for (const auto& [archive, plan] : set.plans) {
+        auto& frozen = pending[archive];
+        for (const auto& o : plan.overrides) {
+            Bytes& bytes = frozen.emplace_back(size_t(o.len));
+            size_t got = o.alias ? io.archive_read(archive, o.donor_offset, bytes.data(), bytes.size()) :
+                                   io.mod_read(o.mod_id + "/" + o.source, 0, bytes.data(), bytes.size());
+            if (got != bytes.size() || jpsm::sha256(bytes.data(), bytes.size()) != o.content)
+                return "a mod file or alias donor changed before rollback could verify it";
+        }
+    }
+    result.swap(pending);
+    return nullptr;
+}
+
 // ---- online ----------------------------------------------------------------------------------------------------------------------------
-// The rollback build word (Caps::build, the re-psn room record) with the mod set folded in. No gameplay digest: exactly `stock`, so a
-// stock peer matches every older stock peer. A digest: the first 32 bits (big-endian) of SHA-256(stock as 4 little-endian bytes ||
-// digest), so two peers agree only on the same set (BuildMismatch otherwise, no wire change). Refused: false, and the caller does not
-// start rollback at all (two refusing peers would otherwise match each other).
+// Legacy folded build word. Schema 3 checks full session content separately.
 inline bool net_build(uint32_t stock, DigestKind kind, const Digest& digest, uint32_t& out)
 {
     if (kind == DigestKind::Refused) return false;

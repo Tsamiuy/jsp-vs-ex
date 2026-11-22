@@ -9,7 +9,8 @@
 // EMA(jitter) + margin) / 33.3); a raise of one needs two readings in a row, a lower five. Its problems in the testers' logs (support bundle 1, ping 99-129 ms):
 // it reacted late (a match ran at 2 ticks while it needed 3), the EMA hid the spikes, and nothing looked at the rollbacks that actually happened.
 // Rule 2 (default): the same trip formula on a window of GekkoNet's single round-trip samples (one every 500 ms, the last 8 s) instead of its 5 s average
-// and the EMA:
+// and the EMA. A producer sample identity prevents cached stats polls from extending that window. Samples retain their receipt time, and a decision
+// requires a newly accepted measurement; repeated polls cannot supply calm votes during an outage:
 //   one way = (median RTT - min(median / 2, 33.3)) / 2           (the answer wait taken off, as rule 1)
 //   spread  = RTT at the JSP_INPUT_DELAY_AUTO_PCT percentile (90) - median RTT   (all of it, as if the whole excursion were one way)
 //   margin  = JSP_INPUT_DELAY_AUTO_MARGIN_MS (8), or JSP_INPUT_DELAY_AUTO_HIGH_MARGIN_MS (16) once the median RTT is >= JSP_INPUT_DELAY_AUTO_HIGH_PING_MS (80)
@@ -26,10 +27,18 @@
 // both peers raise. JSP_INPUT_DELAY_AUTO_DEEP_COUNT=0 turns the depth trigger off.
 #pragma once
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
 namespace jpdr {
+
+// The same clock as GekkoNet's receipt timestamps; it stays local to this process.
+inline uint64_t clock_ms()
+{
+    return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 inline constexpr double kTickMs = 1000.0 / 30.0;
 inline constexpr int kMaxSamples = 32;
@@ -76,7 +85,11 @@ struct Params {
 };
 
 // What step() reads from the session (only when it needs it): GekkoNet's 5 s average round trip and jitter, its last single round trip, and this peer's delay.
-struct Reading { double ping_avg = -1, jitter = 0, last_ping = -1; int cur = 0; };
+struct Reading {
+    double ping_avg = -1, jitter = 0, last_ping = -1;
+    int cur = 0;
+    uint64_t sample_id = 0, sample_at_ms = 0, observed_ms = 0;
+};
 
 struct Decision {
     int want = -1;                // >= 0: set this delay now (differs from Reading::cur)
@@ -91,6 +104,7 @@ struct State {
     uint64_t start = 0, next = 0, next_sample = 0;
     double jit_ema = -1; int up = 0, down = 0;
     float rtt[kMaxSamples] = {}; uint64_t rtt_t[kMaxSamples] = {}; int n = 0, head = 0;
+    uint64_t seen_sample = 0, accepted_sample = 0, decided_sample = 0;
     int start_delay = -1;         // the delay at the first reading (the guard's base)
     uint64_t deep_t[kMaxDeep] = {}; int deep_n = 0; uint64_t last_deep = 0;
     uint64_t hold_until = 0;
@@ -165,7 +179,8 @@ Decision step(State& s, const Params& p, uint64_t now, Read&& read)
         s.deep_n = k;
         if (s.deep_n >= p.deep_count) {
             s.deep_n = 0;
-            const Reading r = read(); d.cur = r.cur; d.why = "rollbacks"; d.ping_avg = r.ping_avg; d.jitter_avg = r.jitter;
+            const Reading r = read(); now = std::max(now, r.observed_ms);
+            d.cur = r.cur; d.why = "rollbacks"; d.ping_avg = r.ping_avg; d.jitter_avg = r.jitter;
             s.hold_until = now + (uint64_t)p.hold_ms; s.up = s.down = 0;
             if (s.start_delay < 0) s.start_delay = r.cur;
             const bool capped = now < s.start + (uint64_t)p.guard_ms && r.cur >= s.start_delay + p.guard_raise;
@@ -175,17 +190,39 @@ Decision step(State& s, const Params& p, uint64_t now, Read&& read)
     }
     Reading r; bool have = false;
     if (now >= s.next_sample) {
-        s.next_sample = now + (uint64_t)p.sample_ms;
         r = read(); have = true;
-        if (r.last_ping > 0) { s.rtt[s.head] = (float)r.last_ping; s.rtt_t[s.head] = now; s.head = (s.head + 1) % p.samples; if (s.n < p.samples) s.n++; }
+        now = std::max(now, r.observed_ms);
+        s.next_sample = now + (uint64_t)p.sample_ms;
+        if (r.sample_id != s.seen_sample) {
+            if (r.sample_id < s.seen_sample) { // a restarted source cannot inherit the preceding source's history or votes
+                s.n = s.head = s.up = s.down = 0;
+                s.accepted_sample = s.decided_sample = 0;
+            }
+            s.seen_sample = r.sample_id;
+            const uint64_t window_ms = (uint64_t)p.samples * p.sample_ms;
+            if (r.sample_id && std::isfinite(r.last_ping) && r.last_ping >= 0 &&
+                r.sample_at_ms >= s.start && r.sample_at_ms <= now && now - r.sample_at_ms <= window_ms) {
+                s.rtt[s.head] = (float)r.last_ping;
+                s.rtt_t[s.head] = r.sample_at_ms;
+                s.head = (s.head + 1) % p.samples;
+                if (s.n < p.samples) s.n++;
+                s.accepted_sample = r.sample_id;
+            }
+        }
     }
     if (now < s.next) return d;
+    if (!have) { r = read(); now = std::max(now, r.observed_ms); }
     s.next = now + (uint64_t)p.every_ms;
+    // A stats poll is not a new RTT. Cached history cannot cast additional delay votes.
+    if (s.accepted_sample == s.decided_sample) { s.up = s.down = 0; return d; }
+    s.decided_sample = s.accepted_sample;
     const bool guarded = now < s.start + (uint64_t)p.guard_ms;
     float v[kMaxSamples]; int m = 0;
-    for (int i = 0; i < s.n; i++) if (guarded || s.rtt_t[i] >= s.start + (uint64_t)p.early_ms) v[m++] = s.rtt[i];
-    if (m < 3) return d;
-    if (!have) r = read();
+    const uint64_t window_ms = (uint64_t)p.samples * p.sample_ms;
+    for (int i = 0; i < s.n; i++)
+        if (now >= s.rtt_t[i] && now - s.rtt_t[i] <= window_ms &&
+            (guarded || s.rtt_t[i] >= s.start + (uint64_t)p.early_ms)) v[m++] = s.rtt[i];
+    if (m < 3) { s.up = s.down = 0; return d; }
     if (s.start_delay < 0) s.start_delay = r.cur;
     d.cur = r.cur; d.why = "trip"; d.ping_avg = r.ping_avg; d.jitter_avg = r.jitter;
     const double med = percentile(v, m, 50);

@@ -893,99 +893,8 @@ def step_place(c):
     return True
 
 
-# ---------------------------------------------------------------- online defaults (ENHANCEMENT, the tester default)
-# A friend installs, starts the game and plays Online Battle > Friendly Match with rollback, with no setup. On the first run with no online
-# settings anywhere (no repsn.ini or community.ini in the shared folder, no repsn.ini of the game), this writes the shared repsn.ini: re-psn on,
-# a public re-psn test server (ONLINE_SERVER; this project does not run it), a random online name "Player" + 4 digits (never the PC's user name;
-# changed in the settings window's Online tab).
-# Then the settings file the launcher reads gets JSP_ROLLBACK=1 (the lobby start: no role key, so the game's own Online Battle room pairs the
-# players and rollback runs the fight; jsp_net_online.h NC_NATIVE) and JSP_ROLLBACK_RELAY=1 (the server's relay when a direct path fails), unless it
-# already has a JSP_ROLLBACK line or a rollback role key. JSP_ROLLBACK is a settings line, not a game-side default: the thread registry reads it at
-# process attach (jsp_thread_registry.cpp), before any code of the game runs. Present files are never changed: a player who chose Off keeps it.
-# Off switch for this step: --no-online-defaults or JSP_ONLINE_DEFAULTS=0.
-# FIX (region): the rollback takeover of the game's own fight hooks US 1.00 addresses (jsp_net_native_fight.cpp; INSN_PATCHES are US only). On another
-# disc (EU) the defaults still turn re-psn on with the test server and a name, but add no JSP_ROLLBACK line: rollback stays off and Online Battle
-# plays on the game's own netcode (the game refuses the takeover on that disc anyway).
-ONLINE_SERVER = "107.175.17.162:36100"   # a public re-psn test server (relay on), not run by this project
-ONLINE_ROLE_KEYS = ("JSP_ROLLBACK_LISTEN", "JSP_ROLLBACK_JOIN", "JSP_ROLLBACK_VIA", "JSP_ROLLBACK_BENCH")
-
-
-def shared_dir(root, portable, env=None):
-    """The folder of repsn.ini / community.ini, as jsp_online.cpp resolve_dirs and the settings window find it; None without APPDATA."""
-    env = os.environ if env is None else env
-    if env.get("PS3RECOMP_SHARED_DIR"):
-        return pathlib.Path(env["PS3RECOMP_SHARED_DIR"])
-    if portable:
-        return pathlib.Path(root) / "shared"
-    ad = env.get("APPDATA")
-    return pathlib.Path(ad) / "PS3Recomp" if ad else None
-
-
-def settings_file(root, portable, env=None):
-    """The play_settings.txt jsp-launcher.exe reads (installer README, "Settings: which file wins", rules 2 to 4)."""
-    env = os.environ if env is None else env
-    root = pathlib.Path(root)
-    if (root / "settings_here.txt").is_file() or (root / "play_settings.txt").is_file() or portable or not env.get("APPDATA"):
-        return root / "play_settings.txt"
-    return pathlib.Path(env["APPDATA"]) / APPDIR / "play_settings.txt"
-
-
-def online_name(rng=None):
-    import random
-    return "Player%04d" % (rng or random.SystemRandom()).randint(1000, 9999)
-
-
-def online_defaults(root, portable, env=None, rng=None, region=None):
-    """Seeds the online defaults (see above). Returns the log lines; never raises for a file it cannot write (the game then stays offline).
-    region: the disc's region ("US", "EU"); None = not known (as before: rollback on)."""
-    env = os.environ if env is None else env
-    if env.get("JSP_ONLINE_DEFAULTS", "1") == "0":
-        return ["[online] defaults: skipped (JSP_ONLINE_DEFAULTS=0)"]
-    sd = shared_dir(root, portable, env)
-    if sd is None:
-        return ["[online] defaults: skipped (no APPDATA folder)"]
-    gd = pathlib.Path(root) / "game" if portable else (pathlib.Path(env["APPDATA"]) / APPDIR if env.get("APPDATA") else None)
-    present = [p for p in (sd / "repsn.ini", sd / "community.ini", gd and gd / "repsn.ini") if p and p.exists()]
-    if present:
-        return ["[online] defaults: online settings already present (" + ", ".join(p.name for p in present) + "), nothing changed"]
-    name = online_name(rng)
-    nl = "\r\n" if WIN else "\n"
-    try:
-        sd.mkdir(parents=True, exist_ok=True)
-        (sd / "repsn.ini").write_text(nl.join(["; re-psn server settings. Written by the installer's first run (online defaults); the launcher and the game read it.",
-                                               "[repsn]", "enabled=1", f"server={ONLINE_SERVER}", f"name={name}", ""]), encoding="ascii", newline="")
-    except OSError as e:
-        return [f"[online] defaults: repsn.ini could not be written ({e.__class__.__name__}); online stays off"]
-    out = [f"[online] defaults: online on, a public test server (re-psn), online name {name} (change it in the settings window, Online tab)"]
-    ps = settings_file(root, portable, env)
-    try:
-        text = ps.read_text(encoding="utf-8-sig", errors="replace") if ps.is_file() else ""
-    except OSError:
-        text = None
-    keys = set()
-    for line in (text or "").splitlines():
-        if "=" in line and line[:1] not in "#;":
-            keys.add(line.split("=", 1)[0].strip().upper())
-    if region not in (None, "US"):
-        out.append(f"[online] defaults: rollback not turned on: the rollback takeover is US-disc only; Online Battle uses the game's own netcode on this {region} disc")
-    elif text is None:
-        out.append("[online] defaults: the settings file could not be read; rollback not turned on")
-    elif "JSP_ROLLBACK" in keys:
-        out.append("[online] defaults: the settings file already has a JSP_ROLLBACK line, kept")
-    elif keys & set(ONLINE_ROLE_KEYS):
-        out.append("[online] defaults: the settings file has a rollback role key (LISTEN, JOIN, VIA or BENCH); rollback not turned on")
-    else:
-        fnl = "\r\n" if ("\r\n" in text or (not text and WIN)) else "\n"
-        add = ["JSP_ROLLBACK=1"] + ([] if "JSP_ROLLBACK_RELAY" in keys else ["JSP_ROLLBACK_RELAY=1"])
-        sep = "" if not text or text.endswith("\n") else fnl
-        try:
-            ps.parent.mkdir(parents=True, exist_ok=True)
-            with open(ps, "a", encoding="utf-8", newline="") as fh:
-                fh.write(sep + fnl.join(add) + fnl)
-            out.append("[online] defaults: rollback for Online Battle on (" + ", ".join(add) + " in the settings file; the Online tab turns it off)")
-        except OSError as e:
-            out.append(f"[online] defaults: the settings file could not be written ({e.__class__.__name__}); rollback not turned on")
-    return out
+def online_setup_notice():
+    return "First run preserves saved settings. To set up online play, choose a server in Settings > Online."
 
 
 SETTINGS_HASH = "jsp-settings.exe.src-sha256"   # beside the exe: SHA-256 of the tools/jsp-settings.cs it was built from
@@ -1127,8 +1036,7 @@ def main(argv=None, ask=input):
     ap.add_argument("--allow-unknown-eboot", action="store_true", help="opt in: go on with an EBOOT.elf this port does not know (check E3 "
                     "becomes a WARN, the build is unsupported); the other region's known EBOOT is still refused")
     ap.add_argument("--portable", action="store_true", help="saves and settings in the install folder (jsp-install.ini portable=1)")
-    ap.add_argument("--no-online-defaults", action="store_true", help="do not seed the online defaults (re-psn on a public test server, "
-                    "rollback for Online Battle) when no online settings exist yet")
+    ap.add_argument("--no-online-defaults", action="store_true", help="omit the online setup notice")
     a = ap.parse_args(argv)
     a.root = os.path.abspath(a.root or str(pathlib.Path(__file__).resolve().parent))   # CMake is run from other folders: absolute paths only
     root = pathlib.Path(a.root)
@@ -1206,8 +1114,8 @@ def main(argv=None, ask=input):
             return 1
         c.mark(s)
     if a.until == "all" and not a.no_online_defaults:
-        for line in online_defaults(root, a.portable, region=c.region):
-            say(line)
+        if os.environ.get("JSP_ONLINE_DEFAULTS") != "0":
+            say(online_setup_notice())
     say(f"RESULT: ok, steps up to {STEPS[last]} done")
     if a.until == "all":
         if (c.root / "jsp-settings.exe").is_file():
@@ -1216,9 +1124,6 @@ def main(argv=None, ask=input):
         else:   # no C# compiler of Windows: build_settings_window said so above
             say("Start the game with jsp-launcher.exe in this folder (the settings window could not be built, see above). "
                 "The first start installs the game data from your disc.")
-        if not a.no_online_defaults:
-            say("Online is ready: Main Menu > Battle Modes > Online Battle > Friendly Match (2 vs 2); "
-                "one player picks Create a Room, the other Search for a Room.")
     return 0
 
 

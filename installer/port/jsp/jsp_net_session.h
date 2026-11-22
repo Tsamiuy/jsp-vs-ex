@@ -278,6 +278,7 @@ struct SessionStats {
     float frames_ahead = 0;
     float ping_ms = -1, jitter_ms = 0;        // GekkoNet's average round trip to the first remote player and its jitter (-1: no remote / not known yet)
     float last_ping_ms = -1;                 // ENHANCEMENT (adaptive input delay, rule 2): GekkoNet's last single round trip to that player (one every 500 ms)
+    uint64_t rtt_samples = 0, last_ping_received_ms = 0; // actual identity and steady_clock receipt time, not stats-poll time
     uint8_t local_delay = 0;                  // the input delay this peer's local players run with now
     uint64_t keepalive_polls = 0;            // polls made by the keepalive thread (the game thread was busy)
 };

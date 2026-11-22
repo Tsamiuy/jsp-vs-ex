@@ -11,6 +11,7 @@
 #define JSP_SESSION_REGISTRY_H
 
 #include "jsp_session_settings.h"
+#include "jsp_session_digest.h"
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -18,7 +19,7 @@
 
 namespace jpsm {
 
-inline constexpr uint16_t kSchema = 2;   // 2: GraceSeconds appended
+inline constexpr uint16_t kSchema = 3;   // 3: full applied-content SHA-256 required in Hello and Propose
 
 // Wire order. Count is the number of synchronized fields every manifest carries exactly once.
 enum class Id : uint8_t {
@@ -219,6 +220,7 @@ inline std::string value_text(Id id, uint32_t v)
 
 // What one peer can honour. Built from the registry defaults; a newer build widens it, an older build lacks the rollback bit.
 struct Caps {
+    Digest content{};               // zero means the loader could not establish an identity
     uint16_t schema = kSchema;
     uint32_t build = 0;            // simulation build/content fingerprint: must be equal on all peers
     bool rollback = true;          // this build contains the rollback netcode

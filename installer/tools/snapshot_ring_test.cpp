@@ -7,6 +7,7 @@
 // rollback 8 ticks back, also checked against a full copy. Run: installer/tools/snapshot_ring_test.sh (builds with -O2).
 // every part runs in both ring modes (Copy2 = two copies per committed page, PagePtr = one copy and a page-index swap); the random test
 // also checks the arena accounting (free + entry pages + shadow pages == arena, no page owned twice) after every operation.
+#include "../port/jsp/jsp_rollback_checks.h"
 #include "../port/jsp/jsp_snapshot_ring.h"
 #include "../port/jsp/jsp_snapshot_sync.h"   // the gate precheck (test_gate_precheck)
 #include <chrono>
@@ -376,8 +377,57 @@ static void test_two_sessions(RingMode mode)
     std::printf("two sessions (%s): second session baselined at tick 1 after invalidate, commits and rollback ok\n", mname(mode));
 }
 
-int main()
+
+static void test_rollback_boundaries()
 {
+    using namespace jsp_rollback;
+    CHECK(thread_id_bit(0) == 0 && thread_id_bit(65) == 0);
+    const uint64_t sparse = thread_id_bit(1) | thread_id_bit(63) | thread_id_bit(64);
+    CHECK(sparse == UINT64_C(0xc000000000000001));
+    CHECK(thread_id_bit(1) == 1 && thread_id_bit(63) == UINT64_C(0x4000000000000000));
+    CHECK(thread_id_bit(64) == UINT64_C(0x8000000000000000));
+    uint64_t dense = 0;
+    for (unsigned id = 1; id <= 64; ++id) dense |= thread_id_bit(id);
+    CHECK(dense == UINT64_MAX);
+
+    bool running = false;
+    int attempts = 0, syncs = 0, polls = 0;
+    auto audit = [&] {
+        return periodic_audit(running, [&] { return ++attempts == 3; },
+            [&] { return ++syncs == 1; }, [&] { ++polls; return true; });
+    };
+    CHECK(audit() && !running && syncs == 1 && polls == 0);
+    CHECK(!audit() && !running && syncs == 2 && polls == 0);
+    CHECK(audit() && running && polls == 1);
+    CHECK(audit() && attempts == 3 && syncs == 2 && polls == 2);
+
+    KoRecord results[] = {{108, 1}, {110, 3}};
+    CHECK(!first_confirmed_result(results, 100, -1).winner);
+    CHECK(!first_confirmed_result(results, 100, 7).winner);
+    results[0] = {108, 0};  // late remote input undoes the predicted red win
+    CHECK(!first_confirmed_result(results, 100, 8).winner);
+    results[0] = {109, 2};  // corrected blue win, recorded before the later time-up
+    CHECK(first_confirmed_result(results, 100, 10).winner == 2);
+    CHECK(first_confirmed_result(results, 110, 0).winner == 3);
+
+    ResultConfirmation match;
+    KoRecord saved[] = {{108, 1}};
+    CHECK(!match.result_at_boundary(saved, 100, 7, PeerState::Live).winner);
+    CHECK(!match.result_at_boundary(saved, 100, 99, PeerState::Disconnected).winner);
+    saved[0] = {108, 0};  // corrected input removes red's predicted KO
+    CHECK(!match.result_at_boundary(saved, 100, 99, PeerState::Disconnected).winner);
+    match = {};  // a separate run confirms the corrected frame before losing the connection
+    CHECK(!match.result_at_boundary(saved, 100, 8, PeerState::Live).winner);
+    saved[0] = {108, 2};  // the corrected save completes after the last known live watermark
+    CHECK(match.result_at_boundary(saved, 100, -1, PeerState::Disconnected).winner == 2);
+    match = {};  // a new session must establish its own live watermark
+    CHECK(!match.result_at_boundary(saved, 100, 99, PeerState::Disconnected).winner);
+}
+
+int main(int argc, char** argv)
+{
+    test_rollback_boundaries();
+    if (argc == 2 && std::strcmp(argv[1], "--rollback-boundaries") == 0) return fails ? 1 : 0;
     test_two_sessions(RingMode::Copy2); test_two_sessions(RingMode::PagePtr);
     test_gate_precheck();
     test_pagemap();

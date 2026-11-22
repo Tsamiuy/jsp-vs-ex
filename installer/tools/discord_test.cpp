@@ -245,7 +245,11 @@ int main()
     CHECK(s.take(&got) && got.room == 43);
     s.clear(); CHECK(!s.active() && s.step(kJoinJoined, 99999) == Step::Idle);
     CHECK(std::string(join_state_text(kJoinFull)) == "the room is full" && std::string(verdict_text(Verdict::WrongServer)).find("server") != std::string::npos);
-    CHECK(std::string(kDefaultAppId) == "1573573702514384977");
+    CHECK(presence_app_id("", "").empty() && presence_app_id("1", "").empty());
+    CHECK(presence_app_id("0", "123456789012345678").empty());
+    CHECK(presence_app_id("", "123456789012345678") == "123456789012345678");
+    CHECK(presence_app_id("1", "0").empty() && presence_app_id("1", "12x").empty());
+    CHECK(presence_app_id("1", "18446744073709551616").empty());
 
     if (fails) { std::printf("discord: %d checks FAILED\n", fails); return 1; }
     std::printf("PASS discord: secret, presence text, names, timer and join rules\n");

@@ -16,7 +16,8 @@
 //   (psnr_relay_wrap out, psnr_relay_unwrap_from in: never the plain unwrap, a room member could forge from_user), anything starting with "PSNR" is control (psnr_is_control).
 // Threading: psnr_connect_timeout runs on a DETACHED worker thread that owns a shared result (DNS is unbounded, so nothing may wait for it: an abort abandons the result and the worker
 // closes a late client itself); every other psnr_* call is made from ONE thread, the one that calls pump() and the IPsnrTransport methods (the glue's pump thread, from the start).
-// ASSUMPTION: a SEARCH lists at most 64 rooms (start 0, max 64); a server with more rollback rooms of other builds could hide the matching one. The UdpMux rx/tx hooks run on whichever thread pumps the mux and only read the client's constant fields plus atomics here.
+// SEARCH uses 64-room pages. A completed scan chooses its oldest observed compatible room; room churn can require a retry.
+// The UdpMux rx/tx hooks run on whichever thread pumps the mux and only read the client's constant fields plus atomics here.
 #ifndef JSP_NET_REPSN_CLIENT_H
 #define JSP_NET_REPSN_CLIENT_H
 
@@ -57,8 +58,8 @@ public:
     void start(bool allow_relay)
     {
         allow_relay_ = allow_relay;
-        if (id_.name.empty() || id_.name.size() > PSNR_ONLINE_ID_MAX) { sticky_fail("re-psn: the online name must be 1 to " + std::to_string(PSNR_ONLINE_ID_MAX) + " characters (repsn.ini name=)"); return; }
-        if (id_.comm_id.size() > PSNR_COMM_ID_MAX) { sticky_fail("re-psn: the communication id is longer than " + std::to_string(PSNR_COMM_ID_MAX) + " characters (repsn.ini comm_id=)"); return; }
+        if (id_.name.empty() || id_.name.size() > PSNR_ONLINE_ID_MAX) { sticky_fail("re-psn (rollback): the online name must be 1 to " + std::to_string(PSNR_ONLINE_ID_MAX) + " characters (repsn.ini name=)"); return; }
+        if (id_.comm_id.size() > PSNR_COMM_ID_MAX) { sticky_fail("re-psn (rollback): the communication id is longer than " + std::to_string(PSNR_COMM_ID_MAX) + " characters (repsn.ini comm_id=)"); return; }
         install_hooks();
         std::shared_ptr<Shared> sh = sh_; const RepsnIdentity id = id_; const uint16_t p2p = mux_.local_port();
         std::thread([sh, id, p2p] {
@@ -67,7 +68,7 @@ public:
             std::lock_guard<std::mutex> lk(sh->mu);
             if (!c) {
                 const int e = psnr_connect_error();
-                sh->fail = "re-psn: cannot connect to " + id.host + ":" + std::to_string(id.port) + (e ? " (error " + std::to_string(e) + (e == PSNR_E_NAME_TAKEN ? ", the online name is taken" : "") + ")" : "");
+                sh->fail = "re-psn (rollback): cannot connect to " + id.host + ":" + std::to_string(id.port) + (e ? " (error " + std::to_string(e) + (e == PSNR_E_NAME_TAKEN ? ", the online name is taken" : "") + ")" : "");
                 sh->state = 2; return;
             }
             if (sh->abandoned) { psnr_close(c); return; }   // stop() ran while we connected: nobody wants this client
@@ -93,7 +94,7 @@ public:
         if (r < 0 && !dead_) {
             dead_ = true; PsnrEvent e; e.kind = PsnrEvent::Error; e.err = -1000 - psnr_dead_reason(c); ev_.push_back(e);
             // The rendezvous reads events only once a room exists; before that (connect, lookup) failure() is what it asks. A dead connection stays failed.
-            sticky_fail("re-psn: the connection to the server was lost (reason " + std::to_string(psnr_dead_reason(c)) + ")");
+            sticky_fail("re-psn (rollback): the connection to the server was lost (reason " + std::to_string(psnr_dead_reason(c)) + ")");
         }
     }
     // ---- IPsnrTransport ----
@@ -113,30 +114,32 @@ public:
     }
     uint32_t self_user() override { return self_user_; }
     bool relay_offered() override { psnr_client* c = c_.load(); return c && psnr_relay_available(c) != 0; }
-    bool search(std::vector<PsnrRoom>& out) override
+    void reset_search() override { search_req_ = 0; search_done_ = false; rooms_.clear(); }
+    bool search(uint16_t offset, std::vector<PsnrRoom>& out, uint16_t& total) override
     {
         pump();
         psnr_client* c = c_.load();
         if (!c || !sticky_.empty()) return false;
         if (!search_req_ && !search_done_) {
-            uint8_t b[4]; psnr_put16(b, 0); psnr_put16(b + 2, 64); search_req_ = psnr_send(c, PSNR_SEARCH_ROOMS, b, 4);
-            if (!search_req_) { sticky_fail("re-psn: the room search could not be sent (the connection is gone)"); return false; }   // 0 = the send failed
+            search_offset_ = offset;
+            uint8_t b[4]; psnr_put16(b, offset); psnr_put16(b + 2, 64); search_req_ = psnr_send(c, PSNR_SEARCH_ROOMS, b, 4);
+            if (!search_req_) { sticky_fail("re-psn (rollback): the room search could not be sent (the connection is gone)"); return false; }   // 0 = the send failed
         }
         if (!search_done_) return false;
-        out = rooms_; search_done_ = false; search_req_ = 0; return true;
+        out.swap(rooms_); total = search_total_; reset_search(); return true;
     }
     void create_room(uint32_t flags, const std::string& external, const std::string& member_data) override
     {
         std::vector<uint8_t> b; b.push_back(2);   // max = 2: a rollback match has two players
         put32(b, flags); put_blob(b, external); put_blob(b, std::string()); put_blob(b, member_data);
         room_req_ = c_.load() ? psnr_send(c_.load(), PSNR_CREATE_ROOM, b.data(), (uint32_t)b.size()) : 0;
-        if (!room_req_) sticky_fail("re-psn: the room could not be created (the request could not be sent)");
+        if (!room_req_) sticky_fail("re-psn (rollback): the room could not be created (the request could not be sent)");
     }
     void join_room(uint64_t room_id, const std::string& member_data) override
     {
         std::vector<uint8_t> b; put64(b, room_id); put_blob(b, member_data);
         room_req_ = c_.load() ? psnr_send(c_.load(), PSNR_JOIN_ROOM, b.data(), (uint32_t)b.size()) : 0;
-        if (!room_req_) sticky_fail("re-psn: the room could not be joined (the request could not be sent)");
+        if (!room_req_) sticky_fail("re-psn (rollback): the room could not be joined (the request could not be sent)");
     }
     bool poll_event(PsnrEvent& ev) override
     {
@@ -244,9 +247,14 @@ private:
     void handle(const psnr_msg& m)
     {
         const uint8_t T = m.type;
-        if (T == PSNR_ROOM_LIST && m.req == search_req_ && search_req_) {
+        if (T == PSNR_ROOM_LIST && m.req == search_req_ && search_req_ && !search_done_) {
             psnr_cursor cur; uint16_t total = 0; rooms_.clear();
-            if (psnr_room_list_parse(&m, &cur, &total)) {
+            if (!psnr_room_list_parse(&m, &cur, &total) ||
+                cur.count != std::min<int>(64, std::max<int>(0, int(total) - search_offset_))) {
+                sticky_fail("re-psn (rollback): invalid room list page"); return;
+            }
+            search_total_ = total;
+            {
                 psnr_room r;
                 while (psnr_room_next(&cur, &r)) {
                     PsnrRoom x; x.id = r.room_id; x.flags = r.flags; x.members = r.cur; x.max_members = r.max; x.owner_name = r.owner;
@@ -280,7 +288,7 @@ private:
             push_err(-2);
         } else if (T == PSNR_ERROR && m.len >= 4 && m.req && (m.req == room_req_ || m.req == search_req_)) {
             const int code = (int)psnr_get32(m.data);
-            if (m.req == search_req_) { search_req_ = 0; search_done_ = false; sticky_fail("re-psn: the room search was refused (error " + std::to_string(code) + ")"); return; }   // ends the lookup (failure() is checked every poll)
+            if (m.req == search_req_) { search_req_ = 0; search_done_ = false; sticky_fail("re-psn (rollback): the room search was refused (error " + std::to_string(code) + ")"); return; }   // ends the lookup (failure() is checked every poll)
             room_req_ = 0; push_err(code);
         }
     }
@@ -298,6 +306,7 @@ private:
     void set_peer_ep(const Endpoint& e) { peer_key_ = ((uint64_t)e.ip_be << 16) | e.port; have_peer_ = true; }
     Endpoint peer_ep() const { const uint64_t k = peer_key_.load(); Endpoint e; e.ip_be = (uint32_t)(k >> 16); e.port = (uint16_t)(k & 0xFFFF); return e; }
     uint64_t t_first_probe_ = 0, last_probe_ = 0;
+    uint16_t search_offset_ = 0, search_total_ = 0;
     uint32_t search_req_ = 0, room_req_ = 0; bool search_done_ = false; std::vector<PsnrRoom> rooms_;
     uint64_t room_ = 0; std::map<uint16_t, uint32_t> members_;
     std::deque<PsnrEvent> ev_;

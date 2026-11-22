@@ -4,8 +4,9 @@
  * at the next start.
  *
  * Environment (the launcher sets the two paths, installer/launcher/launcher.c):
- *   JSP_MODS_LIST  mods.txt, the enable list (one mod id per line, load order). Unset: the stock game, and no provider is registered.
- *   JSP_MODS_DIR   the mods folder (<install>\mods), each mod in <id>\ with its mod.json.
+ *   JSP_MODS_LIST  mods.txt, the optional order and off list (one mod id per line, load order; "-id" turns a mod off).
+ *   JSP_MODS_DIR   the mods folder (<install>\mods), each mod in <id>\ with its mod.json; every such folder loads (alphabetical, after the
+ *                  list). With neither variable set: the stock game, and no provider is registered.
  *   JSP_MODS=0     the kill switch: the stock game whatever the list says.
  * main.cpp calls jsp_mods_init() before the PPU table and the rollback install, so the rollback build word (jsp_net_game.cpp) and the
  * game's own online (jsp_online.cpp) see the set.
@@ -29,6 +30,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -47,7 +49,6 @@
 #endif
 #include <windows.h>
 #else
-#include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -189,6 +190,49 @@ public:
         return true;
 #endif
     }
+    // The names of the folders directly in the mods folder (not followed when they are links: open_file refuses those later).
+    bool list_dirs(std::vector<std::string>& out, std::string& why) const
+    {
+        out.clear();
+#ifdef _WIN32
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((root_ + L"\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            const DWORD e = GetLastError();
+            if (e == ERROR_FILE_NOT_FOUND) return true;   // an empty folder
+            why = "cannot list it (Windows error " + std::to_string(e) + ")";
+            return false;
+        }
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!std::wcscmp(fd.cFileName, L".") || !std::wcscmp(fd.cFileName, L"..")) continue;
+            out.push_back(utf8(fd.cFileName));
+        } while (FindNextFileW(h, &fd));
+        const DWORD e = GetLastError();
+        FindClose(h);
+        if (e != ERROR_NO_MORE_FILES) { out.clear(); why = "listing stopped (Windows error " + std::to_string(e) + ")"; return false; }
+        return true;
+#else
+        const int d = dup(root_);
+        DIR* dp = d >= 0 ? fdopendir(d) : nullptr;
+        if (!dp) { const int e = errno; if (d >= 0) ::close(d); why = std::string("cannot list it: ") + std::strerror(e); return false; }
+        rewinddir(dp);
+        int error = 0;
+        for (;;) {
+            errno = 0;
+            const dirent* e = readdir(dp);
+            if (!e) { error = errno; break; }
+            if (!std::strcmp(e->d_name, ".") || !std::strcmp(e->d_name, "..")) continue;
+            struct stat st;
+            if (fstatat(dirfd(dp), e->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) { error = errno; break; }
+            if (S_ISREG(st.st_mode)) continue;   // a link stays in: open_file refuses it with a reason
+            out.push_back(e->d_name);
+        }
+        closedir(dp);
+        if (error) { out.clear(); why = std::string("listing stopped: ") + std::strerror(error); return false; }
+        return true;
+#endif
+    }
     // rel: "<id>/<path>", already checked by valid_rel_path (no '..', no device names, no '\\' or ':').
     bool open_file(const std::string& rel, ModFile& f, std::string& why) const
     {
@@ -307,8 +351,13 @@ struct Served {
 };
 struct Verified { std::string why; bool logged = false; uint64_t size = UINT64_MAX; };   // why: "" = serves, else why the stock file is read; size: the copy's size then (UINT64_MAX: unknown)
 struct State {
+    std::string disc_dir;
+    std::once_flag freeze_once;
+    FrozenOverrides frozen;
+    std::atomic<bool> frozen_ready{false};
     ModsRoot root;
     bool root_ok = false;
+    std::string root_error;
     std::map<std::string, ModFile> files;   // "<id>/<path>" -> the open file (a failed open is kept with ok = false)
     ModSet set;
     std::map<std::string, Served> served;   // by archive_key (the basename; case folded on Windows)
@@ -317,6 +366,8 @@ struct State {
 };
 State* g_st = nullptr;                                // set once by jsp_mods_init, never freed (fds may outlive any teardown)
 std::atomic<int> g_kind{ (int)DigestKind::None };   // the set's DigestKind (Refused also after a gameplay copy differs)
+Digest g_session_content{};   // published at boot before the network and guest threads start
+std::atomic<bool> g_content_refused{true};   // sticky once any planned overlay cannot be served
 std::atomic<int> g_copy_mismatch{ 0 };               // a gameplay archive copy first opened after start differs (jsp_mods_copy_mismatch)
 
 #ifdef _WIN32
@@ -342,6 +393,8 @@ public:
         const ModFile* f = file(rel);
         return f ? ModsRoot::read(*f, off, dst, n) : 0;
     }
+    bool mod_dirs(std::vector<std::string>& out) override { dirs_error_ = st_.root_error; return st_.root_ok && st_.root.list_dirs(out, dirs_error_); }
+    std::string mod_dirs_error() override { return dirs_error_; }
     std::string mod_why(const std::string& rel) override
     {
         const auto it = why_.find(rel);
@@ -361,6 +414,7 @@ private:
     State& st_;
     std::string disc_;
     std::map<std::string, FILE*> arch_;
+    std::string dirs_error_;
     std::map<std::string, std::string> why_;   // rel -> why it could not be opened (not "not found")
     const ModFile* file(const std::string& rel)
     {
@@ -428,6 +482,7 @@ ps3_fs_vfile* v_open(const char* guest_path, const char* host_path)
             else logl(fmt("[mods] serve %s (%s): NOT served, the stock file is read: this copy is not the one the mods were planned on (%s)",
                           name, guest_path ? guest_path : "?", why.c_str()));
         }
+        if (!why.empty()) g_content_refused.store(true);
         if (late && !why.empty() && s.gameplay) {   // one line per such path (the result is kept)
             g_copy_mismatch.store(1);
             // The start-time decision (the build word, the game's online) could not see this copy: this process now runs stock bytes where
@@ -451,13 +506,15 @@ size_t v_read(ps3_fs_vfile* vf, FILE* host, uint64_t pos, void* dst, size_t n)
                    const auto f = st->files.find(rel);
                    return f == st->files.end() ? 0 : ModsRoot::read(f->second, off, d, k);
                });
-    const size_t got = s.plan.read(io, pos, dst, n);
+    const auto* frozen = st->frozen_ready.load(std::memory_order_acquire) ? &st->frozen.at(s.plan.archive) : nullptr;
+    const size_t got = s.plan.read(io, pos, dst, n, frozen);
     for (size_t i = 0; i < s.plan.overrides.size(); ++i) {
         const PlannedOverride& o = s.plan.overrides[i];
         if (pos < o.virt + o.len && o.virt < pos + n && !s.logged[i].exchange(true))
             logl(fmt("[mods] serve %s (%s) %s: first read in override segment (%s)", s.plan.archive.c_str(), v->guest.c_str(), o.entry.c_str(), o.mod_id.c_str()));
     }
     if (got < n) {   // one line per decade of the count, so a file rewritten under the game cannot flood the log
+        if (pos < s.plan.virt_size && got < std::min<uint64_t>(n, s.plan.virt_size - pos)) g_content_refused.store(true);
         const uint64_t c = s.short_reads.fetch_add(1) + 1;
         uint64_t d = 1;
         while (d < c && d <= UINT64_MAX / 10) d *= 10;
@@ -500,7 +557,9 @@ std::string eboot_id(const char* path)
     Bytes b(1 << 16);
     size_t n;
     while ((n = std::fread(b.data(), 1, b.size(), f)) > 0) s.update(b.data(), n);
+    const bool ok = !std::ferror(f);
     std::fclose(f);
+    if (!ok) return "unknown";
     return "sha256:" + hex(s.finish());
 }
 
@@ -512,30 +571,41 @@ std::vector<RosterFighter> g_roster;   // ENHANCEMENT (roster): the applied mods
  * title_id: PARAM.SFO's (manifests name the game versions they are for). Call once, before the guest starts. */
 extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const char* title_id)
 {
+    g_st = nullptr;   // stock and early refusal have no provider state
     g_copy_mismatch.store(0);
+    g_content_refused.store(true);
+    const std::string executable = eboot_id(eboot);
     std::string k1, k2, k3;
     const EnvChoice c = choose_env(env_utf8("JSP_MODS", k1), env_utf8("JSP_MODS_DIR", k2), env_utf8("JSP_MODS_LIST", k3));
-    if (!c.on) { logl(c.why); return; }   // off means stock: no provider is registered at all
+    if (!c.on) {
+        g_session_content = session_content(ModSet{}, executable);
+        g_content_refused.store(g_session_content == Digest{});
+        logl(c.why);
+        return;
+    }
     std::string text;
-    {
+    if (!c.list.empty()) {
         FILE* f = open_utf8(c.list);
+        const int open_error = f ? 0 : errno;
         uint64_t size = 0;
         bool ok = f && size64(f, size) && size <= (1u << 20);
         if (ok) { text.resize((size_t)size); ok = file_read(f, 0, text.data(), text.size()) == text.size(); }
+        const bool missing = !f && open_error == ENOENT;
         if (f) std::fclose(f);
-        if (!ok) { logl("[mods] list " + c.list + ": cannot read it (or it is over 1 MiB): stock game"); return; }
+        if (missing && !c.dir.empty()) logl("[mods] list " + c.list + ": not there (mods.txt is optional): every mod folder loads");
+        else if (!ok) { logl("[mods] list " + c.list + ": cannot read it (or it is over 1 MiB): stock game"); return; }
     }
     State* st = new State;
     std::string why = "JSP_MODS_DIR is not set";
-    if (!c.dir.empty()) st->root_ok = st->root.open(c.dir, why);
+    if (!c.dir.empty()) { st->root_ok = st->root.open(c.dir, why); if (!st->root_ok) st->root_error = why; }
     if (!st->root_ok) logl("[mods] mods folder " + (c.dir.empty() ? std::string("(none)") : c.dir) + ": " + why + "; every listed mod is refused");
     Options opt;
-    opt.list_name = c.list;
+    opt.list_name = c.list.empty() ? std::string("(no mods.txt)") : c.list;
     opt.title_id = title_id ? title_id : "";
-    opt.eboot_id = eboot_id(eboot);
+    opt.eboot_id = executable;
     std::string disc = vfs_root && *vfs_root ? vfs_root : ".";
     while (!disc.empty() && (disc.back() == '/' || disc.back() == '\\')) disc.pop_back();
-    const std::string disc_dir = disc + "/PS3_GAME/USRDIR/data/PS3/";
+    const std::string& disc_dir = st->disc_dir = disc + "/PS3_GAME/USRDIR/data/PS3/";
     {
         LoadIo io(*st, disc_dir);
         st->set = load_mod_set(io, text, opt);
@@ -554,7 +624,7 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
         s.logged.reset(new std::atomic<bool>[kv.second.overrides.size() + 1]());
     }
     // Every copy the game can open, checked now, before the digest is published: hdd0 is PS3_HDD0_ROOT, else the disc root (ppu_fs host_path).
-    bool gameplay_differs = false;
+    bool gameplay_differs = false, copy_differs = false;
     if (!st->served.empty()) {
         const char* h = std::getenv("PS3_HDD0_ROOT");
         std::string hdd0 = h && *h ? h : disc;
@@ -575,6 +645,7 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
                 if (why.empty()) { ++ok; continue; }
                 logl(fmt("[mods] check %s: the copy %s is not the one the mods were planned on (%s): it is read stock%s", s.plan.archive.c_str(), path.c_str(),
                          why.c_str(), s.gameplay ? ", and a gameplay mod changes this archive" : ""));
+                copy_differs = true;
                 if (s.gameplay) gameplay_differs = true;
             }
             logl(fmt("[mods] check %s: %d of %d cop%s the game can open match the plan", s.plan.archive.c_str(), ok, found, found == 1 ? "y" : "ies"));
@@ -586,6 +657,8 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
              "online and rollback are off, local play reads that copy stock");
         st->set.digest_kind = kind;
     }
+    g_session_content = session_content(st->set, executable);
+    g_content_refused.store(copy_differs || g_session_content == Digest{});
     g_kind.store((int)st->set.digest_kind);
     g_roster = st->set.roster;
     g_st = st;
@@ -601,6 +674,32 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
 /* 1 when a copy of an archive a gameplay mod changes was first opened after start and differs from the planned copy: this process reads it
  * stock, so a running online session no longer runs the set the peers agreed on (the session layer may end it as a content mismatch). */
 extern "C" int jsp_mods_copy_mismatch(void) { return g_copy_mismatch.load(); }
+
+// Full applied-content identity for rollback. No paths or mod labels leave this process.
+extern "C" int jsp_mods_session_content(uint8_t* out)
+{
+    if (g_content_refused.load()) return 0;
+    if (!out) return 1;
+    if (State* st = g_st) {
+        try {
+            std::call_once(st->freeze_once, [st] {
+                LoadIo io(*st, st->disc_dir);
+                if (const char* error = freeze_overrides(io, st->set, st->frozen)) {
+                    g_content_refused.store(true);
+                    logl(std::string("[mods] rollback refused: ") + error);
+                    return;
+                }
+                st->frozen_ready.store(true, std::memory_order_release);
+            });
+        } catch (const std::bad_alloc&) {
+            g_content_refused.store(true);
+            logl("[mods] rollback refused: could not reserve memory for verified replacements");
+        }
+    }
+    if (g_content_refused.load()) return 0;
+    std::memcpy(out, g_session_content.data(), g_session_content.size());
+    return 1;
+}
 
 /* The rollback build word with the mod set folded in (jsp_mods_glue.h net_build). 1 = *out is the word to use; 0 = refused (gameplay mods
  * were listed but not all applied): rollback must not start. */
@@ -653,6 +752,7 @@ extern "C" int jsp_mods_roster_stock(uint32_t* out, int cap)
  * is Refused (no rollback, no game online), the same as a gameplay mod that was requested but not applied. */
 extern "C" void jsp_mods_roster_failed(const char* why)
 {
+    g_content_refused.store(true);
     g_kind.store((int)DigestKind::Refused);
     logl(std::string("[mods] roster not applied (") + (why ? why : "?") + "): gameplay mods requested but not applied on this build: online refused");
     jsp_online_refuse_for_mods();

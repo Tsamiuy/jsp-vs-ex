@@ -19,9 +19,10 @@ enum class Reason : uint8_t {
     WrongSender, OutOfRange, Unsupported, CheatActive, RestartRequired, NoStartupEvidence, ApplyFailed,
     DigestMismatch, Timeout, HostCancelled, PeerLeft, RosterChanged, LocalLeave, PeerRejected, NotReady, DebugSwitch, ReaderError, LayerLost, RestoreFailed, HostLost, PeerLost,
     SessionRefused,  // the rollback session layer refused to start on one side (its own text goes to the log)
-    SessionFailed    // the rollback session failed on one side during the match (snapshot or state error; its own text goes to the log)
+    SessionFailed,   // the rollback session failed on one side during the match (snapshot or state error; its own text goes to the log)
+    ContentUnavailable, ContentMismatch, ContentChanged
 };
-inline constexpr uint8_t kLastReason = static_cast<uint8_t>(Reason::SessionFailed);
+inline constexpr uint8_t kLastReason = static_cast<uint8_t>(Reason::ContentChanged);
 inline bool valid_reason(uint8_t r) { return r >= 1 && r <= kLastReason; }
 
 inline const char* explain(Reason r)
@@ -30,6 +31,9 @@ inline const char* explain(Reason r)
     case Reason::None: return "no error";
     case Reason::Malformed: return "the message is damaged or too large";
     case Reason::SchemaMismatch: return "the other player has a different settings version (update the game)";
+    case Reason::ContentUnavailable: return "could not verify the game and enabled mods. Check the mods list and restart";
+    case Reason::ContentMismatch: return "game content differs. Use the same game version and enabled mods in the same order";
+    case Reason::ContentChanged: return "a player could no longer apply the agreed content. Check the mods and restart";
     case Reason::BuildMismatch: return "the other player has a different game build or content";
     case Reason::RollbackUnsupported: return "rollback netcode is requested but this build cannot provide it (update the game or ask the host to turn rollback off)";
     case Reason::WrongSession: return "the message belongs to another session";
@@ -69,6 +73,7 @@ struct Manifest {
     uint8_t roster = 0;    // bit per slot, includes host
     uint64_t seed = 0;
     Values values;
+    Digest content{};
     bool operator==(const Manifest&) const = default;
 };
 
@@ -93,6 +98,7 @@ inline std::vector<uint8_t> encode_manifest(const Manifest& m)
     wire::put(b, kSchema, 2); wire::put(b, m.session, 8); wire::put(b, m.revision, 4);
     wire::put(b, m.host, 1); wire::put(b, m.roster, 1); wire::put(b, m.seed, 8); wire::put(b, kCount, 1);
     for (size_t i = 0; i < kCount; ++i) { wire::put(b, i, 1); wire::put(b, m.values.v[i], 4); }
+    b.insert(b.end(), m.content.begin(), m.content.end());
     return b;
 }
 inline Digest manifest_digest(const Manifest& m) { const auto b = encode_manifest(m); return sha256(b.data(), b.size()); }
@@ -117,7 +123,9 @@ inline Reason decode_manifest(const uint8_t* d, size_t n, Manifest* out)
         if (c.bad || id != i) return Reason::Malformed;
         m.values.v[i] = static_cast<uint32_t>(v);
     }
+    for (auto& byte : m.content) byte = static_cast<uint8_t>(c.get(1));
     if (!c.done() || !manifest_shape_ok(m)) return Reason::Malformed;
+    if (m.content == Digest{}) return Reason::ContentUnavailable;
     *out = m;
     return Reason::None;
 }
@@ -149,14 +157,17 @@ inline std::vector<uint8_t> encode_hello(uint64_t session, uint8_t slot, const C
     std::vector<uint8_t> b; put_header(b, Msg::Hello, session, 0);
     wire::put(b, slot, 1); wire::put(b, c.epoch, 4); wire::put(b, c.build, 4); wire::put(b, (c.rollback ? 1 : 0) | (c.debug_active ? 2 : 0), 1);
     for (size_t i = 0; i < kCount; ++i) { wire::put(b, c.lo[i], 4); wire::put(b, c.hi[i], 4); wire::put(b, c.mask[i], 4); }
+    b.insert(b.end(), c.content.begin(), c.content.end());
     return b;
 }
 inline Reason decode_hello(const uint8_t* d, size_t n, uint8_t* slot, Caps* c)
 {
+    if (n < kHeaderSize || n > kMaxMessage) return Reason::Malformed;
     wire::Cur cur{ d + kHeaderSize, n - kHeaderSize };
     *slot = static_cast<uint8_t>(cur.get(1)); c->epoch = static_cast<uint32_t>(cur.get(4)); c->build = static_cast<uint32_t>(cur.get(4));
     const uint64_t rb = cur.get(1);
     for (size_t i = 0; i < kCount; ++i) { c->lo[i] = static_cast<uint32_t>(cur.get(4)); c->hi[i] = static_cast<uint32_t>(cur.get(4)); c->mask[i] = static_cast<uint32_t>(cur.get(4)); }
+    for (auto& byte : c->content) byte = static_cast<uint8_t>(cur.get(1));
     if (!cur.done() || rb > 3 || *slot >= kMaxRoster) return Reason::Malformed;
     c->rollback = rb & 1; c->debug_active = (rb & 2) != 0; c->schema = kSchema;
     return Reason::None;

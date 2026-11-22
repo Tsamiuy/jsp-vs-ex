@@ -147,7 +147,7 @@ def main():
                 "[net] ended: Opponent disconnected\nloopback 127.0.0.1:36100 stays\n")
         w(app3 / "game/run/play_stderr.txt", head + ticks + tail)
         w(app3 / "game/run/play_stderr.prev.txt", "[net] env decision: REFUSED (static constructors arrived: online boot first, EnvInit last)\n[net] REFUSED: JSP_ROLLBACK=1 and the game's own online (re-psn or a community server) are both on; only one multiplayer method may be active, neither runs\n")
-        w(app3 / "game/run/play_stdout.txt", f"[online] re-psn enabled: server {srv}:36100\n[online] online id {nm}\n[D3D12] adapter: Test GPU (VRAM 8 MB)\n")
+        w(app3 / "game/run/play_stdout.txt", f"[online] re-psn (standard) enabled: server {srv}:36100\n[online] online id {nm}\n[D3D12] adapter: Test GPU (VRAM 8 MB)\n")
         zp3 = sb.make(app3, out, ad3, None, cap=200000)
         z3 = zipfile.ZipFile(zp3)
         n3 = set(z3.namelist())
@@ -173,8 +173,9 @@ def main():
         check("<server>" in all3 and "<online name>" in all3 and "[net] rendezvous: <peer address> via re-psn, path relay, room 7" in f3 and "127.0.0.1:36100 stays" in all3, "net: placeholders in the files, loopback kept")
         S = lambda play, ini=None: "\n".join(sb.net_mode({"play": play, "ini": ini or {}, "read": []}))
         check("mode: Off" in S({}), "net mode: nothing set is Off")
-        check("rollback status badge (JSP_ROLLBACK_BADGE): off" in S({}) and "badge (JSP_ROLLBACK_BADGE): off" in S({"JSP_ROLLBACK_BADGE": "0"})
-              and "badge (JSP_ROLLBACK_BADGE): on" in S({"JSP_ROLLBACK_BADGE": "yes"}), "net mode: the badge key, off unless non-zero (as jpnb::key_on)")
+        check("rollback status badge (JSP_ROLLBACK_BADGE): on" in S({}) and "badge (JSP_ROLLBACK_BADGE): off" in S({"JSP_ROLLBACK_BADGE": "0"})
+              and "badge (JSP_ROLLBACK_BADGE): off" in S({"JSP_ROLLBACK_BADGE": ""})
+              and "badge (JSP_ROLLBACK_BADGE): on" in S({"JSP_ROLLBACK_BADGE": "yes"}), "net mode: badge defaults on, explicit zero or empty hides it")
         nb = "\n".join(sb.net_log_lines({"game/run/play_stderr.txt": "[net] rollback opt-in: client, build 1a2b3c4d, hooks installed\n[net] status badge: off\n"
                                             "[net] status: path direct, delay -, last rollback -, largest -, rollbacks 0\n"
                                             "[net] status: path 198.51.100.4, delay 2f, last rollback 1f, largest 1f, rollbacks 1\n"}))
@@ -208,7 +209,11 @@ def main():
         check("mode: Delay (re-psn, server from PSNR_SERVER" in S({"PSNR_SERVER": "h.example", "PS3_NET_ONLINE": "1"}), "net mode: both variables by hand are Delay")
         check("mode: Rollback refused: PS3_NET_ONLINE" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_LISTEN": "7000", "PS3_NET_ONLINE": "0"}), "net mode: PS3_NET_ONLINE refuses rollback at any value")
         check("mode: Rollback direct refused: JSP_ROLLBACK_JOIN is not IP:PORT" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_JOIN": "h.example:7000"}), "net mode: the join address must be IP:PORT")
-        check("mode: Rollback re-psn refused: JSP_ROLLBACK_ROLE" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "RePSN"}), "net mode: re-psn needs a role")
+        check("mode: Rollback re-psn auto, relay allowed: no, match code: not set" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "RePSN"}), "net mode: re-psn with no role is the auto role")
+        check("mode: Rollback re-psn refused: JSP_ROLLBACK_ROLE is not auto, host or join" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "RePSN", "JSP_ROLLBACK_ROLE": "boss"}), "net mode: a role that is not auto, host or join is refused")
+        mc = S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "repsn", "JSP_ROLLBACK_ROLE": "auto", "JSP_ROLLBACK_CODE": "ZX81QQ"})
+        check("match code: set" in mc and "ZX81QQ" not in mc, "net mode: the match code is reported as set, never its value")
+        check("mode: Rollback re-psn refused: JSP_ROLLBACK_CODE" in S({"JSP_ROLLBACK": "1", "JSP_ROLLBACK_VIA": "repsn", "JSP_ROLLBACK_CODE": "ab"}), "net mode: a bad match code is refused")
         check("mode: Off (re-psn enabled but no valid server" in S({}, {"repsn": {"enabled": "1"}}), "net mode: re-psn without a server stays offline")
 
         # play_settings.txt as the launcher reads it: '#' only at the start of a line, @APP@, PS3RECOMP_SHARED_DIR from the file wins
@@ -300,6 +305,17 @@ def main():
         check('[psnr] player <online name>' in all7 and "[sceNpMatching2] room 5: <online name> joined as member 2" in all7
               and "[sceNpSignaling] conn 1 (<online name>, <IPv4>:3658)" in all7 and "ActivateConnection(ctx=1, <online name>)" in all7,
               "second review: the NP lines lose this player's and other players' names")
+        # Automatic pairing uses a new prefix and a code-presence tail. No settings are needed to scrub it.
+        for action in ("creating", "joining", "looking for or opening"):
+            raw_auto = "[net] re-psn (rollback): " + action + " a room on synthetic.example.invalid:36100 as SyntheticPrivateName (relay allowed, match code set), local UDP port 4242\n"
+            safe_auto = sb.net_scrub(raw_auto, {})
+            check("synthetic.example.invalid" not in safe_auto and "SyntheticPrivateName" not in safe_auto,
+                  "automatic pairing startup log removes server and identity without settings")
+            check("(relay allowed, match code set), local UDP port 4242" in safe_auto and sb.net_scrub(safe_auto, {}) == safe_auto,
+                  "automatic pairing startup log preserves public diagnostics and is idempotent")
+        safe_short = sb.net_scrub("[net] re-psn (rollback): looking for or opening a room on synthetic.example.invalid:36100 as SyntheticPrivateName\n", {})
+        check("synthetic.example.invalid" not in safe_short and "SyntheticPrivateName" not in safe_short,
+              "truncated automatic pairing startup log is scrubbed")
         sc8 = sb.net_scrub("[net] re-psn: creating a room on s.example:1 as Bob Smith\n", {})
         check(sc8 == "[net] re-psn: creating a room on <server> as <online name>\n", "second review: a room line without its tail loses the rest of the line")
         d8 = t / "ini8"
@@ -344,6 +360,8 @@ def main():
             ('[sceNp] GetOnlineId(user=0) -> "Me 1"\r\n', "[sceNp] GetOnlineId(user=0) -> <online name>\r\n"),
             ('[sceNp] Init(poolSize=1, username="Me 1")\r\n', "[sceNp] Init(poolSize=1, username=<online name>)\r\n"),
             ("[online] re-psn enabled: server srv.example.org:36100\r\n", "[online] re-psn enabled: server <server>\r\n"),
+            ("JSP_ROLLBACK_CODE=ZX81QQ\r\n", "JSP_ROLLBACK_CODE=<set>\r\n"),   # the match code is never in a bundle
+            ("[online] re-psn (standard) enabled: server srv.example.org:36100\r\n", "[online] re-psn (standard) enabled: server <server>\r\n"),   # 0.7 wording
             ("[online] online id Me1\r\n", "[online] online id <online name>\r\n"),
             ('server = "srv.example.org"\r\n', "server = <set>\r\n"),
             ("#PSNR_SERVER=Old.Server.net\r\n", "#PSNR_SERVER=<set>\r\n"),

@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <windows.h>
+#include "cellPad.h"
 #include "jsp_step_effects.h"
 #include "jsp_step_input.h"
 #include "jsp_stall_rule.h"
@@ -43,7 +44,7 @@ struct JspTickState { uint32_t done; uint32_t anc_done; uint8_t anc_set, anc_ski
 void jsp_fight_hash_get_state(JspTickState* s);   // jsp_fight_hash.cpp: done = completed scene passes
 // patch 7915
 extern int (*g_cellpad_canon_hook)(uint32_t port_no, uint16_t* button, int32_t* len, int setting_len, int host_connected);
-extern void (*g_cellpad_info_hook)(void* info);   // patch 7915: CellPadInfo2* (host struct, before the copy to the guest)
+extern void (*g_cellpad_info_hook)(CellPadInfo2* info);   // patch 7915: CellPadInfo2* (host struct, before the copy to the guest)
 }
 
 namespace {
@@ -103,13 +104,11 @@ uint32_t env_u32(const char* n, uint32_t d) { const char* e = std::getenv(n); re
 // padjoin "next player 2") that PC simulated slot 1's input while the other did not. While a session's table is enabled every PC reports EXACTLY the
 // session's slots (the table mask) as connected standard pads and every other port as disconnected, whatever is plugged in locally (no hot-plug change bits).
 // The struct is patch 7915's CellPadInfo2 (libs/input/cellPad.h, 7 ports).
-struct PadInfo2 { uint32_t max_connect, now_connect, system_info, port_status[7], port_setting[7], device_capability[7], device_type[7]; };
 std::atomic<uint32_t> g_info_mask{0};
-void info_hook(void* p)
+void info_hook(CellPadInfo2* in)
 {
     const uint32_t m = g_info_mask.load();
-    if (!m || !p) return;
-    PadInfo2* in = static_cast<PadInfo2*>(p);
+    if (!m || !in) return;
     const uint32_t setting = in->port_setting[0];   // port 0 is always reported (the game sets one setting on every port: SetPortSetting 0x2 x 7)
     uint32_t n = 0;
     for (uint32_t i = 0; i < 7; i++) {

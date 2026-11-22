@@ -5,6 +5,9 @@
 # Placeholders in ARGS (also inside paths): {scratch} an empty folder of this test, {toolkit} the patched ps3recomp folder (--toolkit),
 # {font} the Fira Sans file, {fake_tool} and {launcher} the exes the Windows job builds. A row whose placeholder was not given fails (never skips).
 # tools/ci/run_host_tests.py --check-coverage fails when a test file in git is neither listed nor excluded here.
+all     | installer/tools/firewall_rule_test.py
+posix   | installer/tools/audio_notify_order_test.py
+posix   | installer/tools/audio_lock_output_test.py
 all     | installer/tools/rpcs3_wizard_test.py
 all     | installer/tools/test_rpcs3_locate.py
 all     | installer/tools/steam_shortcut_test.py
@@ -12,6 +15,7 @@ all     | installer/tools/firstrun_selftest.py --units
 all     | installer/tools/portable_selftest.py {scratch}
 all     | installer/tools/lan_discover_test.py
 all     | installer/tools/online_option_test.py
+posix   | installer/tools/online_choice_test.py
 all     | installer/tools/quote_arg_test.py
 all     | installer/tools/support_bundle_test.py
 all     | installer/tools/unlock_option_test.py
@@ -24,9 +28,12 @@ all     | tools/ci/test_host_tests.py
 posix   | tools/site/test_site.py
 # release.yml runs the tag step on ubuntu-latest, and this test fakes `gh` with an extension-less script that Windows' CreateProcess cannot start (not a product problem)
 posix   | tools/ci/test_release_tag.py
+all     | installer/tools/mod_package_test.py
+posix   | installer/tools/mod_manager_test.py
 posix   | installer/tools/online_settings_test.sh
 posix   | installer/tools/port_menu_test.sh
 posix   | installer/tools/net_online_test.sh
+posix   | installer/tools/stall_rule_test.sh
 posix   | installer/tools/net_postgame_test.sh
 posix   | installer/tools/net_report_test.sh
 posix   | installer/tools/build_id_test.py {scratch}
@@ -37,6 +44,7 @@ posix   | installer/tools/np_log_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/net_badge_test.sh
 posix   | installer/tools/net_delay_rule_test.sh
+posix   | installer/tools/net_rtt_sample_test.sh
 posix   | installer/tools/discord_test.sh
 posix   | installer/tools/native_fight_test.sh
 posix   | installer/tools/settings_test.sh
@@ -67,6 +75,7 @@ exclude | installer/tools/matching2_context_test.c | compiled and run by matchin
 exclude | installer/tools/matching2_stale_test.c | optional baseline fixture compiled and run by matching2_context_test.py only with --baseline-sdk; not run by regular CI
 exclude | installer/tools/online_settings_test.cpp | compiled and run by online_settings_test.sh
 exclude | installer/tools/port_menu_test.cpp | compiled and run by port_menu_test.sh
+exclude | installer/tools/stall_rule_test.cpp | compiled and run by stall_rule_test.sh
 exclude | installer/tools/net_online_test.cpp | compiled and run by net_online_test.sh
 exclude | installer/tools/net_postgame_test.cpp | compiled and run by net_postgame_test.sh
 exclude | installer/tools/net_report_test.cpp | compiled and run by net_report_test.sh
@@ -75,6 +84,7 @@ exclude | installer/tools/net_repsn_client_test.cpp | compiled and run by net_re
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
 exclude | installer/tools/net_badge_test.cpp | compiled and run by net_badge_test.sh
 exclude | installer/tools/net_delay_rule_test.cpp | compiled and run by net_delay_rule_test.sh
+exclude | installer/tools/net_rtt_sample_test.cpp | compiled and run by net_rtt_sample_test.sh
 exclude | installer/tools/discord_test.cpp | compiled and run by discord_test.sh
 exclude | installer/tools/native_fight_test.cpp | compiled and run by native_fight_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh

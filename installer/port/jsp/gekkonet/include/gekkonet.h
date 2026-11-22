@@ -184,6 +184,10 @@ typedef struct GekkoNetworkStats {
     unsigned short last_ping;
     float avg_ping;
     float jitter;
+    // Local statistics only: identity and steady_clock receipt time of the latest RTT sample.
+    // Rebuild the bundled static library and consumers together.
+    unsigned long long rtt_samples;
+    unsigned long long last_ping_received_ms;
 } GekkoNetworkStats;
 
 typedef struct GekkoRollbackStats {

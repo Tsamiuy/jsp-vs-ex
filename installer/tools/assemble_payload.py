@@ -33,6 +33,14 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+RUNTIME_TOOLS = ("firstrun.py", "lift_jobs.py", "rpcs3_locate.py", "rpcs3_wizard.py", "mod_package.py")
+
+
+def copy_runtime_tools(out):
+    for name in RUNTIME_TOOLS:
+        shutil.copy2(ROOT / "installer/tools" / name, out / "tools" / name)
+
+
 # Written into the payload root (so the portable zip has it too). The Python prints only the zip's path with --quiet.
 SUPPORT_CMD = """@echo off
 rem Makes jsp-support-<time>.zip (logs and settings, user name removed) on the Desktop, to attach to an issue. Nothing is sent anywhere.
@@ -61,9 +69,8 @@ FORBIDDEN = {".elf", ".bin", ".sfo", ".psarc", ".edat", ".self", ".sprx"}
 NOTICE = """J-Stars Victory VS-EX: Fan Revival
 An unofficial fan project. Not affiliated with or endorsed by the game's developer or publisher.
 No game files are included or downloaded: the port is built on your PC from your own copy of the game.
-This program contacts no server: no update check, no crash report, no telemetry. The one exception is Online Battle
-(experimental): setup turns it on with rollback and a public test server (re-psn, not run by this project), and keeps
-online settings you already have. ONLINE-GUIDE.md says how to play online; the settings window's Online tab turns it off.
+There is no update check, crash report or telemetry.
+Online Battle is optional. In jsp-settings.exe, open Online, choose re-psn, enter your approved server address and online name, and save. Select rollback separately. First run preserves saved settings. See ONLINE-GUIDE.md.
 
 The game glue is the work of Tsamiuy and contributors (MIT licence, licenses/jstars-port-LICENSE.txt), built on ps3recomp by
 Ned Heller (sp00nznet) and contributors (MIT licence, licenses/ps3recomp-LICENSE.txt, v0.19.0 with this project's patches).
@@ -194,8 +201,7 @@ def main(argv=None):
     shutil.copy2(ROOT / "docs/TESTING_ONLINE.md", out / "ONLINE-GUIDE.md")   # ENHANCEMENT: the online guide ships with the game (setup and portable)
     (out / "tree.txt").write_text(a.tree + "\n")
     (out / "tools").mkdir()
-    for n in ("firstrun.py", "lift_jobs.py", "rpcs3_locate.py", "rpcs3_wizard.py"):   # the last two: the wizard's RPCS3 page unpacks them to its temp folder
-        shutil.copy2(ROOT / "installer/tools" / n, out / "tools" / n)
+    copy_runtime_tools(out)
     shutil.move(out / "tools" / "firstrun.py", out / "firstrun.py")
     shutil.copy2(ROOT / "installer/tools/eboot_ids.json", out / "eboot_ids.json")   # known EBOOT builds, read by firstrun.py (check E3)
     # the Start-menu "Make a support bundle" entry: support_bundle.py sits beside firstrun.py (it imports scrub() from it)

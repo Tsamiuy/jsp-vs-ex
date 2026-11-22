@@ -257,3 +257,11 @@ __pycache__/
 !/installer/licenses/
 /installer/licenses/*
 !/installer/licenses/LGPL-2.1.txt
+
+!/installer/tools/online_choice_test.py
+# Mods settings-window behavior test
+!/installer/tools/mod_manager_test.py
+
+# Offline mod-package importer and hostile-fixture tests
+!/installer/tools/mod_package.py
+!/installer/tools/mod_package_test.py
