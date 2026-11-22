@@ -14,7 +14,7 @@
 //                          (chained after the earlier ones, so it sees the source record) ORs garbage into port 0 while a replay runs, i.e. the SOURCE
 //                          of the replayed tick differs from its first pass. Without CANON that must make the replay diverge (the control run proves the
 //                          poison reaches the simulation); with CANON the replay must stay EQUAL (the recorded input, not the source, is what is read).
-//   (patch 7915 also adds g_cellpad_info_hook for the session slots' connected status; nothing installs it yet.)
+//   (patch 7915 also adds g_cellpad_info_hook for the session slots' connected status; info_hook below installs it while a rollback session runs.)
 //   Side effects: jsp_effects_request() is the one question the audio / file / save / net wrappers ask (jsp_step_effects.h); no caller is wired yet
 //   (the CRI atom start/stop addresses are not located), so it is inert until the audio side wires it.
 #include <algorithm>
@@ -41,6 +41,7 @@ struct JspTickState { uint32_t done; uint32_t anc_done; uint8_t anc_set, anc_ski
 void jsp_fight_hash_get_state(JspTickState* s);   // jsp_fight_hash.cpp: done = completed scene passes
 // patch 7915
 extern int (*g_cellpad_canon_hook)(uint32_t port_no, uint16_t* button, int32_t* len, int setting_len, int host_connected);
+extern void (*g_cellpad_info_hook)(void* info);   // patch 7915: CellPadInfo2* (host struct, before the copy to the guest)
 }
 
 namespace {
@@ -94,6 +95,35 @@ bool pad_peek_on() { static const int v = [] { const char* e = std::getenv("JSP_
 
 uint32_t env_u32(const char* n, uint32_t d) { const char* e = std::getenv(n); return e && *e ? (uint32_t)std::strtoul(e, nullptr, 0) : d; }
 
+// FIX (dead / split input on rollback slots 1-3, testers on 0.7.0-test1): cellPadGetInfo2 reports port 0 always and any other port only while a LOCAL
+// device is on it, and the game reads a port's data only while it is reported connected. The session serves rollback slot s on port s, so with one device
+// per PC the remote player on slot 1 pressed nothing (both PCs alike: the hash agreed), and with a second local device on one PC only (a Parsec virtual pad,
+// padjoin "next player 2") that PC simulated slot 1's input while the other did not. While a session's table is enabled every PC reports EXACTLY the
+// session's slots (the table mask) as connected standard pads and every other port as disconnected, whatever is plugged in locally (no hot-plug change bits).
+// The struct is patch 7915's CellPadInfo2 (libs/input/cellPad.h, 7 ports).
+struct PadInfo2 { uint32_t max_connect, now_connect, system_info, port_status[7], port_setting[7], device_capability[7], device_type[7]; };
+std::atomic<uint32_t> g_info_mask{0};
+void info_hook(void* p)
+{
+    const uint32_t m = g_info_mask.load();
+    if (!m || !p) return;
+    PadInfo2* in = static_cast<PadInfo2*>(p);
+    const uint32_t setting = in->port_setting[0];   // port 0 is always reported (the game sets one setting on every port: SetPortSetting 0x2 x 7)
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < 7; i++) {
+        if (i < (uint32_t)jsi::kSlots && (m & (1u << i))) {
+            in->port_status[i] = 1u;                           // CELL_PAD_STATUS_CONNECTED
+            in->port_setting[i] = setting;
+            in->device_capability[i] = 0x1Fu;                  // PS3_CONFORMITY | PRESS_MODE | SENSOR_MODE | HP_ANALOG_STICK | ACTUATOR (as port 0)
+            in->device_type[i] = 0u;                           // CELL_PAD_DEV_TYPE_STANDARD
+            n++;
+        } else {
+            in->port_status[i] = 0u; in->port_setting[i] = 0u; in->device_capability[i] = 0u; in->device_type[i] = 0u;
+        }
+    }
+    in->now_connect = n;
+}
+
 // patch 7915 hook. `button`/`len` = the record the host layer built; return 1 to replace it.
 int canon_hook(uint32_t port, uint16_t* button, int32_t* len, int setting_len, int host_connected)
 {
@@ -112,7 +142,9 @@ int canon_hook(uint32_t port, uint16_t* button, int32_t* len, int setting_len, i
         uint16_t raw[8]; int conn = 0;
         g_filtered[port] = ps3_pad_peek_record(port, raw, &conn) ? jsi::from_record(raw, conn != 0) != hw : true;
     }
-    tbl().capture_local(tick, (int)port, hw);              // mask first, then: first read of a NEW tick latches the device; a replayed tick finds its value
+    // FIX (dead / split input): in a rollback session (g_ext_table) every slot's value comes from the session (Advance inputs); a local device on another
+    // port (a second pad, a Parsec virtual pad) must never fill a session slot, so the device is latched only without one (the local bench / canon tests).
+    if (!g_ext_table) tbl().capture_local(tick, (int)port, hw);   // mask first, then: first read of a NEW tick latches the device; a replayed tick finds its value
     jsi::Pad p;
     if (!tbl().serve(tick, (int)port, &p)) { *len = 0; return 1; }   // second read of the tick, or a slot outside the mask: no packet
     jsi::to_record(p, setting_len, button, len);
@@ -513,11 +545,15 @@ extern "C" void jsp_stepper_net_enable(void* table)
     g_ext_table = static_cast<jsi::Table*>(table);
     g_canon = true; g_canon_from = 0;
     g_cellpad_canon_hook = canon_hook;
+    g_info_mask = g_ext_table ? g_ext_table->mask() : 0u;   // FIX (dead / split input): the caller set the mask before (jsp_net_game.cpp start_session)
+    g_cellpad_info_hook = info_hook;
 }
 extern "C" void jsp_stepper_net_disable(void)
 {
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_cellpad_canon_hook == canon_hook) g_cellpad_canon_hook = nullptr;
+    if (g_cellpad_info_hook == info_hook) g_cellpad_info_hook = nullptr;   // FIX (dead / split input): the local devices again
+    g_info_mask = 0;
     g_ext_table = nullptr; g_canon = false;
 }
 // ENHANCEMENT (rollback latency, JSP_PAD_PEEK, default ON since 2026-11-21; JSP_PAD_PEEK=0 = the old way): the local pad given to the netcode is read from the
