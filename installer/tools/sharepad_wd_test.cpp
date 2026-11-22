@@ -2,6 +2,8 @@
 // The member states are built as the game builds them (0x482E64, with its register quirk) and sync as 0x483260 picks it (priority table
 // [2, 0, 1, 3, 4] at *(TOC+0x61C4): the last match wins, so 4 > 3 > 1 > 0 > 2).
 #include "jsp_sharepad_wd.h"
+#include "jsp_net_ko_rule.h"   // the disconnect result rule (fix/rv-net) and the normal-end text that arms the watchdog
+#include <string>
 #include <cstdio>
 #include <cstdlib>
 
@@ -282,6 +284,37 @@ int main()
         const uint32_t p2[3] = { 2, 0, 1 };   // one peer gone, the others with spares: it exits
         const Sim d = simulate(true, 1, 4, 3, p2, 4);
         CHECK(d.frames > 0);
+    }
+    {   // The watchdog's arming after a disconnect: end_with arms it only on a normal end (jkr::normal_end), and the Disconnected path ends with
+        // jkr::disconnect_end_text(jkr::disconnect_result(...)). base 1000; the session's save frame of tick t is t - base - 1.
+        const uint32_t base = 1000;
+        jkr::Ring ring; ring.clear();
+        jkr::Watermark wm; wm.reset();
+        for (uint32_t t = base + 1; t <= base + 200; t++) ring.record(t, 0);
+        wm.live(150);                              // confirmed by real inputs of both PCs up to frame 150
+        ring.record(base + 206, 1);                // a KO predicted at tick 206 (save frame 205), above the live watermark
+        wm.lost();                                 // the Disconnected event: the watermark freezes
+        wm.live(400);                              // the zero-filled final frame after it must not count
+        uint32_t at = 1;
+        const int kept = jkr::disconnect_result(ring, base, wm, &at);
+        CHECK(kept == 0 && at == 0);
+        CHECK(jkr::disconnect_end_text(kept) == "Opponent disconnected");
+        CHECK(!jkr::normal_end(jkr::disconnect_end_text(kept)));   // a predicted KO and a disconnect: the watchdog stays off
+        jkr::Ring ring2; ring2.clear();
+        jkr::Watermark wm2; wm2.reset();
+        ring2.record(base + 150, 2);               // a KO at tick 150 (save frame 149)
+        wm2.live(151);                             // confirmed before the disconnect
+        wm2.lost();
+        const int kept2 = jkr::disconnect_result(ring2, base, wm2, &at);
+        CHECK(kept2 == 2 && at == base + 150);
+        CHECK(jkr::disconnect_end_text(kept2) == "Match over: blue wins");
+        CHECK(jkr::normal_end(jkr::disconnect_end_text(kept2)));   // a confirmed KO kept across a disconnect: the watchdog may act
+        CHECK(jkr::normal_end(jkr::match_over_text(1)) && jkr::normal_end(jkr::match_over_text(3)));   // the boundary's own KO and time-up ends
+        for (const char* t : { "Match ended", "Match ended: the game stopped taking vblanks", "Desync detected", "Opponent disconnected",
+                               "Opponent did not reach the fight: match ended" })
+            CHECK(!jkr::normal_end(t));
+        std::printf("disconnect: a predicted KO ends as \"%s\" (watchdog off), a confirmed one as \"%s\" (watchdog on)\n",
+                    jkr::disconnect_end_text(kept).c_str(), jkr::disconnect_end_text(kept2).c_str());
     }
     {   // JSP_SHAREPAD_WATCHDOG off values: 0/off/false/no in any case; anything else (unset, empty, 1, on, near misses) leaves it on
         const char* off[] = { "0", "off", "OFF", "Off", "false", "FALSE", "False", "no", "NO", " no ", "off\r\n", "\tfalse" };

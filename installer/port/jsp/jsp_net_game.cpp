@@ -843,7 +843,7 @@ void end_with(const std::string& text, bool quiet = false)
     jsp_stepper_abort();
     jsp_stepper_net_disable();
     jsp_snapshot_ext_session_end();   // FIX (same-link rematch, run native-rm1): the snapshot ring of this session goes; the next match baselines afresh at its tick 1
-    if (text.rfind("Match over", 0) == 0) jsp_native_fight_end_normal();   // FIX (rematch black screen): a normal end lets the share pad watchdog act on the exit
+    if (jkr::normal_end(text)) jsp_native_fight_end_normal();   // FIX (rematch black screen): a normal end lets the share pad watchdog act on the exit
     jsp_native_fight_arm(0);   // ENHANCEMENT (native fight takeover): after the last tick (reset_match below does it again; a no-op when not armed)
     { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host && g.mh) g.mh->end_match(); else if (!g.host && g.mc) g.mc->match_ended(); }
     log("ended", text);
@@ -1158,7 +1158,7 @@ int ko_after_disconnect()
                                g_ko.uncovered(g.base, g_ko_live.ff), any_at - g.base, g_ko_live.ff);
     return w;
 }
-std::string match_over_text(int w) { return w == 3 ? std::string("Match over: time up") : std::string("Match over: ") + (w == 1 ? "red" : "blue") + " wins"; }
+std::string match_over_text(int w) { return jkr::match_over_text(w); }
 
 // WORKAROUND TO REPLACE (a bound, not a cause): the commit gate waits for the frame pipeline threads to reach their park points; a slow frame (a cold pipeline build took 4.4 s on a client and
 // 14 s on a host in two-copy tests) keeps them away. The session network is polled while the gate waits (idle hook); every other long stretch on the game thread (a replayed
@@ -1581,8 +1581,8 @@ void boundary(ppu_context* c)
             { std::string why; if (m2_cancelled_within(300, &why)) { g.sess.abort(why); end_with(why); return; } }   // the peer's handshake Cancel (a local failure there) names the reason
             // FIX (a missed KO): a KO was already recorded here: the other PC ended its match on it and its session went; this is a normal end, not a failure.
             // FIX (review of PR 248): only a result the live confirmation watermark covers; a predicted one is not a completed match (ko_after_disconnect).
-            if (const int w = ko_after_disconnect()) { g.sess.abort("match over (the opponent ended on the KO)"); std::fprintf(stderr, "[net] match over, not a disconnect\n"); end_with(match_over_text(w), true); return; }
-            g.sess.abort("opponent disconnected"); end_with("Opponent disconnected"); return;
+            if (const int w = ko_after_disconnect()) { g.sess.abort("match over (the opponent ended on the KO)"); std::fprintf(stderr, "[net] match over, not a disconnect\n"); end_with(jkr::disconnect_end_text(w), true); return; }
+            g.sess.abort("opponent disconnected"); end_with(jkr::disconnect_end_text(0)); return;
         case SessionEventKind::Desync:   // includes a base-tick mismatch: the per-tick hash carries the tick number
             if (g.bench) {   // ENHANCEMENT (rollback bench): a re-run tick differed from its first run (non-determinism the snapshot misses): counted, logged, the bench goes on
                 if (g.bs.first_desync < 0) g.bs.first_desync = e.tick;
