@@ -791,6 +791,13 @@ bool NetSession::update(std::vector<NetEvent>& out, bool consumer_idle)
 }
 
 std::vector<SessionEvent> NetSession::take_events() { std::lock_guard<std::recursive_mutex> lk(gmu_); std::vector<SessionEvent> v; v.swap(events_); return v; }
+std::vector<SessionEvent> NetSession::take_events(int* ff)
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);   // the keepalive thread polls (and queues a Disconnected) only under this lock
+    std::vector<SessionEvent> v; v.swap(events_);
+    if (ff) *ff = final_frame();                        // recursive: the same lock
+    return v;
+}
 
 SessionStats NetSession::stats() const
 {

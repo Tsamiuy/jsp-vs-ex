@@ -340,6 +340,9 @@ public:
     bool desynced() const { return desync_tick_ != kNoTick; }
     int first_desync_tick() const { return desync_tick_ == kNoTick ? -1 : desync_tick_; }   // lowest tick (stepper tick numbering) reported different
     std::vector<SessionEvent> take_events();
+    // FIX (review of PR 248, the live watermark): the events and GekkoNet's final frame (as final_frame()) read under ONE lock, so a keepalive poll cannot
+    // land between them: when no Disconnected is among the events, *final_frame is from a moment every peer was still connected.
+    std::vector<SessionEvent> take_events(int* final_frame);
     SessionStats stats() const;
     const SessionPlan& plan() const { return plan_; }
     // ENHANCEMENT (adaptive input delay, test): the input delay of this peer's local players from now on (GekkoNet SetLocalDelay: a longer delay repeats

@@ -158,7 +158,64 @@ SCENARIOS = {
     # ENHANCEMENT (lobby): three matches in a row in ONE process per peer, on the same NetSession object, socket and message channel: start, stop, start, stop,
     # start (NetSession::stop and the GekkoNet adapter singleton rebinding). Every round must agree like impaired_2x2 (equal hashes, rollbacks, no desync).
     "restart_3_rounds": (["--local", "2", "--rounds", "3"] + IMP, ["--local", "2", "--rounds", "3"] + IMP, "agree_rounds"),
+    # FIX (review of PR 248, jsp_net_ko_rule.h): the match end rules. The host stops pressing (--idle-from 150: the all-zero input GekkoNet also fills in for a
+    # gone peer, so no rollback corrects the client's predictions of it) and goes silent at tick 200 (--mute-at); the client predicts up to its window and
+    # times out (1.5 s). ko_predicted_disconnect: every tick from 206 is a KO, so the client has saved predicted KOs above anything the host ever sent;
+    # they must NOT survive the disconnect (the old rule ended "Match over" on them). ko_confirmed_disconnect (control, the match does not end on the KO
+    # itself: --ko-scan 0): the KO of tick 150 was confirmed by the host's real inputs, so the disconnect keeps it. ko_scan_agree: no disconnect, a lossy
+    # link with rollbacks, KOs on 1 state in 7 from tick 300: both copies end on the same confirmed tick.
+    "ko_predicted_disconnect": (["--local", "2", "--idle-from", "150", "--mute-at", "200", "--timeout-ms", "1500", "--max-ms", "8000"],
+                                ["--local", "2", "--ko-from", "206", "--timeout-ms", "1500"], "ko_predicted"),
+    "ko_confirmed_disconnect": (["--local", "2", "--idle-from", "150", "--mute-at", "200", "--timeout-ms", "1500", "--max-ms", "8000"],
+                                ["--local", "2", "--ko-from", "150", "--ko-scan", "0", "--timeout-ms", "1500"], "ko_confirmed"),
+    # The live watermark is the final frame read WITH the events (one session lock). ko_disconnect_gap: as ko_predicted_disconnect, but the client's
+    # game thread stops for 2 s between taking a pass's events and using their frame, just after the host went silent; the keepalive thread polls in
+    # that gap and times the host out there. The predicted KOs must still not survive, and the watermark must be the frame read with the events.
+    "ko_disconnect_gap": (["--local", "2", "--idle-from", "150", "--mute-at", "200", "--timeout-ms", "1500", "--max-ms", "8000"],
+                          ["--local", "2", "--ko-from", "206", "--timeout-ms", "1500", "--gap-at", "200,2000"], "ko_gap"),
+    "ko_scan_agree": (["--local", "2", "--ko-from", "300", "--ko-every", "7"] + ADV, ["--local", "2", "--ko-from", "300", "--ko-every", "7"] + ADV, "ko_agree"),
 }
+KO_KINDS = ("ko_predicted", "ko_confirmed", "ko_agree", "ko_gap")
+
+
+def ko_check(kind, ho, co):
+    """FIX (review of PR 248): the "KO disconnect" / "KO end" lines of net_session_test (--ko-from) against the rule of jsp_net_ko_rule.h."""
+    f = []
+    kv = lambda line: dict(x.split("=", 1) for x in line.split() if "=" in x)
+    disc = lambda out: [kv(l) for l in out.splitlines() if l.startswith("KO disconnect:")]
+    ends = lambda out: [kv(l) for l in out.splitlines() if l.startswith("KO end:")]
+    gap = lambda out: [kv(l) for l in out.splitlines() if l.startswith("GAP ")]
+    if kind == "ko_gap":
+        g, d = gap(co), disc(co)
+        if len(g) != 1: return [f"client: {len(g)} 'GAP' lines, expected 1"]
+        if len(d) != 1: return [f"client: {len(d)} 'KO disconnect' lines, expected exactly 1"]
+        g, d = g[0], d[0]
+        if int(g["polls"]) < 1: f.append(f"client: no keepalive poll in the {g['ms']} ms gap: the scenario tested nothing")
+        if d["result"] != "disconnect": f.append(f"client: a predicted KO (tick {d['at']}) became a match result on the disconnect (watermark {d['watermark']})")
+        if int(d["watermark"]) > int(g["events_ff"]) and int(d["watermark"]) > 205: f.append(f"client: watermark {d['watermark']} above the frame read with the events ({g['events_ff']})")
+        if ends(co): f.append("client: ended on a KO before the disconnect: " + str(ends(co)))
+        return f
+    if kind in ("ko_predicted", "ko_confirmed"):
+        d = disc(co)
+        if len(d) != 1: return [f"client: {len(d)} 'KO disconnect' lines, expected exactly 1 (the host went silent at 200 and must time out)"]
+        d = d[0]
+        if ends(co): f.append("client: ended on a KO before the disconnect: " + str(ends(co)))
+        wm = int(d["watermark"])
+        if wm < 150 or wm > 205: f.append(f"client: live watermark {wm}, expected about the host's last sent frame (200..203)")
+        if int(d["final_frame"]) < wm: f.append(f"client: final frame {d['final_frame']} below the live watermark {wm}")
+        if kind == "ko_predicted":
+            if d["result"] != "disconnect": f.append(f"client: a predicted KO (tick {d['at']}) became a match result on the disconnect (watermark {wm})")
+            if d["old_rule"] != "match" or int(d["uncovered"]) < 1: f.append(f"no predicted KO was saved before the disconnect (old_rule={d['old_rule']} uncovered={d['uncovered']}): the scenario tested nothing")
+            if int(d["old_at"]) < 206: f.append(f"a KO below --ko-from: {d['old_at']}")
+        else:
+            if d["result"] != "match" or d["at"] != "150": f.append(f"client: the confirmed KO of tick 150 did not survive the disconnect: result={d['result']} at={d['at']} (watermark {wm})")
+    elif kind == "ko_agree":
+        eh, ec = ends(ho), ends(co)
+        if len(eh) != 1 or len(ec) != 1: f.append(f"'KO end' lines: host {len(eh)}, client {len(ec)}, expected 1 each")
+        elif eh[0]["at"] != ec[0]["at"]: f.append(f"the copies ended on different ticks: host {eh[0]['at']}, client {ec[0]['at']}")
+        elif int(eh[0]["at"]) < 300: f.append(f"ended at {eh[0]['at']}, below --ko-from 300")
+        if disc(ho) or disc(co): f.append("a disconnect in a clean match")
+    return f
 ROUNDS_EXPECTED = {"restart_3_rounds": 3}
 
 
@@ -305,6 +362,7 @@ def main():
             hs, cs = summary(ho), summary(co)
             fl = problems or check(kind, hs, cs, hr, cr, tmp, a.ticks)
             if not problems and kind == "agree_rounds": fl += rounds_check(name, ho, co, a.ticks)
+            if not problems and kind in KO_KINDS: fl += ko_check(kind, ho, co)
             if not fl and name.startswith("skip_final"):   # the switch must have skipped saves on both peers, or the scenario tested nothing
                 for n_, s_ in (("host", hs), ("client", cs)):
                     if num(s_, "skipped", 0) <= 0: fl.append(f"{n_}: no save was skipped (skipped={num(s_, 'skipped', -1)})")

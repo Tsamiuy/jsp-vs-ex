@@ -58,6 +58,7 @@ extern "C" unsigned long long jsp_net_presence_room(char* server, int sn) { if (
 #include "jsp_net_online.h"
 #include "jsp_net_badge.h"
 #include "jsp_net_delay_rule.h"   // ENHANCEMENT (adaptive input delay, rule 2): the decision, shared with the host simulator
+#include "jsp_net_ko_rule.h"      // FIX (review of PR 248): the KO / time-up end rules and the live confirmation watermark, shared with net_session_test
 #include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
 #include "jsp_net_report.h"
@@ -302,10 +303,11 @@ struct State {
 // rollback overwrites its entry and a rollback drops the entries after its target. The boundary ends the match on the earliest recorded winner whose tick is
 // confirmed (ko_scan). Before, only saves of ticks that were already final were read, so a tick saved while predicted (its prediction right, never saved
 // again) hid the KO on one PC: that PC stalled into "Opponent disconnected" while the other ended normally. Main thread; cleared by reset_match.
-struct KoRec { uint32_t tick = 0; int w = 0; };
-constexpr int kKoRing = 128;   // far more than the rollback window plus the confirmation lag
-KoRec g_ko_ring[kKoRing];
-void ko_clear() { for (KoRec& r : g_ko_ring) r = KoRec(); }
+// FIX (review of PR 248: a predicted result must not survive a disconnect): the rules are in jsp_net_ko_rule.h (host-tested by net_session_test --ko-from);
+// g_ko_live is the live confirmation watermark, read at every boundary whose events showed no disconnect (boundary, before ko_scan).
+jkr::Ring g_ko;
+jkr::Watermark g_ko_live;
+void ko_clear() { g_ko.clear(); g_ko_live.reset(); }
 // ENHANCEMENT (lobby): an ended match keeps its GekkoNet session this long (its keepalive thread still answers), so the other PC can confirm the last ticks
 // (a natural match end has no abort, see end_match_over) before it is destroyed; stopped earlier by a new session or jsp_net_lobby_close.
 constexpr uint64_t kLingerMs = 2000;
@@ -1081,7 +1083,7 @@ public:
         // the audio to blocks_at(T), so the snapshot holds the guest's audio at blocks_at(T - 1): rewinding to blocks_at(T) dropped 6-7 blocks per rollback
         // (voices ended later on the copy with more rollbacks). The boundary that follows mixes them again.
         if (g_ps3_audio_lock_target >= 0) ps3_audio_lock_rewind(tick > g.base ? audio_blocks_at(tick - 1) : 0);
-        for (KoRec& r : g_ko_ring) if (r.tick > tick) r = KoRec();   // FIX (a missed KO): those ticks run again; their re-saves record them anew
+        g_ko.drop_after(tick);   // FIX (a missed KO): those ticks run again; their re-saves record them anew
         regs_restore(tick);   // FIX (helper thread registers): back to what they held at that save   // the audio goes back with the tick (the mix thread is idle here)   // the ticks gone back and run again (status badge and status line)
         g.done_now = tick;
         if (!g.bench && tick_log()) std::fprintf(stderr, "[net] rollback to tick=%u (longest game-thread stretch without a session call since the last rollback: %u ms, keepalive polls so far: %llu)\n", tick, g.sess.take_max_gap_ms(), (unsigned long long)g.sess.keepalive_polls());
@@ -1126,8 +1128,7 @@ private:
         if (g.bench || g.match_winner || !g.fight_seen) return;
         int w = jsp_fight_ko_winner();
         if (w <= 0) { const int e = jsp_fight_end_state(); if (e > 0) w = e; }   // 1 / 2: the game's judge named the winner; 3: time up, winner not written yet
-        KoRec& r = g_ko_ring[tick % kKoRing];
-        r.tick = tick; r.w = w > 0 ? w : 0;
+        g_ko.record(tick, w);
     }
     uint32_t serial_ = 100;
 } g_game_glue;
@@ -1138,19 +1139,24 @@ void ko_scan()
     if (g.bench || g.match_winner) return;
     const int ff = g.sess.final_frame();
     if (ff < 0) return;
-    uint32_t best = 0; int bw = 0;
-    for (const KoRec& r : g_ko_ring)
-        if (r.w > 0 && (int)(r.tick - g.base) - 1 < ff && (!bw || r.tick < best)) { best = r.tick; bw = r.w; }
+    uint32_t best = 0;
+    const int bw = g_ko.earliest_covered(g.base, ff, &best);
     if (!bw) return;
     g.match_winner = bw;
     std::fprintf(stderr, "[net] match over at confirmed tick %u (session-relative): %s\n", best - g.base, bw == 1 ? "red wins" : bw == 2 ? "blue wins" : "time up");
 }
-// The winner of any recorded tick (confirmed or not): a peer that disconnects after it ended its own match on that KO (a missed KO). 0 = none.
-int ko_any()
+// FIX (review of PR 248): the result a disconnect may keep, only one covered by the live confirmation watermark (jkr::disconnect_result). A predicted
+// KO / time-up above it ends the match as a disconnect, as a disconnect without any recorded result. Main thread (boundary, the Disconnected event).
+int ko_after_disconnect()
 {
-    uint32_t best = 0; int bw = 0;
-    for (const KoRec& r : g_ko_ring) if (r.w > 0 && (!bw || r.tick < best)) { best = r.tick; bw = r.w; }
-    return bw;
+    g_ko_live.lost();
+    uint32_t at = 0, any_at = 0;
+    const int w = jkr::disconnect_result(g_ko, g.base, g_ko_live, &at);
+    const int any = g_ko.earliest_any(&any_at);
+    if (w) std::fprintf(stderr, "[net] the opponent left after a confirmed result at tick %u (session-relative; live confirmed up to frame %d)\n", at - g.base, g_ko_live.ff);
+    else if (any) std::fprintf(stderr, "[net] the opponent left; %d predicted result(s) from tick %u (session-relative) are above the live confirmed frame %d: ignored, a disconnect\n",
+                               g_ko.uncovered(g.base, g_ko_live.ff), any_at - g.base, g_ko_live.ff);
+    return w;
 }
 std::string match_over_text(int w) { return w == 3 ? std::string("Match over: time up") : std::string("Match over: ") + (w == 1 ? "red" : "blue") + " wins"; }
 
@@ -1567,13 +1573,15 @@ void boundary(ppu_context* c)
         g_hold_ms += qpc_ms(h0, qpc_now()); g_holds++; if (op.kind != jsx::OpKind::Run) g_hold_renders++;
         g_jsp_main_stage = 5;
     }
-    for (const SessionEvent& e : g.sess.take_events()) {
+    int events_ff = -1;   // FIX (review of PR 248): GekkoNet's final frame read with the events, under the session lock (the live watermark below)
+    for (const SessionEvent& e : g.sess.take_events(&events_ff)) {
         switch (e.kind) {
         case SessionEventKind::Started: log("gekko session synchronized", ""); if (!g.path_line.empty()) { show(g.path_line); g.path_until = GetTickCount64() + 6000; } else show(""); break;
         case SessionEventKind::Disconnected:   // GekkoNet fires it after the disconnect timeout = the grace window: the match is over
             { std::string why; if (m2_cancelled_within(300, &why)) { g.sess.abort(why); end_with(why); return; } }   // the peer's handshake Cancel (a local failure there) names the reason
-            // FIX (a missed KO): a KO was already recorded here: the other PC ended its match on it and its session went; this is a normal end, not a failure
-            if (const int w = ko_any()) { g.sess.abort("match over (the opponent ended on the KO)"); std::fprintf(stderr, "[net] the opponent left after a recorded KO: match over, not a disconnect\n"); end_with(match_over_text(w), true); return; }
+            // FIX (a missed KO): a KO was already recorded here: the other PC ended its match on it and its session went; this is a normal end, not a failure.
+            // FIX (review of PR 248): only a result the live confirmation watermark covers; a predicted one is not a completed match (ko_after_disconnect).
+            if (const int w = ko_after_disconnect()) { g.sess.abort("match over (the opponent ended on the KO)"); std::fprintf(stderr, "[net] match over, not a disconnect\n"); end_with(match_over_text(w), true); return; }
             g.sess.abort("opponent disconnected"); end_with("Opponent disconnected"); return;
         case SessionEventKind::Desync:   // includes a base-tick mismatch: the per-tick hash carries the tick number
             if (g.bench) {   // ENHANCEMENT (rollback bench): a re-run tick differed from its first run (non-determinism the snapshot misses): counted, logged, the bench goes on
@@ -1599,6 +1607,11 @@ void boundary(ppu_context* c)
     // ENHANCEMENT (online match end): a confirmed tick had a KO winner (GameGlue::confirmed). Ended quietly (no UI yet: the post-game menu is a later step) and
     // with NO abort: the GekkoNet session lingers kLingerMs and its keepalive thread keeps answering, so the other PC confirms the same tick and ends the same way
     // instead of seeing a disconnect. Without this end the boundary would wait for ticks forever once the fight scene goes and done stops.
+    // FIX (review of PR 248): no Disconnected among this boundary's events (it returned above), so GekkoNet's final frame here is confirmed by every peer's
+    // real inputs: the live watermark a later disconnect may end on (a disconnect fills the gone peer's slots with neutral input INSIDE an update, and
+    // that update's Disconnected event is always taken before this line). The frame is the one read with the events under the session lock
+    // (take_events(&ff)): a keepalive poll that queues a disconnect after them cannot move it.
+    if (!g.bench) g_ko_live.live(events_ff);
     ko_scan();   // FIX (a missed KO): the earliest confirmed tick among the recorded winners
     if (g.match_winner > 0) { end_with(match_over_text(g.match_winner), true); return; }
     const uint64_t now = GetTickCount64();
