@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Host test of the rollback snapshot's guest thread mask bit (installer/port/jsp/jsp_thread_bit.h: ids 1..64 -> bit t - 1, bounds-checked).
-# No game, no GPU: needs only g++ (C++20). Built with -fsanitize=undefined when the compiler has it (a shift by 64 then fails the run).
-# A source guard then checks that no raw thread id shift is back in jsp_net_game.cpp and jsp_snapshot*.{cpp,h}.
+# Host test of the rollback snapshot's guest thread mask bit (installer/port/jsp/jsp_thread_bit.h: ids 1..64 -> bit t - 1, bounds-checked) and of the
+# background thread-registry audit's start (installer/port/jsp/jsp_audit_start.h: a failed worker start runs that audit synchronously and is retried at
+# the next audit). No game, no GPU: needs only g++ (C++20). Built with -fsanitize=undefined when the compiler has it (a shift by 64 then fails the run).
+# Source guards then check that no raw thread id shift is back in jsp_net_game.cpp and jsp_snapshot*.{cpp,h}, and that jsp_snapshot.cpp still starts
+# its audit worker through jau::Starter.
 #   bash installer/tools/thread_audit_test.sh
 set -e
 d=$(cd "$(dirname "$0")" && pwd)
@@ -22,3 +24,13 @@ if grep -nE "$raw" "$jsp"/jsp_net_game.cpp "$jsp"/jsp_snapshot*.cpp "$jsp"/jsp_s
     exit 1
 fi
 echo "source guard: ok (no raw thread id shift in jsp_net_game.cpp, jsp_snapshot*.cpp/h)"
+
+# Source guard: the game's scheduled audit goes through jau::Starter, so the logic tested above is the one the game runs. Fails if jsp_snapshot.cpp stops
+# calling g_audit_starter.at_audit(start_audit_worker) in registry_audit_tick, or stops falling back to the synchronous audit on jau::Path::Sync.
+snap="$jsp/jsp_snapshot.cpp"
+if ! grep -qE '^jau::Starter[[:space:]]+g_audit_starter;' "$snap" \
+   || ! grep -qE 'if[[:space:]]*\([[:space:]]*g_audit_starter\.at_audit\([[:space:]]*start_audit_worker[[:space:]]*\)[[:space:]]*==[[:space:]]*jau::Path::Sync[[:space:]]*\)[[:space:]]*return[[:space:]]+registry_audit\(' "$snap"; then
+    echo "FAIL: jsp_snapshot.cpp no longer starts the audit worker through jau::Starter (g_audit_starter.at_audit, synchronous audit on Path::Sync)"
+    exit 1
+fi
+echo "source guard: ok (jsp_snapshot.cpp starts the audit worker through jau::Starter, synchronous audit on a failed start)"

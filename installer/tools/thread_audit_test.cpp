@@ -1,8 +1,11 @@
-// Host test of a rollback snapshot helper (review of the online rollback PR):
-// jsp_thread_bit.h: guest thread ids 1..64 -> mask bit t - 1 (the helper-thread register allowlist / save / restore of jsp_net_game.cpp, the
+// Host test of two rollback snapshot helpers (review of the online rollback PR):
+//  1. jsp_thread_bit.h: guest thread ids 1..64 -> mask bit t - 1 (the helper-thread register allowlist / save / restore of jsp_net_game.cpp, the
 //     park roles of jsp_snapshot_sync.h, ppu_alive_mask of jsp_snapshot.cpp). Ids 1, 63 and 64, every id once, and ids outside 1..64.
+//  2. jsp_audit_start.h: the background thread-registry audit. A worker start that fails runs that scheduled audit synchronously and is tried again
+//     at the next scheduled audit; no scheduled audit is ever skipped (the old code skipped every audit after one failed CreateThread).
 // Run: installer/tools/thread_audit_test.sh (builds with -fsanitize=undefined where available: a shift by 64 fails the run).
 #include "../port/jsp/jsp_thread_bit.h"
+#include "../port/jsp/jsp_audit_start.h"
 #include <cstdio>
 #include <vector>
 static int fails = 0, checks = 0;
@@ -44,9 +47,43 @@ static void test_thread_bit()
     CHECK((restore(r) == std::vector<uint32_t>{64}));     // the old 1ull << t: thread 64 never restored (undefined shift), thread 63 took bit 63
 }
 
+// Scheduled audits with a worker start that fails `fail_first` times (or always): every audit is covered, by the worker or synchronously.
+static void run_audits(int audits, int fail_first, bool always_fail)
+{
+    jau::Starter s; int start_calls = 0, sync = 0, background = 0, worker_runs = 0;
+    auto start = [&] { start_calls++; if (always_fail || start_calls <= fail_first) return false; worker_runs++; return true; };
+    for (int i = 0; i < audits; i++) {
+        const jau::Path p = s.at_audit(start);
+        if (p == jau::Path::Sync) sync++; else background++;
+    }
+    const int expect_fail = always_fail ? audits : (fail_first < audits ? fail_first : audits);
+    CHECK(sync + background == audits);                  // no scheduled audit skipped
+    CHECK(sync == expect_fail);                          // each failed start: that audit ran on the game thread
+    CHECK((int)s.failures == expect_fail && (int)s.sync_runs == expect_fail);
+    CHECK(start_calls == (always_fail ? audits : (fail_first < audits ? fail_first + 1 : audits)));   // tried again at every audit until it ran, then never
+    CHECK(worker_runs == (always_fail || fail_first >= audits ? 0 : 1));   // one worker at most
+    CHECK(s.running == (worker_runs == 1));
+}
+
+static void test_audit_start()
+{
+    run_audits(10, 0, false);    // starts at once
+    run_audits(10, 1, false);    // the reviewed case: one CreateThread failure
+    run_audits(10, 3, false);
+    run_audits(10, 9, false);
+    run_audits(10, 10, false);
+    run_audits(50, 0, true);     // never starts: every audit synchronous
+    // first audit after one failure: the sync path, then the worker
+    jau::Starter s; int n = 0;
+    CHECK(s.at_audit([&] { return ++n > 1; }) == jau::Path::Sync);
+    CHECK(s.at_audit([&] { return ++n > 1; }) == jau::Path::Background);
+    CHECK(s.at_audit([&] { n += 100; return false; }) == jau::Path::Background && n == 2);   // running: start not called again
+}
+
 int main()
 {
     test_thread_bit();
+    test_audit_start();
     std::printf("thread_audit_test: %d checks, %d failed\n", checks, fails);
     std::printf("%s\n", fails ? "RESULT FAIL" : "RESULT ok");
     return fails ? 1 : 0;

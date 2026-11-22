@@ -60,6 +60,7 @@
 #include "jsp_snapshot_sync.h"
 #include "jsp_snapshot_flow.h"
 #include "jsp_thread_registry.h"
+#include "jsp_audit_start.h"   // jau::Starter: the background audit worker's start and the synchronous fallback (registry_audit_tick)
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -1328,8 +1329,7 @@ DWORD g_async_audit_period_ms = 0;   // ENHANCEMENT (rollback smoothness): JSP_S
 DWORD WINAPI async_audit_main(void*)
 {
     const DWORD period = g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u;
-    for (;;) {
-        Sleep(period);
+    for (;;) {   // the first listing at once: the scheduled audit that started this worker is covered by it
         char why[256] = {0}; unsigned listed = 0, rechecked = 0;
         const auto t = Clock::now();
         const int bad = jsp_thread_registry_audit(why, sizeof why, &listed, &rechecked);
@@ -1337,23 +1337,37 @@ DWORD WINAPI async_audit_main(void*)
         g_async_audit_us_sum.fetch_add(us); if (us > g_async_audit_us_max.load()) g_async_audit_us_max.store(us);
         g_async_audits.fetch_add(1);
         if (bad && !g_async_audit_bad.load()) { std::memcpy(g_async_audit_why, why, sizeof why); g_async_audit_bad.store(1); }
+        Sleep(period);
     }
 }
 #endif
+// FIX (review: a failed worker start skipped the audits): the worker start is retried at every scheduled audit until it runs (jau::Starter), and a
+// scheduled audit whose start failed runs here, on the game thread, as the synchronous audit does.
+jau::Starter g_audit_starter;
+bool start_audit_worker()
+{
+#ifdef _WIN32
+    { const char* e = std::getenv("JSP_SNAPSHOT_AUDIT_PERIOD_MS"); if (e && *e) g_async_audit_period_ms = (DWORD)std::strtoul(e, nullptr, 10); }
+    DWORD tid = 0; HANDLE h = CreateThread(nullptr, 0, async_audit_main, nullptr, 0, &tid);
+    if (!h) {
+        if (g_audit_starter.failures < 5)
+            std::fprintf(stderr, "[snap] threads audit (background): the worker thread did not start (error %lu); this audit runs on the game thread, the start is tried again at the next audit\n", (unsigned long)GetLastError());
+        return false;
+    }
+    if (g_audit_exempt) exempt_add((uint32_t)tid);   // exempt: listed in freeze_exempt before the next freeze (this thread takes them)
+    CloseHandle(h);
+    std::fprintf(stderr, "[snap] threads audit (background) every %lu ms, %s%s\n", (unsigned long)(g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u),
+                 g_audit_exempt ? "left running by the freeze (JSP_SNAPSHOT_AUDIT_EXEMPT=1)" : "frozen with the others (JSP_SNAPSHOT_AUDIT_EXEMPT=0)",
+                 g_audit_starter.failures ? " (started after earlier failed starts; those audits ran on the game thread)" : "");
+    return true;
+#else
+    return false;   // no worker here: every scheduled audit runs synchronously
+#endif
+}
 bool registry_audit_tick(const char* what, uint32_t k)
 {
     if (!audit_async_on()) return registry_audit(what, k);
-#ifdef _WIN32
-    static bool started = false;
-    if (!started) {
-        started = true;
-        { const char* e = std::getenv("JSP_SNAPSHOT_AUDIT_PERIOD_MS"); if (e && *e) g_async_audit_period_ms = (DWORD)std::strtoul(e, nullptr, 10); }
-        DWORD tid = 0; HANDLE h = CreateThread(nullptr, 0, async_audit_main, nullptr, 0, &tid);
-        if (h) { if (g_audit_exempt) exempt_add((uint32_t)tid); CloseHandle(h); } else return registry_audit(what, k);   // exempt: listed in freeze_exempt before the next freeze (this thread takes them)
-        std::fprintf(stderr, "[snap] threads audit (background) every %lu ms, %s\n", (unsigned long)(g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u),
-                     g_audit_exempt ? "left running by the freeze (JSP_SNAPSHOT_AUDIT_EXEMPT=1)" : "frozen with the others (JSP_SNAPSHOT_AUDIT_EXEMPT=0)");
-    }
-#endif
+    if (g_audit_starter.at_audit(start_audit_worker) == jau::Path::Sync) return registry_audit(what, k);
     const auto t = Clock::now();
     jtr::Registry& R = jsp_thread_registry();
     R.reclaim([](void* h) { jsp_thread_registry_close(h); }, [](void* h) { return jsp_thread_registry_ended(h); }, true);
