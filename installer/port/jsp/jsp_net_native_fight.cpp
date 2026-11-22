@@ -36,11 +36,18 @@
 // Rollback: the hooks keep no host state that changes what the game does except g_armed, which is constant for a whole session (armed before the
 // first save, disarmed after the last tick). Everything the replacement writes (records, +0x6D8/+0x6DC) is guest memory and rolls back.
 #include "jsp_net_native_fight.h"
+#include "jsp_sharepad_wd.h"   // FIX (rematch black screen): the share pad watchdog rule
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>   // GetCurrentThreadId (the watchdog's one-shot thread lines)
 
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
@@ -49,6 +56,7 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 #include "jsp_hook_chain.h"
 extern "C" const char* cellGame_get_title_id(void);                     // libs/system/cellGame.c: PARAM.SFO's TITLE_ID (read by main.cpp before the table)
 extern "C" void jsp_setting_set_live(const char* key, const char* value);   // jsp_settings.cpp: an in-process setting, never written to the file
+extern "C" int jsp_setting_get(const char* key, char* out, int n);           // jsp_settings.cpp: the session layer, the live value, else the environment
 
 extern "C" int g_jsp_native_fight_armed = 0;   // also the guard of jnf::kPatches (read by the lifted code)
 
@@ -187,6 +195,322 @@ template <uint32_t A, int K> struct Stub {
 };
 template <uint32_t A, int K> fn_t Stub<A, K>::orig = nullptr;
 
+// ---- FIX (rematch black screen): the share pad watchdog (PR #248, Update 3; the rule is jspw::step in jsp_sharepad_wd.h) ----
+// Verified in the lifted code (US 1.00, build\recompiled\ppu_recomp_039.cpp / 008 / 007):
+//   - a share pad queue entry q = *(member block + 8) (= sp + 0x1C + 0x28*k) is { +0 peer, +4 list L, ... }; L+4 (= q+8) is the sample count,
+//     L+0x10 the used list head, L+0x18 (= q+0x1C) the free list head; nodes are { +0 next, +4 prev, +8 tag, +0xC length, +0x10 data }.
+//   - 0x473704(L, tag, src, len) takes the free list's head (0x473270); with none it takes the oldest USED node and does L+4 -= 1, and with both lists
+//     empty it writes through node 0. It writes tag and min(capacity, len), copies the bytes (0x717CCC, memcpy), appends the node to the used list
+//     (0x473230) and does L+4 += 1. No other field is touched. The watchdog only feeds a queue with count 0 (used list empty), so it checks the free
+//     list head before the call and never calls with it empty.
+//   - the receive path 0x4824CC fills a member's queue with exactly that call (0x00482688: 0x473704(q + 4, 1, sample, len)), and nothing else: the
+//     member's +4 word is written before from the packet header, the +0xB4 / +0x94 words belong to the SEND side (0x4834E4 drains member + 0x94).
+//   - the readers only use counts: member states 0x482E64, base 0x481FD8 (min of the counts), stall 0x4844DC. Nothing in the received queue reaches
+//     the network (only 0x4834E4 sends, from the member's own +0x94 send list).
+//   - the pop (0x48495C / 0x4826F0) runs in the mode's pad take (slot 4), unlocked, as does the receive push in the manager update 0x45222C: the game
+//     only ever touches these lists from one thread (inferred; the one-shot "thread" lines below check it). This hook runs in slot 2 of the same mode.
+//   - neutral sample = what a released pad gives (the send 0x4844DC / take_armed): buttons 0, the four stick bytes 0x56610(f[TOC+0x61D8]) (centred,
+//     not 0), flags 0.
+//   - markers: 0x0E2048 is the DELETING destructor of the post-fight object of class 0x876A60 (base vtable, dtor 0x0E38D0, free); 0x0F777C is the online
+//     mode's exit poll (slot 18: mode+0x1A0 += 1, 1 on the second call); 0x0F77DC is the mode's deleting destructor (slot 1). 0x0094DEC4 is NOT a scene
+//     word (an audio playback count); it is not used. The share pad object persists across matches.
+extern "C" volatile uint32_t g_hud_calls;  // jsp_game.cpp: calls of the fight HUD draw 0x00085CEC (counted on every draw)
+constexpr uint32_t kPostFightVt = 0x00876A60u;
+std::atomic<bool> g_wd_on{false};          // JSP_SHAREPAD_WATCHDOG (default on), decided at install
+std::atomic<int> g_end_normal{0};          // jsp_native_fight_end_normal(): the session ending now ended on an agreed KO / time-up
+std::atomic<int> g_wd_after{0};            // 1 from a NORMAL match-end disarm to the mode's free 0x0F77DC or the next arm
+std::atomic<int> g_wd_f2{0};               // the 0x876A60 object was deleted (0x0E2048) since that disarm
+std::atomic<uint32_t> g_wd_mode{0};        // the online mode object the watchdog acts on: the first slot 2 caller after 0x0E2048
+std::atomic<uint32_t> g_wd_epoch{0};       // bumped by arm / disarm / the mode's free: the game-thread state below starts a new episode
+std::atomic<uint32_t> g_wd_match{0};       // normal match-end disarms (for the log lines)
+std::atomic<uint32_t> g_wd_logs{0};        // per-match lines (0x0E2048, the free summary), capped per process
+std::atomic<uint32_t> g_wd_feed_logs{0};   // feed lines, their own cap
+std::atomic<unsigned long> g_tid_slot2{0}, g_tid_mgr{0};   // host thread ids of slot 2 and of the manager update 0x45222C (one-shot logs)
+jspw::State g_wd;                          // game thread only (slot 2 / free hooks)
+uint32_t g_wd_seen_epoch = 0xFFFFFFFFu;    // game thread only
+uint32_t g_wd_fed_total = 0;               // game thread only: samples fed this episode
+uint32_t g_wd_hud_last = 0;                // game thread only: g_hud_calls at the previous slot 2 tick
+fn_t g_orig_slot2 = nullptr, g_orig_f2 = nullptr, g_orig_free = nullptr, g_orig_mgr = nullptr;
+#if defined(JSP_TEST_KNOBS) && JSP_TEST_KNOBS
+#define JSP_WD_KNOB 1
+#else
+#define JSP_WD_KNOB 0
+#endif
+#if JSP_WD_KNOB
+// Debug repro knob JSP_SHAREPAD_SKIP_PUSH=N, COMPILED ONLY into JSP_TEST_KNOBS builds (cmake -DJSP_TEST_KNOBS=ON); a release build has neither the code
+// nor the name, so play_settings.txt cannot reach it. It reproduces the shape of the black screen seen in a two-copy rematch test: THIS copy's own input delay (own queue count after the pop) is 0 at the
+// post-fight deletion 0x0E2048, so its PEER holds no spare sample from it and starves at the exit.
+// How: from a NORMAL match-end disarm (never another disarm, so never in a live fight) to the online mode's free 0x0F77DC (or the next arm), every
+// manager update 0x45222C at which this copy's own queue still holds a sample (own ctr >= 1) runs with share pad +0x6D8 = 0 for that one call only:
+// 0x484690 then skips its tail 0x4844DC (no own push, no send, no state / stall update; the receive path and the handshake timers still run), and +0x6D8
+// is 1 again before the mode's slot 2 / slot 4 run, so this copy still pops one own and one peer sample that tick. Each dropped push lowers this copy's
+// delay by one and makes the peer wait one tick (its delay goes up by one): the same thing a restart pause does, in the other direction. So the own
+// delay is pinned at 0 through Results until the exit, and a later pause of this copy (a hitch) is taken back at the next update.
+// Only when the last computed states are all normal (+0x6D0 started 1, +0x6D4 sync 2, every member state 2), +0x6DC is 0, the own queue holds a sample,
+// and at most N pushes per window. The member queues are NOT required to hold a sample at the update's entry (an earlier version did, and never fired in
+// a two-copy test): on a local link the peer's sample for this tick usually arrives inside the same update (its receive 0x451448 runs before the push
+// 0x484690), so the member count is 0 at the entry. They are checked AFTER the update instead: a member still without a sample gets the states 0x483168 /
+// 0x483260 would have written (member state 3, +0x6D0 = 0, +0x6D4 = 3), so the stall check pauses this one tick and nothing is popped (the game's own path
+// for a late sample). The next update recomputes the states. Nothing is held across a mode tick.
+uint32_t g_skip_n = 0;                     // JSP_SHAREPAD_SKIP_PUSH: own pushes dropped at most per window
+std::atomic<int> g_pin_on{0};              // the window: a normal match-end disarm .. the mode's free 0x0F77DC or the next arm
+std::atomic<uint32_t> g_pin_left{0}, g_pin_done{0}, g_pin_logs{0};
+#endif
+// FIX (late but alive): members whose received-sample count rose inside a manager update 0x45222C since the previous watchdog tick. Only the receive
+// path 0x4824CC pushes into a member's queue there (the pop is in slot 4, the watchdog's own push in slot 2), so a rise is a REAL sample from that peer.
+std::atomic<uint32_t> g_wd_real{0};
+
+constexpr uint32_t kWdLogCap = 400, kWdFeedLogCap = 400;
+bool wd_log_ok() { return g_wd_logs.fetch_add(1) < kWdLogCap; }
+bool wd_feed_log_ok() { return g_wd_feed_logs.fetch_add(1) < kWdFeedLogCap; }
+
+uint32_t own_count(uint32_t sp)
+{
+    const uint32_t me = vm_read32(sp + 0x18u);
+    for (uint32_t k = 0; k < jspw::kMaxMembers; k++) if (vm_read32(sp + 0x1Cu + 0x28u * k) == me) return vm_read32(sp + 0x1Cu + 0x28u * k + 8u);
+    return 0;
+}
+// "sync S active A stall N own ctr C; m0 st S ctr C; ..." (guest reads only)
+void sp_counts(uint32_t sp, char* out, size_t n)
+{
+    int p = 0;
+    if (!sp) { std::snprintf(out, n, "no share pad"); return; }
+    p += std::snprintf(out + p, n - (size_t)p, "sync %u active %u stall %u own ctr %u", vm_read32(sp + 0x6D4u), vm_read32(sp + 0x6D8u), vm_read32(sp + 0x6E8u), own_count(sp));
+    const uint32_t m = vm_read32(sp + 0x10u);
+    for (uint32_t i = 0; i < m && i < jspw::kMaxMembers && p > 0 && (size_t)p < n; i++) {
+        const uint32_t blk = sp + 0xBCu + 0xB8u * i, q = vm_read32(blk + 8u);
+        p += std::snprintf(out + p, n - (size_t)p, "; m%u st %u ctr %d", i, vm_read32(blk), plausible(q) ? (int)vm_read32(q + 8u) : -1);
+    }
+}
+
+// The 12-byte neutral sample at guest `addr` (as take_armed builds it): buttons 0, sticks 0x56610(f[TOC + 0x61D8]) twice, two bytes each, flags 0.
+void write_neutral(ppu_context* c, uint32_t addr)
+{
+    vm_write32(addr + 0x0u, 0);
+    for (int k = 0; k < 2; k++) {
+        const uint32_t fw = vm_read32(kToc + 0x61D8u); float f; std::memcpy(&f, &fw, 4); c->fpr[1] = f;
+        call(c, func_00056610, k ? 0x00484558u : 0x00484540u);
+        vm_write8(addr + 4u + 2u * k, (uint8_t)c->gpr[3]); vm_write8(addr + 5u + 2u * k, (uint8_t)c->gpr[3]);
+    }
+    vm_write32(addr + 0x8u, 0);
+}
+
+// Push one neutral sample into queue entry q (0x473704(q + 4, 1, sample, 12), as the receive path 0x4824CC does). 1 = landed (12 bytes copied and
+// the count went up by one), 0 = called but did not land, -1 = refused before the call (no free node: 0x473704 would recycle a used node, and with
+// the count at 0 there is none, so it would write through node 0). Volatile registers are clobbered as by any call; the caller restores slot 2's.
+int feed_neutral(ppu_context* c, uint32_t q)
+{
+    const uint32_t before = vm_read32(q + 8u);
+    if (!plausible(vm_read32(q + 4u + 0x18u))) return -1;   // free list empty: never call (the used-list fallback is empty too at count 0)
+    if (before != 0 && !plausible(vm_read32(q + 4u + 0x10u))) return -1;   // defensive: a count with no used node is a broken list
+    const uint64_t r1 = c->gpr[1];
+    c->gpr[1] = r1 - 0x90u; vm_write64(c->gpr[1], r1);   // own frame: ABI header (0x70) + the sample
+    const uint32_t buf = (uint32_t)c->gpr[1] + 0x70u;
+    write_neutral(c, buf);
+    c->gpr[3] = q + 4u; c->gpr[4] = 1; c->gpr[5] = buf; c->gpr[6] = 12;
+    call(c, func_00473704, 0x00482688u);
+    const uint32_t len = (uint32_t)c->gpr[3];
+    c->gpr[1] = r1;
+    return len == 12 && vm_read32(q + 8u) == before + 1u ? 1 : 0;
+}
+
+#if JSP_WD_KNOB
+// Debug knob: should this manager update drop this copy's own push? (game thread, at the manager update's entry, before the receive and the push)
+bool pin_skip(uint32_t* sp_out)
+{
+    if (!g_pin_on.load() || armed() || !g_pin_left.load()) return false;
+    const uint32_t sp = share_pad();
+    if (!sp || vm_read32(sp + 0x6D8u) != 1 || vm_read32(sp + 0x6DCu) != 0 || vm_read32(sp + 0x6D0u) != 1 || vm_read32(sp + 0x6D4u) != 2) return false;
+    if (own_count(sp) < 1) return false;   // own delay already 0: push as usual
+    const uint32_t m = vm_read32(sp + 0x10u);
+    if (m < 1 || m > jspw::kMaxMembers) return false;
+    for (uint32_t i = 0; i < m; i++) {   // the peer's sample may still arrive in this update's receive: checked after it (pin_fix_states)
+        const uint32_t q = vm_read32(sp + 0xBCu + 0xB8u * i + 8u);
+        if (vm_read32(sp + 0xBCu + 0xB8u * i) != 2 || !plausible(q) || !vm_read32(q)) return false;
+    }
+    *sp_out = sp;
+    return true;
+}
+// Debug knob, after a dropped push: the states 0x4844DC did not compute this update. A member with no sample now would be state 3 (own queue not empty,
+// that member empty), started 0 and sync 3 (3 outranks 1 and 2 in the priority table [2, 0, 1, 3, 4]); write that, so the stall check pauses this tick
+// and the pad take pops nothing. Returns the number of such members.
+uint32_t pin_fix_states(uint32_t sp)
+{
+    const uint32_t m = vm_read32(sp + 0x10u);
+    uint32_t empty = 0;
+    for (uint32_t i = 0; i < m && i < jspw::kMaxMembers; i++) {
+        const uint32_t blk = sp + 0xBCu + 0xB8u * i, q = vm_read32(blk + 8u);
+        if (plausible(q) && vm_read32(q + 8u) == 0) { vm_write32(blk, 3); empty++; }
+    }
+    if (empty) { vm_write32(sp + 0x6D0u, 0); vm_write32(sp + 0x6D4u, 3); }
+    return empty;
+}
+// Debug knob: runs this manager update with +0x6D8 = 0 when pin_skip says so. Returns false (nothing called) otherwise.
+bool pin_call(ppu_context* c)
+{
+    uint32_t sp = 0;
+    if (!pin_skip(&sp)) return false;
+    const uint32_t own0 = own_count(sp);
+    vm_write32(sp + 0x6D8u, 0);   // this call only: 0x484690 skips 0x4844DC (no own push / send)
+    g_orig_mgr(c);
+    drain(c);                     // any tail call of the update runs before the word is written back
+    if (vm_read32(sp + 0x6D8u) == 0) vm_write32(sp + 0x6D8u, 1);
+    const uint32_t late = pin_fix_states(sp);
+    g_pin_left--;
+    const uint32_t n = ++g_pin_done;
+    if (g_pin_logs.fetch_add(1) < 60) {
+        char b[160]; sp_counts(sp, b, sizeof b);
+        std::fprintf(stderr, "[sharepad-wd] DEBUG skip-push: own push %u dropped (own ctr was %u%s; %s)\n", n, own0,
+                     late ? "; a peer sample is late: this tick pauses" : "", b);
+    }
+    return true;
+}
+#endif
+
+// FIX (late but alive): each member's received-sample count (UINT32_MAX for a member without a plausible queue); returns the member count (<= 4).
+uint32_t member_counts(uint32_t sp, uint32_t* out)
+{
+    if (!sp) return 0;
+    const uint32_t m = vm_read32(sp + 0x10u), n = m < jspw::kMaxMembers ? m : jspw::kMaxMembers;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t q = vm_read32(sp + 0xBCu + 0xB8u * i + 8u);
+        out[i] = plausible(q) && vm_read32(q) != 0 ? vm_read32(q + 8u) : 0xFFFFFFFFu;
+    }
+    return n;
+}
+
+// The watchdog's tick (slot 2, before the stall check). `mode` = slot 2's this.
+void wd_tick(ppu_context* c, uint32_t mode)
+{
+    const uint32_t ep = g_wd_epoch.load();
+    if (ep != g_wd_seen_epoch) { g_wd_seen_epoch = ep; jspw::reset(g_wd); g_wd_fed_total = 0; g_wd_hud_last = g_hud_calls; g_wd_real = 0; }
+    const uint32_t hud = g_hud_calls;
+    const bool hud_drawn = hud != g_wd_hud_last;
+    g_wd_hud_last = hud;
+    if (!g_wd_after.load() || !g_wd_f2.load()) return;   // the cheap gate: nothing is read in a fight or before the 0x876A60 object is deleted
+    const uint32_t sp = share_pad();
+    jspw::View v;
+    bool g = sp && plausible(mode) && vm_read32(mode) == kOnlineVt && !armed();
+    if (g) {
+        uint32_t m0 = g_wd_mode.load();
+        if (!m0 && g_wd_mode.compare_exchange_strong(m0, mode)) m0 = mode;
+        g = m0 == mode;
+    }
+    v.guards = g;
+    v.hud_drawn = hud_drawn;
+    v.paused = plausible(mode) && (vm_read32(mode + 0x1Cu) & 0xB0u) == 0xB0u;
+    if (sp) {
+        v.active = vm_read32(sp + 0x6D8u); v.sync = vm_read32(sp + 0x6D4u); v.members = vm_read32(sp + 0x10u); v.own = own_count(sp);
+        for (uint32_t i = 0; i < jspw::kMaxMembers && i < v.members; i++) {
+            const uint32_t blk = sp + 0xBCu + 0xB8u * i, q = vm_read32(blk + 8u);
+            v.st[i] = vm_read32(blk);
+            v.queue_ok[i] = plausible(q) && vm_read32(q) != 0;
+            v.count[i] = v.queue_ok[i] ? vm_read32(q + 8u) : 0;
+        }
+    }
+    v.real = g_wd_real.exchange(0);
+    bool stopped0[jspw::kMaxMembers];
+    for (uint32_t i = 0; i < jspw::kMaxMembers; i++) stopped0[i] = g_wd.stopped[i];
+    const uint32_t mask = jspw::step(g_wd, v);
+    for (uint32_t i = 0; i < jspw::kMaxMembers; i++)
+        if (g_wd.stopped[i] && !stopped0[i] && wd_feed_log_ok()) {
+            char b[160]; sp_counts(sp, b, sizeof b);
+            std::fprintf(stderr, "[sharepad-wd] match %u: member %u sent a real sample after %u neutral one(s): no more feeding for this match (the %u stay queued "
+                         "until the next online mode resets the queues; %s)\n", g_wd_match.load(), i, g_wd.surplus[i], g_wd.surplus[i], b);
+        }
+    if (!mask) return;
+    const uint64_t r2 = c->gpr[2], r3 = c->gpr[3], lr = c->lr, cr = c->cr, ctr = c->ctr;
+    for (uint32_t i = 0; i < jspw::kMaxMembers; i++) {   // every starved member in this same tick (2v2)
+        if (!(mask & (1u << i))) continue;
+        const uint32_t q = vm_read32(sp + 0xBCu + 0xB8u * i + 8u);
+        const int r = feed_neutral(c, q);
+        c->gpr[2] = r2;
+        if (r == 1) g_wd_fed_total++; else jspw::fed_failed(g_wd, i);
+        if ((r != 1 || g_wd.fed[i] <= 8) && wd_feed_log_ok()) {
+            char b[160]; sp_counts(sp, b, sizeof b);
+            const unsigned long ts = g_tid_slot2.load(), tm = g_tid_mgr.load();
+            std::fprintf(stderr, "[sharepad-wd] match %u: %s neutral sample %u to member %u (%s; %s; threads slot2 %lu mgr %lu %s)\n", g_wd_match.load(),
+                         r == 1 ? "fed" : r == 0 ? "FAILED to feed" : "REFUSED (no free node) to feed", r == 1 ? g_wd.fed[i] : 0u, i,
+                         g_wd.ticks[i] == 0 ? "starved 10 ticks, paused, no fight HUD" : "starved again", b, ts, tm,
+                         !tm ? "(mgr not seen)" : ts == tm ? "same" : "DIFFERENT");
+        }
+    }
+    c->gpr[2] = r2; c->gpr[3] = r3; c->lr = lr; c->cr = cr; c->ctr = ctr;
+}
+
+// mode slot 2, 0x0F7704 (indirect only: the mode vtable): this -> 0x0F73E8, the stall check. Runs every mode tick, paused or not.
+void slot2_wrap(ppu_context* c)
+{
+    if (!g_tid_slot2.load()) {
+        unsigned long z = 0; const unsigned long t = (unsigned long)GetCurrentThreadId();
+        if (g_tid_slot2.compare_exchange_strong(z, t)) std::fprintf(stderr, "[sharepad-wd] thread: mode slot 2 0x0F7704 runs on host thread %lu\n", t);
+    }
+    if (!armed()) {
+        if (g_wd_on.load()) wd_tick(c, (uint32_t)c->gpr[3]);
+    }
+    g_orig_slot2(c);
+}
+// the share pad manager update 0x45222C (indirect, 30/s): the receive push 0x4824CC runs inside it. One-shot thread id. FIX (late but alive): from the
+// post-fight deletion to the mode's free (the only time the watchdog may feed), the member counts are read before and after the call, and a rise marks a
+// real sample from that peer (g_wd_real): the watchdog then stops feeding that member. In JSP_TEST_KNOBS builds the debug knob may run one call with
+// +0x6D8 = 0 (pin_call above).
+void mgr_wrap(ppu_context* c)
+{
+    if (!g_tid_mgr.load()) {
+        unsigned long z = 0; const unsigned long t = (unsigned long)GetCurrentThreadId();
+        if (g_tid_mgr.compare_exchange_strong(z, t)) std::fprintf(stderr, "[sharepad-wd] thread: manager update 0x45222C (receive push) runs on host thread %lu\n", t);
+    }
+    const bool watch = g_wd_on.load() && !armed() && g_wd_after.load() && g_wd_f2.load();
+    uint32_t sp = 0, n = 0, before[jspw::kMaxMembers] = {};
+    if (watch) { sp = share_pad(); n = member_counts(sp, before); }
+#if JSP_WD_KNOB
+    if (!pin_call(c)) g_orig_mgr(c);
+#else
+    g_orig_mgr(c);
+#endif
+    if (!n || share_pad() != sp) return;
+    uint32_t after[jspw::kMaxMembers] = {}, real = 0;
+    const uint32_t n2 = member_counts(sp, after);
+    for (uint32_t i = 0; i < n && i < n2; i++)
+        if (before[i] != 0xFFFFFFFFu && after[i] != 0xFFFFFFFFu && after[i] > before[i]) real |= 1u << i;
+    if (real) g_wd_real.fetch_or(real);
+}
+// 0x0E2048 (indirect only): the deleting destructor of the post-fight object of class 0x876A60; its online mode reaches its exit a mode tick later.
+void f2_wrap(ppu_context* c)
+{
+    const uint32_t obj = (uint32_t)c->gpr[3];
+    if (!armed() && g_wd_after.load() && plausible(obj) && vm_read32(obj) == kPostFightVt && !g_wd_f2.exchange(1) && wd_log_ok()) {
+        char b[160]; sp_counts(share_pad(), b, sizeof b);
+        std::fprintf(stderr, "[sharepad-wd] match %u: post-fight object (vt 876A60) deleted, 0x0E2048 (%s)\n", g_wd_match.load(), b);
+    }
+    g_orig_f2(c);
+}
+// the online mode's deleting destructor, 0x0F77DC (slot 1, indirect only; on the frame of the second exit poll 0x0F777C): the episode and the
+// watchdog's scope end with the mode, so a later fight on the game's own netcode is never touched.
+void free_wrap(ppu_context* c)
+{
+    const uint32_t mode = (uint32_t)c->gpr[3];
+    if (!armed() && g_wd_after.load() && plausible(mode) && vm_read32(mode) == kOnlineVt) {
+        if (g_wd_fed_total && wd_log_ok()) {
+            char b[160]; sp_counts(share_pad(), b, sizeof b);
+            // The counts in `b` are what the queues still hold. They do not carry over: the next online mode's build (0x0F7880 / 0x0F7D1C) calls the
+            // share pad start 0x484270 and then 0x4848C4, which stops a started share pad (0x484224 -> 0x482AA4 -> 0x4828F4) and starts it again;
+            // 0x4828F4 runs 0x473BD4 on every member queue (count 0, every node back on the free list), and 0x484270's own start does the same.
+            std::fprintf(stderr, "[sharepad-wd] match %u: online mode freed (0x0F77DC) after %u neutral samples (fed m0..m3: %u %u %u %u; stopped on a real sample "
+                         "m0..m3: %d %d %d %d; left queued, reset by the next online mode: %s)\n", g_wd_match.load(), g_wd_fed_total, g_wd.fed[0], g_wd.fed[1],
+                         g_wd.fed[2], g_wd.fed[3], g_wd.stopped[0], g_wd.stopped[1], g_wd.stopped[2], g_wd.stopped[3], b);
+        }
+#if JSP_WD_KNOB
+        if (g_pin_on.exchange(0)) {   // debug knob: the window ends with the mode
+            char b[160]; sp_counts(share_pad(), b, sizeof b);
+            std::fprintf(stderr, "[sharepad-wd] DEBUG skip-push: window over at the mode's free, %u own pushes dropped (%s)\n", g_pin_done.load(), b);
+        }
+#endif
+        g_wd_after = 0; g_wd_f2 = 0; g_wd_mode = 0; g_wd_epoch++;
+    }
+    g_orig_free(c);
+}
+
 bool g_installed = false;
 int g_supported = 0;   // FIX (region): jsp_native_fight_supported(); set once by jsp_native_fight_install
 
@@ -220,7 +544,40 @@ extern "C" void jsp_native_fight_install(void)
     one(Stub<0x00466ADCu, 2>::install());   // connection check: ok
     one(Stub<0x004862B0u, 1>::install());   // user error check: none
     std::fprintf(stderr, "[native-fight] hooks installed (%d of %d; pass-through until armed; direct calls need the guarded insn patches)\n", ok, n);
+    // FIX (rematch black screen): the share pad watchdog, on unless JSP_SHAREPAD_WATCHDOG is 0/off/false/no. The debug knob (see JSP_WD_KNOB) exists only in
+    // JSP_TEST_KNOBS builds (a release build never reads it).
+    {
+        char b[16] = {};
+        const bool wd = !(jsp_setting_get("JSP_SHAREPAD_WATCHDOG", b, sizeof b) && jspw::setting_off(b));
+#if defined(JSP_TEST_KNOBS) && JSP_TEST_KNOBS
+        const char* sk = std::getenv("JSP_SHAREPAD_SKIP_PUSH");
+        const long skn = sk && *sk ? std::strtol(sk, nullptr, 10) : 0;
+        g_skip_n = skn > 0 ? (uint32_t)(skn < 300 ? skn : 300) : 0u;
+#endif
+#if JSP_WD_KNOB
+        if (wd || g_skip_n) {
+#else
+        if (wd) {
+#endif
+            int k = 0;
+            k += jsp_hook_chain::install<fn_t>(0x000F7704u, slot2_wrap, &g_orig_slot2) ? 1 : 0;   // mode slot 2
+            k += jsp_hook_chain::install<fn_t>(0x000E2048u, f2_wrap, &g_orig_f2) ? 1 : 0;         // post-fight object's deleting destructor
+            k += jsp_hook_chain::install<fn_t>(0x000F77DCu, free_wrap, &g_orig_free) ? 1 : 0;     // the online mode's deleting destructor
+            const bool m = jsp_hook_chain::install<fn_t>(0x0045222Cu, mgr_wrap, &g_orig_mgr);    // thread id, real-sample detection
+            k += m ? 1 : 0;
+            g_wd_on = wd && k == 4;   // never half on: without the 0x0E2048 / free hooks the gates would be wrong, without 0x45222C a late peer's real samples
+            std::fprintf(stderr, "[sharepad-wd] share pad watchdog %s (%d of 4 hooks; JSP_SHAREPAD_WATCHDOG=0 turns it off)\n", g_wd_on ? "on" : "OFF", k);
+#if JSP_WD_KNOB
+            if (k != 4) g_skip_n = 0;   // the debug knob needs the manager-update hook
+            if (g_skip_n)
+                std::fprintf(stderr, "[sharepad-wd] DEBUG JSP_SHAREPAD_SKIP_PUSH=%u (JSP_TEST_KNOBS build, TEST ONLY): after each normal match end this copy drops up to %u own "
+                             "share pad pushes to keep its own input delay at 0 until the exit (its peer starves there)\n", g_skip_n, g_skip_n);
+#endif
+        } else std::fprintf(stderr, "[sharepad-wd] share pad watchdog off (JSP_SHAREPAD_WATCHDOG=0)\n");
+    }
 }
+
+extern "C" void jsp_native_fight_end_normal(void) { g_end_normal = 1; }
 
 extern "C" int jsp_native_fight_supported(void) { return g_supported; }
 
@@ -326,25 +683,50 @@ extern "C" int jsp_native_fight_arm(int on)
         }
         std::fprintf(stderr, "[native-fight] armed: share pad %08X (+6D4=%u +6D8=%u +6DC=%u +6E0=%d), mode %08X vt %08X (online)\n", sp,
                      vm_read32(sp + 0x6D4u), vm_read32(sp + 0x6D8u), vm_read32(sp + 0x6DCu), (int32_t)vm_read32(sp + 0x6E0u), m, vt);
+#if JSP_WD_KNOB
+        g_pin_on = 0;   // debug knob: its window never reaches a fight
+#endif
         g_arm_sp = sp; g_arm_vt = vm_read32(sp); g_arm_mgr = vm_read32(vm_read32(kToc + 0x59F8u));
         g_arm_6d8 = vm_read32(sp + 0x6D8u); g_arm_6dc = vm_read32(sp + 0x6DCu);
         vm_write32(sp + 0x6D8u, 0);   // share pad inactive: 0x4844DC / 0x0F73E8 return at once
         vm_write32(sp + 0x6DCu, 0);   // no start request: 0x484690 does not set +0x6D8 again
         g_jsp_native_fight_armed = 1;
+        g_end_normal = 0; g_wd_after = 0; g_wd_f2 = 0; g_wd_mode = 0; g_wd_epoch++;   // FIX (rematch black screen): the watchdog never acts while armed
         return 1;
     }
     const bool was = g_jsp_native_fight_armed != 0;
+    const bool normal = g_end_normal.exchange(0) != 0;   // FIX (rematch black screen): consumed by every disarm call, so it never leaks to a later one
     g_jsp_native_fight_armed = 0;
     g_port_on = false;   // FIX (swapped controls): the next session maps its own fight (jsp_native_fight_map); the counts stay for a last owner check
     if (was) {
         const uint32_t sp = share_pad();
         const bool same = sp && sp == g_arm_sp && vm_read32(sp) == g_arm_vt && vm_read32(vm_read32(kToc + 0x59F8u)) == g_arm_mgr;
+        // FIX (rematch black screen): only a NORMAL match end (jsp_native_fight_end_normal: an agreed KO / time-up hand-back) opens the watchdog's scope.
+        // After a mid-fight end (desync, disconnect, Cancel, F9) the game's own fight plays on and the watchdog stays off.
+        // Debug knob (JSP_TEST_KNOBS builds only): a normal end opens the window in which this copy's own input delay is pinned at 0 (pin_skip).
+#if JSP_WD_KNOB
+        const bool hold = normal && same && g_skip_n && g_orig_mgr;
+#endif
         if (same) {
             if (vm_read32(sp + 0x6D8u) == 0) vm_write32(sp + 0x6D8u, g_arm_6d8);
             if (vm_read32(sp + 0x6DCu) == 0) vm_write32(sp + 0x6DCu, g_arm_6dc);
         }
+#if JSP_WD_KNOB
+        if (hold) { g_pin_left = g_skip_n; g_pin_done = 0; g_pin_logs = 0; g_pin_on = 1; }
+#endif
+        g_wd_f2 = 0; g_wd_mode = 0; g_wd_epoch++;
+        if (normal) g_wd_match++;
+        g_wd_after = normal ? 1 : 0;
+        char b[160]; sp_counts(sp, b, sizeof b);
+        std::fprintf(stderr, "[sharepad-wd] %s disarm, share pad: %s; watchdog %s%s\n", normal ? "normal match-end" : "mid-fight (not a normal match end)", b,
+                     normal && g_wd_on.load() ? "armed for the exit" : "off for this match",
+#if JSP_WD_KNOB
+                     hold ? "; DEBUG skip-push: own delay pinned at 0 until the exit" : "");
+#else
+                     "");
+#endif
         std::fprintf(stderr, "[native-fight] disarmed (share pad +6D8=%u +6DC=%u: %s)\n", g_arm_6d8, g_arm_6dc,
-                     same ? "restored" : "not restored, the share pad object is gone or another one");
+                     !same ? "not restored, the share pad object is gone or another one" : "restored");
     }
     g_arm_sp = g_arm_vt = g_arm_mgr = 0;
     return 0;

@@ -277,6 +277,12 @@ if(NOT MSVC)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE jsp_gekkonet)
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_ROLLBACK_BUILD=1)
+# FIX (rematch black screen): test-only debug knobs (JSP_SHAREPAD_SKIP_PUSH) are compiled in only with -DJSP_TEST_KNOBS=ON; never in a release or tester build.
+option(JSP_TEST_KNOBS "Compile the test-only debug knobs (JSP_SHAREPAD_SKIP_PUSH); never for a release" OFF)
+if(JSP_TEST_KNOBS)
+    message(WARNING "JSP_TEST_KNOBS=ON: test-only debug knobs are compiled in; do not ship this build")
+    set_property(SOURCE jsp_net_native_fight.cpp APPEND PROPERTY COMPILE_DEFINITIONS JSP_TEST_KNOBS=1)
+endif()
 # The rollback build id from the release content (jsp_build_id.cmake), on the one file that reads it.
 include("${CMAKE_CURRENT_SOURCE_DIR}/jsp_build_id.cmake")
 jsp_build_id(JSP_NET_BUILD_ID "${PROJECT_VERSION}" "${JSP_GAME_REGION}" "${CMAKE_CURRENT_SOURCE_DIR}" "${PS3RECOMP_DIR}")

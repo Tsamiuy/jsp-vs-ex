@@ -729,6 +729,7 @@ void report_start()
     g_rep.clear();
     char b[16]; std::snprintf(b, sizeof b, "%08x", build_id()); g_rep.set_build(b);
     for (const jpno::KV& e : jpno::kDefaults) { char v[128] = {}; if (jsp_setting_get(e.k, v, sizeof v)) g_rep.add_setting(e.k, v); }
+    { char v[16] = {}; g_rep.add_setting("JSP_SHAREPAD_WATCHDOG", jsp_setting_get("JSP_SHAREPAD_WATCHDOG", v, sizeof v) && v[0] ? v : "1 (default)"); }   // FIX (rematch black screen)
     jsnr::SessionFacts f; f.local_slot = (int)g.plan.local_first; f.players = (int)g.plan.total_players; f.input_delay = g.bv.delay; f.base_tick = g.base;
     f.link = path_word(); g_rep.set_session(f);
     g_rep.add_machine_redactions();
@@ -839,6 +840,7 @@ void end_with(const std::string& text, bool quiet = false)
     jsp_stepper_abort();
     jsp_stepper_net_disable();
     jsp_snapshot_ext_session_end();   // FIX (same-link rematch, run native-rm1): the snapshot ring of this session goes; the next match baselines afresh at its tick 1
+    if (text.rfind("Match over", 0) == 0) jsp_native_fight_end_normal();   // FIX (rematch black screen): a normal end lets the share pad watchdog act on the exit
     jsp_native_fight_arm(0);   // ENHANCEMENT (native fight takeover): after the last tick (reset_match below does it again; a no-op when not armed)
     { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host && g.mh) g.mh->end_match(); else if (!g.host && g.mc) g.mc->match_ended(); }
     log("ended", text);

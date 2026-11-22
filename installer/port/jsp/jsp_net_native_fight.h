@@ -16,6 +16,9 @@ int  jsp_native_fight_supported(void);
 int  jsp_native_fight_online(void);    // 1 when the current battle mode object is the ONLINE one (vtable 0x00878A70), else 0
 int  jsp_native_fight_slot(void);      // my battle slot (share pad +0x6E0; host 0, join 1 in the traced Friendly Match), -1 unknown
 int  jsp_native_fight_arm(int on);     // 1 at the rollback session's first tick (before its first save), 0 when the session ended
+// FIX (rematch black screen): called right before jsp_native_fight_arm(0) when the session ends NORMALLY (an agreed KO / time-up hand-back, "Match over").
+// Only such a disarm lets the share pad watchdog act on the exit that follows; any other disarm (desync, disconnect, Cancel) leaves it off.
+void jsp_native_fight_end_normal(void);
 // FIX: returns 1 armed, 0 refused (the mode vtable is not 0x00878A70, or no share pad; g_jsp_native_fight_armed stays 0) and 0 for a disarm,
 // which writes share pad +0x6D8 / +0x6DC back while the same share pad object still exists (the .cpp says why).
 // The guard of the guarded instruction patches (jnf::kPatches, for lift_insn_patches.json): 1 while armed. The lifted code reads it.
