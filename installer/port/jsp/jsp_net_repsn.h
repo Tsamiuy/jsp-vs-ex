@@ -92,6 +92,25 @@ inline std::string window_words(int ms)
     const int s = (ms + 999) / 1000; return std::to_string(s) + (s == 1 ? " second" : " seconds");
 }
 inline std::string build_hex(uint32_t build) { char b[12]; std::snprintf(b, sizeof b, "%08x", (unsigned)build); return b; }
+// ENHANCEMENT (version mismatch message): the build words of the published releases (jsp_build_id.cmake, without gameplay mods), so the message names the
+// release the other player runs. A word not listed (a newer release, a local build, gameplay mods) is named "build xxxxxxxx". Add each release when it is published.
+struct KnownBuild { uint32_t build; const char* release; };
+inline constexpr KnownBuild kKnownBuilds[] = { { 0xe9be7f43u, "0.7.0-test1" }, { 0xf1e06d4du, "0.7.0-test2" }, { 0x8a47e98au, "0.7.0-test3" } };
+inline std::string release_name(uint32_t build)
+{
+    for (const KnownBuild& k : kKnownBuilds) if (k.build == build) return k.release;
+    return "build " + build_hex(build);
+}
+// The message of a version mismatch (the message line and the first line of the menu notice). own_release: this game's release.txt ("" = by its build word).
+// Two different words that name the same release (other gameplay mods, a changed source) are both shown as build words.
+inline std::string version_mismatch_text(uint32_t other, uint32_t own, const std::string& own_release)
+{
+    std::string theirs = release_name(other), mine = own_release.empty() ? release_name(own) : own_release;
+    if (theirs == mine) { theirs = "build " + build_hex(other); mine = "build " + build_hex(own); }
+    return "The other player is on " + theirs + "; you're on " + mine + ". Both players need the same version for rollback.";
+}
+// How long a joiner that found the other version's room waits for the server's answer to its one join (that join tells a new host at once).
+constexpr int kMismatchJoinMs = 3000;
 // What to check when the two games did not meet (the second line of the on-screen notice; the tail of the one-line text).
 inline std::string meet_advice(uint32_t build, int window_ms)
 {
@@ -180,6 +199,7 @@ public:
         int give_up_ms = kRendezvousWindowMs;   // finding the other player (connect, room list / room, until its endpoint is known); the punch has its own windows
         int lookup_every_ms = kLookupEveryMs;   // joiner: the pause between two room lists without a matching room
         int progress_every_ms = kProgressEveryMs;
+        std::string release;            // this game's release name (release.txt; "" = a local build): the version mismatch message
     };
     RePsnRendezvous(IPsnrTransport& t, UdpMux& mux, MessageHub& hub, const Config& c) : t_(t), mux_(mux), hub_(hub), c_(c) {}
     // when the path changes: Relay means the mux must send through the server from now on (psnr_relay_wrap / psnr_relay_unwrap_from); the glue sets that up
@@ -195,6 +215,12 @@ public:
         if (state_ == kFailed) return -1;
         const uint64_t t = now_ms();
         if (!t0_) t0_ = t;
+        if (mm_build_) {   // the joiner joined the other version's room once, only so that its host learns it: fail when the server answered (or did not in time)
+            PsnrEvent ev; bool answered = false;
+            while (t_.poll_event(ev)) if (ev.kind == PsnrEvent::RoomJoined || ev.kind == PsnrEvent::Error) answered = true;
+            if (answered || t >= mm_until_ || t_.failure()) return fail_version(mm_build_);
+            return 0;
+        }
         // The window covers finding the other player only: once its endpoint is known the punch (and the relay, if allowed) has its own bound (punch_ms).
         if (state_ < kPunch && t - t0_ > (uint64_t)c_.give_up_ms) return give_up();
         if (const char* f = t_.failure()) return fail(f);   // the connection failed for good, or a lookup was refused: end now, not at the give-up
@@ -211,16 +237,16 @@ public:
                 note_other_builds(all);
                 // FIX (two PCs, another version): with a pair key the host's rollback room is known exactly (same native room). When it is there with
                 // another build, waiting 2 minutes (then 3 retries) cannot help and the fight meanwhile starts on the game's own netcode with no word on
-                // screen: say so at once, with both build numbers. The host learns it from its own give-up (it never sees a member join).
+                // screen: say so at once, with both versions. ENHANCEMENT (version mismatch message): first join that room once with our own record, so a
+                // host of this build or later fails at once too (its member check below); an older host refuses the member and still gives up at its window.
+                // The room's record format is unchanged: older builds compare it exactly.
                 if (c_.pair && !c_.join_room)
                     for (const PsnrRoom& x : all) {
                         uint32_t b = 0; uint64_t k = 0;
                         if ((x.flags & kRoomFlagRollback) && record_build(x.external, &b, &k) && k == c_.pair && b != c_.build) {
-                            const std::string what = "the other player runs another version (build " + build_hex(b) + ", yours " + build_hex(c_.build) + ")";
-                            fail("re-psn: " + what);
-                            n1_ = "Rollback could not start: " + what + ".";
-                            n2_ = "Both players need the same download and the same gameplay mods (or none). The main menu corner shows the version.";
-                            return -1;
+                            t_.join_room(x.id, make_record(c_.build, c_.pair)); room_ = x.id; state_ = kRoom;
+                            mm_build_ = b; mm_until_ = t + (uint64_t)kMismatchJoinMs;
+                            return 0;
                         }
                     }
                 const std::vector<PsnrRoom> ok = filter_rooms(all, c_.build, c_.pair);
@@ -236,7 +262,12 @@ public:
         while (t_.poll_event(ev)) {
             if (ev.kind == PsnrEvent::Error) return fail("re-psn: the server refused (error " + std::to_string(ev.err) + ")");
             if (ev.kind == PsnrEvent::RoomJoined) { room_ = ev.room_id; owner_ = ev.owner; members_ = ev.members; }
-            else if (ev.kind == PsnrEvent::MemberJoined) { for (auto& m : ev.members) members_.push_back(m); }
+            else if (ev.kind == PsnrEvent::MemberJoined) {
+                for (auto& m : ev.members) {
+                    uint32_t b = 0; if (other_version(m, &b)) return fail_version(b);   // checked here too: the joiner leaves again at once (MemberLeft may come in this same poll)
+                    members_.push_back(m);
+                }
+            }
             else if (ev.kind == PsnrEvent::MemberLeft) {
                 members_.erase(std::remove_if(members_.begin(), members_.end(), [&](const PsnrMember& m) { return m.user == ev.user; }), members_.end());
                 if (ev.user == peer_user_ && state_ >= kPunch) return fail("re-psn: the other player left the room");
@@ -247,6 +278,7 @@ public:
             // every OTHER member's record is checked; a mismatching member is refused (never played with). The host waits for the first match, the client looks at the owner.
             for (const PsnrMember& m : members_) {
                 if (m.user == t_.self_user()) continue;
+                { uint32_t b = 0; if (other_version(m, &b)) return fail_version(b); }   // ENHANCEMENT (version mismatch message): a player of our native room on another version
                 if (!record_matches(m.data, c_.build, c_.pair)) {
                     if (!c_.host) return fail("re-psn: the host's build or settings record does not match (refused)");
                     if (!rejected_.count(m.user)) { rejected_.insert(m.user); ++rejected_members; t_.kick(m.user); }   // never played with, and removed from the room so it cannot hold the slot
@@ -290,15 +322,32 @@ public:
     // The failure as the two lines of the on-screen notice (what happened / what to do); line 2 is empty when error() says it all.
     const std::string& notice1() const { return n1_; }
     const std::string& notice2() const { return n2_; }
+    bool version_mismatch() const { return mismatch_; }   // the failure was the other player's version: notice1() is version_mismatch_text, no retry can help
 private:
     enum { kConnect = 0, kLookup, kRoom, kPunch, kDone, kFailed };
     int fail(const std::string& why) { err_ = why; n1_ = "Rollback could not start: " + why; n2_.clear(); state_ = kFailed; t_.leave_room(); return -1; }
+    // A member of our native room (the same pair key) whose record carries another build word.
+    bool other_version(const PsnrMember& m, uint32_t* b) const
+    {
+        uint64_t k = 0;
+        return c_.pair && m.user != t_.self_user() && record_build(m.data, b, &k) && k == c_.pair && *b != c_.build;
+    }
+    int fail_version(uint32_t other)
+    {
+        fail("re-psn: the other player runs another version (build " + build_hex(other) + ", yours " + build_hex(c_.build) + ")");
+        n1_ = version_mismatch_text(other, c_.build, c_.release);
+        n2_ = "Rollback is off in this room. Both need the same download and the same gameplay mods (or none); the main menu corner shows the version.";
+        mismatch_ = true; return -1;
+    }
     // The window ended before the other player was found. One line for the log and the screen, with the build word so the players can compare.
     int give_up()
     {
         std::string what;
         if (state_ == kConnect) what = "the online server did not answer within " + window_words(c_.give_up_ms);
         else if (!c_.host && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (other_builds_.empty() ? std::string() : " (" + other_builds_text() + ")");
+        // ENHANCEMENT (version mismatch message): a paired host knows the other player is in its native room; a joiner of a build before 0.7.0-test4 that
+        // runs another version never joins (it only says so on its own screen), so that is the likely reason
+        else if (c_.host && c_.pair) what = "the other player probably runs a different version (the main menu shows it)";
         else if (c_.host) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
         else what = "the host's room did not answer within " + window_words(c_.give_up_ms);
         const std::string advice = meet_advice(c_.build, c_.give_up_ms);
@@ -349,6 +398,7 @@ private:
     IPsnrTransport& t_; UdpMux& mux_; MessageHub& hub_; Config c_;
     int state_ = kConnect; uint64_t t0_ = 0, punch_start_ = 0, last_punch_ = 0, next_lookup_ = 0, last_progress_ = 0;
     std::set<uint32_t> other_builds_; std::string n1_, n2_;
+    uint32_t mm_build_ = 0; uint64_t mm_until_ = 0; bool mismatch_ = false;   // the joiner's one join of the other version's room; the failure was a version mismatch
     uint64_t room_ = 0; uint32_t owner_ = 0, peer_user_ = 0; int local_index_ = -1; bool relay_ = false;
     std::vector<PsnrMember> members_; PsnrMember peer_; std::set<uint32_t> rejected_;
     std::unique_ptr<DirectRendezvous> inner_; SessionPlan plan_; std::string err_; MessageChannel* ch_ = nullptr; Path path_ = Path::None;

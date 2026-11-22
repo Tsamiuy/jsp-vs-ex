@@ -324,6 +324,16 @@ inline bool notice_visible(bool have_notice, bool top_up, uint64_t up_since_ms, 
     return have_notice && top_up && now_ms - up_since_ms < kNoticeMs;
 }
 
+// FIX (an F9 tap cancelled rollback at fight start; recording hotkeys use F9): the rollback cancel key (jsp_net_game.cpp) counts only once held
+// kCancelHoldMs, in every phase (waiting, armed and running). since: when the key went down (0 = up; the caller keeps it).
+static constexpr uint64_t kCancelHoldMs = 1500;
+inline bool cancel_held(bool down, uint64_t now_ms, uint64_t& since)
+{
+    if (!down) { since = 0; return false; }
+    if (!since) since = now_ms;
+    return now_ms - since > kCancelHoldMs;
+}
+
 // ONE place decides whether a rollback start happens, and it runs after the online files were applied (so PS3_NET_ONLINE is final):
 //   - JSP_ROLLBACK off: nothing.
 //   - the game's own online on (PS3_NET_ONLINE set to anything, the runtime's test) AND a role key: REFUSED, neither runs (one multiplayer method at a time):

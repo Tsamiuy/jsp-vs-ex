@@ -259,6 +259,49 @@ int main()
       int r = 0; for (int i = 0; i < 5; i++) { h.clock += 50; r = h.rz->poll(); }
       CHECK(r == 0 && h.rz->rejected_members == 1 && h.rz->path() == Path::None); }
 
+    // ---- ENHANCEMENT (version mismatch message): the release table, the text, both sides fail at once (paired), an older host's give-up text ----
+    { CHECK(release_name(0xe9be7f43u) == "0.7.0-test1" && release_name(0xf1e06d4du) == "0.7.0-test2" && release_name(0x8a47e98au) == "0.7.0-test3");
+      CHECK(release_name(0x0000abcdu) == "build 0000abcd" && release_name(B) == "build a1b2c3d4");
+      CHECK(version_mismatch_text(0xf1e06d4du, 0x8a47e98au, "") == "The other player is on 0.7.0-test2; you're on 0.7.0-test3. Both players need the same version for rollback.");
+      CHECK(version_mismatch_text(0x8a47e98au, B, "0.7.0-test4") == "The other player is on 0.7.0-test3; you're on 0.7.0-test4. Both players need the same version for rollback.");
+      CHECK(version_mismatch_text(0x12345678u, B, "0.7.0-test4") == "The other player is on build 12345678; you're on 0.7.0-test4. Both players need the same version for rollback.");
+      // the same release name on both sides (other gameplay mods): the build words
+      CHECK(version_mismatch_text(0x8a47e98au, B, "0.7.0-test3") == "The other player is on build 8a47e98a; you're on build a1b2c3d4. Both players need the same version for rollback."); }
+    // paired, the host on 0.7.0-test3 (B2) and a 0.7.0-test4 joiner (B): the joiner joins once, then fails; the host fails at that join, not at its window; nobody retries
+    { FakeServer sv; const uint64_t P = 0x7777; const uint32_t B2 = 0x8a47e98au;
+      auto ch = cfg(true, B2); ch.pair = P; auto cc = cfg(false, B); cc.pair = P; cc.release = "0.7.0-test4";
+      Side h, c; h.init(sv, 11, ch); c.init(sv, 22, cc); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
+      CHECK(h.rz->poll() == 0 && sv.rooms.size() == 1 && sv.rooms[0].r.external == make_record(B2, P));   // the record format is unchanged
+      int rc = 0; for (int i = 0; i < 4 && rc == 0; i++) { c.clock += 50; rc = c.rz->poll(); }
+      CHECK(rc == -1 && c.cl->joins == 1 && c.rz->version_mismatch() && c.cl->leaves == 1);
+      CHECK(c.rz->notice1() == "The other player is on 0.7.0-test3; you're on 0.7.0-test4. Both players need the same version for rollback." && !c.rz->notice2().empty());
+      CHECK(c.rz->error() == "re-psn: the other player runs another version (build 8a47e98a, yours a1b2c3d4)");
+      h.clock += 50; const int rh = h.rz->poll();   // the host's release.txt is "" here (a local build): its own side by the table
+      CHECK(rh == -1 && h.rz->version_mismatch() && h.rz->notice1() == "The other player is on build a1b2c3d4; you're on 0.7.0-test3. Both players need the same version for rollback.");
+      CHECK(h.clock < 2000); }
+    // the joiner's join and leave reach the host in one poll: the host still fails with the message (checked at MemberJoined)
+    { FakeServer sv; const uint64_t P = 0x7778; const uint32_t B2 = 0xf1e06d4du;
+      auto ch = cfg(true, B); ch.pair = P; ch.release = "0.7.0-test3"; Side h; h.init(sv, 11, ch);
+      CHECK(h.rz->poll() == 0);
+      PsnrEvent j; j.kind = PsnrEvent::MemberJoined; j.members = { PsnrMember{ 22, 9, Endpoint{}, make_record(B2, P) } }; h.cl->ev.push_back(j);
+      PsnrEvent l; l.kind = PsnrEvent::MemberLeft; l.user = 22; h.cl->ev.push_back(l);
+      CHECK(h.rz->poll() == -1 && h.rz->version_mismatch() && h.rz->notice1() == "The other player is on 0.7.0-test2; you're on 0.7.0-test3. Both players need the same version for rollback."); }
+    // a member of another native room (another pair key) is not "another version": refused as before, no mismatch
+    { FakeServer sv; auto ch = cfg(true, B); ch.pair = 0x7779; Side h; h.init(sv, 11, ch); h.rz->poll();
+      PsnrEvent j; j.kind = PsnrEvent::MemberJoined; j.members = { PsnrMember{ 22, 9, Endpoint{}, make_record(B + 1, 0x777a) } }; h.cl->ev.push_back(j);
+      CHECK(h.rz->poll() == 0 && !h.rz->version_mismatch() && h.rz->rejected_members == 1); }
+    // the server does not answer the joiner's one join: it fails with the message after kMismatchJoinMs
+    { FakeServer sv; const uint64_t P = 0x777b; auto ch = cfg(true, B + 1); ch.pair = P; auto cc = cfg(false, B); cc.pair = P;
+      Side h, c; h.init(sv, 11, ch); c.init(sv, 22, cc); h.rz->poll();
+      CHECK(c.rz->poll() == 0 && c.cl->joins == 1); c.cl->ev.clear();
+      CHECK(c.run_alone(kMismatchJoinMs - 100) == 0);
+      CHECK(c.run_alone(300) == -1 && c.rz->version_mismatch()); }
+    // a paired host whose joiner never comes (a joiner before 0.7.0-test4 on another version only says so on its own screen): the 120 s give-up says why
+    { FakeServer sv; auto ch = cfg(true, B); ch.pair = 0x777c; Side h; h.init(sv, 11, ch);
+      CHECK(h.run_alone(119000) == 0 && h.run_alone(2000) == -1 && !h.rz->version_mismatch());
+      CHECK(h.rz->notice1() == "Rollback could not start: the other player probably runs a different version (the main menu shows it).");
+      CHECK(h.rz->error().rfind("re-psn: the other player probably runs a different version (the main menu shows it): start both games", 0) == 0); }
+
     // ---- the notice store (jsp_net_game.cpp): every end of the wait leaves it right ----
     { RendezvousNotice n; std::string a, b; const unsigned g0 = n.gen();
       CHECK(!n.read(a, b));

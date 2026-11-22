@@ -256,7 +256,7 @@ Over re-psn instead of a typed address (with an optional relay): see "Rollback o
 **What happens:**
 
 1. Both games start as usual. Once each has finished starting up, the client connects to the host. The client shows
-   *Waiting for host...* and the host *Waiting for client...*; F9 cancels.
+   *Waiting for host...* and the host *Waiting for client...*; holding F9 for 1.5 s cancels (a tap does nothing).
 2. The host's match rules (input delay `JSP_INPUT_DELAY`, 0 to 8 ticks, default 2; the reconnect grace time
    `JSP_NET_GRACE_S`, 1 to 30 s, default 5; the match timer) are sent to the client for this match only. The client shows
    *Settings received: controlled by host*. Your own settings come back when the match ends; nothing is saved. Settings that

@@ -73,6 +73,7 @@ static bool clock_diag() { static const bool v = [] { const char* e = std::geten
 #include "jsp_session_reader.h"
 #include "jsp_session_manifest.h"
 #include "jsp_mods_glue.h"   // rollback_gate, kModsNotAsListed (ENHANCEMENT, mods)
+#include "jsp_version_line.h"   // parse_version_txt (ENHANCEMENT, version mismatch message)
 
 extern "C" {
 int jsp_online_repsn_identity(char* server, int sn, char* name, int nn, char* comm, int cn, int* report_rtt);   // jsp_online.cpp: repsn.ini even with enabled=0
@@ -361,9 +362,9 @@ void redraw()
         jsp_overlay_text_style(jpnb::ping_x(p, pw), jpnb::kPingY, p.c_str(), jpnb::kPingScale, g.ping_rgba, 0);
     }
     if (!s.empty()) {
-        const float w = jsp_overlay_text_width(s.c_str(), 1.0f);
+        const float w1 = jsp_overlay_text_width(s.c_str(), 1.0f), sc = w1 > 1180 ? 1180 / w1 : 1.0f, w = w1 * sc;   // a long line (the version mismatch) shrinks to fit the width
         jsp_overlay_fill_rect(30, 640, (int)(w > 0 ? w : 800) + 40, 50, JSP_RGBA(0, 0, 0, 190));
-        jsp_overlay_text_style(50, 652, s.c_str(), 1.0f, JSP_RGBA(255, 255, 255, 255), 0);
+        jsp_overlay_text_style(50, 652 + 10.5f * (1 - sc), s.c_str(), sc, JSP_RGBA(255, 255, 255, 255), 0);
     }
     jsp_overlay_end();
 }
@@ -934,7 +935,11 @@ void pump_tick(uint64_t t)
         if (mods_refuse_now()) return;
         const int r = g.rz->poll();
         if (r < 0) {
-            if (g.rrz && !g.rrz->notice1().empty()) { g_rdv.failed(g.rrz->notice1(), g.rrz->notice2()); pump_fail("rendezvous failed: " + g.rz->error(), true); }   // on the menu notice
+            if (g.rrz && g.rrz->version_mismatch()) {   // ENHANCEMENT (version mismatch message): on the message line too (the Friendly Match room shows no main menu notice); then the menu notice
+                std::fprintf(stderr, "[net] rendezvous failed: %s\n", g.rz->error().c_str());
+                pump_fail(g.rrz->notice1(), false); g_rdv.failed(g.rrz->notice1(), g.rrz->notice2());
+            }
+            else if (g.rrz && !g.rrz->notice1().empty()) { g_rdv.failed(g.rrz->notice1(), g.rrz->notice2()); pump_fail("rendezvous failed: " + g.rz->error(), true); }   // on the menu notice
             else pump_fail("rendezvous failed: " + g.rz->error());
             return;
         }
@@ -1422,23 +1427,23 @@ bool window_focused() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWin
 bool cancel_key() { return window_focused() && (GetAsyncKeyState(VK_F9) & 0x8000) != 0; }
 void ui_and_cancel()
 {
-    static bool was = false;
-    const bool k = cancel_key(), edge = k && !was; was = k;
     const Phase ph = g.phase;
     if (ph == Phase::Handshake || ph == Phase::Armed) {
+        // FIX (tester video: an F9 tap at fight start cancelled rollback): F9 must be held 1.5 s here too, as in a running match (jpno::cancel_held)
+        const bool held = jpno::cancel_held(cancel_key(), GetTickCount64(), g.cancel_since);
         std::lock_guard<std::mutex> lk(g.pump.mutex());
         if (g.host) {
-            if (edge && g.plan_ready) { g.mh->cancel(); g.phase = Phase::Ended; set_text("Cancelled: local settings restored"); show(take_text()); return; }
-            if (ph == Phase::Handshake && g.plan_ready) { show("Waiting for client... (F9 cancels)"); return; }   // only until Start
+            if (held && g.plan_ready) { std::fprintf(stderr, "[net] F9 held 1.5 s: the player cancelled rollback (host)\n"); g.mh->cancel(); g.phase = Phase::Ended; set_text("Rollback cancelled (F9 held): local settings restored"); show(take_text()); return; }
+            if (ph == Phase::Handshake && g.plan_ready) { show("Waiting for client... (hold F9 to cancel)"); return; }   // only until Start
         } else if (g.plan_ready) {
             const auto hw = g.mc->host_wait(now_ms());
             const jpsm::State st = g.mc->state();
-            if (edge) { g.mc->leave(); g.phase = Phase::Ended; set_text("Left the session: local settings restored"); show(take_text()); return; }
+            if (held) { std::fprintf(stderr, "[net] F9 held 1.5 s: the player left the rollback session (client)\n"); g.mc->leave(); g.phase = Phase::Ended; set_text("Left the rollback session (F9 held): local settings restored"); show(take_text()); return; }
             if (g.mc->applied() && g.ev.active()) {
                 if (!g.settings_shown_ms) g.settings_shown_ms = GetTickCount64();
                 if (GetTickCount64() - g.settings_shown_ms < 6000) { show("Settings received: controlled by host"); return; }
             }
-            if (hw.waiting && st != jpsm::State::Started) { show("Waiting for host... (" + std::to_string(hw.waited_ms / 1000) + " s, F9 cancels)"); return; }
+            if (hw.waiting && st != jpsm::State::Started) { show("Waiting for host... (" + std::to_string(hw.waited_ms / 1000) + " s, hold F9 to cancel)"); return; }
         }
         if (ph == Phase::Armed) show("");
     }
@@ -1529,10 +1534,7 @@ void boundary(ppu_context* c)
         else if (n + 1 != g.hud_mark) { g.fight_seen = true; g.hud_tick = g.done_now; std::fprintf(stderr, "[net] fight HUD drawn: loading is over (tick %u)\n", g.done_now); }
         load_diag();
     }
-    if (cancel_key()) {   // End match: F9 held 1.5 s
-        if (!g.cancel_since) g.cancel_since = GetTickCount64();
-        if (GetTickCount64() - g.cancel_since > 1500) { g.sess.abort("match ended by the player"); end_with("Match ended"); return; }
-    } else g.cancel_since = 0;
+    if (jpno::cancel_held(cancel_key(), GetTickCount64(), g.cancel_since)) { g.sess.abort("match ended by the player"); end_with("Match ended"); return; }   // End match: F9 held 1.5 s
     if (g.path_until && GetTickCount64() > g.path_until) { g.path_until = 0; if (g.shown == g.path_line) show(""); }   // never blanks a later message (a reconnect or an end line)
     const uint64_t u0 = g.glue->updates();
     jsx::Op op = g.glue->iteration(true);   // update is called whenever the stepper has nothing queued (skipping it for pacing stalled both peers in a two-copy test)
@@ -1747,6 +1749,25 @@ void install_process_wide()
     task_diag_install();
 }
 
+// ENHANCEMENT (version mismatch message): this game's release name as the main menu's version line reads it (JSP_PORT_VERSION, then release.txt beside the
+// exe or in its parent folder; jsp_port_menu.cpp load_version_line); "" for a local build (the message then names the build word).
+std::string own_release()
+{
+    if (const char* v = std::getenv("JSP_PORT_VERSION")) if (jpv::valid_version(v)) return v;
+    char exe[1024] = "";
+    const unsigned long n = GetModuleFileNameA(nullptr, exe, sizeof exe);
+    std::string dir(exe, n < sizeof exe ? n : 0);
+    for (int i = 0; i < 2; i++) {
+        const size_t sl = dir.find_last_of("\\/");
+        if (sl == std::string::npos) break;
+        dir.resize(sl);
+        std::string t;
+        if (FILE* f = std::fopen((dir + "\\release.txt").c_str(), "rb")) { char b[256]; t.assign(b, std::fread(b, 1, sizeof b, f)); std::fclose(f); }
+        const std::string v = jpv::parse_version_txt(t);
+        if (!v.empty()) return v;
+    }
+    return "";
+}
 // Opens the connection of one session and enters Phase::Handshake, as the start-up path always did. false + why / code: nothing is left open (the caller logs
 // why and calls conn_close to be sure). Main thread, with the pump thread stopped.
 bool conn_open(const Conn& c, std::string* why, jpno::Refusal* code)
@@ -1784,6 +1805,7 @@ bool conn_open(const Conn& c, std::string* why, jpno::Refusal* code)
     if (c.repsn) {
         g.rp.reset(new PsnrClientTransport(g.mux, rid));
         RePsnRendezvous::Config rc; rc.host = c.host; rc.build = g.caps.build; rc.allow_relay = c.relay; rc.local_count = 1;
+        rc.release = own_release();   // ENHANCEMENT (version mismatch message)
         rc.pair = c.pair;   // ENHANCEMENT (native-room pairing): only the rollback room of the same native room (0: the plain record, as before)
         // TEST ONLY (JSP_ROLLBACK_FORCE_RELAY=1, gated by JSP_ROLLBACK_ALLOW_DEBUG=1 like the other test knobs): skip the direct try, use the relay at once
         if (env_on("JSP_ROLLBACK_ALLOW_DEBUG") && env_on("JSP_ROLLBACK_FORCE_RELAY")) {
@@ -1891,17 +1913,26 @@ void native_open(uint64_t room, bool owner)
     g_nat.link = true; g_nat.room = room; g_nat.tries++; g_nat.fails = 0; g_nat.rearm_at = 0; g_nat.away_since = 0;
     std::fprintf(stderr, "[net] native room %llu: 2 players, rollback link opening as %s (try %d), build %08x\n", (unsigned long long)room, owner ? "host (room owner)" : "client", g_nat.tries, g.caps.build);
 }
+// ENHANCEMENT (version mismatch message): the message line kept after the link closed (conn_close clears it), until the fight is drawn or kVersionMsgMs passed.
+constexpr uint64_t kVersionMsgMs = 30000;
+std::string g_vmsg; uint64_t g_vmsg_until = 0;
 // The open link of a native room, between matches: a failed rendezvous is tried again a little later (3 times per native room); an ended match arms the next one.
 void native_maintain(uint64_t now)
 {
     if (g.phase.load() != Phase::Ended) { g_nat.rearm_at = 0; return; }
-    bool ready; { std::lock_guard<std::mutex> lk(g.pump.mutex()); ready = g.plan_ready; }
+    bool ready, vm = false; std::string v1, v2;   // ENHANCEMENT (version mismatch message): the failure's notice, which conn_close clears
+    { std::lock_guard<std::mutex> lk(g.pump.mutex()); ready = g.plan_ready; if (g.rrz) { vm = g.rrz->version_mismatch(); v1 = g.rrz->notice1(); v2 = g.rrz->notice2(); } }
     if (!ready) {   // the two games did not meet over the rollback room (the reason is in the log and on the menu notice)
         const uint64_t room = g_nat.room;
         g_nat.link = false; g_nat.room = 0;
         conn_close();
         g_nat.seen_room = room; g_nat.seen_since = now;
-        if (g_nat.tries >= 3) { g_nat.given_up = room; log("native room", "the rollback link could not be made 3 times: no rollback in this room"); }
+        if (!v1.empty()) g_rdv.failed(v1, v2);   // the menu notice comes back (a retry's waiting text replaces it)
+        if (vm) {   // another version: no retry can help; the message line comes back too
+            g_nat.given_up = room; log("native room", "the other player runs another version: no rollback in this room");
+            show(v1); g_vmsg = v1; g_vmsg_until = now + kVersionMsgMs;
+        }
+        else if (g_nat.tries >= 3) { g_nat.given_up = room; log("native room", "the rollback link could not be made 3 times: no rollback in this room"); }
         else g_nat.retry_at = now + 5000;
         return;
     }
@@ -1917,6 +1948,7 @@ void native_poll()
     const uint64_t now = GetTickCount64();
     if (now < g_nat.next_poll) return;
     g_nat.next_poll = now + 100;
+    if (g_vmsg_until && (now >= g_vmsg_until || g_hud_idle == 0)) { g_vmsg_until = 0; if (g.shown == g_vmsg) show(""); }   // the version mismatch line: until the fight or its time
     uint64_t room = 0; int members = 0, max = 0, own = 0;
     const int st = ps3_np_matching2_room(&room, &members, &max, &own, nullptr, 0);
     if (g_nat.link && g.phase.load() == Phase::Off && !g.mux.is_open()) {   // closed by someone else (jsp_net_lobby_close): not reopened in this room

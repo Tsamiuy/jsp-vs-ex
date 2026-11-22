@@ -385,6 +385,13 @@ int main()
       CHECK(notice_visible(true, true, 1000, 1000) && notice_visible(true, true, 1000, 1000 + kNoticeMs - 1));
       CHECK(!notice_visible(true, true, 1000, 1000 + kNoticeMs) && !notice_visible(true, false, 1000, 1001) && !notice_visible(false, true, 1000, 1001));
     }
+    {   // FIX (an F9 tap cancelled rollback at fight start): the cancel key counts only once held kCancelHoldMs; a tap or a release resets it
+      uint64_t since = 0;
+      CHECK(!cancel_held(true, 5000, since) && since == 5000);                  // pressed
+      CHECK(!cancel_held(true, 5000 + kCancelHoldMs, since));                   // not yet past the hold
+      CHECK(!cancel_held(false, 5100 + kCancelHoldMs, since) && since == 0);    // released: a tap never cancels
+      CHECK(!cancel_held(true, 9000, since) && !cancel_held(true, 9000 + kCancelHoldMs - 1, since) && cancel_held(true, 9001 + kCancelHoldMs, since));
+    }
     // the page: Connection and Relay toggles, saved to the file; re-psn needs a server and a name
     { Fake fk3; FakeIO io3; Menu m; m.be = &fk3; m.io = &io3; m.enter_online(); press(m, BTN_RIGHT); press(m, BTN_RIGHT); CHECK(m.nc == NC_ROLLBACK);
       press(m, BTN_DOWN); CHECK(m.orow() == R_CONN); press(m, BTN_RIGHT); CHECK(m.rb.repsn && m.orows() == V({ R_NETCODE, R_CONN, R_ROLE, R_RELAY, R_SAVE, R_DISCARD }));
