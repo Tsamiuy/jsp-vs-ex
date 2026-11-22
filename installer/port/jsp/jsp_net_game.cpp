@@ -74,6 +74,7 @@ static bool clock_diag() { static const bool v = [] { const char* e = std::geten
 #include "jsp_session_manifest.h"
 #include "jsp_mods_glue.h"   // rollback_gate, kModsNotAsListed (ENHANCEMENT, mods)
 #include "jsp_version_line.h"   // parse_version_txt (ENHANCEMENT, version mismatch message)
+#include "jsp_thread_bit.h"   // jtb::thread_bit: guest thread id 1..64 -> mask bit t - 1 (helper-thread register save / restore)
 
 extern "C" {
 int jsp_online_repsn_identity(char* server, int sn, char* name, int nn, char* comm, int cn, int* report_rtt);   // jsp_online.cpp: repsn.ini even with enabled=0
@@ -561,7 +562,7 @@ void fs_find_threads()
     g_fs_n = 0;
     g_regs_allow = 0;
     for (uint32_t t = 1; t < 65; t++) { uint64_t o[5] = {}; char nm[64] = {}; if (!ps3_ppu_thread_view(t, o, nm)) continue;
-        if (!std::strncmp(nm, "CRI", 3)) g_regs_allow |= 1ull << t;   // the register save / restore covers the sound library's threads only (a shared wait wrapper)
+        if (!std::strncmp(nm, "CRI", 3)) g_regs_allow |= jtb::thread_bit(t);   // the register save / restore covers the sound library's threads only (a shared wait wrapper)
         if (!std::strncmp(nm, "CRI FS", 6) && g_fs_n < 16) g_fs_tids[g_fs_n++] = t; }
     std::fprintf(stderr, "[net] sound library file threads: %d (guest tids", g_fs_n);
     for (int i = 0; i < g_fs_n; i++) std::fprintf(stderr, " %u", g_fs_tids[i]);
@@ -666,12 +667,12 @@ void regs_save(uint32_t tick)
     static uint32_t kind[65], id[65], obj[65], lr[65]; static uint8_t alive[65], unrel[65]; uint32_t ov = 0, ub = 0;
     ps3_hle_thread_census(kind, id, obj, lr, alive, unrel, &ov, &ub);
     for (uint32_t t = 1; t < 65; t++) {
-        if (!(g_regs_allow & (1ull << t)) || !alive[t] || kind[t] == 0 || unrel[t]) continue;   // running guest code (or an unreliable marker): nothing safe to take
+        if (!jtb::has_thread(g_regs_allow, t) || !alive[t] || kind[t] == 0 || unrel[t]) continue;   // running guest code (or an unreliable marker): nothing safe to take
         ppu_context* c = ps3_ppu_thread_ctx(t); if (!c) continue;
         ThrRegs& r = R.t[t]; r.kind = kind[t]; r.lr = lr[t];
         std::memcpy(r.gpr, c->gpr, sizeof r.gpr); std::memcpy(r.fpr, c->fpr, sizeof r.fpr); std::memcpy(r.vr, c->vr, sizeof r.vr);
         r.cr = c->cr; r.xer = c->xer; r.fpscr = c->fpscr; r.vscr = c->vscr; r.lrr = c->lr; r.ctr = c->ctr;
-        R.mask |= 1ull << t;
+        R.mask |= jtb::thread_bit(t);
     }
     g_regs_saved++;
 }
@@ -683,7 +684,7 @@ void regs_restore(uint32_t tick)
     static uint32_t kind[65], id[65], obj[65], lr[65]; static uint8_t alive[65], unrel[65]; uint32_t ov = 0, ub = 0;
     ps3_hle_thread_census(kind, id, obj, lr, alive, unrel, &ov, &ub);
     for (uint32_t t = 1; t < 65; t++) {
-        if (!(R.mask & (1ull << t))) continue;
+        if (!jtb::has_thread(R.mask, t)) continue;
         const ThrRegs& r = R.t[t];
         if (!alive[t] || kind[t] != r.kind || lr[t] != r.lr) { g_regs_skipped++; continue; }   // not parked in the same wait: leave it
         ppu_context* c = ps3_ppu_thread_ctx(t); if (!c) continue;

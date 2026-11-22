@@ -29,6 +29,7 @@
 #pragma once
 #include <chrono>
 #include <cstdint>
+#include "jsp_thread_bit.h"   // jtb::thread_bit: the park roles' member masks (bit tid - 1)
 
 namespace jsy {
 
@@ -209,7 +210,7 @@ inline Verdict judge(const View& v, const View* saved, const Cfg& c)
             Role& ro = c.roles->r[i];
             uint32_t at = 0;
             for (int t = 1; t < kThr; t++) {
-                const uint64_t bit = 1ull << (t - 1);
+                const uint64_t bit = jtb::thread_bit((uint32_t)t);
                 if (!v.t_alive[t]) { ro.members &= ~bit; continue; }          // an ended thread: ids are reused, forget it
                 if ((uint32_t)t == c.self_tid) continue;
                 bool here = false;

@@ -527,7 +527,7 @@ struct Suspended {
 #ifdef _WIN32
         uint32_t kd[jsy::kThr], id[jsy::kThr], ob[jsy::kThr], lr[jsy::kThr], ov = 0, ub = 0; uint8_t al[jsy::kThr], un[jsy::kThr];
         ps3_hle_thread_census(kd, id, ob, lr, al, un, &ov, &ub);
-        uint64_t m = 0; for (int i = 1; i < jsy::kThr; i++) if (al[i]) m |= 1ull << (i - 1);
+        uint64_t m = 0; for (int i = 1; i < jsy::kThr; i++) if (al[i]) m |= jtb::thread_bit((uint32_t)i);
         return m;
 #else
         return 0;
