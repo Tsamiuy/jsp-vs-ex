@@ -806,7 +806,7 @@ SessionStats NetSession::stats() const
         for (unsigned sl = 0; sl < plan_.total_players; sl++) {
             if (sl >= plan_.local_first && sl < (unsigned)plan_.local_first + plan_.local_count) continue;
             GekkoNetworkStats ns{}; gekko_network_stats((GekkoSession*)gs_, (int)sl, &ns);
-            if (ns.avg_ping > 0) { s.ping_ms = ns.avg_ping; s.jitter_ms = ns.jitter; }
+            if (ns.avg_ping > 0) { s.ping_ms = ns.avg_ping; s.jitter_ms = ns.jitter; s.last_ping_ms = ns.last_ping; }
             break;
         }
     }
@@ -818,6 +818,12 @@ int NetSession::final_frame() const
     std::lock_guard<std::recursive_mutex> lk(gmu_);
     if (!gs_ || mode_ != SessionMode::Game) return -1;
     return gekko_final_frame((GekkoSession*)gs_);
+}
+
+void NetSession::set_prediction_window(uint8_t w)
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (gs_ && mode_ == SessionMode::Game && w) gekko_set_input_prediction_window((GekkoSession*)gs_, w);
 }
 
 void NetSession::set_local_delay(uint8_t d)

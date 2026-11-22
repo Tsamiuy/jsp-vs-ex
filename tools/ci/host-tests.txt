@@ -36,6 +36,7 @@ posix   | installer/tools/fs_vfile_test.sh {toolkit} {scratch}
 posix   | installer/tools/np_log_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/net_badge_test.sh
+posix   | installer/tools/net_delay_rule_test.sh
 posix   | installer/tools/discord_test.sh
 posix   | installer/tools/native_fight_test.sh
 posix   | installer/tools/settings_test.sh
@@ -73,6 +74,7 @@ exclude | installer/tools/net_repsn_test.cpp | compiled and run by net_repsn_tes
 exclude | installer/tools/net_repsn_client_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
 exclude | installer/tools/net_badge_test.cpp | compiled and run by net_badge_test.sh
+exclude | installer/tools/net_delay_rule_test.cpp | compiled and run by net_delay_rule_test.sh
 exclude | installer/tools/discord_test.cpp | compiled and run by discord_test.sh
 exclude | installer/tools/native_fight_test.cpp | compiled and run by native_fight_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh

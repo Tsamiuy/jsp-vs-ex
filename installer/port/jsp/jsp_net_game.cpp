@@ -57,6 +57,7 @@ extern "C" unsigned long long jsp_net_presence_room(char* server, int sn) { if (
 #include "jsp_net_session.h"
 #include "jsp_net_online.h"
 #include "jsp_net_badge.h"
+#include "jsp_net_delay_rule.h"   // ENHANCEMENT (adaptive input delay, rule 2): the decision, shared with the host simulator
 #include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
 #include "jsp_net_report.h"
@@ -374,52 +375,75 @@ std::string path_word() { const int k = g.path_kind.load(); return k == 1 ? "dir
 // manifest's InputDelay, default 2), and it only goes higher when the trip needs it. The peers need not agree on it: GekkoNet stamps each input with its
 // frame, both PCs simulate the same stamped inputs, and a delay change only moves which frame a local input lands on (sync.cpp SetDelay: a longer delay
 // repeats the last input to fill the gap; a shorter one drops local inputs until the clock catches up). So the determinism rule is not touched.
-// ENHANCEMENT (adaptive input delay). Every 2 s this peer sets its OWN input delay from GekkoNet's average round
-// trip and jitter: the delay that covers the one-way trip plus the jitter, so the other peer's inputs arrive before they are needed and a rollback (whose re-run
-// costs more than a frame in this port today) stays rare. ticks = ceil((ping/2 + jitter + JSP_INPUT_DELAY_AUTO_MARGIN_MS (default 8)) / 33.3), clamped to
-// JSP_INPUT_DELAY_AUTO_MIN..MAX (default 1..4). It goes up at once and down only after three readings in a row ask for less (no flapping). Each peer changes only its
-// own delay: inputs are stamped with their tick, so the two peers need not agree (the manifest's InputDelay is the start value).
-uint64_t g_ad_next = 0; int g_ad_down_votes = 0;   // per match (reset_match); the switches below are read once per process
-double g_ad_jit_ema = -1; int g_ad_up_votes = 0;     // FIX (rematch inherited delay state): were function statics that a rematch inherited; per match now (reset_match)
+// ENHANCEMENT (adaptive input delay). Every 2 s this peer sets its OWN input delay from the measured round trip: the delay that covers the one-way trip plus
+// the jitter, so the other peer's inputs arrive before they are needed and a rollback (whose re-run costs more than a frame in this port today) stays rare.
+// The decision is jsp_net_delay_rule.h (pure, so net_four_sim runs the same code): rule 2 by default (since 2026-11-21, tester support bundle 1: the match
+// ran at 2 ticks while it needed 3, the averaged jitter hid the spikes, and 5-8 tick rollbacks went unanswered): a percentile of GekkoNet's single round
+// trips over the last 8 s instead of its average and an EMA of its jitter, a first reading 4 s after the sync (raising at most one tick before 10 s: the
+// fight-start stall), a larger margin from 80 ms, one tick up at once after two rollbacks deeper than 2 ticks within 10 s, and down one tick at a time
+// after 10 calm seconds. JSP_INPUT_DELAY_RULE=1 is the earlier rule
+// (EMA, first reading at 10 s, two readings to raise). Switches: JSP_INPUT_DELAY_AUTO (0 = off), _MIN, _MAX, _MARGIN_MS, and for rule 2 _FIRST_MS, _PCT,
+// _SAMPLES, _HIGH_PING_MS, _HIGH_MARGIN_MS, _UP_VOTES, _DOWN_VOTES, _DEEP_TICKS, _DEEP_COUNT (0 = no depth trigger), _DEEP_WINDOW_MS, _HOLD_MS
+// (all JSP_INPUT_DELAY_AUTO_*; see the header for each). Read once per process.
+// Each peer changes only its own delay: inputs are stamped with their tick, so the two peers need not agree (the manifest's InputDelay is the start value).
+// FIX (rematch inherited delay state): the rule's state is per match (reset_match).
+// FIX (fight-start stall, runs native-rb1/rb2: the first reading of a match said ping 243-416 ms on a 60 ms link and jumped the delay to 4): see the guard above.
+// FIX (ping includes the answer wait): GekkoNet answers a ping at its next poll, once a tick, so the measured round trip carries up to one tick (33 ms) of
+// waiting that is no network time (rb1: 30 ms each way measured 94-100 ms); the rule takes up to half the round trip, capped at one tick, off before halving.
+// FIX (delay flapping, two-copy run native-rb1: 2 -> 3 -> 2 every 6-10 s on a steady 30 ms link): lowering needs five calm readings (10 s) in both rules.
+jpdr::State g_ad;   // per match (reset_match)
+int g_ad_on = -1;   // the switches are read once per process
+jpdr::Params g_ad_p;
+// ENHANCEMENT (rollback hitches, JSP_ROLLBACK_PREDICTION=N, 1..8, default 6; 8 = as before): how many ticks this PC may run ahead on predicted inputs before
+// it waits (GekkoNet's input prediction window, set at the first synced boundary of each match; the session is created with 8). It caps the deepest
+// rollback, and so the longest hitch, at N ticks (testers: 8-tick rollbacks). Each PC alone: it only changes when this PC waits, never which inputs a tick
+// simulates. Host simulation (D:/jsp-audit/delay): 6 is neutral to slightly better than 8 on 99-129 ms links; 4 or lower is worse (waits replace hitches).
+int g_ad_pred = 6;
+void adapt_settings()
+{
+    if (g_ad_on >= 0) return;
+    char b[16] = {};
+    g_ad_on = !(jsp_setting_get("JSP_INPUT_DELAY_AUTO", b, sizeof b) && b[0] == '0');   // default on (see above)
+    auto num = [&b](const char* key, int& v) { b[0] = 0; if (jsp_setting_get(key, b, sizeof b) && b[0]) v = std::atoi(b); };
+    jpdr::Params& p = g_ad_p;
+    num("JSP_INPUT_DELAY_RULE", p.rule);
+    num("JSP_INPUT_DELAY_AUTO_MIN", p.lo); num("JSP_INPUT_DELAY_AUTO_MAX", p.hi); num("JSP_INPUT_DELAY_AUTO_MARGIN_MS", p.margin_ms);
+    num("JSP_INPUT_DELAY_AUTO_FIRST_MS", p.first_ms); num("JSP_INPUT_DELAY_AUTO_PCT", p.pct); num("JSP_INPUT_DELAY_AUTO_SAMPLES", p.samples);
+    num("JSP_INPUT_DELAY_AUTO_HIGH_PING_MS", p.high_ping_ms); num("JSP_INPUT_DELAY_AUTO_HIGH_MARGIN_MS", p.high_margin_ms);
+    num("JSP_INPUT_DELAY_AUTO_UP_VOTES", p.up_votes); num("JSP_INPUT_DELAY_AUTO_DOWN_VOTES", p.down_votes);
+    num("JSP_INPUT_DELAY_AUTO_DEEP_TICKS", p.deep_ticks); num("JSP_INPUT_DELAY_AUTO_DEEP_COUNT", p.deep_count);
+    num("JSP_INPUT_DELAY_AUTO_DEEP_WINDOW_MS", p.deep_window_ms); num("JSP_INPUT_DELAY_AUTO_HOLD_MS", p.hold_ms);
+    num("JSP_ROLLBACK_PREDICTION", g_ad_pred);
+    g_ad_pred = std::min(std::max(g_ad_pred, 1), 8);
+    if (g_ad_pred != 8) std::fprintf(stderr, "[net] prediction window %d ticks (JSP_ROLLBACK_PREDICTION; 8 = as before)\n", g_ad_pred);
+    p.clamp();
+    if (!g_ad_on) std::fprintf(stderr, "[net] adaptive input delay off (JSP_INPUT_DELAY_AUTO=0: the manifest's InputDelay holds)\n");
+    else if (p.rule == 1) std::fprintf(stderr, "[net] adaptive input delay on (%d..%d ticks, margin %d ms; JSP_INPUT_DELAY_AUTO=0 turns it off)\n", p.lo, p.hi, p.margin_ms);
+    else std::fprintf(stderr, "[net] adaptive input delay on (%d..%d ticks, margin %d ms; rule 2: p%d of %d round trips, margin %d ms from %d ms, first reading %d ms, "
+                      "depth trigger %d rollbacks > %d ticks in %d ms; JSP_INPUT_DELAY_AUTO=0 turns it off)\n", p.lo, p.hi, p.margin_ms, p.pct, p.samples, p.high_margin_ms,
+                      p.high_ping_ms, p.first_ms, p.deep_count, p.deep_ticks, p.deep_window_ms);
+}
+// A rollback of `depth` ticks (the glue's rollback, main thread): rule 2's depth trigger.
+void adapt_note_rollback(int64_t depth) { if (g_ad_on > 0 && !g.bench) jpdr::note_rollback(g_ad, g_ad_p, GetTickCount64(), depth); }
 void adapt_delay(uint64_t now)
 {
-    static int on = -1, lo = 1, hi = 4, margin = 8; uint64_t& next = g_ad_next; int& down_votes = g_ad_down_votes;
-    if (on < 0) {
-        char b[16] = {};
-        on = !(jsp_setting_get("JSP_INPUT_DELAY_AUTO", b, sizeof b) && b[0] == '0');   // default on (see above)
-        if (jsp_setting_get("JSP_INPUT_DELAY_AUTO_MIN", b, sizeof b) && b[0]) lo = std::atoi(b);
-        if (jsp_setting_get("JSP_INPUT_DELAY_AUTO_MAX", b, sizeof b) && b[0]) hi = std::atoi(b);
-        if (jsp_setting_get("JSP_INPUT_DELAY_AUTO_MARGIN_MS", b, sizeof b) && b[0]) margin = std::atoi(b);
-        if (lo < 0) lo = 0; if (hi > 8) hi = 8; if (hi < lo) hi = lo;
-        if (on) std::fprintf(stderr, "[net] adaptive input delay on (%d..%d ticks, margin %d ms; JSP_INPUT_DELAY_AUTO=0 turns it off)\n", lo, hi, margin);
-        else std::fprintf(stderr, "[net] adaptive input delay off (JSP_INPUT_DELAY_AUTO=0: the manifest's InputDelay holds)\n");
-    }
-    if (!on || !g.sess.synced()) return;
-    // FIX (fight-start stall, runs native-rb1/rb2: the first reading of a match said ping 243-416 ms on a 60 ms link and jumped the delay to 4): the first
-    // seconds of a fight build pipelines and load, which delays the ping answers. The first reading of a match is taken 10 s after the session is synced.
-    if (next == 0) { next = now + 10000; return; }
-    if (now < next) return;
-    next = now + 2000;
-    const SessionStats st = g.sess.stats();
-    if (st.ping_ms < 0) return;
-    // FIX (delay flapping, two-copy run native-rb1: 2 -> 3 -> 2 every 6-10 s on a steady 30 ms link): one jitter spike raised the delay at once and three calm
-    // readings lowered it again. Now the jitter is smoothed (EMA, a spike counts a quarter), a raise by ONE tick needs two readings in a row (a jump of two or
-    // more ticks still goes up at once), and a lower needs five calm readings (10 s).
-    // FIX (ping includes the answer wait): GekkoNet answers a ping at its next poll, once a tick, so the measured round trip carries up to one tick (33 ms) of
-    // waiting that is no network time (rb1: 30 ms each way measured 94-100 ms). Up to half the round trip, capped at one tick, is taken off before halving, so
-    // a 30 ms internet ping gives 1 tick, not 2.
-    double& jit_ema = g_ad_jit_ema; int& up_votes = g_ad_up_votes;
-    jit_ema =jit_ema < 0 ? st.jitter_ms : jit_ema * 0.75 + st.jitter_ms * 0.25;
-    const double wait_ms = std::min(st.ping_ms * 0.5, 1000.0 / 30.0);
-    const double need_ms = (st.ping_ms - wait_ms) / 2.0 + jit_ema + margin;
-    int want = (int)std::ceil(need_ms / (1000.0 / 30.0));
-    if (want < lo) want = lo; if (want > hi) want = hi;
-    const int cur = st.local_delay;
-    if (want > cur) { down_votes = 0; if (want < cur + 2 && ++up_votes < 2) return; up_votes = 0; }
-    else if (want < cur) { up_votes = 0; if (++down_votes < 5) return; down_votes = 0; }
-    else { down_votes = 0; up_votes = 0; return; }
-    g.sess.set_local_delay((uint8_t)want); g.bv.delay = want;
-    std::fprintf(stderr, "[net] input delay %d -> %d ticks (ping %.1f ms, jitter %.1f ms)\n", cur, want, st.ping_ms, st.jitter_ms);
+    adapt_settings();
+    if (!g.sess.synced()) return;
+    if (!g_ad.start && g_ad_pred != 8) g.sess.set_prediction_window((uint8_t)g_ad_pred);   // once per match (g_ad is reset per match)
+    if (!g_ad_on) { if (!g_ad.start) g_ad.start = now; return; }
+    const jpdr::Decision d = jpdr::step(g_ad, g_ad_p, now, [] {
+        const SessionStats st = g.sess.stats();
+        jpdr::Reading r; r.ping_avg = st.ping_ms; r.jitter = st.jitter_ms; r.last_ping = st.last_ping_ms; r.cur = st.local_delay;
+        return r;
+    });
+    if (d.want < 0 || d.want == d.cur) return;
+    g.sess.set_local_delay((uint8_t)d.want); g.bv.delay = d.want;
+    // The line starts as before ("input delay A -> B ticks (ping P ms, jitter J ms"): GekkoNet's averages, whatever the rule.
+    if (g_ad_p.rule == 1) std::fprintf(stderr, "[net] input delay %d -> %d ticks (ping %.1f ms, jitter %.1f ms)\n", d.cur, d.want, d.ping_avg, d.jitter_avg);
+    else if (d.why[0] == 'r') std::fprintf(stderr, "[net] input delay %d -> %d ticks (ping %.1f ms, jitter %.1f ms; %d rollbacks deeper than %d ticks within %d ms)\n",
+                                           d.cur, d.want, d.ping_avg, d.jitter_avg, g_ad_p.deep_count, g_ad_p.deep_ticks, g_ad_p.deep_window_ms);
+    else std::fprintf(stderr, "[net] input delay %d -> %d ticks (ping %.1f ms, jitter %.1f ms; round trip median %.1f ms, p%d +%.1f ms, need %.1f ms)\n",
+                      d.cur, d.want, d.ping_avg, d.jitter_avg, d.ping, g_ad_p.pct, d.jitter, d.need_ms);
 }
 void log_status() { g.bv.path = path_word(); std::fprintf(stderr, "[net] %s\n", jpnb::log_line(g.bv).c_str()); }
 
@@ -776,7 +800,7 @@ void reset_match()
     g.last_run_ms = g.started_ms = 0; g.settings_shown_ms = 0;   // started_ms = 0: the presence no longer counts a match
     g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every(); g.ping_every = jpnb::Every();
     g.record = false; g.match_winner = 0; ko_clear();
-    g_ad_next = 0; g_ad_down_votes = 0; g_ad_jit_ema = -1; g_ad_up_votes = 0;
+    g_ad = jpdr::State();   // ENHANCEMENT (adaptive input delay): per match
     g_audio_waits = g_audio_timeouts = 0; g_audio_wait_ms = 0;
     g_hold_ms = 0; g_holds = g_hold_renders = 0;
     g_regs_saved = g_regs_restored = g_regs_skipped = 0;
@@ -1043,6 +1067,7 @@ public:
         if (g.bench) g.bs.restore.add(qpc_ms(t0, qpc_now()));
         if (!ok) { log("snapshot rollback failed", std::to_string(tick)); return false; }
         jpnb::note_rollback(g.bv, (int64_t)g.done_now - (int64_t)tick);
+        adapt_note_rollback((int64_t)g.done_now - (int64_t)tick);   // ENHANCEMENT (adaptive input delay, rule 2): the depth trigger
         g_rep.rollback(g.done_now - g.base, g.done_now - tick);
         // the audio goes back with the tick (the mix thread is idle here). FIX (audio rewind dropped blocks): the save of tick T is taken at the boundary BEFORE that boundary raises
         // the audio to blocks_at(T), so the snapshot holds the guest's audio at blocks_at(T - 1): rewinding to blocks_at(T) dropped 6-7 blocks per rollback

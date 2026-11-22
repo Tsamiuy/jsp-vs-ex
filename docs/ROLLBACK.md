@@ -469,8 +469,11 @@ Each is a `play_settings.txt` line (or an environment variable). Test-only switc
 |---|---|---|
 | `JSP_ROLLBACK_NATIVE` | native-room pairing in the lobby start (Online Battle + rollback); on by default, `0` turns it off | no |
 | `JSP_ROLLBACK_RELAY` | allow the server's relay when the direct link fails (the defaults after install set `1`) | no |
-| `JSP_INPUT_DELAY_AUTO` | input delay follows the measured link: ceil((ping/2 + jitter + margin) / 33.3 ms) ticks; on by default, `0` keeps the start value | no |
+| `JSP_INPUT_DELAY_AUTO` | input delay follows the measured link (each PC sets only its own); on by default, `0` keeps the start value | no |
 | `JSP_INPUT_DELAY_AUTO_MIN`, `_MAX`, `_MARGIN_MS` | its range (default 1 to 4 ticks) and margin (default 8 ms) | no |
+| `JSP_INPUT_DELAY_RULE` | `2` (default): ticks = ceil((one way from the median of the last 8 s of round trips + (90th percentile - median) + margin) / 33.3 ms), margin 16 ms from a median of 80 ms, first reading 4 s after the sync (before 10 s: the spread mirrored from the low side, and at most start + 1 tick), one tick up after two rollbacks deeper than 2 ticks within 10 s (then held 20 s), down one tick after 10 calm seconds (`jsp_net_delay_rule.h`). `1`: the earlier rule (GekkoNet's average ping and an EMA of its jitter, first reading at 10 s) | A/B |
+| `JSP_INPUT_DELAY_AUTO_FIRST_MS`, `_PCT`, `_SAMPLES`, `_HIGH_PING_MS`, `_HIGH_MARGIN_MS`, `_UP_VOTES`, `_DOWN_VOTES`, `_DEEP_TICKS`, `_DEEP_COUNT`, `_DEEP_WINDOW_MS`, `_HOLD_MS` | rule 2's tuning (defaults 4000, 90, 16, 80, 16, 1, 5, 2, 2, 10000, 20000; `_DEEP_COUNT=0` turns the depth trigger off) | A/B |
+| `JSP_ROLLBACK_PREDICTION` | how many ticks a PC may run ahead on predicted inputs before it waits, which caps the deepest rollback (1 to 8, default 6; `8` = as before); each PC alone | no |
 | `JSP_ROLLBACK_PING` | the [ping counter](#ping-counter) under the fight timer; on by default, `0` hides it | no |
 | `JSP_POSTGAME_IDLE_SECS` | after a fight, seconds without a locked pick before the side leaves (10 to 3600, default 180) | no |
 | `JSP_ROLLBACK_RECORD`, `JSP_ROLLBACK_RECORD_DIR` | save each match's confirmed inputs as a replay (off by default) | no |

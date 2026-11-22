@@ -277,6 +277,7 @@ struct SessionStats {
     uint64_t advances = 0, resimulated = 0, saves = 0, loads = 0, deferred = 0;
     float frames_ahead = 0;
     float ping_ms = -1, jitter_ms = 0;        // GekkoNet's average round trip to the first remote player and its jitter (-1: no remote / not known yet)
+    float last_ping_ms = -1;                 // ENHANCEMENT (adaptive input delay, rule 2): GekkoNet's last single round trip to that player (one every 500 ms)
     uint8_t local_delay = 0;                  // the input delay this peer's local players run with now
     uint64_t keepalive_polls = 0;            // polls made by the keepalive thread (the game thread was busy)
 };
@@ -344,6 +345,9 @@ public:
     // ENHANCEMENT (adaptive input delay, test): the input delay of this peer's local players from now on (GekkoNet SetLocalDelay: a longer delay repeats
     // the last input, a shorter one drops the overlap). Each peer sets only its own delay; the other peer sees only its input stamps. All local players alike.
     void set_local_delay(uint8_t d);
+    // ENHANCEMENT (rollback hitches): how many ticks this peer may run ahead on predicted inputs (gekko_set_input_prediction_window; at most the
+    // max_prediction the session was created with). Local only: the peers need not agree.
+    void set_prediction_window(uint8_t w);
     // ENHANCEMENT (rollback latency): every later Load names this frame or a later one (GekkoNet's confirmed frame, held back by a pending rollback),
     // so the saved states of earlier frames are never loaded again (gekko_final_frame, a local GekkoNet addition: gekkonet/PIN.md). -1 = none / not a game session.
     int final_frame() const;
