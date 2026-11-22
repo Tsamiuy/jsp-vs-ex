@@ -251,7 +251,7 @@ void hash_tick(uint32_t n, uint32_t flip)
     if (P) { if (rng_ptrs) H.bytes(rng, P, 0x28); else H.bytes(rng, P + 0x14, 0x14); }
     H.bytes(glob, A_GLOB, 0x10);
     if (S) { H.bytes(seed, S + 0x1C, 4); H.bytes(seed, S + 0x48140, 4); }
-    H.bytes(setup, A_BSETUP, 0xB0);
+    H.bytes(setup, A_BSETUP, 0xB0);   // FIX (second cause of the tick-1 desync): normalized before every online fight, see jsp_fight_hash_reset_fight
     // FIX (rollback false desync): 0x0094DEC4 is no scene step in a fight: it counts the sound library's active playbacks (the stores are in func_00662784 /
     // func_006624DC, called from func_0048DC70 and the CRI range 0x0048xxxx-0x0057xxxx). A playback ends on the host's audio clock, so two PCs saw the count
     // change 0-4 ticks apart while every gameplay part matched (two-copy tests, ticks 969-1031). Left out of the per-tick hash; JSP_FIGHT_HASH_SCENE=1 keeps it (A/B).
@@ -598,6 +598,21 @@ extern "C" void jsp_fight_hash_reset_fight(void)
     }
     { std::lock_guard<std::mutex> lk(g_anc_mu); g_anc.done = 0; g_anc.set = false; g_anc.skip = 0; }
     std::fprintf(stderr, "[tick] fight state reset (the next fight anchors again)\n");
+    // FIX (two-PC desync at tick 1, second cause; testers on 0.7.0-test3): 0x009540E4 is Free Battle's battle setup table (0x2C per slot: player /
+    // CPU type, character, CPU level ...), hashed as `setup`. Free Battle's character select writes it; an online fight neither writes nor clears
+    // it (two-copy runs: all zero through whole online matches and rematches). So a PC that played an offline Free Battle before the online match
+    // still held that fight's picks there while a fresh PC held zeroes, and `setup` (and `all`) differed from the first compared tick (run os-fix-a:
+    // host after one offline Free Battle vs a fresh joiner, rng / glob / seed / cam / pad equal). Every online fight starts from the fresh
+    // process's table now: it is cleared here, called by the rollback lobby before each online fight is built (match arm / rematch, main thread,
+    // no fight running). An offline Free Battle afterwards fills it again at its character select, as after a fresh start.
+    // JSP_FIGHT_SETUP_CLEAR=0 turns it off (A/B).
+    {
+        static const bool clear = [] { const char* e = std::getenv("JSP_FIGHT_SETUP_CLEAR"); return !(e && e[0] == '0'); }();
+        uint32_t nz = 0;
+        for (uint32_t o = 0; o < 0xB0; o += 4) if (vm_read32(A_BSETUP + o)) nz++;
+        if (clear && nz) { for (uint32_t o = 0; o < 0xB0; o += 4) vm_write32(A_BSETUP + o, 0); }
+        std::fprintf(stderr, "[tick] battle setup table 0x%08X: %u nonzero words%s\n", A_BSETUP, nz, !nz ? "" : clear ? ", cleared (online fights start from a fresh table)" : ", left (JSP_FIGHT_SETUP_CLEAR=0)");
+    }
 }
 // ENHANCEMENT (online match end): KO state of the current fight, read from the two KO counter objects (vtable 0x00876558, +0x24 KOs scored,
 // +0x28 KOs needed; jsp_game.cpp finds them). Guest heap words: they roll back with the snapshot, so on a confirmed tick both copies agree.
