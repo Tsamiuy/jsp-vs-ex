@@ -5,7 +5,7 @@ that compares the two tick logs must fail when one of them is missing or empty.
     python3 installer/tools/net_session_driver_test.py [--driver PATH]
 --driver runs another copy of the driver (the negative control: the driver before the deadline fix blocks on a host that never exits).
 POSIX only (the fake process is a script started through its #! line); exit 1 on any failure."""
-import argparse, importlib.util, os, pathlib, subprocess, sys, tempfile, time
+import argparse, contextlib, importlib.util, io, os, pathlib, subprocess, sys, tempfile, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 DEADLINE = 3      # the scenario deadline given to the driver (seconds)
@@ -76,6 +76,41 @@ def check_logs(driver):
     return f
 
 
+def check_mailbox_main(driver):
+    """Exercise actual main's control branch with adversarial observations, not only an agreement helper."""
+    m = load_driver(driver)
+    good = "".join(f"{t} {t:016x}\n" for t in range(1, 81))
+    cases = [
+        ("good", good, good, 80, 80, 0),
+        ("missing host", None, good, 80, 80, 1),
+        ("missing client", good, None, 80, 80, 1),
+        ("empty host", "", good, 80, 80, 1),
+        ("empty client", good, "", 80, 80, 1),
+        ("divergent tick40", good, good.replace("40 0000000000000028", "40 0000000000009999"), 80, 80, 1),
+        ("both missing tick40", good.replace("40 0000000000000028\n", ""), good.replace("40 0000000000000028\n", ""), 80, 80, 1),
+        ("short prefix", "".join(good.splitlines(True)[:49]), good, 80, 80, 1),
+        ("host reference short", good, good, 79, 80, 1),
+        ("client reference short", good, good, 80, 79, 1),
+    ]
+    failures = []
+    for label, host_log, client_log, host_ref, client_ref, expected in cases:
+        def observations(exe, ha, ca, tmp, *args):
+            for name, content in (("h.log", host_log), ("c.log", client_log)):
+                if content is not None: (tmp / name).write_text(content)
+            state = "SUMMARY maxtick=80 ref_bad=0 desync=-1 failed=- ref_ticks="
+            return (0, "MAILBOX_STALLED\nMAILBOX_RESUMED\n" + state + str(host_ref),
+                    0, "MAILBOX_CONNECTED\n" + state + str(client_ref), [])
+        m.run = observations
+        previous = sys.argv
+        try:
+            sys.argv = [str(driver), "--exe", "not-executed", "--only", "mailbox_no_request_resume", "--ticks", "80"]
+            with contextlib.redirect_stdout(io.StringIO()) as output: rc = m.main()
+        finally:
+            sys.argv = previous
+        if rc != expected: failures.append(f"{label}: actual main returned {rc}, expected {expected}: {output.getvalue()[-300:]}")
+    return failures, len(cases)
+
+
 def alive(pid):
     try: os.kill(pid, 0)
     except ProcessLookupError: return False
@@ -126,6 +161,10 @@ def main():
             fails += bool(f)
     f = check_logs(a.driver)
     print(f"{'PASS' if not f else 'FAIL'} tick_logs_required ({len(CHECK_KINDS)} kinds)")
+    for x in f: print("   !", x)
+    fails += bool(f)
+    f, count = check_mailbox_main(a.driver)
+    print(f"{'PASS' if not f else 'FAIL'} mailbox_control_actual_main ({count} cases)")
     for x in f: print("   !", x)
     fails += bool(f)
     print("net_session_driver_test:", "FAIL" if fails else "ok", f"({fails} failed)")

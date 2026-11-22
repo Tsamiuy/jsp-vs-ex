@@ -339,6 +339,17 @@ def main():
                         fl.append("both peers must resume to the target with matching reference state")
                     if "disconnected(" in ho or "disconnected(" in co or num(hs,"desync",0) != -1 or num(cs,"desync",0) != -1:
                         fl.append("the no-request control disconnected or desynchronized")
+                    for who, state in (("host", hs), ("client", cs)):
+                        if num(state, "ref_ticks", 0) < a.ticks:
+                            fl.append(f"{who}: reference covers fewer than {a.ticks} ticks")
+                    # Exclude the unsettled tail, but require every earlier tick on BOTH peers.
+                    settled = max(1, a.ticks - 30)
+                    hlog, clog = logs(tmp)
+                    for who, values in (("host", hlog), ("client", clog)):
+                        missing = [tick for tick in range(1, settled + 1) if tick not in values]
+                        if missing: fl.append(f"{who}: incomplete settled prefix 1..{settled}, missing {missing[:3]}")
+                    bad = [tick for tick in range(1, settled + 1) if tick in hlog and tick in clog and hlog[tick] != clog[tick]]
+                    if bad: fl.append(f"settled peer hashes differ at ticks {bad[:3]}")
                 for text in (ho, co):
                     for line in text.splitlines():
                         if line.startswith("MAILBOX_"): print("   receipt:", line)
