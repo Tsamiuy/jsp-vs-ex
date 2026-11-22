@@ -180,6 +180,8 @@ __pycache__/
 !/installer/tools/net_badge_test.sh
 !/installer/tools/net_delay_rule_test.cpp
 !/installer/tools/net_delay_rule_test.sh
+!/installer/tools/net_perf_test.cpp
+!/installer/tools/net_perf_test.sh
 !/installer/tools/native_fight_test.cpp
 !/installer/tools/native_fight_test.sh
 !/installer/tools/discord_test.cpp

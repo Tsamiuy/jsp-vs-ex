@@ -58,6 +58,7 @@ extern "C" unsigned long long jsp_net_presence_room(char* server, int sn) { if (
 #include "jsp_net_online.h"
 #include "jsp_net_badge.h"
 #include "jsp_net_delay_rule.h"   // ENHANCEMENT (adaptive input delay, rule 2): the decision, shared with the host simulator
+#include "jsp_net_perf.h"   // ENHANCEMENT (match perf summary): input latency, rollback depth, hitches, replay shown; five [perf] lines per match
 #include "jsp_net_ko_rule.h"      // FIX (review of PR 248): the KO / time-up end rules and the live confirmation watermark, shared with net_session_test
 #include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
@@ -453,6 +454,17 @@ void adapt_delay(uint64_t now)
                       d.cur, d.want, d.ping_avg, d.jitter_avg, d.ping, g_ad_p.pct, d.jitter, d.need_ms);
 }
 void log_status() { g.bv.path = path_word(); std::fprintf(stderr, "[net] %s\n", jpnb::log_line(g.bv).c_str()); }
+// ENHANCEMENT (match perf summary, jsp_net_perf.h): per match (reset_match), main thread; from the first fight HUD draw, never in the bench.
+jpperf::Match g_perf; int64_t g_perf_t0 = 0;
+double perf_now() { if (!g_perf_t0) g_perf_t0 = qpc_now(); return qpc_ms(g_perf_t0, qpc_now()); }
+bool perf_on() { return !g.bench && g.fight_seen; }
+void perf_log()
+{
+    if (g.bench || !g.started_ms) return;
+    const std::string s = jpperf::lines(g_perf, path_word().c_str(), g.rrz ? "re-psn" : "direct IP", g.host ? "host" : "join", g.match_k,
+                                        (double)(GetTickCount64() - g.started_ms) / 1000.0);
+    std::fputs(s.c_str(), stderr);
+}
 
 uint64_t rz_rejected() { if (auto* d = dynamic_cast<DirectRendezvous*>(g.rz.get())) return d->rejected_hello; return g.rrz ? g.rrz->rejected_members : 0; }
 // FIX (rollback determinism, JSP_AUDIO_TICKLOCK=0 turns it off): tick-locked audio (patch 3005). The game's sound library advances on the audio device's
@@ -809,6 +821,7 @@ void reset_match()
     g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every(); g.ping_every = jpnb::Every();
     g.record = false; g.match_winner = 0; ko_clear();
     g_ad = jpdr::State();   // ENHANCEMENT (adaptive input delay): per match
+    g_perf = jpperf::Match();   // ENHANCEMENT (match perf summary): per match
     g_audio_waits = g_audio_timeouts = 0; g_audio_wait_ms = 0;
     g_hold_ms = 0; g_holds = g_hold_renders = 0;
     g_regs_saved = g_regs_restored = g_regs_skipped = 0;
@@ -840,6 +853,7 @@ void end_with(const std::string& text, bool quiet = false)
     jsp_snapshot_ext_set_idle_hook(nullptr);   // the gate must not call into a finished session
     jsp_snapshot_ext_guard_summary();
     if (g.started_ms) log_status();   // the session ran: its last status line
+    perf_log();   // ENHANCEMENT (match perf summary): the five [perf] lines of this match
     badge(""); ping_hide();
     set_text(text); g.phase = Phase::Ended; g.skip_sim = g.skip_pad = false;
     if (g.was_replaying || g.stepper.replaying()) jsp_stepper_replay(0, g.done_now);   // an end during a replay: gate, clock and flag off
@@ -1093,6 +1107,7 @@ public:
         if (!ok) { log("snapshot rollback failed", std::to_string(tick)); return false; }
         jpnb::note_rollback(g.bv, (int64_t)g.done_now - (int64_t)tick);
         adapt_note_rollback((int64_t)g.done_now - (int64_t)tick);   // ENHANCEMENT (adaptive input delay, rule 2): the depth trigger
+        if (perf_on()) jpperf::on_rollback(g_perf, perf_now(), (int64_t)g.done_now - (int64_t)tick);   // ENHANCEMENT (match perf summary)
         g_rep.rollback(g.done_now - g.base, g.done_now - tick);
         // the audio goes back with the tick (the mix thread is idle here). FIX (audio rewind dropped blocks): the save of tick T is taken at the boundary BEFORE that boundary raises
         // the audio to blocks_at(T), so the snapshot holds the guest's audio at blocks_at(T - 1): rewinding to blocks_at(T) dropped 6-7 blocks per rollback
@@ -1130,6 +1145,11 @@ public:
         { static const bool ln = [] { char b[8] = {}; return jsp_setting_get("JSP_NET_LOAD_NEUTRAL", b, sizeof b) && b[0] == '1'; }();
           if (ln && !g.fight_seen && !g.bench) { jsi::Pad n; n.connected = true; const auto b = n.pack(); for (int i = 0; i < 8; i++) canon[i] = b[i]; } }
         pad_pack_to_wire(canon, wire);   // the device is physical port 0 on every machine; the table slot it feeds is the plan's local slot
+        if (perf_on()) jpperf::on_local(g_perf, perf_now(), (uint16_t)(canon[0] | (canon[1] << 8)));   // ENHANCEMENT (match perf summary): the press sample
+    }
+    void advanced(int32_t frame, bool rolling_back, const jsi::Pad* in, unsigned players) override   // ENHANCEMENT (match perf summary): the press's frame
+    {
+        if (perf_on() && g.plan.local_first < players) jpperf::on_advance(g_perf, frame, rolling_back, in[g.plan.local_first].buttons);
     }
 private:
     // ENHANCEMENT (online match end): the guest memory now holds a CONFIRMED tick's state (both PCs simulated it with the same inputs), so the KO counters read
@@ -1565,6 +1585,10 @@ void boundary(ppu_context* c)
     }
     if (jpno::cancel_held(cancel_key(), GetTickCount64(), g.cancel_since)) { g.sess.abort("match ended by the player"); end_with("Match ended"); return; }   // End match: F9 held 1.5 s
     if (g.path_until && GetTickCount64() > g.path_until) { g.path_until = 0; if (g.shown == g.path_line) show(""); }   // never blanks a later message (a reconnect or an end line)
+    if (perf_on() && g.sess.synced()) {   // ENHANCEMENT (match perf summary): the frame the last iteration presented (none after a replay tick)
+        const double pn = perf_now(); jpperf::on_frame(g_perf, pn, !g.was_replaying, g.bv.delay);
+        if (jpperf::wants_ack(g_perf)) jpperf::on_ack(g_perf, pn, g.sess.stats().acked_frame);
+    }
     const uint64_t u0 = g.glue->updates();
     jsx::Op op = g.glue->iteration(true);   // update is called whenever the stepper has nothing queued (skipping it for pacing stalled both peers in a two-copy test)
     // FIX (time sync, smoothness audit cause 4): GekkoNet's frames-ahead slowdown was a Sleep here, swallowed by the lockstep clock's 33.3 ms hold, so the

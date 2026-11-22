@@ -29,6 +29,8 @@ public:
     virtual bool hash_only(uint32_t tick, uint32_t* hash) { (void)tick; (void)hash; return false; }
     // The local pad of local player n for the update about to run, canonical wire form (pad_pack_to_wire). Called once per update per local player.
     virtual void local_pad(uint8_t local_player, uint8_t wire[8]) = 0;
+    // ENHANCEMENT (match perf summary, jsp_net_perf.h): every Advance event as it arrives (GekkoNet frame, replay or live, the inputs of all slots). Observe only.
+    virtual void advanced(int32_t frame, bool rolling_back, const jsi::Pad* in, unsigned players) { (void)frame; (void)rolling_back; (void)in; (void)players; }
 };
 
 class Glue {
@@ -99,6 +101,7 @@ private:
                     if (!jsi::Pad::unpack(canon, 8, &je.in[p])) { s_.abort("non-canonical pad from the wire, slot " + std::to_string(p)); return false; }
                     je.confirmed[p] = false;
                 }
+                g_.advanced(je.frame, je.rolling_back, je.in, players);
                 break;
             }
             }
