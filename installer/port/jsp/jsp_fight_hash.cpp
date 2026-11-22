@@ -239,7 +239,16 @@ void hash_tick(uint32_t n, uint32_t flip)
     if (!g_hash_on || n < g_start || n >= g_start + g_n || g_cams.empty()) return;
     Hasher H; Fnv rng, glob, seed, setup;
     const uint32_t P = vm_read32(A_RNGP), S = vm_read32(A_SETUPP);
-    if (P) H.bytes(rng, P, 0x28);
+    // FIX (two-PC desync at tick 1, testers on 0.7.0-test3, bundles tb-204931 / tb-204935): the RNG object (0x28 bytes at *(0x009512A4), made by
+    // 0x0001972C, filled by 0x00019604) starts with FIVE HEAP POINTERS (+0x00..+0x10: its sub-objects of 0x790, 0x1C, 0x1C, 0x14 and 0x820 bytes);
+    // only +0x14..+0x23 is the generator's state (xorshift128, stepped by 0x00018E20) and +0x24 a word set to 0 at creation. The object and its
+    // sub-objects are allocated again when a fight is built after other fights (a 3v3, a re-select, cancelled matches), so their addresses follow
+    // what the process did before: a first fight in a fresh process has P=0x1A02D3A0, later ones 0x19FECB70 / 0x19FECB40. Both testers' failing
+    // matches paired different P (host 0x1A02D3A0, joiner 0x19FECB70), so `rng` (and `all`, the rollback checksum) differed from the very first
+    // compared tick while the game state was the same; two copies on one PC always had the same history and the same P. Hashed now: +0x14..+0x27
+    // (the state and +0x24), never the pointers. JSP_FIGHT_HASH_RNG_PTRS=1 hashes the old 0x28 bytes again (A/B).
+    static const bool rng_ptrs = [] { const char* e = std::getenv("JSP_FIGHT_HASH_RNG_PTRS"); return e && e[0] == '1'; }();
+    if (P) { if (rng_ptrs) H.bytes(rng, P, 0x28); else H.bytes(rng, P + 0x14, 0x14); }
     H.bytes(glob, A_GLOB, 0x10);
     if (S) { H.bytes(seed, S + 0x1C, 4); H.bytes(seed, S + 0x48140, 4); }
     H.bytes(setup, A_BSETUP, 0xB0);
@@ -281,7 +290,18 @@ void hash_tick(uint32_t n, uint32_t flip)
     // ENHANCEMENT (testers): the per-tick [hash] line is an unbuffered write on every tick of a rollback match (JSP_FIGHT_HASH defaults on there); it prints only
     // with JSP_NET_TICK_LOG=1 or outside a rollback start. The hash itself still feeds jsp_snapshot_tap below (the rollback checksum), unchanged.
     static const bool show = [] { const char* t = std::getenv("JSP_NET_TICK_LOG"); const char* r = std::getenv("JSP_ROLLBACK"); return (t && t[0] == '1') || !(r && r[0] == '1'); }();
-    if (show) {
+    // DIAGNOSTIC (two-PC desync at tick 1): the part line of the first 3 hashed ticks of every fight always prints (testers run without
+    // JSP_NET_TICK_LOG), with the raw RNG object and glob words once per fight, so a bundle names the part that splits (the rollback checksum
+    // is only `all` folded to 32 bits).
+    const bool early = !g_first_hashed || n <= g_first_n + 2;
+    if (!g_first_hashed) {
+        std::fprintf(stderr, "[hash] raw n=%u P=0x%08X rng:", n, P);
+        for (uint32_t o = 0; P && o < 0x28; o += 4) std::fprintf(stderr, " %08X", vm_read32(P + o));
+        std::fprintf(stderr, " glob:");
+        for (uint32_t o = 0; o < 0x10; o += 4) std::fprintf(stderr, " %08X", vm_read32(A_GLOB + o));
+        std::fputc('\n', stderr);
+    }
+    if (show || early) {
     std::fprintf(stderr, "[hash] n=%u f=%u all=%016llx rng=%016llx glob=%016llx seed=%016llx setup=%016llx cam=%s fi=%s pad=%s rngc=",
                  n, flip, (unsigned long long)H.all.h, (unsigned long long)rng.h, (unsigned long long)glob.h,
                  (unsigned long long)seed.h, (unsigned long long)setup.h, hex_list(cam).c_str(), hex_list(fi).c_str(), hex_list(pad).c_str());
