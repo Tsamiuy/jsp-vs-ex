@@ -139,6 +139,7 @@ namespace Gekko {
         u64 last_bandwidth_update = 0;
 
         std::vector<u16> rtt;
+        u32 rtt_count = 0;   // jsp-vs-ex local addition (PIN.md): AddRTT calls so far
 
         void AddRTT(u16 rtt_ms);
         void UpdateBandwidth();

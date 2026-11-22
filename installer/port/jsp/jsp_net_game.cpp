@@ -404,7 +404,7 @@ jpdr::Params g_ad_p;
 // ENHANCEMENT (rollback hitches, JSP_ROLLBACK_PREDICTION=N, 1..8, default 6; 8 = as before): how many ticks this PC may run ahead on predicted inputs before
 // it waits (GekkoNet's input prediction window, set at the first synced boundary of each match; the session is created with 8). It caps the deepest
 // rollback, and so the longest hitch, at N ticks (testers: 8-tick rollbacks). Each PC alone: it only changes when this PC waits, never which inputs a tick
-// simulates. Host simulation (D:/jsp-audit/delay): 6 is neutral to slightly better than 8 on 99-129 ms links; 4 or lower is worse (waits replace hitches).
+// simulates. Host simulation (PR #248, Update 3): 6 is neutral to slightly better than 8 on 99-129 ms links; 4 or lower is worse (waits replace hitches).
 int g_ad_pred = 6;
 void adapt_settings()
 {
@@ -440,7 +440,7 @@ void adapt_delay(uint64_t now)
     if (!g_ad_on) { if (!g_ad.start) g_ad.start = now; return; }
     const jpdr::Decision d = jpdr::step(g_ad, g_ad_p, now, [] {
         const SessionStats st = g.sess.stats();
-        jpdr::Reading r; r.ping_avg = st.ping_ms; r.jitter = st.jitter_ms; r.last_ping = st.last_ping_ms; r.cur = st.local_delay;
+        jpdr::Reading r; r.ping_avg = st.ping_ms; r.jitter = st.jitter_ms; r.last_ping = st.last_ping_ms; r.rtt_seq = st.rtt_seq; r.cur = st.local_delay;
         return r;
     });
     if (d.want < 0 || d.want == d.cur) return;

@@ -9,7 +9,9 @@
 // EMA(jitter) + margin) / 33.3); a raise of one needs two readings in a row, a lower five. Its problems in the testers' logs (support bundle 1, ping 99-129 ms):
 // it reacted late (a match ran at 2 ticks while it needed 3), the EMA hid the spikes, and nothing looked at the rollbacks that actually happened.
 // Rule 2 (default): the same trip formula on a window of GekkoNet's single round-trip samples (one every 500 ms, the last 8 s) instead of its 5 s average
-// and the EMA:
+// and the EMA. FIX (RTT sampling, review of PR 248: repeated polls timestamped the same cached round trip as fresh history): a sample enters the window only
+// when GekkoNet's round-trip count (Reading::rtt_seq) moved since the last one taken, so a poll with no new ping answer adds nothing; the polls run every
+// 250 ms (twice the ping rate) so that no answer is missed. The window is 16 MEASURED round trips, never one answer counted twice.
 //   one way = (median RTT - min(median / 2, 33.3)) / 2           (the answer wait taken off, as rule 1)
 //   spread  = RTT at the JSP_INPUT_DELAY_AUTO_PCT percentile (90) - median RTT   (all of it, as if the whole excursion were one way)
 //   margin  = JSP_INPUT_DELAY_AUTO_MARGIN_MS (8), or JSP_INPUT_DELAY_AUTO_HIGH_MARGIN_MS (16) once the median RTT is >= JSP_INPUT_DELAY_AUTO_HIGH_PING_MS (80)
@@ -43,7 +45,7 @@ struct Params {
     int first_ms = 4000;          // JSP_INPUT_DELAY_AUTO_FIRST_MS: the first reading after the sync (rule 1: 10000)
     int every_ms = 2000;          // a reading every 2 s
     int sample_from_ms = 2000;    // RTT samples are kept from this long after the sync
-    int sample_ms = 500;          // GekkoNet pings every 500 ms (NetStats::NET_CHECK_DELAY)
+    int sample_ms = 250;          // the stats poll: GekkoNet pings every 500 ms (NetStats::NET_CHECK_DELAY); a poll keeps only a new round trip (rtt_seq)
     int samples = 16;             // JSP_INPUT_DELAY_AUTO_SAMPLES: the window (16 x 500 ms = 8 s)
     int pct = 90;                 // JSP_INPUT_DELAY_AUTO_PCT
     int high_ping_ms = 80;        // JSP_INPUT_DELAY_AUTO_HIGH_PING_MS
@@ -75,8 +77,9 @@ struct Params {
     }
 };
 
-// What step() reads from the session (only when it needs it): GekkoNet's 5 s average round trip and jitter, its last single round trip, and this peer's delay.
-struct Reading { double ping_avg = -1, jitter = 0, last_ping = -1; int cur = 0; };
+// What step() reads from the session (only when it needs it): GekkoNet's 5 s average round trip and jitter, its last single round trip, how many round
+// trips it measured so far (rtt_seq: last_ping is new only when this moved), and this peer's delay.
+struct Reading { double ping_avg = -1, jitter = 0, last_ping = -1; uint32_t rtt_seq = 0; int cur = 0; };
 
 struct Decision {
     int want = -1;                // >= 0: set this delay now (differs from Reading::cur)
@@ -91,6 +94,8 @@ struct State {
     uint64_t start = 0, next = 0, next_sample = 0;
     double jit_ema = -1; int up = 0, down = 0;
     float rtt[kMaxSamples] = {}; uint64_t rtt_t[kMaxSamples] = {}; int n = 0, head = 0;
+    uint32_t rtt_seq = 0;         // the round-trip count of the newest sample taken (Reading::rtt_seq)
+    uint32_t rtt_taken = 0, rtt_stale = 0;   // polls that took a new round trip / found none new (diagnostics)
     int start_delay = -1;         // the delay at the first reading (the guard's base)
     uint64_t deep_t[kMaxDeep] = {}; int deep_n = 0; uint64_t last_deep = 0;
     uint64_t hold_until = 0;
@@ -177,7 +182,10 @@ Decision step(State& s, const Params& p, uint64_t now, Read&& read)
     if (now >= s.next_sample) {
         s.next_sample = now + (uint64_t)p.sample_ms;
         r = read(); have = true;
-        if (r.last_ping > 0) { s.rtt[s.head] = (float)r.last_ping; s.rtt_t[s.head] = now; s.head = (s.head + 1) % p.samples; if (s.n < p.samples) s.n++; }
+        if (r.last_ping > 0 && r.rtt_seq != s.rtt_seq) {   // a round trip measured since the last sample: the only kind that enters the window
+            s.rtt_seq = r.rtt_seq; s.rtt_taken++;
+            s.rtt[s.head] = (float)r.last_ping; s.rtt_t[s.head] = now; s.head = (s.head + 1) % p.samples; if (s.n < p.samples) s.n++;
+        } else s.rtt_stale++;
     }
     if (now < s.next) return d;
     s.next = now + (uint64_t)p.every_ms;

@@ -184,6 +184,10 @@ typedef struct GekkoNetworkStats {
     unsigned short last_ping;
     float avg_ping;
     float jitter;
+    // jsp-vs-ex local addition (PIN.md): round trips measured so far (+1 per ping answer, never reset), so a caller tells a new last_ping from the
+    // one it already read; and the newest frame of this session's local input that the player acknowledged (-1 none).
+    unsigned int rtt_count;
+    int last_acked_frame;
 } GekkoNetworkStats;
 
 typedef struct GekkoRollbackStats {

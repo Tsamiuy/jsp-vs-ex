@@ -1,5 +1,6 @@
 // net_delay_rule_test.cpp -- host test of the adaptive input delay decision (installer/port/jsp/jsp_net_delay_rule.h): rule 1 is the
-// 2026-11-21 formula unchanged, rule 2's percentile trip, high-ping margin, fight-start guard, depth trigger, hold and one-tick lowering.
+// 2026-11-21 formula unchanged, rule 2's percentile trip, high-ping margin, fight-start guard, depth trigger, hold and one-tick lowering, and the RTT
+// sampling fix (only a round trip whose GekkoNet count is new enters the window).
 // A fake clock and fake stats; no GekkoNet. Run by net_delay_rule_test.sh.
 #include "jsp_net_delay_rule.h"
 
@@ -8,23 +9,39 @@
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <vector>
 
 static int g_fail = 0, g_checks = 0;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; std::printf("FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 
+// The fake session models GekkoNet: a new single round trip every ping_every ms (its count rtt_seq + 1), and between two of them every stats read returns
+// the SAME last round trip and count. fresh_every_poll = the old fake (and the bug the review found): every read is a new measurement. pings = false: no
+// answer arrives any more (the count stays), as in a stall.
 struct Sim {
     jpdr::Params p; jpdr::State s; int cur = 2; uint64_t t = 100000;
-    std::function<double(uint64_t)> rtt = [](uint64_t) { return 100.0; };   // single round trip at time t (ms since start)
+    std::function<double(uint64_t)> rtt = [](uint64_t) { return 100.0; };   // single round trip measured at time t (ms since start)
     double avg = 100, jit = 2;
-    uint64_t t0 = 0;
+    uint64_t t0 = 0, step_ms = 33, ping_every = 500;
+    bool fresh_every_poll = false, pings = true;
+    uint32_t seq = 0; double last = -1; uint32_t reads = 0;
     int changes = 0; const char* last_why = "";
-    // runs ms of live ticks (one per 33 ms); returns the delay
+    struct Seen { uint64_t t; int cur, want; double ping, spread, need; };
+    std::vector<Seen> seen;   // every trip reading (the decision's inputs), for the equivalence check
+    jpdr::Reading read()
+    {
+        reads++;
+        if (fresh_every_poll) { seq++; last = rtt(t - t0); }
+        else if (pings) { const uint32_t k = (uint32_t)((t - t0) / ping_every) + 1; if (k != seq) { seq = k; last = rtt(t - t0); } }
+        jpdr::Reading r; r.ping_avg = avg; r.jitter = jit; r.last_ping = last; r.rtt_seq = seq; r.cur = cur; return r;
+    }
+    // runs ms of live ticks (one per step_ms); returns the delay
     int run(uint64_t ms)
     {
         const uint64_t end = t + ms;
-        for (; t < end; t += 33) {
+        for (; t < end; t += step_ms) {
             if (!t0) t0 = t;
-            const jpdr::Decision d = jpdr::step(s, p, t, [&] { jpdr::Reading r; r.ping_avg = avg; r.jitter = jit; r.last_ping = rtt(t - t0); r.cur = cur; return r; });
+            const jpdr::Decision d = jpdr::step(s, p, t, [&] { return read(); });
+            if (d.why[0] == 't') seen.push_back({t - t0, d.cur, d.want, d.ping, d.jitter, d.need_ms});
             if (d.want >= 0 && d.want != cur) { cur = d.want; changes++; last_why = d.why; }
         }
         return cur;
@@ -130,6 +147,61 @@ int main()
         n.rtt = [&k2](uint64_t) { k2 = k2 * 1103515245u + 12345u; return 115.0 + ((double)((k2 >> 8) % 1001) / 1000.0 * 100.0 - 50.0); };
         n.run(4100);
         CHECK(n.cur == 2);   // the median alone: (115 - 33.3) / 2 + 16 = 56.9 -> 2
+    }
+    // FIX (RTT sampling): polls with no new ping answer add nothing. GekkoNet answers stop at 9 s (a stall): the window keeps the samples it had, however
+    // often the stats are read, and later readings decide on exactly those samples.
+    {
+        Sim m; m.p.clamp(); m.rtt = [](uint64_t t) { return 100.0 + (double)(t / 500 % 7) * 10.0; };
+        m.run(9000);
+        const int n_before = m.s.n; const uint32_t taken = m.s.rtt_taken, seq = m.seq;
+        CHECK(n_before >= 13 && n_before <= 15);   // answers at 2.0 .. 9.0 s, one per 500 ms
+        m.pings = false;
+        const uint32_t reads0 = m.reads;
+        m.run(20000);
+        CHECK(m.reads - reads0 >= 70);           // polled every 250 ms all along
+        CHECK(m.s.n == n_before); CHECK(m.s.rtt_taken == taken); CHECK(m.seq == seq);
+        CHECK(m.s.rtt_stale >= 70);
+        // the readings after the stall all saw the same window: the same median and spread every time
+        bool same = true; double p0 = -1, s0 = -1;
+        for (const Sim::Seen& e : m.seen) if (e.t >= 12000) { if (p0 < 0) { p0 = e.ping; s0 = e.spread; } else if (e.ping != p0 || e.spread != s0) same = false; }
+        CHECK(p0 > 0 && same);
+        // the old fake (every read a new measurement) filled the window with copies of the last answer: the bug. With the count, the same reads add nothing.
+        Sim b; b.p.clamp(); b.pings = false; b.rtt = [](uint64_t) { return 100.0; };
+        b.seq = 1; b.last = 300;   // one answer before the match: count 1
+        b.run(30000);
+        CHECK(b.s.n == 1); CHECK(b.s.rtt_taken == 1);
+        CHECK(b.seen.empty());   // fewer than 3 samples: no reading decides
+        CHECK(b.cur == 2);
+    }
+    // FIX (RTT sampling): with a genuinely new round trip at every poll, the window, the median, the p90 spread and every delay decision are the same as
+    // before the fix. Old: a poll every 500 ms, each read a new measurement. New: a poll every 250 ms, GekkoNet answering every 500 ms (every other poll is
+    // stale and dropped). 25 ms ticks so that both polls land on the answer times exactly.
+    {
+        auto link = [](uint64_t t) { const uint32_t k = (uint32_t)(t / 500) * 2654435761u; return 115.0 + (double)((k >> 8) % 101) - 50.0 + (t < 4000 ? 200.0 : 0.0); };
+        Sim a; a.p.sample_ms = 500; a.p.clamp(); a.fresh_every_poll = true; a.step_ms = 25; a.rtt = link; a.cur = 1;
+        Sim b; b.p.clamp(); b.step_ms = 25; b.rtt = link; b.cur = 1;
+        CHECK(b.p.sample_ms == 250);
+        a.run(60000); b.run(60000);
+        CHECK(a.seen.size() == b.seen.size() && a.seen.size() >= 25);
+        bool same = a.seen.size() == b.seen.size();
+        for (size_t i = 0; same && i < a.seen.size(); i++) {
+            const Sim::Seen& x = a.seen[i]; const Sim::Seen& y = b.seen[i];
+            same = x.t == y.t && x.cur == y.cur && x.want == y.want && x.ping == y.ping && x.spread == y.spread && x.need == y.need;
+            if (!same) std::printf("  differs at reading %zu: t %llu/%llu cur %d/%d want %d/%d median %.1f/%.1f spread %.1f/%.1f\n", i, (unsigned long long)x.t,
+                                   (unsigned long long)y.t, x.cur, y.cur, x.want, y.want, x.ping, y.ping, x.spread, y.spread);
+        }
+        CHECK(same);
+        CHECK(a.changes == b.changes && a.cur == b.cur);
+        CHECK(a.changes >= 1);   // the link is lively enough that the rule did move
+        CHECK(b.s.rtt_stale >= b.s.rtt_taken - 2);   // every other poll found nothing new
+        // and the window sorted is the same multiset
+        float va[jpdr::kMaxSamples], vb[jpdr::kMaxSamples];
+        for (int i = 0; i < a.s.n; i++) va[i] = a.s.rtt[i];
+        for (int i = 0; i < b.s.n; i++) vb[i] = b.s.rtt[i];
+        CHECK(a.s.n == b.s.n && a.s.n == 16);
+        std::sort(va, va + a.s.n); std::sort(vb, vb + b.s.n);
+        CHECK(std::equal(va, va + a.s.n, vb));
+        CHECK(jpdr::percentile(va, a.s.n, 90) == jpdr::percentile(vb, b.s.n, 90));
     }
     // the range: MAX caps every decision
     {
