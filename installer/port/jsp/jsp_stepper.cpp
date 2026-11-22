@@ -27,6 +27,7 @@
 #include "jsp_step_effects.h"
 #include "jsp_step_input.h"
 #include "jsp_stall_rule.h"
+#include "cellPad.h"   // toolkit libs/input (CMakeLists: this file only): CellPadInfo2 and patch 7915's g_cellpad_canon_hook / g_cellpad_info_hook
 
 extern "C" {
 void cellGcmTickVBlank(void);
@@ -41,9 +42,7 @@ void cellGcm_rsx_process_fifo(void);
 int cellGcm_flip_write_off_lost(int want_write_off, uint32_t* out);   // patch 7927
 struct JspTickState { uint32_t done; uint32_t anc_done; uint8_t anc_set, anc_skip; };
 void jsp_fight_hash_get_state(JspTickState* s);   // jsp_fight_hash.cpp: done = completed scene passes
-// patch 7915
-extern int (*g_cellpad_canon_hook)(uint32_t port_no, uint16_t* button, int32_t* len, int setting_len, int host_connected);
-extern void (*g_cellpad_info_hook)(void* info);   // patch 7915: CellPadInfo2* (host struct, before the copy to the guest)
+// patch 7915: g_cellpad_canon_hook and g_cellpad_info_hook are declared by cellPad.h
 }
 
 namespace {
@@ -102,25 +101,25 @@ uint32_t env_u32(const char* n, uint32_t d) { const char* e = std::getenv(n); re
 // per PC the remote player on slot 1 pressed nothing (both PCs alike: the hash agreed), and with a second local device on one PC only (a Parsec virtual pad,
 // padjoin "next player 2") that PC simulated slot 1's input while the other did not. While a session's table is enabled every PC reports EXACTLY the
 // session's slots (the table mask) as connected standard pads and every other port as disconnected, whatever is plugged in locally (no hot-plug change bits).
-// The struct is patch 7915's CellPadInfo2 (libs/input/cellPad.h, 7 ports).
-struct PadInfo2 { uint32_t max_connect, now_connect, system_info, port_status[7], port_setting[7], device_capability[7], device_type[7]; };
+// The hook gets the toolkit's own CellPadInfo2 (libs/input/cellPad.h, CELL_PAD_MAX_PORT_NUM = 7 ports), the host struct before the copy to the guest.
+static_assert(jsi::kSlots <= CELL_PAD_MAX_PORT_NUM, "session slots are pad ports");
 std::atomic<uint32_t> g_info_mask{0};
-void info_hook(void* p)
+void info_hook(CellPadInfo2* in)
 {
     const uint32_t m = g_info_mask.load();
-    if (!m || !p) return;
-    PadInfo2* in = static_cast<PadInfo2*>(p);
+    if (!m || !in) return;
     const uint32_t setting = in->port_setting[0];   // port 0 is always reported (the game sets one setting on every port: SetPortSetting 0x2 x 7)
     uint32_t n = 0;
-    for (uint32_t i = 0; i < 7; i++) {
+    for (uint32_t i = 0; i < CELL_PAD_MAX_PORT_NUM; i++) {
         if (i < (uint32_t)jsi::kSlots && (m & (1u << i))) {
-            in->port_status[i] = 1u;                           // CELL_PAD_STATUS_CONNECTED
+            in->port_status[i] = CELL_PAD_STATUS_CONNECTED;
             in->port_setting[i] = setting;
-            in->device_capability[i] = 0x1Fu;                  // PS3_CONFORMITY | PRESS_MODE | SENSOR_MODE | HP_ANALOG_STICK | ACTUATOR (as port 0)
-            in->device_type[i] = 0u;                           // CELL_PAD_DEV_TYPE_STANDARD
+            in->device_capability[i] = CELL_PAD_CAPABILITY_PS3_CONFORMITY | CELL_PAD_CAPABILITY_PRESS_MODE | CELL_PAD_CAPABILITY_SENSOR_MODE |
+                                       CELL_PAD_CAPABILITY_HP_ANALOG_STICK | CELL_PAD_CAPABILITY_ACTUATOR;   // 0x1F, as port 0
+            in->device_type[i] = CELL_PAD_DEV_TYPE_STANDARD;
             n++;
         } else {
-            in->port_status[i] = 0u; in->port_setting[i] = 0u; in->device_capability[i] = 0u; in->device_type[i] = 0u;
+            in->port_status[i] = CELL_PAD_STATUS_DISCONNECTED; in->port_setting[i] = 0u; in->device_capability[i] = 0u; in->device_type[i] = 0u;
         }
     }
     in->now_connect = n;
