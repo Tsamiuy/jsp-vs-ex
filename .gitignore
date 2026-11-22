@@ -268,3 +268,5 @@ __pycache__/
 
 !/installer/tools/host_abort_test.cpp
 !/installer/tools/host_abort_test.sh
+
+!/installer/tools/recovery_notice_test.py

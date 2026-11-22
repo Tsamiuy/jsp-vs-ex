@@ -161,6 +161,39 @@ namespace JStarsLauncher
     }
     // END MODS MANAGER
 
+    // BEGIN RECOVERY NOTICE: standalone C# 5 helper, identical in both variants.
+    class RecoveryNotice
+    {
+        readonly object owner, sync = new object();
+        readonly StringBuilder line = new StringBuilder();
+        ulong highest, current; bool stopped, discard, carriage;
+        public RecoveryNotice(object process) { owner = process; }
+        public bool CanHide(object process) { lock (sync) return Object.ReferenceEquals(owner, process) && !stopped; }
+        public bool CanShow(object process, ulong id) { lock (sync) return Object.ReferenceEquals(owner, process) && current == id && stopped; }
+        public ulong Feed(byte value)
+        {
+            lock (sync) {
+                if (value != 10) {
+                    if (carriage) discard = true;
+                    if (value == 13) { carriage = true; return 0; }
+                    if (value < 32 || value > 126 || line.Length >= 96) discard = true;
+                    if (!discard) line.Append((char)value);
+                    return 0;
+                }
+                string record = line.ToString(); line.Length = 0;
+                bool bad = discard; discard = carriage = false; if (bad) return 0;
+                string[] fields = record.Split(' '); ulong id;
+                if (fields.Length < 3 || fields[0] != "JSP_SESSION/1" || fields[2].Length == 0 ||
+                    !UInt64.TryParse(fields[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out id) || id == 0 || fields[2] != id.ToString(System.Globalization.CultureInfo.InvariantCulture)) return 0;
+                if (fields[1] == "START" && fields.Length == 3 && id > highest) { highest = current = id; stopped = false; }
+                else if (fields[1] == "RETIRE" && fields.Length == 3 && id == current) { current = 0; stopped = false; }
+                else if (fields[1] == "STOPPED" && fields.Length == 4 && fields[3] == "CLOCK" && id == current && !stopped) { stopped = true; return id; }
+                return 0;
+            }
+        }
+    }
+    // END RECOVERY NOTICE
+
     static class Program
     {
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
@@ -585,6 +618,7 @@ namespace JStarsLauncher
 
         // ---- running game ----
         Process game;
+        volatile RecoveryNotice recoveryNotice;
         volatile bool gameRunning, closingAfterGame;
 
         public LauncherForm()
@@ -2268,7 +2302,7 @@ namespace JStarsLauncher
         void Status(string s)
         {
             lastStatus = s;
-            if (InvokeRequired) { try { BeginInvoke((MethodInvoker)delegate { statusLabel.Text = s; }); } catch { } }
+            if (InvokeRequired) { try { BeginInvoke((MethodInvoker)delegate { if (s.StartsWith("Game running") && recoveryNotice != null && !recoveryNotice.CanHide(game)) return; statusLabel.Text = s; }); } catch { } }
             else statusLabel.Text = s;
             Log(s);
         }
@@ -2385,8 +2419,11 @@ namespace JStarsLauncher
 
                 Status("Starting the game...");
                 game = Process.Start(psi);
+                Process ownedGame = game;
+                RecoveryNotice ownedNotice = new RecoveryNotice(ownedGame);
+                recoveryNotice = ownedNotice; hiddenForGame = false;
                 Thread o = Pump(game.StandardOutput.BaseStream, Path.Combine(runDir, "play_stdout.txt"));
-                Thread e = Pump(game.StandardError.BaseStream, Path.Combine(runDir, "play_stderr.txt"));
+                Thread e = Pump(game.StandardError.BaseStream, Path.Combine(runDir, "play_stderr.txt"), delegate(byte value) { RecoveryByte(ownedGame, ownedNotice, value); });
                 Status("Game running (disc on " + drive + ":). Close the game window or press Exit to stop.");
                 // Once the game's window is up the launcher hides; this thread stays to
                 // clean up (boost off, unmount) and then ends the launcher.
@@ -2394,9 +2431,10 @@ namespace JStarsLauncher
                 {
                     if (GameHasWindow(game.Id))
                     {
-                        hiddenForGame = true;
-                        Log("Game window is up, launcher hidden.");
-                        BeginInvoke((MethodInvoker)delegate { Hide(); });
+                        BeginInvoke((MethodInvoker)delegate {
+                            if (!Object.ReferenceEquals(game, ownedGame) || !ownedNotice.CanHide(ownedGame)) return;
+                            hiddenForGame = true; Hide();
+                        });
                         break;
                     }
                     Thread.Sleep(250);
@@ -2443,16 +2481,38 @@ namespace JStarsLauncher
             }
         }
 
-        static Thread Pump(Stream from, string file)
+        void RecoveryByte(Process ownedGame, RecoveryNotice ownedNotice, byte value)
         {
-            var t = new Thread(delegate () {
+                    ulong id = ownedNotice.Feed(value);
+                    if (id == 0) return;
+                    try { BeginInvoke((MethodInvoker)delegate {
+                        if (!Object.ReferenceEquals(game, ownedGame) || !ownedNotice.CanShow(ownedGame, id)) return;
+                        hiddenForGame = false;
+                        Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                        Activate();
+                        lastStatus = statusLabel.Text = "Online session stopped. If the game stays frozen, use Exit to close it, then start it again.";
+                    }); } catch { }
+        }
+
+        static Thread Pump(Stream from, string file, Action<byte> inspect = null)
+        {
+            // The pipe reader never waits for disk or UI. Logs are best effort under disk backpressure.
+            var pending = new Queue<byte[]>(); var wake = new AutoResetEvent(false); bool done = false;
+            var writer = new Thread(delegate () {
                 try { using (var f = new FileStream(file, FileMode.Create, FileAccess.Write, FileShare.Read)) {
-                    var buf = new byte[65536]; int n;
-                    while ((n = from.Read(buf, 0, buf.Length)) > 0) { f.Write(buf, 0, n); f.Flush(); }
-                } } catch { }
-            });
-            t.IsBackground = true; t.Start();
-            return t;
+                    for (;;) { byte[] part = null; lock (pending) { if (pending.Count > 0) part = pending.Dequeue(); else if (done) break; }
+                        if (part == null) { wake.WaitOne(100); continue; } f.Write(part, 0, part.Length); f.Flush(); }
+                } } catch { } // reader keeps draining even if this sink fails
+            }); writer.IsBackground = true; writer.Start();
+            var t = new Thread(delegate () {
+                try { var buf = new byte[65536]; int n;
+                    while ((n = from.Read(buf, 0, buf.Length)) > 0) {
+                        if (inspect != null) for (int i = 0; i < n; i++) inspect(buf[i]);
+                        lock (pending) { if (pending.Count < 8) { var copy = new byte[n]; Buffer.BlockCopy(buf, 0, copy, 0, n); pending.Enqueue(copy); } }
+                        wake.Set();
+                    }
+                } catch { } finally { lock (pending) done = true; wake.Set(); }
+            }); t.IsBackground = true; t.Start(); return t;
         }
 
         // Run a .bat with no console window; null when the file is missing.

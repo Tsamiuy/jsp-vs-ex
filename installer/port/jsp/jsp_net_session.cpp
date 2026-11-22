@@ -413,6 +413,16 @@ namespace {
 // GekkoNetAdapter has no user pointer: one adapter per process, bound to the mux of the running session.
 UdpMux* g_mux = nullptr;
 std::vector<GekkoNetResult*> g_results;
+std::atomic<uint64_t> g_notice_next{1}; // process lifetime; never reset by stop/start
+uint64_t next_notice_id() {
+    uint64_t n = g_notice_next.load();
+    while (n != UINT64_MAX) if (g_notice_next.compare_exchange_weak(n, n + 1)) return n;
+    return 0; // exhausted identities never wrap/reuse
+}
+void session_record(const char* kind, uint64_t id, const char* suffix = "") {
+    std::fprintf(stderr, "\nJSP_SESSION/1 %s %llu%s\n", kind, (unsigned long long)id, suffix);
+    std::fflush(stderr); // one complete bounded stdio record; no UI/disk callbacks
+}
 
 void ad_send(GekkoNetAddress* a, const char* data, int len)
 {
@@ -470,7 +480,7 @@ void NetSession::stop()
 {
     { // Retire before joining; never hold the worker's mutex across its join.
         std::lock_guard<std::recursive_mutex> lk(gmu_);
-        if (host_abort_) host_abort_->retired.store(true);
+        if (host_abort_) { host_abort_->retired.store(true); session_record("RETIRE", host_abort_->notice_id); }
         host_abort_.reset();
     }
     stop_keepalive();   // first: the thread takes gmu_ and calls into GekkoNet
@@ -517,6 +527,8 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
         const unsigned dn = n < cfg.local_delay.size() ? cfg.local_delay[n] : 0;
         if (dn != d0) return refuse("local delays on one peer must be equal (GekkoNet desyncs under loss with unequal local delays)");
     }
+    const uint64_t notice_id = cfg.keepalive_stale_ms ? next_notice_id() : 0;
+    if (cfg.keepalive_stale_ms && !notice_id) return refuse("session notice identities exhausted");
     plan_ = plan; cfg_ = cfg;
     g_mux = &mux;
     GekkoSession* g = nullptr;
@@ -560,7 +572,7 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
     if (cfg.keepalive_stale_ms) {
         const uint32_t stale = cfg.keepalive_stale_ms;
         ka_stop_.store(false);
-        const auto lifetime = std::make_shared<HostAbort>();
+        const auto lifetime = std::make_shared<HostAbort>(notice_id);
         ka_ = std::thread([this, stale, lifetime]() {
             while (!ka_stop_.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(std::max<uint32_t>(5, stale / 5)));
@@ -568,13 +580,14 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
                 if (!lk.owns_lock()) continue;   // the game thread is inside the session: it polls anyway
                 if (ka_stop_.load() || failed_ || lifetime->retired.load() || host_abort_ != lifetime) break;
                 // Control is independent of guest poll freshness and consumes no guest state.
-                if (lifetime->requested.load()) { fail("frame clock stalled"); break; }
+                if (lifetime->requested.load()) { fail("frame clock stalled"); session_record("STOPPED", lifetime->notice_id, " CLOCK"); break; }
                 if (now_ms() - last_poll_ms_.load() < stale) continue;
                 poll_impl();
                 ka_polls_.fetch_add(1);
             }
         });
         host_abort_ = lifetime; // initialized session and ready consumer, before releasing ownership
+        session_record("START", lifetime->notice_id);
     }
     return true;
 }

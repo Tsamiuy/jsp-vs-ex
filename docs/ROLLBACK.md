@@ -716,3 +716,9 @@ The host control is available only for Game sessions with a nonzero keepalive in
 The focused two-process model cases `mailbox_peer_receipt` and `mailbox_no_request_resume` in `net_session_test.py --only` check peer receipt while the originating fake guest makes no more boundary/update/poll calls. A driver-owned acknowledgment keeps that origin and its session alive until receipt. The complementary case observes continued connection without a request and then resumes both model peers. Their normal disconnect timeout is 60 seconds, well beyond the five-second stalled observation bound. These are local UDP model controls, not title recovery evidence.
 
 The no-request resume model case requires `--ticks 51` or more: after excluding its final 30 ticks, the compared prefix must extend past the deliberate stall at tick 20. Smaller targets are refused before either process starts.
+
+### Recovery notice transport checkpoint
+
+The native session emits exact ASCII LF lifecycle records on stderr: `JSP_SESSION/1 START <id>`, `JSP_SESSION/1 RETIRE <id>`, and `JSP_SESSION/1 STOPPED <id> CLOCK`. IDs increase for the process lifetime and never wrap. Only the validated mailbox worker emits STOPPED after disconnecting its current session. An old clock log is not a notice. The standalone C# launcher's direct RunGame path parses bounded complete records, rechecks process/session identity on queued UI callbacks, and shows restart guidance without automatically stopping the game. Log writing is best effort with a bounded queue so a failing or blocked disk sink cannot stop pipe draining.
+
+This is a partial integration checkpoint: the installed default delegates execution to the separate C launcher and closes the C# form. That installed path is not connected to this notice handler. Installed recovery visibility, real Windows UI behavior and guest recovery remain unproved; no claim covers all launch paths.
