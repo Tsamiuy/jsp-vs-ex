@@ -126,8 +126,8 @@ Nothing goes online unless you turn Online Battle on. There is no update check, 
 | A two-page Main Menu (Battle Modes, J-Customize, J-Point Shop, Gallery, Options), on by default | [Features: Main Menu](docs/FEATURES.md#main-menu-pages) |
 | 3v3 Free Battle (three fighters per team, six in the fight), on by default | [Features: 3v3](docs/FEATURES.md#free-battle-3v3) |
 | Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
-| The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [docs/ONLINE.md](docs/ONLINE.md) (quick start) |
-| Coming soon: online matches with rollback netcode, spectating and lobbies | [Roadmap, section 4](docs/ROADMAP.md) |
+| Online Battle with rollback netcode (experimental, 2 vs 2, set up by the installer) | [docs/ONLINE.md](docs/ONLINE.md), [player guide](docs/TESTING_ONLINE.md) |
+| Coming soon: spectating and lobbies | [Roadmap, section 4](docs/ROADMAP.md) |
 | Coming soon: more match options (1v1, and 3v3 in other modes) and Training options | [Roadmap, section 3](docs/ROADMAP.md) |
 
 <p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
