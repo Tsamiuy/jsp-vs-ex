@@ -2,6 +2,7 @@
 #include "jsp_stall_rule.h"
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); g_fail++; } } while (0)
@@ -88,6 +89,31 @@ int main()
         jsr::begin(st, 200000); s.last_flip_ms = 1000; s.now_ms = 200000 + jsr::kFailMs - 1;
         CHECK(jsr::step(st, s) == Act::None);
         s.now_ms++; CHECK(jsr::step(st, s) == Act::Fail);
+    }
+    {   // Pause the clock after obtaining the old pass. Rearm before its failure publication.
+        jsr::Activations matches;
+        matches.set(true, 0);
+        auto old_pass = matches.current();
+        jsr::Sample s;
+        s.now_ms = jsr::kFailMs;
+        CHECK(jsr::step(old_pass->rule, s) == Act::Fail);
+        matches.set(false, 0);
+        CHECK(!matches.current());
+        matches.set(true, 0); // same timestamp, distinct match
+        auto current_pass = matches.current();
+        std::thread late_clock([old_pass] {
+            old_pass->failed.exchange(true); // same publication used by the no-flip and ack watchdogs
+            jsr::flip_taken(old_pass->rule);
+        });
+        late_clock.join();
+        CHECK(old_pass->failed.load());
+        CHECK(!matches.failed());
+        CHECK(current_pass != old_pass);
+        CHECK(jsr::step(current_pass->rule, s) == Act::Fail);
+        current_pass->failed.exchange(true);
+        CHECK(matches.failed());
+        matches.set(false, 0);
+        CHECK(!matches.failed());
     }
     if (g_fail) { std::printf("stall_rule_test: %d failure(s)\n", g_fail); return 1; }
     std::printf("stall_rule_test: all checks passed\n");

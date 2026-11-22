@@ -15,7 +15,9 @@
 // Anything else with no flip keeps waiting (and is logged); after kFailMs without a flip the match is declared failed (lockstep_failed),
 // the same end as a vblank the guest never takes.
 #pragma once
+#include <atomic>
 #include <cstdint>
+#include <memory>
 
 namespace jsr {
 
@@ -51,6 +53,28 @@ inline void begin(State& st, uint64_t now_ms)
     st.started_ms = now_ms;
     st.started = true;
 }
+
+// A pass keeps its own activation alive across HLE calls. Only the frame clock
+// mutates rule after publication. The session boundary polls the current flag.
+struct Activation {
+    explicit Activation(uint64_t now_ms) { begin(rule, now_ms); }
+    State rule;
+    std::atomic<bool> failed{false};
+    std::atomic<uint32_t> stretch_us{0};
+};
+
+class Activations {
+    std::atomic<std::shared_ptr<Activation>> current_;
+public:
+    std::shared_ptr<Activation> current() const { return current_.load(); }
+    void set(bool enabled, uint64_t now_ms) {
+        current_.store(enabled ? std::make_shared<Activation>(now_ms) : nullptr);
+    }
+    bool failed() const {
+        const auto activation = current();
+        return activation && activation->failed.load();
+    }
+};
 
 inline uint64_t last_progress_ms(const State& st, const Sample& s)
 {
