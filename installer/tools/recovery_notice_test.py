@@ -20,6 +20,14 @@ Send(p,new string('x',200)+"JSP_SESSION/1 START 3\n");Check(Send(p,"JSP_SESSION/
 Send(p,"JSP_SESSION/1 START 3\n");Check(Send(p,"JSP_SESSION/1 STOPPED 3 CLOCK\n")==1);
 Send(p,"JSP_SESSION/1 START 4\r\n");Check(Send(p,"JSP_SESSION/1 STOPPED 4 CLOCK\r\n")==1);
 Send(p,"JSP_SESSION/1 START 5\rX\n");Check(Send(p,"JSP_SESSION/1 STOPPED 5 CLOCK\n")==0);
+// Use the actual product status snapshot to model a notice already displayed, then lifecycle updates.
+var displayed=p.StatusAt(owner,p.Revision); Check(displayed.StartsWith("Online session stopped."));
+ulong shown=p.Revision; Send(p,"JSP_SESSION/1 RETIRE 4\n");
+displayed=p.StatusAt(owner,p.Revision); Check(displayed=="Online session closed."); Check(p.StatusAt(owner,shown)==null);
+Send(p,"JSP_SESSION/1 START 6\n"); displayed=p.StatusAt(owner,p.Revision); Check(displayed=="Online session started.");
+Send(p,"JSP_SESSION/1 STOPPED 6 CLOCK\n"); displayed=p.StatusAt(owner,p.Revision); Check(displayed.StartsWith("Online session stopped."));
+shown=p.Revision; Send(p,"JSP_SESSION/1 START 7\n"); displayed=p.StatusAt(owner,p.Revision); Check(displayed=="Online session started."&&p.StatusAt(owner,shown)==null);
+ulong unchanged=p.Revision; Send(p,"ordinary log\nJSP_SESSION/1 RETIRE 6\n"); Check(p.Revision==unchanged);
 // Actual pipe-reader helper must drain even when file creation fails; no Form/display required.
 int count=0; var input=new MemoryStream(Encoding.ASCII.GetBytes("plain log\n"));
 var pump=typeof(LauncherForm).GetMethod("Pump",BindingFlags.NonPublic|BindingFlags.Static);

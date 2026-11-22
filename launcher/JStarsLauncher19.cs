@@ -166,7 +166,10 @@ namespace JStarsLauncher
     {
         readonly object owner, sync = new object();
         readonly StringBuilder line = new StringBuilder();
-        ulong highest, current; bool stopped, discard, carriage;
+        ulong highest, current, revision; bool stopped, discard, carriage;
+        string message;
+        public ulong Revision { get { lock (sync) return revision; } }
+        public string StatusAt(object process, ulong version) { lock (sync) return Object.ReferenceEquals(owner, process) && version == revision ? message : null; }
         public RecoveryNotice(object process) { owner = process; }
         public bool CanHide(object process) { lock (sync) return Object.ReferenceEquals(owner, process) && !stopped; }
         public bool CanShow(object process, ulong id) { lock (sync) return Object.ReferenceEquals(owner, process) && current == id && stopped; }
@@ -185,9 +188,9 @@ namespace JStarsLauncher
                 string[] fields = record.Split(' '); ulong id;
                 if (fields.Length < 3 || fields[0] != "JSP_SESSION/1" || fields[2].Length == 0 ||
                     !UInt64.TryParse(fields[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out id) || id == 0 || fields[2] != id.ToString(System.Globalization.CultureInfo.InvariantCulture)) return 0;
-                if (fields[1] == "START" && fields.Length == 3 && id > highest) { highest = current = id; stopped = false; }
-                else if (fields[1] == "RETIRE" && fields.Length == 3 && id == current) { current = 0; stopped = false; }
-                else if (fields[1] == "STOPPED" && fields.Length == 4 && fields[3] == "CLOCK" && id == current && !stopped) { stopped = true; return id; }
+                if (fields[1] == "START" && fields.Length == 3 && id > highest) { highest = current = id; stopped = false; revision++; message = "Online session started."; }
+                else if (fields[1] == "RETIRE" && fields.Length == 3 && id == current) { current = 0; stopped = false; revision++; message = "Online session closed."; }
+                else if (fields[1] == "STOPPED" && fields.Length == 4 && fields[3] == "CLOCK" && id == current && !stopped) { stopped = true; revision++; message = "Online session stopped. If the game stays frozen, use Exit to close it, then start it again."; return id; }
                 return 0;
             }
         }
@@ -2483,14 +2486,20 @@ namespace JStarsLauncher
 
         void RecoveryByte(Process ownedGame, RecoveryNotice ownedNotice, byte value)
         {
+                    ulong before = ownedNotice.Revision;
                     ulong id = ownedNotice.Feed(value);
-                    if (id == 0) return;
+                    ulong revision = ownedNotice.Revision;
+                    if (revision == before) return;
                     try { BeginInvoke((MethodInvoker)delegate {
-                        if (!Object.ReferenceEquals(game, ownedGame) || !ownedNotice.CanShow(ownedGame, id)) return;
-                        hiddenForGame = false;
-                        Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
-                        Activate();
-                        lastStatus = statusLabel.Text = "Online session stopped. If the game stays frozen, use Exit to close it, then start it again.";
+                        if (!Object.ReferenceEquals(game, ownedGame)) return;
+                        string text = ownedNotice.StatusAt(ownedGame, revision);
+                        if (text == null) return;
+                        if (id != 0 && ownedNotice.CanShow(ownedGame, id)) {
+                            hiddenForGame = false;
+                            Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                            Activate();
+                        }
+                        lastStatus = statusLabel.Text = text;
                     }); } catch { }
         }
 
