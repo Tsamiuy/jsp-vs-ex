@@ -81,7 +81,8 @@ def command(cmd, subs, scratch):
         # without it a Windows console code page (cp1252) raises UnicodeEncodeError in the test's own print
         return [sys.executable, "-I", "-X", "utf8", str(path), *args], ""
     if path.suffix == ".sh":
-        return ["bash", str(path), *args], ""
+        # the bash on PATH: on Windows a bare "bash" is looked up in System32 before PATH, which can be the WSL launcher instead of Git's bash
+        return [shutil.which("bash") or "bash", str(path), *args], ""
     if path.suffix == ".c":
         # a C test: compile with the system compiler, include dirs from the toolkit (libs/video, libs/input), run
         cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
