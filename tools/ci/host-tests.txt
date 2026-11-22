@@ -13,6 +13,7 @@ all     | installer/tools/portable_selftest.py {scratch}
 all     | installer/tools/lan_discover_test.py
 all     | installer/tools/online_option_test.py
 all     | installer/tools/quote_arg_test.py
+all     | installer/tools/firewall_rule_test.py
 all     | installer/tools/support_bundle_test.py
 all     | installer/tools/unlock_option_test.py
 all     | installer/tools/menu_option_test.py

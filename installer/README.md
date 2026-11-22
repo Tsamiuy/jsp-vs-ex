@@ -146,6 +146,26 @@ Never in the zip: the EBOOT, disc files, saves (`hdd0`, `.sav`), lifted code, sh
 step up to the SPU lift and stop before the compile; on Linux or macOS they take a few minutes. `make_fixture.py DIR` writes
 a fake disc folder and an `EBOOT.elf` stand-in for the checks that need no real data.
 
+## Firewall rule
+
+The **Allow online play through Windows Firewall** task adds one inbound UDP allow rule named `JSP Fan Revival online play` for this
+installation's `game\jsp.exe`. Setup (before adding it again) and uninstall remove only a rule with that exact name **and** that program
+path; rules the player or Windows made for the program, and the same-named rule of another installation in another folder, are kept.
+Uninstall first reads the rules (no administrator rights needed) and asks for them (UAC) only when this installation owns a rule.
+Source and model checks: `python3 -I installer/tools/firewall_rule_test.py` (CI runs it).
+
+Manual check on a Windows test PC or VM, never on a PC whose rules matter (an elevated PowerShell; `A` and `B` are two install folders):
+
+    $A = "C:\JSPTest\A\game\jsp.exe"; $B = "C:\JSPTest\B\game\jsp.exe"; $N = "JSP Fan Revival online play"
+    netsh advfirewall firewall add rule name="$N" dir=in action=allow protocol=UDP program="$A" enable=yes
+    netsh advfirewall firewall add rule name="$N" dir=in action=allow protocol=UDP program="$B" enable=yes
+    netsh advfirewall firewall add rule name="my own jsp rule" dir=in action=block protocol=UDP program="$A" enable=yes
+    netsh advfirewall firewall delete rule name="$N" program="$A"    # the command setup and uninstall run for A
+    Get-NetFirewallApplicationFilter -Program $A, $B | Get-NetFirewallRule | Select-Object DisplayName, Action
+    # expected: "my own jsp rule" (Block) for A and "JSP Fan Revival online play" for B; then remove the three test rules
+
+Then install into `A` with the task, uninstall, and check the same listing: B's rule and the custom rule are still there.
+
 ## What the player needs
 
 - The disc folder (the one that holds `PS3_GAME`), US BLUS31519 or EU BLES02136. Setup reads it in place.
