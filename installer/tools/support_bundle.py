@@ -12,7 +12,8 @@ What goes in (text only: .log .txt .ini .cmd), every file and file name through 
     player's and other players' online names (also with ',' or ')' in them), the server, the peer's address, community preset labels and
     unknown section names) and the whole values of the settings keys server, name, address, PSNR_SERVER, PS3_NP_ONLINE_ID and
     JSP_ROLLBACK_JOIN ('#' and ';' inside a value included), also on lines commented out with '#' or ';' (LF or CRLF line ends);
-  - an ini section header line other than [repsn], [community] and [install] (preset labels, sections the user wrote);
+  - an ini section header line other than [repsn], [community] and [install] (preset labels, sections the user wrote); a match report
+    (game/run/reports/jsp-match-report-*.txt) keeps its own headers ([end], [session], [settings], [rollbacks], [commits], [notes]);
   - wherever else they appear: every value of those keys in play_settings.txt, repsn.ini and community.ini (also earlier lines of a key and
     commented-out lines; names also as the runtime cleans them; community.ini's preset labels and active=), and the login name (USERNAME / USER and the profile folder's last part,
     as written and cleaned: the runtime makes it the online name when none is set);
@@ -694,9 +695,8 @@ def net_secrets(s, env=None):
 _IPV4 = re.compile(r"(?<![\d.])((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})(?![\d]|\.\d)")
 _NET_RULES = (   # always applied, also when the settings files were not found
     (re.compile(r"(?im)^(\s*[#;]?\s*(?:server|name|address|JSP_ROLLBACK_JOIN|PSNR_SERVER|PS3_NP_ONLINE_ID)\s*=[ \t]*)\S[^\r\n]*"), r"\1<set>"),   # the whole value: '#' or ';' inside it is part of it
-    # an ini section header of its own line that is not one of the program's (a preset label, an unknown section the user wrote)
+    # an ini section header of its own line that is not one of the program's (a preset label; an unknown section: _SECTION_HEADER below)
     (re.compile(r"(?im)^(\s*\[\s*preset\s+)[^\]\r\n]*(\]\s*)(?=\r?$)"), r"\1<preset>\2"),
-    (re.compile(r"(?im)^(\s*\[)(?!\s*(?:repsn|community|install|preset\s[^\]\r\n]*)\s*\])[^\]\r\n]*(\]\s*)(?=\r?$)"), r"\1<set>\2"),
     (re.compile(r"(\[online\] community method enabled \(preset )[^\r\n]*?(\): not supported yet)"), r"\1<preset>\2"),
     (re.compile(r"(rejected \(unknown section \[)[^\r\n]*(\]\))"), r"\1<set>\2"),
     (re.compile(r"(\[online\] re-psn enabled: server )\S+"), r"\1<server>"),
@@ -723,6 +723,20 @@ _NET_RULES = (   # always applied, also when the settings files were not found
     (re.compile(r"(\[sceNpSignaling\] conn \d+ \()[^\r\n]*(, \d+\.\d+\.\d+\.\d+:\d+\) (?:established|dead))"), r"\1<online name>\2"),
     (re.compile(r"(\[sceNpSignaling\] ActivateConnection\(ctx=\d+, )[^\r\n]*(\) -> conn \d+ \((?:active|pending)\))"), r"\1<online name>\2"),
 )
+# An ini section header of its own line that is not one of the program's (an unknown section the user wrote) becomes [<set>].
+# FIX (testers): net_scrub() leaves the header names in `sections` alone: a match report's own sections (REPORT_SECTIONS), which this rule
+# turned into [<set>] in every bundle. In any other file (an ini) the same header is still scrubbed.
+_SECTION_HEADER = re.compile(r"(?im)^(\s*\[)(?!\s*(?:repsn|community|install|preset\s[^\]\r\n]*)\s*\])([^\]\r\n]*)(\]\s*)(?=\r?$)")
+# The headers jsp_net_report.h render() writes in a match report (jsp-match-report-*.txt), and its "[truncated]" line: program words only.
+REPORT_SECTIONS = ("end", "session", "settings", "rollbacks", "commits", "notes", "truncated")
+_MATCH_REPORT = re.compile(r"(?:^|/)game/run/reports/jsp-match-report-[^/]*\.txt$")
+
+
+def is_match_report(name):
+    """True for a match report's path in the bundle (game/run/reports/jsp-match-report-*.txt, as collect() offers them)."""
+    return _MATCH_REPORT.search(name.replace("\\", "/")) is not None
+
+
 # The program's own log tags and ini section names at the start of a line ("[net]", "[online]", "[repsn]"): never a private value, so a
 # name that happens to read "net" or "online" does not turn every tag into a placeholder. Only these: any other bracketed word is scrubbed.
 _LINE_TAG = (r"(?m:^\s*\[(?:net|online|psnr|repsn|community|install|portmenu|version|jstars-game|support_bundle|D3D12|"
@@ -732,18 +746,24 @@ _LINE_TAG = (r"(?m:^\s*\[(?:net|online|psnr|repsn|community|install|portmenu|ver
 _PLACEHOLDER = r"<(?:set|server|online name|join address|user name|peer address|IPv4|preset)>"
 
 
-def net_scrub(text, secrets=None):
+def net_scrub(text, secrets=None, sections=()):
     """Takes the private netcode values out of a file's text: first the address and name fields of the known log lines and settings keys
-    (so a name that is also a word of those lines, "member" or "room", cannot break them), then the values in `secrets` (net_secrets)
-    wherever they stand except inside the program's own line tags and the placeholders, then every IPv4 address except loopback (127.x)
-    and 0.0.0.0 (a port after it stays)."""
+    (so a name that is also a word of those lines, "member" or "room", cannot break them) and every section header line that is not the
+    program's (_SECTION_HEADER) except the names in `sections` (REPORT_SECTIONS for a match report), then the values in `secrets`
+    (net_secrets) wherever they stand except inside the program's own line tags, the kept section headers and the placeholders, then every
+    IPv4 address except loopback (127.x) and 0.0.0.0 (a port after it stays)."""
     for pat, rep in _NET_RULES:
         text = pat.sub(rep, text)
-    keep = re.compile(_LINE_TAG + "|" + _PLACEHOLDER)
+    kept = {x.lower() for x in sections}
+    text = _SECTION_HEADER.sub(lambda m: m.group(0) if m.group(2).strip().lower() in kept else m.group(1) + "<set>" + m.group(3), text)
+    tags = _LINE_TAG
+    if kept:   # a kept header line is a program word: a secret that reads "notes" or "session" must not change it
+        tags += r"|(?im:^[ \t]*\[(?:" + "|".join(re.escape(x) for x in sorted(kept)) + r")\](?=[ \t]*\r?$))"
+    keep = re.compile(tags + "|" + _PLACEHOLDER)
     for v in sorted(secrets or {}, key=len, reverse=True):
         b1 = "(?<![A-Za-z0-9_])" if (v[:1].isalnum() or v[:1] == "_") else ""
         b2 = "(?![A-Za-z0-9_])" if (v[-1:].isalnum() or v[-1:] == "_") else ""
-        pat = re.compile(_LINE_TAG + "|" + _PLACEHOLDER + "|" + b1 + re.escape(v) + b2, re.IGNORECASE)
+        pat = re.compile(tags + "|" + _PLACEHOLDER + "|" + b1 + re.escape(v) + b2, re.IGNORECASE)
         text = pat.sub(lambda m, r=secrets[v]: m.group(0) if keep.fullmatch(m.group(0).strip()) or keep.fullmatch(m.group(0)) else r, text)
     return _IPV4.sub(lambda m: m.group(1) if m.group(1).startswith("127.") or m.group(1) == "0.0.0.0" else "<IPv4>", text)
 
@@ -1011,7 +1031,7 @@ def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
             net_logs = net_logs or {}
             net_logs[name0] = raw                                 # the [net] summary reads the raw text (net_scrub could change its words)
         shown[name0] = name
-        blobs[name] = net_scrub(raw, secrets).encode("utf-8")
+        blobs[name] = net_scrub(raw, secrets, REPORT_SECTIONS if is_match_report(name0) else ()).encode("utf-8")   # FIX: a report keeps its headers
     net = {"mode": net_mode(ns), "logs": net_log_lines(net_logs or {}, secrets, shown), "secrets": secrets}   # before trim(): the summary sees every line
     net_logs = None
     cuts = trim(blobs, cap - 30000)                              # room for facts.txt

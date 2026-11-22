@@ -475,6 +475,36 @@ def main():
         check(len(got14) == sb.REPORTS_KEPT and "game/run/reports/jsp-match-report-20261121-120000.txt" not in got14
               and f"game/run/reports/jsp-match-report-20261121-1200{sb.REPORTS_KEPT + 1:02d}.txt" in got14, f"match reports: the newest {sb.REPORTS_KEPT}: {got14}")
 
+        # FIX (testers): a match report keeps its section headers (they were all turned into [<set>]); its private values are still scrubbed,
+        # also an online name that reads like a header ("Session"); an ini's unknown section is still scrubbed in the same bundle
+        app15 = t / "app15"
+        w(app15 / "VERSION.txt", "x\n")
+        w(app15 / "settings_here.txt", "")
+        w(app15 / "play_settings.txt", "PS3_NP_ONLINE_ID=Session\nPSNR_SERVER=srv15.example:36100\nPS3RECOMP_SHARED_DIR=" + str(app15 / "shared") + "\n")
+        w(app15 / "shared/repsn.ini", "[repsn]\nenabled=1\nserver=srv15.example\nname=Session\n[Alice House]\nx=1\n")
+        report15 = ("# jsp-match-report 1\r\n# J-Stars Victory VS+ port: online rollback match report. Safe to share: addresses, home folders and names are replaced.\r\n"
+                    "written: 2026-11-21 12:00:00 (local time)\r\nbuild: 0.7.0-test5\r\n\r\n[end]\r\nreason: desync at tick 1200\r\n\r\n"
+                    "[session]\r\nlocal_slot: 1\r\nplayers: 2\r\ninput_delay: 2\r\nbase_tick: 100\r\nlink: relay via srv15.example:36100\r\n\r\n"
+                    "[settings]\r\nPSNR_SERVER=srv15.example:36100\r\nJSP_ROLLBACK=1\r\n\r\n[rollbacks]\r\ncount: 1  max_depth: 3  avg_depth: 3.00  kept: 1 (oldest first: from_tick depth)\r\n1190 3\r\n\r\n"
+                    "[commits]\r\ncount: 1  kept: 1 (oldest first: tick hash raw, hex)\r\n1200 00000000deadbeef 00000000deadbeef\r\n\r\n"
+                    "[notes]\r\npeer Session at 203.0.113.7:3658\r\n\r\n[truncated]\r\n# end of report\r\n")
+        w(app15 / "game/run/reports/jsp-match-report-20261121-120000.txt", report15)
+        w(app15 / "logs/first.log", "[repsn]\r\n[Alice House]\r\n")
+        z15 = zipfile.ZipFile(sb.make(app15, out, None, None))
+        r15 = z15.read("game/run/reports/jsp-match-report-20261121-120000.txt").decode("utf-8")
+        log15 = z15.read("logs/first.log").decode("utf-8") if "logs/first.log" in z15.namelist() else ""
+        z15.close()
+        heads15 = [l for l in r15.splitlines() if l.startswith("[")]
+        check(heads15 == ["[end]", "[session]", "[settings]", "[rollbacks]", "[commits]", "[notes]", "[truncated]"], f"match report: section headers kept: {heads15}")
+        check("[<set>]" not in r15 and "1190 3" in r15 and "1200 00000000deadbeef" in r15, "match report: the body is kept")
+        check("srv15" not in r15 and "203.0.113.7" not in r15 and "peer Session" not in r15 and "PSNR_SERVER=<set>" in r15,
+              f"match report: server, peer address and online name still scrubbed: {r15!r}")
+        check("[repsn]" in log15 and "[<set>]" in log15 and "Alice" not in log15, f"another file in the same bundle: an unknown section is still scrubbed: {log15!r}")
+        check(sb.net_scrub("[notes]\n[Bob]\n", {}) == "[<set>]\n[<set>]\n" and sb.net_scrub("[notes]\n[Bob]\n", {}, sb.REPORT_SECTIONS) == "[notes]\n[<set>]\n",
+              "net_scrub: report headers kept only when asked for, other headers scrubbed")
+        check(sb.is_match_report("game/run/reports/jsp-match-report-1.txt") and not sb.is_match_report("game/run/reports/other.txt")
+              and not sb.is_match_report("logs/jsp-match-report-1.txt"), "is_match_report: only the reports folder's report files")
+
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")
     print("FAILED: " + "; ".join(FAILS) if FAILS else "all passed")
