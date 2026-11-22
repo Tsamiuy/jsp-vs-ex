@@ -482,7 +482,7 @@ Each is a `play_settings.txt` line (or an environment variable). Test-only switc
 | `JSP_AUDIO_TICKLOCK`, `JSP_NET_GUEST_CLOCK`, `JSP_NET_CRI_LOCK`, `JSP_NET_THREAD_REGS` | the determinism fixes above; on in a match, `0` turns each off | A/B only |
 | `JSP_ROLLBACK_SKIP_FINAL`, `JSP_SNAPSHOT_COPY_THREADS` (3), `JSP_SNAPSHOT_PRECHECK_US` (20000), `JSP_SNAPSHOT_AUDIT_EXEMPT`, `JSP_SNAPSHOT_LWM_CACHE`, `JSP_SNAPSHOT_LAYOUT_GEN`, `JSP_SNAPSHOT_QUICK`, `JSP_SNAPSHOT_QUICK_WAIT_US`, `JSP_SNAPSHOT_FROZEN_WALK_EVERY`, `JSP_SNAPSHOT_AUDIT_ASYNC`, `JSP_SNAPSHOT_SITE`, `JSP_SNAPSHOT_SITE_MS` | snapshot speed-ups, set by default in rollback; `0` turns each off | A/B only |
 | `PSO_ASYNC` | pipelines built on worker threads, on as offline (rollback no longer sets `0`: the bench crash was the blob count race toolkit patch 2072 fixed); `0` builds them on the drawing thread | no |
-| `JSP_STEP_SKIP_DRAWS` | skip the draws of re-run frames (with `JSP_STEP_TURBO`; off by default) | no |
+| `JSP_STEP_SKIP_DRAWS` | skip the draws of re-run frames (with `JSP_STEP_TURBO`); off offline, a rollback match sets `1` (`jsp_net_online.h`), `0` draws them | no |
 | `JSP_NET_STICK_DEADZONE`, `JSP_NET_STICK_LEVELS` | send the sticks with a dead zone or fewer steps (off by default) | yes |
 | `JSP_ROLLBACK_LIMITED_SAVING`, `JSP_ROLLBACK_START=fight`, `JSP_NET_LOAD_NEUTRAL`, `JSP_PAD_PEEK`, `JSP_SNAPSHOT_PREWAIT`, `JSP_SNAPSHOT_QUICK_SLEEP` | alternatives that were tried; off by default | yes |
 | `JSP_FIGHT_HASH_SCENE`, `JSP_FIGHT_HASH_FIGHTER`, `JSP_FIGHT_HASH_CAM_CACHE` | `1` puts the playback count, the fighter part or the old camera range back into the checksum | yes |
