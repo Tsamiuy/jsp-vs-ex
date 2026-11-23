@@ -4,7 +4,8 @@
 // line, a variable left in a shell) would desync the match without a word. DECISION: a gate, not the handshake manifest: a manifest entry changes the
 // handshake protocol for both peers (an older peer would refuse), while these are test knobs no player needs; the gate keeps them for the two-instance
 // tests that already set JSP_ROLLBACK_ALLOW_DEBUG=1 on both copies. Without it a set value is ignored and the log says so (jsp_net_game.cpp gated_get).
-// Pure (no Windows, no game): installer/tools/net_debug_gate_test.sh tests the rule and that jsp_net_game.cpp reads these keys only through the gate.
+// Pure (no Windows, no game): installer/tools/net_debug_gate_test.sh tests the rule and that jsp_net_game.cpp (kGated) and jsp_fight_hash.cpp (kGatedHash)
+// read these keys only through the gate.
 #ifndef JSP_NET_DEBUG_GATE_H
 #define JSP_NET_DEBUG_GATE_H
 #include <cstring>
@@ -24,10 +25,21 @@ constexpr const char* kGated[] = {
     "JSP_ROLLBACK_INPUTS_SKIP",      // =N: the recording starts N rows in
 };
 
+// FIX (review of split PR A): the per-tick fight hash's A/B switches. Each one puts a part back into `all`, the rollback checksum, that is left out because it
+// differs between PCs whose game state is equal; set on one PC alone it ends the match as a desync. jsp_fight_hash.cpp reads them only through hash_ab (getenv,
+// like the rest of that file), which applies this gate.
+constexpr const char* kGatedHash[] = {
+    "JSP_FIGHT_HASH_RNG_PTRS",       // =1: the RNG object's heap pointers in the hash
+    "JSP_FIGHT_HASH_SCENE",          // =1: the sound library's playback count in the hash
+    "JSP_FIGHT_HASH_CAM_CACHE",      // =1: the cameras' matrix cache in the hash
+    "JSP_FIGHT_HASH_FIGHTER",        // =1: the fighters' never-written bytes in the checksum
+};
+
 inline bool is_gated(const char* key)
 {
     if (!key) return false;
     for (const char* k : kGated) if (!std::strcmp(k, key)) return true;
+    for (const char* k : kGatedHash) if (!std::strcmp(k, key)) return true;
     return false;
 }
 

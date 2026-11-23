@@ -45,6 +45,7 @@
 #include <utility>
 #include <string>
 #include "jsp_fight_setup_rule.h"   // FIX (review of PR 248): the battle setup table in the checksum (native online: out)
+#include "jsp_net_debug_gate.h"     // FIX (review of split PR A): the A/B switches below apply only with JSP_ROLLBACK_ALLOW_DEBUG=1
 
 namespace jft {   // tick-keyed pad events (pure)
 
@@ -237,6 +238,18 @@ void dump_all(uint32_t n)
 }
 
 // @ the end of counted scene pass n (= k), state after the step. n is the tick, not a flip.
+// FIX (review of split PR A): an A/B switch of the hash (jpdg::kGatedHash) is on only when set to 1 AND JSP_ROLLBACK_ALLOW_DEBUG=1 (test tooling), the rule
+// JSP_FIGHT_HASH_SETUP already had: each one puts back a part that differs between PCs with equal game state, so set on one PC alone (a stray
+// play_settings.txt line: the launcher exports every line) it would end the match as a false desync. A dropped value is logged once (each caller caches it).
+bool hash_ab(const char* key)
+{
+    const char* d = std::getenv(jpdg::kAllowKey);
+    bool ignored = false;
+    const char* v = jpdg::honoured(key, std::getenv(key), d && d[0] && d[0] != '0', &ignored);
+    if (ignored) std::fprintf(stderr, "[tick] %s ignored: a fight hash test switch, honoured only with %s=1 (set on one PC alone it would end the match as a desync)\n", key, jpdg::kAllowKey);
+    return v && v[0] == '1';
+}
+
 void hash_tick(uint32_t n, uint32_t flip)
 {
     if (!g_hash_on || n < g_start || n >= g_start + g_n || g_cams.empty()) return;
@@ -249,8 +262,8 @@ void hash_tick(uint32_t n, uint32_t flip)
     // what the process did before: a first fight in a fresh process has P=0x1A02D3A0, later ones 0x19FECB70 / 0x19FECB40. Both testers' failing
     // matches paired different P (host 0x1A02D3A0, joiner 0x19FECB70), so `rng` (and `all`, the rollback checksum) differed from the very first
     // compared tick while the game state was the same; two copies on one PC always had the same history and the same P. Hashed now: +0x14..+0x27
-    // (the state and +0x24), never the pointers. JSP_FIGHT_HASH_RNG_PTRS=1 hashes the old 0x28 bytes again (A/B).
-    static const bool rng_ptrs = [] { const char* e = std::getenv("JSP_FIGHT_HASH_RNG_PTRS"); return e && e[0] == '1'; }();
+    // (the state and +0x24), never the pointers. JSP_FIGHT_HASH_RNG_PTRS=1 hashes the old 0x28 bytes again (A/B, with JSP_ROLLBACK_ALLOW_DEBUG=1, hash_ab).
+    static const bool rng_ptrs = hash_ab("JSP_FIGHT_HASH_RNG_PTRS");
     if (P) { if (rng_ptrs) H.bytes(rng, P, 0x28); else H.bytes(rng, P + 0x14, 0x14); }
     H.bytes(glob, A_GLOB, 0x10);
     if (S) { H.bytes(seed, S + 0x1C, 4); H.bytes(seed, S + 0x48140, 4); }
@@ -263,8 +276,8 @@ void hash_tick(uint32_t n, uint32_t flip)
         jfs::hash([](uint32_t a) { return (uint8_t)vm_read8(a); }, setup, H.all, jfs::in_checksum(g_setup_out.load(std::memory_order_relaxed) != 0, setup_keep)); }
     // FIX (rollback false desync): 0x0094DEC4 is no scene step in a fight: it counts the sound library's active playbacks (the stores are in func_00662784 /
     // func_006624DC, called from func_0048DC70 and the CRI range 0x0048xxxx-0x0057xxxx). A playback ends on the host's audio clock, so two PCs saw the count
-    // change 0-4 ticks apart while every gameplay part matched (two-copy tests, ticks 969-1031). Left out of the per-tick hash; JSP_FIGHT_HASH_SCENE=1 keeps it (A/B).
-    { static const bool keep = [] { const char* e = std::getenv("JSP_FIGHT_HASH_SCENE"); return e && e[0] == '1'; }(); if (keep) H.bytes(setup, A_SCENE, 4); }
+    // change 0-4 ticks apart while every gameplay part matched (two-copy tests, ticks 969-1031). Left out of the per-tick hash; JSP_FIGHT_HASH_SCENE=1 keeps it (A/B, with JSP_ROLLBACK_ALLOW_DEBUG=1, hash_ab).
+    { static const bool keep = hash_ab("JSP_FIGHT_HASH_SCENE"); if (keep) H.bytes(setup, A_SCENE, 4); }
     // DIAGNOSTIC (JSP_CAM_DUMP=idx:from:to, test runs only): the raw camera bytes the hash covers (+0x10..+0xB0, +0xF0, +0xF4) of camera idx on every
     // hashed tick from..to, so two copies' logs name the first byte that splits (a re-run prints again: the last line of a tick is the confirmed one).
     {   static int ci = -2; static uint32_t c_from = 0, c_to = 0;
@@ -281,15 +294,15 @@ void hash_tick(uint32_t n, uint32_t flip)
     // matrix and its inverse, a CACHE the camera step never writes (0x6F688 stores eye +0x90 and target +0xA0 and sets the dirty flag +0x4); a reader that needs
     // the matrices rebuilds them on demand (vtable slot 0, 0x523D78), and the render does so only for the cameras this PC draws, which differ between the two
     // players' views. The eye and target stayed equal tick for tick after the "split". Hashed now: the camera's own state (+0x90..+0xAF eye/target,
-    // +0xF0, +0xF4); the cache is left out. JSP_FIGHT_HASH_CAM_CACHE=1 hashes the old range again (A/B).
-    static const bool cam_cache = [] { const char* e = std::getenv("JSP_FIGHT_HASH_CAM_CACHE"); return e && e[0] == '1'; }();
+    // +0xF0, +0xF4); the cache is left out. JSP_FIGHT_HASH_CAM_CACHE=1 hashes the old range again (A/B, with JSP_ROLLBACK_ALLOW_DEBUG=1, hash_ab).
+    static const bool cam_cache = hash_ab("JSP_FIGHT_HASH_CAM_CACHE");
     for (uint32_t c : g_cams) { Fnv f; if (cam_cache) H.bytes(f, c + 0x10, 0xA0); else H.bytes(f, c + 0x90, 0x20); H.bytes(f, c + 0xF0, 1); H.bytes(f, c + 0xF4, 4); cam.push_back(f.h); }
     // FIX (false desync on a same-link rematch, two-copy runs native-rm2 / rm3, object dumps): fighter +0x90..+0xA7 is memory the fight never writes (all
     // zero, constant for a whole first fight). In a later fight of the same process the objects reuse heap that still holds the previous fight's leftovers,
     // which differ between the two PCs (their after-fight screens ran apart), so every rematch "desynced" at tick 1 with every other part equal, and the
     // values never changed afterwards. The fi part is still computed and logged, but it is no longer in `all` (the rollback checksum);
-    // JSP_FIGHT_HASH_FIGHTER=1 puts it back (A/B).
-    static const bool fi_in_all = [] { const char* e = std::getenv("JSP_FIGHT_HASH_FIGHTER"); return e && e[0] == '1'; }();
+    // JSP_FIGHT_HASH_FIGHTER=1 puts it back (A/B, with JSP_ROLLBACK_ALLOW_DEBUG=1, hash_ab).
+    static const bool fi_in_all = hash_ab("JSP_FIGHT_HASH_FIGHTER");
     for (uint32_t x : g_fighters) {
         Fnv f;
         if (fi_in_all) H.bytes(f, x + 0x90, 0x18); else for (uint32_t i = 0; i < 0x18; i++) f.b(vm_read8(x + 0x90 + i));

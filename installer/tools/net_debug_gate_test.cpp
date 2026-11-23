@@ -24,6 +24,16 @@ int main()
         ig = true; CHECK(honoured(k, "", false, &ig) == nullptr && !ig);
         ig = true; CHECK(honoured(k, nullptr, true, &ig) == nullptr && !ig);
     }
+    // the fight hash's A/B switches (jsp_fight_hash.cpp hash_ab): the same rule
+    const char* want_hash[] = { "JSP_FIGHT_HASH_RNG_PTRS", "JSP_FIGHT_HASH_SCENE", "JSP_FIGHT_HASH_CAM_CACHE", "JSP_FIGHT_HASH_FIGHTER" };
+    CHECK(sizeof kGatedHash / sizeof kGatedHash[0] == sizeof want_hash / sizeof want_hash[0]);
+    for (const char* k : want_hash) {
+        CHECK(is_gated(k));
+        ig = false; CHECK(honoured(k, "1", false, &ig) == nullptr && ig);    // set on one PC without the allow switch: off, reported
+        ig = true; const char* v = honoured(k, "1", true, &ig); CHECK(v && v[0] == '1' && !ig);
+        ig = true; CHECK(honoured(k, nullptr, false, &ig) == nullptr && !ig);
+    }
+    CHECK(!is_gated("JSP_FIGHT_HASH") && !is_gated("JSP_FIGHT_HASH_START") && !is_gated("JSP_FIGHT_HASH_SCENEX"));   // the hash itself and its window stay ungated
     // an ungated key passes through (the gate is not a general filter)
     ig = true; CHECK(honoured("JSP_ROLLBACK_BADGE", "1", false, &ig) && !ig);
     CHECK(honoured("JSP_AUDIO_TICKLOCK", "0", false, nullptr) == nullptr);   // null out-pointer is fine
