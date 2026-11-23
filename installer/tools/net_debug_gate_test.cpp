@@ -7,11 +7,12 @@ static int fails = 0;
 int main()
 {
     using namespace jpdg;
-    const char* want[] = { "JSP_NET_LINK", "JSP_AUDIO_TICKLOCK", "JSP_NET_CRI_LOCK", "JSP_NET_GUEST_CLOCK", "JSP_NET_THREAD_REGS", "JSP_ROLLBACK_LIMITED_SAVING", "JSP_ROLLBACK_START" };
+    const char* want[] = { "JSP_NET_LINK", "JSP_AUDIO_TICKLOCK", "JSP_NET_CRI_LOCK", "JSP_NET_GUEST_CLOCK", "JSP_NET_THREAD_REGS", "JSP_ROLLBACK_LIMITED_SAVING", "JSP_ROLLBACK_START",
+                           "JSP_ROLLBACK_INPUTS", "JSP_ROLLBACK_INPUTS_SKIP" };
     CHECK(sizeof kGated / sizeof kGated[0] == sizeof want / sizeof want[0]);
     for (const char* k : want) CHECK(is_gated(k));
     CHECK(!is_gated("JSP_ROLLBACK") && !is_gated("JSP_ROLLBACK_LISTEN") && !is_gated("JSP_ROLLBACK_BADGE") && !is_gated(kAllowKey) && !is_gated(nullptr) && !is_gated(""));
-    CHECK(!is_gated("JSP_NET_LINKX") && !is_gated("jsp_net_link"));   // exact names only
+    CHECK(!is_gated("JSP_NET_LINKX") && !is_gated("jsp_net_link") && !is_gated("JSP_ROLLBACK_INPUTS_SKIPX") && !is_gated("JSP_ROLLBACK_INPUT"));   // exact names only
     bool ig = true;
     for (const char* k : want) {
         // without the allow switch: a set value is dropped (the default applies) and reported

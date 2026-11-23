@@ -1193,8 +1193,10 @@ bool start_at_anchor() { static const bool v = [] { char b[16] = {}; const char*
 void load_feed()
 {
     char fp[400] = {}, sk[16] = {};
-    if (!jsp_setting_get("JSP_ROLLBACK_INPUTS", fp, sizeof fp) || !fp[0] || !g.feed.empty()) return;
-    const unsigned skip = jsp_setting_get("JSP_ROLLBACK_INPUTS_SKIP", sk, sizeof sk) ? (unsigned)std::strtoul(sk, nullptr, 10) : 0u;
+    // FIX (review of split PR A): both are gated (jsp_net_debug_gate.h): set on one PC alone, that PC would play the recording while the match goes on.
+    if (!g.feed.empty() || !gated_get("JSP_ROLLBACK_INPUTS", fp, sizeof fp)) return;
+    const char* sv = gated_get("JSP_ROLLBACK_INPUTS_SKIP", sk, sizeof sk);
+    const unsigned skip = sv ? (unsigned)std::strtoul(sv, nullptr, 10) : 0u;
     unsigned row = 0;
     if (FILE* fi = std::fopen(fp, "rb")) {
         char line[256];

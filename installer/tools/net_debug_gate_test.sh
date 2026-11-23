@@ -12,7 +12,8 @@ import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 h = (p / "jsp_net_debug_gate.h").read_text(encoding="utf-8")
 keys = re.findall(r'^\s+"(JSP_[A-Z_]+)",', h[h.index("kGated[]"):h.index("};", h.index("kGated[]"))], re.M)
-assert len(keys) == 7, keys
+assert len(keys) == 9, keys
+assert {"JSP_ROLLBACK_INPUTS", "JSP_ROLLBACK_INPUTS_SKIP"} <= set(keys), keys
 bad = []
 for f in sorted(p.glob("*.cpp")) + sorted(p.glob("*.h")):
     if f.name == "jsp_net_debug_gate.h": continue
