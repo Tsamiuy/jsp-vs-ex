@@ -162,7 +162,7 @@ Heavy fights can drop to about 20 frames per second. The Training freeze after R
 
 More symptoms and the log places: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-To report a bug, click **Make a support bundle (JSP Fan Revival)** in the Start menu (portable zip: double-click `support-bundle.cmd`). It writes `jsp-support-<time>.zip` on the Desktop. It holds logs and settings as text, never the EBOOT, disc files or saves, and it sends nothing anywhere. Attach it to a [new issue](https://github.com/Tsamiuy/jsp-vs-ex/issues/new/choose) and say which graphics card and CPU you have. The forms are: bug report, performance report, play-test report, feature request, and feedback or question. Never attach game files.
+To report a bug, click **Make a support bundle (JSP Fan Revival)** in the Start menu (portable zip: double-click `support-bundle.cmd`). It writes `jsp-support-<version>-<time>.zip` on the Desktop. It holds logs and settings as text, never the EBOOT, disc files or saves, and it sends nothing anywhere. Attach it to a [new issue](https://github.com/Tsamiuy/jsp-vs-ex/issues/new/choose) and say which graphics card and CPU you have. The forms are: bug report, performance report, play-test report, feature request, and feedback or question. Never attach game files.
 
 <p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 

@@ -56,4 +56,4 @@ body:
     id: bundle
     attributes:
       label: Support bundle (installer only)
-      description: "Drag jsp-support-<time>.zip here. Never attach game files, EBOOTs, saves or keys."
+      description: "Drag jsp-support-<version>-<time>.zip here. Never attach game files, EBOOTs, saves or keys."
