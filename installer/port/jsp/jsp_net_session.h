@@ -9,6 +9,7 @@
 //   IRendezvous      how two peers learn each other: DirectRendezvous (host/join by IP:port, implemented) or a re-psn room (design only).
 //   NetSession       GekkoNet wrapper: slots, local delay, QUEUED events (the stepper runs them one tick per main-loop iteration), desync/disconnect events.
 #pragma once
+#include "jsp_host_abort.h"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -311,7 +312,7 @@ public:
     bool replay_user_data(std::vector<uint8_t>& out) const;   // Replay mode: the user data stored in the replay
     bool replay_finished() const { return replay_finished_; }
     const std::string& error() const { return start_error_; }
-    bool running() const { return gs_ != nullptr && !failed_; }
+    bool running() const { std::lock_guard<std::recursive_mutex> lk(gmu_); return gs_ != nullptr && !failed_; }
     bool synced() const { return started_; }                  // all remotes connected and sync handshake done
     // Local input for the coming update for local player n (0..local_count-1), in wire form; every local player once per update().
     void set_local_input(uint8_t local_player, const uint8_t* wire_input);
@@ -338,8 +339,11 @@ public:
     // called every iteration it may (a two-copy test: the game skipped update while the figure was >= 1, so the figure never changed again).
     uint32_t pace_sleep_ms(uint32_t tick_ms);
     float frames_ahead() const;                               // >= ~1: the caller should wait a tick (pacing)
-    bool failed() const { return failed_; }
-    const std::string& failure() const { return failure_; }
+    bool failed() const { std::lock_guard<std::recursive_mutex> lk(gmu_); return failed_; }
+    std::string failure() const { std::lock_guard<std::recursive_mutex> lk(gmu_); return failure_; }   // by value: the keepalive worker may write it
+    // FIX (host abort): the frame clock's failure request for this session; empty unless a Game session with a live keepalive worker (stress, replay and
+    // keepalive_stale_ms = 0 sessions have none). Retired by stop() and fail().
+    HostAbortHandle host_abort_handle() const { std::lock_guard<std::recursive_mutex> lk(gmu_); return host_abort_ && !host_abort_->retired.load() ? host_abort_ : HostAbortHandle{}; }
     bool desynced() const { return desync_tick_ != kNoTick; }
     int first_desync_tick() const { return desync_tick_ == kNoTick ? -1 : desync_tick_; }   // lowest tick (stepper tick numbering) reported different
     std::vector<SessionEvent> take_events();
@@ -372,6 +376,7 @@ private:
     std::atomic<uint64_t> game_call_ms_{0}; std::atomic<uint32_t> max_gap_ms_{0};
     mutable std::recursive_mutex gmu_;                         // every GekkoNet call and events_ / psaves_ / pending_ access
     std::thread ka_; std::atomic<bool> ka_stop_{false}; std::atomic<uint64_t> last_poll_ms_{0}, ka_polls_{0};
+    HostAbortHandle host_abort_;                               // published and retired under gmu_; the worker captures its own lifetime
     void* gs_ = nullptr;                                       // GekkoSession*
     SessionPlan plan_; SessionConfig cfg_;
     std::vector<uint8_t> pending_;                            // local inputs for the coming tick

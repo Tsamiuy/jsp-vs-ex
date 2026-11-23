@@ -27,6 +27,8 @@
 #include "jsp_step_effects.h"
 #include "jsp_step_input.h"
 #include "jsp_stall_rule.h"
+#include "jsp_host_abort.h"
+#include <memory>
 #include "cellPad.h"   // toolkit libs/input (CMakeLists: this file only): CellPadInfo2 and patch 7915's g_cellpad_canon_hook / g_cellpad_info_hook
 
 extern "C" {
@@ -233,6 +235,12 @@ uint32_t g_ack_before = 0;
 long long g_ack_wait_qpc = 0, g_ack_drain_qpc = 0;   // this vblank's waiting time outside / inside the drains (QPC units)
 uint32_t g_ack_logs = 0;
 std::atomic<int> g_ls_failed{0};            // the lockstep clock gave up on the guest (kAckFailMs): read by jsp_stepper_lockstep_failed
+// FIX (the frame clock's failure reaches the peer, the a46e512 design): the session's host abort request (jsp_host_abort.h). Written by the main thread
+// (jsp_stepper_lockstep_start / jsp_stepper_lockstep) with std::atomic_store; the frame clock thread takes a snapshot at the start of each pass (g_pass_owner)
+// and posts to that snapshot at both failure sites, so a pass that began in an ended match posts to its (retired) handle, never to the next session's.
+std::shared_ptr<jspnet::HostAbort> g_ls_owner;
+std::shared_ptr<jspnet::HostAbort> g_pass_owner;   // frame clock thread only
+void report_failure() { if (g_pass_owner) g_pass_owner->post(); }   // the keepalive worker ends the session (NetSession::fail); nothing here touches the guest
 }  // namespace
 static jsr::State g_lf;                     // frame clock thread only (and jsp_stepper_lockstep): the lost-flip rule and its failure timers (jsp_stall_rule.h)
 namespace {
@@ -262,6 +270,7 @@ bool vblank_ack(int rsx_ok, bool resumable = false)
                          (double)g_ack_wait_qpc / qf.QuadPart, (double)g_ack_drain_qpc / qf.QuadPart, (int)g_jsp_main_stage, (int)jsp_net_vblank_counter());
             if (g_ack_wait_qpc >= (long long)kAckFailMs * qms) {
                 jsr::note_fail(g_lf, GetTickCount64());   // FIX (review of PR 248): the same release timer as a no-flip failure (jsp_rollback_clock_turbo)
+                report_failure();
                 if (!g_ls_failed.exchange(1))
                     std::fprintf(stderr, "[step] FAILED: the guest has not taken a vblank for %llu s: the match must end (jsp_stepper_lockstep_failed)\n", (unsigned long long)(kAckFailMs / 1000));
             }
@@ -307,9 +316,10 @@ constexpr uint32_t kStretchMaxUs = 2000;    // at most 2 ms (6%) longer per tick
 }
 static ULONGLONG g_ls_last_ms = 0;                                 // frame clock thread only: GetTickCount64 of the last lockstep flip
 // FIX (review of PR 248, the freeze timeout): on = a match starts: the no-flip deadline runs from now (jsr::start), not from a first flip that may never come.
-// off (end_with, after the boundary read the flag) also clears the failure flag, so a later match's pump watchdog (jsp_net_game.cpp) never sees this one's.
+// off (end_with, after the boundary read the flag) also clears the failure flag and the host abort handle, so a later match never sees this one's.
 extern "C" void jsp_stepper_lockstep(int on)
 {
+    if (!on) std::atomic_store(&g_ls_owner, std::shared_ptr<jspnet::HostAbort>());
     if (on) { QueryPerformanceFrequency(&g_ls_qf); g_ls_next = 0; g_ls_last = 0; g_ls_second = 0; g_ls_flips = g_ls_idle = g_ls_restarts = g_ls_stretch_total_us = 0; g_ls_stretch_us.store(0); g_ls_failed.store(0); g_ls_last_ms = 0; jsr::start(g_lf, GetTickCount64()); }
     else {
         if (g_lockstep.load()) std::fprintf(stderr, "[step] lockstep clock off: %llu flips, %llu idle vblanks, %llu schedule restarts (a flip over half a period late), time-sync stretch %.1f ms in all\n",
@@ -317,6 +327,13 @@ extern "C" void jsp_stepper_lockstep(int on)
         g_ls_failed.store(0);
     }
     g_lockstep.store(on ? 1 : 0);
+}
+// A match starts with its session's host abort handle (NetSession::host_abort_handle; empty = no keepalive worker, the boundary alone ends the match).
+// std::atomic_load / atomic_store rather than std::atomic<std::shared_ptr>, which libc++ does not have.
+extern "C" void jsp_stepper_lockstep_start(jspnet::HostAbortHandle owner)
+{
+    std::atomic_store(&g_ls_owner, std::move(owner));
+    jsp_stepper_lockstep(1);
 }
 // The boundary (main thread, after a session update): stretch the next lockstep period by `us` (capped at kStretchMaxUs per period). Returns 0 when the
 // lockstep clock is off (the caller sleeps instead, as before).
@@ -491,6 +508,7 @@ static bool lost_flip_pass(ULONGLONG last_flip_ms)
     }
     const jsr::Act a = jsr::step(g_lf, s);
     if (a == jsr::Act::Fail) {
+        report_failure();
         if (!g_ls_failed.exchange(1))
             std::fprintf(stderr, "[step] FAILED: no flip for %llu s%s (flip status %u, queued %u reached %u completed %u): the match must end (jsp_stepper_lockstep_failed)\n",
                          (unsigned long long)(jsr::kFailMs / 1000), last_flip_ms ? "" : " since the lockstep clock started", s.status, s.queued, s.reached, s.completed);
@@ -523,8 +541,9 @@ static bool owed_vblank_pass(int rsx_ok)
 // The frame clock (main.cpp). Returns 1 when this pass was handled by the replay clock, 2 when by the lockstep clock (main.cpp goes on to present / drain / pump).
 extern "C" int jsp_rollback_clock_turbo(int rsx_ok)
 {
+    g_pass_owner = std::atomic_load(&g_ls_owner);   // this pass's session (see g_ls_owner)
     // FIX (review of PR 248, the freeze timeout's owner): a failed stall (jsr::kFailMs without a flip, or kAckFailMs without a vblank taken) is ended by the
-    // pump thread (jsp_net_game.cpp: session aborted, the peer told). If the guest still has not flipped kReleaseMs later, the game thread cannot reach the
+    // session's keepalive worker (the host abort request above: session failed, the peer sees the disconnect). If the guest still has not flipped kReleaseMs later, the game thread cannot reach the
     // boundary that would turn this clock off, so this thread (which stays responsive: main.cpp calls it every pass) lets go of the guest itself: the
     // lockstep clock goes off and the normal frame clock takes over (an open vblank closes in vblank_ack). The failure flag stays set for the boundary.
     if (g_lockstep.load(std::memory_order_relaxed) && jsr::release_due(g_lf, GetTickCount64())) {

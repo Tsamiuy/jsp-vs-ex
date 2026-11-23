@@ -210,8 +210,8 @@ int main(int argc, char** argv)
     int poll_stall_at = -1, poll_stall_ms = 0; bool poll_stalled = false; if (const char* ps = arg(argc, argv, "--poll-stall", "")) std::sscanf(ps, "%d,%d", &poll_stall_at, &poll_stall_ms);   // --poll-stall TICK,MS: from that tick the loop only polls (as a long commit gate does) for MS
     // --busy-stall TICK,MS: from that tick the loop sleeps for MS WITHOUT calling the session (a replay or a slow render on the game thread); only the keepalive thread can keep the peer alive
     int busy_at = -1, busy_ms = 0; bool busy_done = false; if (const char* bs = arg(argc, argv, "--busy-stall", "")) std::sscanf(bs, "%d,%d", &busy_at, &busy_ms);
-    // FIX (review of PR 248, the freeze timeout's owner): --stall-abort MS: during the busy stall another thread (the game's pump thread) ends the session MS
-    // after it began, as pump_tick does on the frame clock's failure, while the game thread is still away; the keepalive thread alone would keep the peer waiting
+    // FIX (review of PR 248, the freeze timeout's owner): --stall-abort MS: during the busy stall another thread (the game's frame clock) posts the session's
+    // host abort request (jsp_host_abort.h) MS after it began, while the game thread is still away; the keepalive worker consumes it and ends the session
     const int stall_abort_ms = atoi(arg(argc, argv, "--stall-abort", "-1"));
     uint64_t iters_after_first_run = 0, runs_after_first = 0, live_after_first = 0; bool seen_run = false;   // window: first tick .. the tick `ticks` (the linger at the end is not counted)
     auto one_iteration = [&]() {
@@ -223,7 +223,8 @@ int main(int argc, char** argv)
         if (busy_at >= 0 && !busy_done && (int)max_tick >= busy_at) {
             busy_done = true;
             std::thread owner;
-            if (stall_abort_ms >= 0) owner = std::thread([&] { sleep_ms(stall_abort_ms); s.abort("frame clock stalled"); std::printf("STALL-ABORT by the owner thread at %d ms\n", since()); std::fflush(stdout); });
+            if (stall_abort_ms >= 0) { const HostAbortHandle h = s.host_abort_handle();
+                owner = std::thread([&, h] { sleep_ms(stall_abort_ms); const bool ok = h && h->post(); std::printf("STALL-ABORT %s by the owner thread at %d ms\n", ok ? "posted" : "NOT posted (no handle)", since()); std::fflush(stdout); }); }
             sleep_ms(busy_ms);
             if (owner.joinable()) owner.join();
         }

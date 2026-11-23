@@ -198,6 +198,8 @@ __pycache__/
 !/installer/tools/net_session_test.cpp
 !/installer/tools/net_session_test.sh
 !/installer/tools/net_replay_test.cpp
+!/installer/tools/host_abort_test.cpp
+!/installer/tools/host_abort_test.sh
 !/installer/tools/net_online_test.cpp
 !/installer/tools/net_online_test.sh
 !/installer/tools/net_repsn_test.cpp

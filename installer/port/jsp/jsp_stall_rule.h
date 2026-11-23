@@ -16,8 +16,9 @@
 // the same end as a vblank the guest never takes.
 // FIX (review of PR 248, the freeze timeout): (1) the no-flip deadline starts when the lockstep clock starts (start()): before the first live flip the
 // last-flip time is 0, and a guest that never flipped at all was never failed. (2) The failure must reach an owner that stays responsive: the flag was
-// consumed only at the tick boundary on the game thread, which a guest stalled for good never reaches. Now the rollback layer's pump thread ends the
-// session as soon as the flag is set (jsp_net_game.cpp pump_tick: the peer is told at once, the keepalive stops answering), and if no flip came for
+// consumed only at the tick boundary on the game thread, which a guest stalled for good never reaches. Now the frame clock posts the session's host abort
+// request as soon as it fails (jsp_host_abort.h) and the session's keepalive worker ends the session (NetSession::fail: the peer sees the disconnect at
+// once, the keepalive stops answering; no guest state is touched off the game thread), and if no flip came for
 // kReleaseMs after the failure the frame clock itself hands the guest back to the normal frame clock (release_due), so the game thread can reach its
 // boundary and end the match locally. Both owners act on the frame clock's own state; nothing waits on the stalled thread.
 #pragma once

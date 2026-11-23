@@ -182,10 +182,11 @@ KO_KINDS = ("ko_predicted", "ko_confirmed", "ko_agree", "ko_gap")
 
 
 def owner_check(ho, co, hs, cs, tmp, T):
-    """FIX (review of PR 248): stall_owner. The host's game thread is away 7 s (from tick 195); its owner thread ends the session 1 s in. The client must
+    """FIX (review of PR 248): stall_owner. The host's game thread is away 7 s (from tick 195); its frame clock posts the host abort 1 s in and the keepalive
+    worker ends the session. The client must
     see the disconnect about 1 s after its last new tick (well inside the 7 s stall and before its own 5 s timeout), then run on to the end alone."""
     f = []
-    if "STALL-ABORT" not in ho: f.append("host: the owner thread did not end the session")
+    if "STALL-ABORT posted" not in ho: f.append("host: the owner thread did not post the host abort")
     if "frame clock stalled" not in hs: f.append("host: the session did not fail with the owner's reason: " + hs[-160:])
     m = re.search(r"DISCONNECT-EVENT (\d+) ms after", co)
     if not m: f.append("client: no disconnect event: " + cs[-200:])
