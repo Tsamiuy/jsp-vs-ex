@@ -158,7 +158,7 @@ SCENARIOS = {
     "skip_final_blackout_resume": (["--local", "2", "--skip-final", "1", "--blackout", "1000,2500", "--timeout-ms", "8000"], ["--local", "2", "--skip-final", "1", "--blackout", "1000,2500", "--timeout-ms", "8000"], "agree_rb"),
     "skip_final_cheat": (["--local", "2", "--skip-final", "1"], ["--local", "2", "--skip-final", "1", "--cheat", "300"], "cheat"),
     "skip_final_record_replay": (["--local", "1", "--skip-final", "1", "--record", "{tmp}/h.gkrp"] + ADV, ["--local", "1", "--skip-final", "1", "--record", "{tmp}/c.gkrp"] + ADV, "replay"),
-    # ENHANCEMENT (lobby): three matches in a row in ONE process per peer, on the same NetSession object, socket and message channel: start, stop, start, stop,
+    # ENHANCEMENT (session restart): three matches in a row in ONE process per peer, on the same NetSession object, socket and message channel: start, stop, start, stop,
     # start (NetSession::stop and the GekkoNet adapter singleton rebinding). Every round must agree like impaired_2x2 (equal hashes, rollbacks, no desync).
     "restart_3_rounds": (["--local", "2", "--rounds", "3"] + IMP, ["--local", "2", "--rounds", "3"] + IMP, "agree_rounds"),
     # FIX (review of PR 248, jsp_net_ko_rule.h): the match end rules. The host stops pressing (--idle-from 150: the all-zero input GekkoNet also fills in for a

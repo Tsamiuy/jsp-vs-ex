@@ -146,7 +146,7 @@ int main(int argc, char** argv)
         std::memcpy(&plan.remotes[0].ep, raw, sizeof(Endpoint));
     }
 
-    // ENHANCEMENT (lobby: sessions opened and closed at runtime): --rounds N plays N matches one after another with the SAME NetSession object, mux and
+    // ENHANCEMENT (sessions opened and closed at runtime): --rounds N plays N matches one after another with the SAME NetSession object, mux and
     // message channel (as the game reuses its one NetSession for every lobby and match): NetSession::stop(), a ROUND barrier on the channel, start() again (the
     // GekkoNet adapter singleton must rebind). Each round prints its SUMMARY line (round=K/N); the tick log and recording are the last round's. The loop body
     // below is not re-indented, to keep the diff small.
@@ -369,7 +369,7 @@ int main(int argc, char** argv)
     // two rules for 7: live ticks per iteration (sparse inputs) and Runs (live + replay) per iteration
     const int rc = s.failed() ? 4 : ((min_rate > 0 && rate < min_rate) || (min_all > 0 && all_rate < min_all)) ? 7 : ref_bad ? 5 : 0;
     if (rc || round >= rounds) return rc;
-    // ENHANCEMENT (lobby): the next round on the same objects. stop() must leave nothing of this session behind (no events, not synced, not failed, no stats).
+    // ENHANCEMENT (session restart): the next round on the same objects. stop() must leave nothing of this session behind (no events, not synced, not failed, no stats).
     s.stop();
     { const SessionStats z = s.stats();
       if (s.running() || s.synced() || s.failed() || !s.take_events().empty() || z.advances || z.saves || z.rollbacks) { std::printf("SUMMARY role=%s stop() left session state behind (round %d)\n", role.c_str(), round); return 8; } }
