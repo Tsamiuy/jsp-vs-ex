@@ -235,14 +235,35 @@ struct SessionConfig {
     // loss (read in GekkoNet's backend.cpp): start() refuses unequal values. Different peers may use different delays.
     std::vector<uint8_t> local_delay;        // missing entries = 0
     uint32_t disconnect_timeout_ms = 5000;   // 0 = never
-    bool desync_detection = true;            // forces limited_saving off (GekkoNet checks only without limited saving)
+    bool desync_detection = true;            // without limited_saving: every saved frame's checksum is compared; with it: a health frame every 16 ticks (GekkoNet's HEALTH_CHECK_INTERVAL)
+    // ENHANCEMENT (rollback latency, A/B, off by default): GekkoNet's limited (sparse) saving. Off, every live and every re-simulated tick is a Save (a full snapshot
+    // commit here, ~13 ms measured); on, only the confirmed frame is saved (once per rollback, or a catch-up rollback when the last save is a prediction window old) plus a
+    // health-check save every 16 ticks. Fewer saves, longer re-simulations: chosen by measurement (docs/ROLLBACK.md, the bench). Game sessions only.
+    bool limited_saving = false;
     // Keepalive thread: GekkoNet's Poll() sends its NetworkHealth ping every 500 ms and the peer's disconnect timer counts any packet received, but only
     // while somebody CALLS poll. When the game thread is busy for seconds (a replay, a slow render), a thread polls instead once no poll happened for this long.
     // 0 = no thread. All GekkoNet calls are serialized by one mutex.
     uint32_t keepalive_stale_ms = 250;
+    // ENHANCEMENT (replays, opt-in): record the match's CONFIRMED inputs and the checksum of every confirmed tick (GekkoNet's replay format, GKRP v2), so a
+    // later replay session can play the match back and name the first tick whose state differs. The recording starts at GekkoNet frame 0 (the session's
+    // base tick) without an initial state: a playback must start from the same fight start, which the user data has to identify (the game glue stores its
+    // build id and the settings there). Game sessions only.
+    bool record = false;
+    std::vector<uint8_t> record_user_data;   // copied into the replay (GekkoNet keeps it as opaque bytes)
+    // GekkoNet writes a confirmed tick's checksum into the recording at the start of the NEXT update; our saves are completed asynchronously (complete_save), so
+    // a recording read while a save is pending would carry an unfilled checksum. recording() therefore serves a copy taken at the start of an update (no save
+    // pending), refreshed every `record_copy_every` updates (0 = never: recording() then needs an idle session).
+    uint32_t record_copy_every = 60;
 };
 
-enum class SessionEventKind { Syncing, Connected, Started, Disconnected, Desync, Failed };
+// ENHANCEMENT (replays and the rollback bench): what kind of GekkoNet session a NetSession runs.
+//   Game    two or more peers over the UdpMux (start)
+//   Stress  every player local, no network: GekkoNet's stress session rolls back `distance` ticks EVERY update and replays them, comparing the checksum of
+//           each re-simulated tick with its first pass (a determinism check, and the worst-case rollback load for timing). start_stress.
+//   Replay  plays a recorded match back from its bytes, comparing every recorded checksum. start_replay.
+enum class SessionMode : uint8_t { Game, Stress, Replay };
+
+enum class SessionEventKind { Syncing, Connected, Started, Disconnected, Desync, Failed, ReplayFinished };
 struct SessionEvent {
     SessionEventKind kind;
     int handle = -1;                         // slot
@@ -255,6 +276,12 @@ struct SessionStats {
     uint32_t rollbacks = 0, max_rollback_frames = 0, stalls = 0;
     uint64_t advances = 0, resimulated = 0, saves = 0, loads = 0, deferred = 0;
     float frames_ahead = 0;
+    float ping_ms = -1, jitter_ms = 0;        // GekkoNet's average round trip to the first remote player and its jitter (-1: no remote / not known yet)
+    float last_ping_ms = -1;                 // ENHANCEMENT (adaptive input delay, rule 2): GekkoNet's last single round trip to that player (one every 500 ms)
+    uint32_t rtt_seq = 0;                    // FIX (RTT sampling): round trips measured so far for that player (GekkoNet's count, +1 per ping answer): a reader
+                                             // that sees the same count again has no new round trip, whatever last_ping_ms says
+    int32_t acked_frame = -1;                // ENHANCEMENT (match perf summary): the newest frame of this PC's input that player acknowledged (-1 none)
+    uint8_t local_delay = 0;                  // the input delay this peer's local players run with now
     uint64_t keepalive_polls = 0;            // polls made by the keepalive thread (the game thread was busy)
 };
 
@@ -265,6 +292,24 @@ public:
     // Creates the GekkoNet session and adds actors in slot order (every peer adds the same order, so handles agree). One NetSession per
     // process: GekkoNet's adapter has no user pointer, so the adapter is a process-wide singleton bound to `mux`. false + error() on refusal.
     bool start(UdpMux& mux, const SessionPlan& plan, const SessionConfig& cfg);
+    // ENHANCEMENT (rollback bench): a local session of `players` local players (slots 0..players-1, set_local_input for each) that rolls back `distance`
+    // ticks every update (1..max_prediction). No socket, no keepalive thread, no recording. A Desync event names a tick whose re-simulation gave a
+    // different checksum than its first pass.
+    bool start_stress(uint8_t players, uint32_t distance, const SessionConfig& cfg);
+    // ENHANCEMENT (replays): plays back a recording (bytes of recording()). The replay's own config is used; its input size must equal cfg.input_size and
+    // its player count must be 1..4. set_local_input is ignored. Ends with a ReplayFinished event; the first checksum that differs from the recording
+    // raises a Desync event (tick = stepper numbering, local_hash = this run, remote_hash = the recording). The stored user data: replay_user_data().
+    bool start_replay(const std::vector<uint8_t>& bytes, const SessionConfig& cfg);
+    // ENHANCEMENT (lobby: sessions opened and closed at runtime): ends the session (keepalive thread joined, GekkoNet session destroyed, the adapter
+    // singleton unbound) and returns this object to its constructed state, so start(), start_stress() or start_replay() may run again in the same process.
+    // The peer is NOT told: abort() first for that. Read recording() / stats() before it. Idempotent; never call it from inside a session callback.
+    void stop();
+    SessionMode mode() const { return mode_; }
+    // ENHANCEMENT (replays): the recording so far, ready to save to disk (only with cfg.record). Read live when no save is pending, else the last copy (see
+    // SessionConfig::record_copy_every: it misses at most that many updates at the end). false: not recording, or nothing to serve yet.
+    bool recording(std::vector<uint8_t>& out);
+    bool replay_user_data(std::vector<uint8_t>& out) const;   // Replay mode: the user data stored in the replay
+    bool replay_finished() const { return replay_finished_; }
     const std::string& error() const { return start_error_; }
     bool running() const { return gs_ != nullptr && !failed_; }
     bool synced() const { return started_; }                  // all remotes connected and sync handshake done
@@ -298,11 +343,29 @@ public:
     bool desynced() const { return desync_tick_ != kNoTick; }
     int first_desync_tick() const { return desync_tick_ == kNoTick ? -1 : desync_tick_; }   // lowest tick (stepper tick numbering) reported different
     std::vector<SessionEvent> take_events();
+    // FIX (review of PR 248, the live watermark): the events and GekkoNet's final frame (as final_frame()) read under ONE lock, so a keepalive poll cannot
+    // land between them: when no Disconnected is among the events, *final_frame is from a moment every peer was still connected.
+    std::vector<SessionEvent> take_events(int* final_frame);
     SessionStats stats() const;
     const SessionPlan& plan() const { return plan_; }
+    // ENHANCEMENT (adaptive input delay, test): the input delay of this peer's local players from now on (GekkoNet SetLocalDelay: a longer delay repeats
+    // the last input, a shorter one drops the overlap). Each peer sets only its own delay; the other peer sees only its input stamps. All local players alike.
+    void set_local_delay(uint8_t d);
+    // ENHANCEMENT (rollback hitches): how many ticks this peer may run ahead on predicted inputs (gekko_set_input_prediction_window; at most the
+    // max_prediction the session was created with). Local only: the peers need not agree.
+    void set_prediction_window(uint8_t w);
+    // ENHANCEMENT (rollback latency): every later Load names this frame or a later one (GekkoNet's confirmed frame, held back by a pending rollback),
+    // so the saved states of earlier frames are never loaded again (gekko_final_frame, a local GekkoNet addition: gekkonet/PIN.md). -1 = none / not a game session.
+    int final_frame() const;
 private:
+    uint8_t cur_delay_ = 0;   // the local players' input delay now (set_local_delay)
+
     static constexpr int kNoTick = 0x7fffffff;
     void fail(const std::string& why);
+    bool start_local(SessionMode m, const SessionPlan& plan, const SessionConfig& cfg, uint32_t distance, const std::vector<uint8_t>* bytes);
+    void copy_recording();   // under gmu_, no save pending
+    SessionMode mode_ = SessionMode::Game;
+    std::vector<uint8_t> rec_copy_; uint32_t rec_updates_ = 0; bool recording_ = false, replay_finished_ = false;
     void stop_keepalive();
     void poll_impl();
     void note_game_call();

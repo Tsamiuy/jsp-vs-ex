@@ -311,6 +311,8 @@ endif()
 
 set_source_files_properties(jsp_net_probe.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/network")
+set_source_files_properties(jsp_stepper.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/input")
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"              # verified LOD capability header

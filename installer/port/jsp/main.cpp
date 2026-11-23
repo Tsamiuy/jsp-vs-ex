@@ -239,7 +239,9 @@ static DWORD WINAPI frame_clock(LPVOID)
 
     int turbo_left = 0, turbo_reset = 0;
     for (;;) {
-        if (jsp_rollback_clock_turbo(rsx_ok)) { turbo_left = 1; continue; }
+        { const int tr = jsp_rollback_clock_turbo(rsx_ok);
+          if (tr == 1) { turbo_left = 1; continue; }
+          if (tr == 2) { turbo_left = 1; goto outer_cadence; } }   /* the lockstep clock of a rollback match: present / drain / pump below */
         if (turbo_left) {   /* leaving a replay: restart both clocks from now, or the grid fires its missed ticks in a burst */
             turbo_left = 0;
             QueryPerformanceCounter(&qn);
@@ -623,6 +625,16 @@ int main(int argc, char** argv)
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
+    {   /* Windows 11 drops a process's timer resolution back to ~15.6 ms while its window is covered or minimized (power throttling), so every
+         * Sleep(1) of the game and of the rollback gate would take a whole timer tick. Opt out of that (the call fails harmlessly on older Windows). */
+        /* Looked up at run time: SetProcessInformation and its power-throttling types are Windows 8+/10+ declarations, missing
+         * from the headers at the toolkit's default _WIN32_WINNT (the CI syntax check). Values from processthreadsapi.h:
+         * ProcessPowerThrottling = 4, PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1, ..._IGNORE_TIMER_RESOLUTION = 0x4. */
+        struct { ULONG Version, ControlMask, StateMask; } pt = { 1u, 0x4u, 0u };   /* StateMask 0 = never throttle the timer resolution */
+        using SetProcInfo = BOOL (WINAPI*)(HANDLE, int, LPVOID, DWORD);
+        if (const auto set = (SetProcInfo)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetProcessInformation"))
+            set(GetCurrentProcess(), 4, &pt, (DWORD)sizeof pt);
+    }
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
     /* from jsp-vs-ex jstars/port/main.cpp: sound with a 16-block cellAudio ring (the game asks for 8) and CRI
      * keeping 12 blocks (64 ms) ahead instead of 5, which rides out the late ticks of its sound server (v0.15:

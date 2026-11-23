@@ -36,6 +36,9 @@ posix   | installer/tools/np_log_test.sh {toolkit} {scratch}
 posix   | installer/tools/sys_net_test.sh {toolkit} {scratch}
 posix   | installer/tools/version_line_test.sh
 posix   | installer/tools/net_badge_test.sh
+posix   | installer/tools/net_delay_rule_test.sh
+posix   | installer/tools/fight_setup_rule_test.sh
+posix   | installer/tools/stall_rule_test.sh
 posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py
 posix   | installer/tools/session_startup_test.py
@@ -57,6 +60,7 @@ posix   | installer/tools/net_session_test.sh {scratch}
 posix   | installer/tools/net_session_driver_test.py
 posix   | installer/tools/stepper_test.sh
 posix   | installer/tools/snapshot_ring_test.sh
+posix   | installer/tools/thread_audit_test.sh
 posix   | installer/tools/mods_overlay_test.sh {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
@@ -71,6 +75,9 @@ exclude | installer/tools/net_repsn_test.cpp | compiled and run by net_repsn_tes
 exclude | installer/tools/net_repsn_client_test.cpp | compiled and run by net_repsn_test.sh
 exclude | installer/tools/version_line_test.cpp | compiled and run by version_line_test.sh
 exclude | installer/tools/net_badge_test.cpp | compiled and run by net_badge_test.sh
+exclude | installer/tools/net_delay_rule_test.cpp | compiled and run by net_delay_rule_test.sh
+exclude | installer/tools/fight_setup_rule_test.cpp | compiled and run by fight_setup_rule_test.sh
+exclude | installer/tools/stall_rule_test.cpp | compiled and run by stall_rule_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh
 exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh
 exclude | installer/tools/session_manifest_test.cpp | compiled and run by session_manifest_test.sh
@@ -78,7 +85,9 @@ exclude | installer/tools/net_transport_test.cpp | compiled and run by net_sessi
 exclude | installer/tools/net_m2_link_test.cpp | compiled and run by net_session_test.sh
 exclude | installer/tools/net_session_test.cpp | compiled by net_session_test.sh and run by net_session_test.py
 exclude | installer/tools/net_session_test.py | the two-process driver net_session_test.sh runs (its deadline handling: net_session_driver_test.py)
+exclude | installer/tools/net_replay_test.cpp | compiled and run by net_session_test.sh (stress runs, and the playback of net_session_test.py's record_replay scenario)
 exclude | installer/tools/stepper_test.cpp | compiled and run by stepper_test.sh
 exclude | installer/tools/snapshot_ring_test.cpp | compiled and run by snapshot_ring_test.sh
+exclude | installer/tools/thread_audit_test.cpp | compiled and run by thread_audit_test.sh
 exclude | installer/tools/mods_overlay_test.cpp | compiled and run by mods_overlay_test.sh
 exclude | docs/archive/jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner

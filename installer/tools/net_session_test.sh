@@ -4,7 +4,10 @@
 #   net_transport_test   endpoint wire form, pad wire encoding, message channel with epochs, rendezvous, UDP mux (real localhost UDP)
 #   net_m2_link_test     the real host/client settings handshake (jsp_session_handshake.h) over the session's datagram adapter, 30% loss each way
 #   net_session_test.py  two processes (host and client) of net_session_test: a fake deterministic game driven through the real stepper and glue
-#                        (jsp_stepper.h, jsp_net_glue.h); scenarios with loss, jitter, blackouts, desync detection, refusals and the tick rate
+#                        (jsp_stepper.h, jsp_net_glue.h); scenarios with loss, jitter, blackouts, desync detection, refusals and the tick rate;
+#                        record_replay plays both peers' recordings back with net_replay_test
+#   net_replay_test      the replay and stress modes in one process (stress below: every update rolls back D ticks; --flaky plants a re-simulation
+#                        that differs, which must be reported at exactly that tick)
 #   bash installer/tools/net_session_test.sh [SCRATCH_DIR]
 set -euo pipefail
 d=$(cd "$(dirname "$0")" && pwd)
@@ -18,9 +21,12 @@ for f in "$g"/src/*.cpp; do   # third-party, unchanged: compiled without warning
   g++ "${common[@]}" -I"$g/include/private" -I"$g/thirdparty" -w -c "$f" -o "$out/obj/$(basename "$f" .cpp).o"
 done
 g++ "${common[@]}" -c "$port/jsp_net_session.cpp" -o "$out/jsp_net_session.o"
-for t in net_transport_test net_m2_link_test net_session_test; do
+for t in net_transport_test net_m2_link_test net_session_test net_replay_test; do
   g++ "${common[@]}" "$d/$t.cpp" "$out/jsp_net_session.o" "$out"/obj/*.o -o "$out/$t" -pthread
 done
 "$out/net_transport_test"
 "$out/net_m2_link_test"
-python3 -I "$d/net_session_test.py" --exe "$out/net_session_test"
+for a in "--distance 1" "--distance 4" "--distance 10" "--distance 4 --players 4" "--distance 4 --flaky 200" "--distance 9 --flaky 50"; do
+  "$out/net_replay_test" --mode stress --ticks 600 $a
+done
+python3 -I "$d/net_session_test.py" --exe "$out/net_session_test" --replay-exe "$out/net_replay_test"

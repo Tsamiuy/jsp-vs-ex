@@ -446,14 +446,41 @@ GekkoNetAdapter g_adapter = {ad_send, ad_recv, ad_free};
 // state transfer, see the plan). Fixed little-endian-agnostic: only read back by the same process.
 struct Token { uint32_t magic, frame, token, checksum; };
 constexpr uint32_t kTokenMagic = 0x4A534E32;   // "JSN2" (frame format version 2)
+
+// ENHANCEMENT (replays): the head of a GekkoNet replay (GKRP), as the pinned replay.cpp writes it with zpp::bits (little endian, no padding): header u32,
+// version u32, compressed u8, then GekkoConfig member by member: num_players u8, max_spectators u8, max_input_prediction_window u8, spectator_delay u32,
+// input_size u32, state_size u32, ... GekkoNet has no call that returns a loaded replay's config, and the state size must be ours before a Save writes a
+// Token into GekkoNet's buffer. The host test reads back recordings this session wrote, so a layout change in a GekkoNet update fails there first.
+struct ReplayHead { uint32_t version = 0; uint8_t players = 0; uint32_t input_size = 0, state_size = 0; };
+bool read_replay_head(const std::vector<uint8_t>& b, ReplayHead* h)
+{
+    auto u32 = [&](size_t o) { return (uint32_t)b[o] | (uint32_t)b[o + 1] << 8 | (uint32_t)b[o + 2] << 16 | (uint32_t)b[o + 3] << 24; };
+    if (b.size() < 24 || u32(0) != 0x474B5250u) return false;   // "GKRP"
+    h->version = u32(4); h->players = b[9]; h->input_size = u32(16); h->state_size = u32(20);
+    return h->version == 2;
+}
 }
 
 NetSession::NetSession() {}
-NetSession::~NetSession()
+NetSession::~NetSession() { stop(); }
+
+// ENHANCEMENT (lobby): see the header. Everything start() / start_local() set or counted goes back to its initial value; the next start creates a new GekkoNet
+// session (a new session magic, so stragglers of the old one addressed to it are dropped by GekkoNet) and binds the adapter to its own mux again.
+void NetSession::stop()
 {
-    stop_keepalive();
-    if (gs_) { GekkoSession* g = (GekkoSession*)gs_; gekko_destroy(&g); }
-    g_mux = nullptr;
+    stop_keepalive();   // first: the thread takes gmu_ and calls into GekkoNet
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (gs_) { GekkoSession* g = (GekkoSession*)gs_; gekko_destroy(&g); gs_ = nullptr; }
+    g_mux = nullptr;   // one session per process (see start): nothing else is bound to the adapter
+    g_results.clear();
+    mode_ = SessionMode::Game; cur_delay_ = 0;
+    rec_copy_.clear(); rec_updates_ = 0; recording_ = false; replay_finished_ = false;
+    game_call_ms_.store(0); max_gap_ms_.store(0); ka_stop_.store(false); last_poll_ms_.store(0); ka_polls_.store(0);
+    plan_ = SessionPlan{}; cfg_ = SessionConfig{};
+    pending_.clear(); events_.clear(); psaves_.clear();
+    next_id_ = 1; pending_saves_ = 0; pace_us_ = 0; polled_events_ = 0;
+    started_ = false; failed_ = false; failure_.clear(); start_error_.clear(); desync_tick_ = kNoTick;
+    advances_ = resim_ = saves_ = loads_ = deferred_ = 0;
 }
 
 void NetSession::stop_keepalive()
@@ -493,7 +520,7 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
     c.max_input_prediction_window = cfg.max_prediction;
     c.input_size = cfg.input_size;
     c.state_size = sizeof(Token);
-    c.limited_saving = false;                    // GekkoNet's desync detection works only without limited saving
+    c.limited_saving = cfg.limited_saving;       // see SessionConfig::limited_saving (desync detection then runs on GekkoNet's health frames)
     c.desync_detection = cfg.desync_detection;
     c.check_distance = 0;
     gekko_start(g, &c);
@@ -504,7 +531,7 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
         if (s >= plan.local_first && s < (unsigned)plan.local_first + plan.local_count) {
             const int h = gekko_add_actor(g, GekkoLocalPlayer, nullptr);
             if (h != (int)s) { gekko_destroy(&g); return refuse("local actor handle mismatch"); }
-            gekko_set_local_delay(g, h, (unsigned char)d0);
+            gekko_set_local_delay(g, h, (unsigned char)d0); cur_delay_ = (uint8_t)d0;
         } else {
             const PeerSlots* ps = nullptr;
             for (const PeerSlots& r : plan.remotes) if (s >= r.first_slot && s < (unsigned)r.first_slot + r.count) ps = &r;
@@ -513,6 +540,12 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
             GekkoNetAddress a{w.data(), (unsigned)w.size()};
             if (gekko_add_actor(g, GekkoRemotePlayer, &a) != (int)s) { gekko_destroy(&g); return refuse("remote actor handle mismatch"); }
         }
+    }
+    if (cfg.record) {   // ENHANCEMENT (replays): from frame 0, no initial state (see SessionConfig::record), every confirmed tick's checksum
+        const bool ok = gekko_start_recording(g, false, false) && gekko_record_checksums(g, 1) &&
+                        (cfg.record_user_data.empty() || gekko_set_replay_user_data(g, cfg.record_user_data.data(), (unsigned)cfg.record_user_data.size()));
+        if (!ok) { gekko_destroy(&g); return refuse("the replay recording could not start"); }
+        recording_ = true;
     }
     gs_ = g;
     pending_.assign((size_t)plan.local_count * cfg.input_size, 0);   // zero wire bytes = neutral (see pad_pack_to_wire)
@@ -533,6 +566,85 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
         });
     }
     return true;
+}
+
+bool NetSession::start_stress(uint8_t players, uint32_t distance, const SessionConfig& cfg)
+{
+    SessionPlan p; p.host = true; p.total_players = players; p.local_first = 0; p.local_count = players;
+    return start_local(SessionMode::Stress, p, cfg, distance, nullptr);
+}
+bool NetSession::start_replay(const std::vector<uint8_t>& bytes, const SessionConfig& cfg)
+{
+    return start_local(SessionMode::Replay, SessionPlan{}, cfg, 0, &bytes);
+}
+// Stress and Replay sessions: no socket (the adapter is never set, GekkoNet sends nothing), no keepalive thread, no disconnect timer.
+bool NetSession::start_local(SessionMode m, const SessionPlan& plan, const SessionConfig& cfg, uint32_t distance, const std::vector<uint8_t>* bytes)
+{
+    auto refuse = [&](const std::string& why) { start_error_ = why; return false; };
+    if (gs_) return refuse("already started");
+    if (cfg.record && m != SessionMode::Stress) return refuse("a replay session cannot record");
+    if (!cfg.input_size) return refuse("bad input size");
+    if (cfg.max_prediction >= cfg.ring_depth) return refuse("max_prediction (" + std::to_string(cfg.max_prediction) + ") must be below the snapshot ring depth (" + std::to_string(cfg.ring_depth) + ")");
+    SessionPlan p = plan;
+    GekkoSession* g = nullptr;
+    if (m == SessionMode::Stress) {
+        if (!p.total_players || p.total_players > 4) return refuse("stress: 1 to 4 players");
+        if (!distance || distance > cfg.max_prediction) return refuse("stress: the rollback distance must be 1.." + std::to_string(cfg.max_prediction));
+        if (!gekko_create(&g, GekkoStressSession)) return refuse("gekko_create failed");
+        GekkoConfig c{};
+        c.num_players = p.total_players; c.max_input_prediction_window = cfg.max_prediction; c.input_size = cfg.input_size; c.state_size = sizeof(Token);
+        c.limited_saving = false; c.desync_detection = true; c.check_distance = distance;
+        gekko_start(g, &c);
+        for (unsigned s = 0; s < p.total_players; s++)
+            if (gekko_add_actor(g, GekkoLocalPlayer, nullptr) != (int)s) { gekko_destroy(&g); return refuse("local actor handle mismatch"); }
+        // ENHANCEMENT (replays): a stress session records the INPUTS only (the bench: real local play for the input analysis, installer/tools/replay_inputs.py).
+        // No checksums: the stress session stores a frame's checksum at the end of the update that issued its save, before our asynchronous commit fills it.
+        if (cfg.record) {
+            const bool ok = gekko_start_recording(g, false, false) &&
+                            (cfg.record_user_data.empty() || gekko_set_replay_user_data(g, cfg.record_user_data.data(), (unsigned)cfg.record_user_data.size()));
+            if (!ok) { gekko_destroy(&g); return refuse("the replay recording could not start"); }
+            recording_ = true;
+        }
+    } else {
+        ReplayHead h;
+        if (!bytes || !read_replay_head(*bytes, &h)) return refuse("not a replay this build can read (GKRP version 2)");
+        if (h.input_size != cfg.input_size) return refuse("replay input size " + std::to_string(h.input_size) + ", expected " + std::to_string(cfg.input_size));
+        if (h.state_size != sizeof(Token)) return refuse("replay state size " + std::to_string(h.state_size) + " is not this port's");
+        if (!h.players || h.players > 4) return refuse("replay: 1 to 4 players");
+        if (!gekko_create(&g, GekkoReplaySession)) return refuse("gekko_create failed");
+        if (!gekko_load_replay(g, bytes->data(), (unsigned)bytes->size())) { gekko_destroy(&g); return refuse("the replay could not be read"); }
+        p = SessionPlan{}; p.host = true; p.total_players = h.players;   // local_count 0: every input comes from the replay
+    }
+    plan_ = p; cfg_ = cfg; cfg_.keepalive_stale_ms = 0; mode_ = m;
+    gs_ = g;
+    pending_.assign((size_t)p.local_count * cfg.input_size, 0);
+    last_poll_ms_.store(now_ms());
+    return true;
+}
+
+void NetSession::copy_recording()
+{
+    unsigned len = 0;
+    const unsigned char* d = gekko_peek_recording((GekkoSession*)gs_, &len);
+    if (d && len) rec_copy_.assign(d, d + len);
+}
+bool NetSession::recording(std::vector<uint8_t>& out)
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (!gs_ || !recording_) return false;
+    if (!pending_saves_) copy_recording();   // every save completed: the live recording has every confirmed checksum
+    if (rec_copy_.empty()) return false;
+    out = rec_copy_;
+    return true;
+}
+bool NetSession::replay_user_data(std::vector<uint8_t>& out) const
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (!gs_ || mode_ != SessionMode::Replay) return false;
+    unsigned len = 0;
+    const unsigned char* d = gekko_replay_user_data((GekkoSession*)gs_, &len);
+    out.assign(d, d + (d ? len : 0));
+    return d != nullptr;
 }
 
 void NetSession::set_local_input(uint8_t n, const uint8_t* in)
@@ -613,6 +725,8 @@ bool NetSession::update(std::vector<NetEvent>& out, bool consumer_idle)
     if (!consumer_idle || pending_saves_) { deferred_++; return false; }
     GekkoSession* g = (GekkoSession*)gs_;
     psaves_.clear();
+    // Replays: every save of the last update is complete here, so the live recording is whole; keep a copy for recording() calls made mid-tick.
+    if (recording_ && cfg_.record_copy_every && ++rec_updates_ >= cfg_.record_copy_every) { rec_updates_ = 0; copy_recording(); }
     for (unsigned n = 0; n < plan_.local_count; n++)
         gekko_add_local_input(g, plan_.local_first + n, pending_.data() + (size_t)n * cfg_.input_size);
     int cnt = 0;
@@ -662,6 +776,12 @@ bool NetSession::update(std::vector<NetEvent>& out, bool consumer_idle)
             o.local_hash = s.data.desynced.local_checksum; o.remote_hash = s.data.desynced.remote_checksum;
             if (o.tick < desync_tick_) desync_tick_ = o.tick;
             break;
+        case GekkoReplayDesync:   // ENHANCEMENT (replays): this run's checksum of a recorded tick differs from the recording (reported once, the first)
+            o.kind = SessionEventKind::Desync; o.tick = s.data.replay_desynced.frame + 1;
+            o.local_hash = s.data.replay_desynced.checksum; o.remote_hash = s.data.replay_desynced.recorded_checksum;
+            if (o.tick < desync_tick_) desync_tick_ = o.tick;
+            break;
+        case GekkoReplayFinished: o.kind = SessionEventKind::ReplayFinished; replay_finished_ = true; break;
         default: continue;
         }
         events_.push_back(o);
@@ -671,6 +791,13 @@ bool NetSession::update(std::vector<NetEvent>& out, bool consumer_idle)
 }
 
 std::vector<SessionEvent> NetSession::take_events() { std::lock_guard<std::recursive_mutex> lk(gmu_); std::vector<SessionEvent> v; v.swap(events_); return v; }
+std::vector<SessionEvent> NetSession::take_events(int* ff)
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);   // the keepalive thread polls (and queues a Disconnected) only under this lock
+    std::vector<SessionEvent> v; v.swap(events_);
+    if (ff) *ff = final_frame();                        // recursive: the same lock
+    return v;
+}
 
 SessionStats NetSession::stats() const
 {
@@ -682,8 +809,37 @@ SessionStats NetSession::stats() const
         gekko_rollback_stats((GekkoSession*)gs_, &r);
         s.rollbacks = r.total_count; s.max_rollback_frames = r.max_frames; s.stalls = r.total_stalls;
         s.frames_ahead = gekko_frames_ahead((GekkoSession*)gs_);
+        s.local_delay = cur_delay_;
+        for (unsigned sl = 0; sl < plan_.total_players; sl++) {
+            if (sl >= plan_.local_first && sl < (unsigned)plan_.local_first + plan_.local_count) continue;
+            GekkoNetworkStats ns{}; gekko_network_stats((GekkoSession*)gs_, (int)sl, &ns);
+            if (ns.avg_ping > 0) { s.ping_ms = ns.avg_ping; s.jitter_ms = ns.jitter; s.last_ping_ms = ns.last_ping; }
+            s.rtt_seq = ns.rtt_count; s.acked_frame = ns.last_acked_frame;
+            break;
+        }
     }
     return s;
+}
+
+int NetSession::final_frame() const
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (!gs_ || mode_ != SessionMode::Game) return -1;
+    return gekko_final_frame((GekkoSession*)gs_);
+}
+
+void NetSession::set_prediction_window(uint8_t w)
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (gs_ && mode_ == SessionMode::Game && w) gekko_set_input_prediction_window((GekkoSession*)gs_, w);
+}
+
+void NetSession::set_local_delay(uint8_t d)
+{
+    std::lock_guard<std::recursive_mutex> lk(gmu_);
+    if (!gs_ || d == cur_delay_) return;
+    for (unsigned n = 0; n < plan_.local_count; n++) gekko_set_local_delay((GekkoSession*)gs_, (int)(plan_.local_first + n), d);   // equal on all local players (see start())
+    cur_delay_ = d;
 }
 
 } // namespace jspnet

@@ -44,6 +44,7 @@
 #include <vector>
 #include <utility>
 #include <string>
+#include "jsp_fight_setup_rule.h"   // FIX (review of PR 248): the battle setup table in the checksum (native online: out)
 
 namespace jft {   // tick-keyed pad events (pure)
 
@@ -125,6 +126,7 @@ struct Anchor {
 }  // namespace jft
 
 #ifndef JSP_FIGHT_TICK_TEST
+#include <atomic>
 #include <mutex>
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
@@ -181,6 +183,7 @@ std::vector<uint32_t> g_cams, g_fighters, g_pads;
 uint32_t g_rngc[k_nrng];
 FILE* g_dump = nullptr;
 bool g_snap_on = false;   // JSP_SNAPSHOT=1 accepted by jsp_snapshot_init()
+std::atomic<int> g_setup_out{0};   // FIX (review of PR 248): 1 = a native online fight: the battle setup table is not in `all` (jsp_fight_hash_native_online)
 
 struct Fnv {
     uint64_t h = 0xCBF29CE484222325ull;
@@ -239,20 +242,91 @@ void hash_tick(uint32_t n, uint32_t flip)
     if (!g_hash_on || n < g_start || n >= g_start + g_n || g_cams.empty()) return;
     Hasher H; Fnv rng, glob, seed, setup;
     const uint32_t P = vm_read32(A_RNGP), S = vm_read32(A_SETUPP);
-    if (P) H.bytes(rng, P, 0x28);
+    // FIX (two-PC desync at tick 1, testers on 0.7.0-test3, bundles tb-204931 / tb-204935): the RNG object (0x28 bytes at *(0x009512A4), made by
+    // 0x0001972C, filled by 0x00019604) starts with FIVE HEAP POINTERS (+0x00..+0x10: its sub-objects of 0x790, 0x1C, 0x1C, 0x14 and 0x820 bytes);
+    // only +0x14..+0x23 is the generator's state (xorshift128, stepped by 0x00018E20) and +0x24 a word set to 0 at creation. The object and its
+    // sub-objects are allocated again when a fight is built after other fights (a 3v3, a re-select, cancelled matches), so their addresses follow
+    // what the process did before: a first fight in a fresh process has P=0x1A02D3A0, later ones 0x19FECB70 / 0x19FECB40. Both testers' failing
+    // matches paired different P (host 0x1A02D3A0, joiner 0x19FECB70), so `rng` (and `all`, the rollback checksum) differed from the very first
+    // compared tick while the game state was the same; two copies on one PC always had the same history and the same P. Hashed now: +0x14..+0x27
+    // (the state and +0x24), never the pointers. JSP_FIGHT_HASH_RNG_PTRS=1 hashes the old 0x28 bytes again (A/B).
+    static const bool rng_ptrs = [] { const char* e = std::getenv("JSP_FIGHT_HASH_RNG_PTRS"); return e && e[0] == '1'; }();
+    if (P) { if (rng_ptrs) H.bytes(rng, P, 0x28); else H.bytes(rng, P + 0x14, 0x14); }
     H.bytes(glob, A_GLOB, 0x10);
     if (S) { H.bytes(seed, S + 0x1C, 4); H.bytes(seed, S + 0x48140, 4); }
-    H.bytes(setup, A_BSETUP, 0xB0); H.bytes(setup, A_SCENE, 4);
+    // FIX (second cause of the tick-1 desync; review of PR 248): the battle setup table, see jsp_fight_hash_native_online. In a native online fight it is
+    // still logged (setup=) but left out of `all`, the rollback checksum: that fight never reads it. JSP_FIGHT_HASH_SETUP=1 keeps it in (A/B), only together
+    // with JSP_ROLLBACK_ALLOW_DEBUG=1 (test tooling): set on one PC alone it would only make a false desync, so a player's settings cannot turn it on.
+    {   static const bool setup_keep = [] {
+            const char* e = std::getenv("JSP_FIGHT_HASH_SETUP"); const char* d = std::getenv("JSP_ROLLBACK_ALLOW_DEBUG");
+            return e && e[0] == '1' && d && d[0] && d[0] != '0'; }();
+        jfs::hash([](uint32_t a) { return (uint8_t)vm_read8(a); }, setup, H.all, jfs::in_checksum(g_setup_out.load(std::memory_order_relaxed) != 0, setup_keep)); }
+    // FIX (rollback false desync): 0x0094DEC4 is no scene step in a fight: it counts the sound library's active playbacks (the stores are in func_00662784 /
+    // func_006624DC, called from func_0048DC70 and the CRI range 0x0048xxxx-0x0057xxxx). A playback ends on the host's audio clock, so two PCs saw the count
+    // change 0-4 ticks apart while every gameplay part matched (two-copy tests, ticks 969-1031). Left out of the per-tick hash; JSP_FIGHT_HASH_SCENE=1 keeps it (A/B).
+    { static const bool keep = [] { const char* e = std::getenv("JSP_FIGHT_HASH_SCENE"); return e && e[0] == '1'; }(); if (keep) H.bytes(setup, A_SCENE, 4); }
+    // DIAGNOSTIC (JSP_CAM_DUMP=idx:from:to, test runs only): the raw camera bytes the hash covers (+0x10..+0xB0, +0xF0, +0xF4) of camera idx on every
+    // hashed tick from..to, so two copies' logs name the first byte that splits (a re-run prints again: the last line of a tick is the confirmed one).
+    {   static int ci = -2; static uint32_t c_from = 0, c_to = 0;
+        if (ci == -2) { ci = -1; const char* e = std::getenv("JSP_CAM_DUMP"); if (e && std::sscanf(e, "%d:%u:%u", &ci, &c_from, &c_to) != 3) ci = -1; }
+        if (ci >= 0 && (size_t)ci < g_cams.size() && n >= c_from && n <= c_to) {
+            const uint32_t c = g_cams[(size_t)ci];
+            std::fprintf(stderr, "[camdump] n=%u cam%d=%08X:", n, ci, c);
+            for (uint32_t o = 0x10; o < 0xB0; o += 4) std::fprintf(stderr, " %08X", vm_read32(c + o));
+            std::fprintf(stderr, " | F0=%02X F4=%08X\n", vm_read8(c + 0xF0), vm_read32(c + 0xF4));
+        }
+    }
     std::vector<uint64_t> cam, fi, pad;
-    for (uint32_t c : g_cams) { Fnv f; H.bytes(f, c + 0x10, 0xA0); H.bytes(f, c + 0xF0, 1); H.bytes(f, c + 0xF4, 4); cam.push_back(f.h); }
-    for (uint32_t x : g_fighters) { Fnv f; H.bytes(f, x + 0x90, 0x18); fi.push_back(f.h); }
+    // FIX (false desync online, two-copy runs native-rb1..rb4: camera 2 "split" at ticks 1848-3776 with every other part equal): +0x10..+0x8F is the view
+    // matrix and its inverse, a CACHE the camera step never writes (0x6F688 stores eye +0x90 and target +0xA0 and sets the dirty flag +0x4); a reader that needs
+    // the matrices rebuilds them on demand (vtable slot 0, 0x523D78), and the render does so only for the cameras this PC draws, which differ between the two
+    // players' views. The eye and target stayed equal tick for tick after the "split". Hashed now: the camera's own state (+0x90..+0xAF eye/target,
+    // +0xF0, +0xF4); the cache is left out. JSP_FIGHT_HASH_CAM_CACHE=1 hashes the old range again (A/B).
+    static const bool cam_cache = [] { const char* e = std::getenv("JSP_FIGHT_HASH_CAM_CACHE"); return e && e[0] == '1'; }();
+    for (uint32_t c : g_cams) { Fnv f; if (cam_cache) H.bytes(f, c + 0x10, 0xA0); else H.bytes(f, c + 0x90, 0x20); H.bytes(f, c + 0xF0, 1); H.bytes(f, c + 0xF4, 4); cam.push_back(f.h); }
+    // FIX (false desync on a same-link rematch, two-copy runs native-rm2 / rm3, object dumps): fighter +0x90..+0xA7 is memory the fight never writes (all
+    // zero, constant for a whole first fight). In a later fight of the same process the objects reuse heap that still holds the previous fight's leftovers,
+    // which differ between the two PCs (their after-fight screens ran apart), so every rematch "desynced" at tick 1 with every other part equal, and the
+    // values never changed afterwards. The fi part is still computed and logged, but it is no longer in `all` (the rollback checksum);
+    // JSP_FIGHT_HASH_FIGHTER=1 puts it back (A/B).
+    static const bool fi_in_all = [] { const char* e = std::getenv("JSP_FIGHT_HASH_FIGHTER"); return e && e[0] == '1'; }();
+    for (uint32_t x : g_fighters) {
+        Fnv f;
+        if (fi_in_all) H.bytes(f, x + 0x90, 0x18); else for (uint32_t i = 0; i < 0x18; i++) f.b(vm_read8(x + 0x90 + i));
+        fi.push_back(f.h);
+    }
     for (uint32_t k : g_pads) { Fnv f; H.bytes(f, k + 0x204, 0x14); pad.push_back(f.h); }
+    // ENHANCEMENT (testers): the per-tick [hash] line is an unbuffered write on every tick of a rollback match (JSP_FIGHT_HASH defaults on there); it prints only
+    // with JSP_NET_TICK_LOG=1 or outside a rollback start. The hash itself still feeds jsp_snapshot_tap below (the rollback checksum), unchanged.
+    static const bool show = [] { const char* t = std::getenv("JSP_NET_TICK_LOG"); const char* r = std::getenv("JSP_ROLLBACK"); return (t && t[0] == '1') || !(r && r[0] == '1'); }();
+    // DIAGNOSTIC (two-PC desync at tick 1): the part line of the first 3 hashed ticks of every fight always prints (testers run without
+    // JSP_NET_TICK_LOG), with the raw RNG object and glob words once per fight, so a bundle names the part that splits (the rollback checksum
+    // is only `all` folded to 32 bits).
+    const bool early = !g_first_hashed || n <= g_first_n + 2;
+    if (!g_first_hashed) {
+        std::fprintf(stderr, "[hash] raw n=%u P=0x%08X rng:", n, P);
+        for (uint32_t o = 0; P && o < 0x28; o += 4) std::fprintf(stderr, " %08X", vm_read32(P + o));
+        std::fprintf(stderr, " glob:");
+        for (uint32_t o = 0; o < 0x10; o += 4) std::fprintf(stderr, " %08X", vm_read32(A_GLOB + o));
+        std::fputc('\n', stderr);
+    }
+    if (show || early) {
     std::fprintf(stderr, "[hash] n=%u f=%u all=%016llx rng=%016llx glob=%016llx seed=%016llx setup=%016llx cam=%s fi=%s pad=%s rngc=",
                  n, flip, (unsigned long long)H.all.h, (unsigned long long)rng.h, (unsigned long long)glob.h,
                  (unsigned long long)seed.h, (unsigned long long)setup.h, hex_list(cam).c_str(), hex_list(fi).c_str(), hex_list(pad).c_str());
     for (int i = 0; i < k_nrng; i++) std::fprintf(stderr, "%s%u", i ? "," : "", g_rngc[i]);
     std::fputc('\n', stderr);
+    }
     std::memset(g_rngc, 0, sizeof g_rngc);
+    {   // DIAGNOSTIC: the battle setup words whenever their hash changes (a desync in `setup` alone names the word)
+        static uint64_t last_setup = 0;
+        if (setup.h != last_setup) {
+            last_setup = setup.h;
+            std::fprintf(stderr, "[hash] setup-words n=%u scene=%08X:", n, vm_read32(A_SCENE));
+            for (uint32_t o = 0; o < 0xB0; o += 4) std::fprintf(stderr, " %08X", vm_read32(A_BSETUP + o));
+            std::fputc('\n', stderr);
+        }
+    }
     if (g_snap_on) {
         auto fold = [](const std::vector<uint64_t>& v) { Fnv f; for (uint64_t x : v) for (int i = 0; i < 8; i++) f.b((uint8_t)(x >> (8 * i))); return f.h; };
         const uint64_t tv[8] = {H.all.h, rng.h, glob.h, seed.h, setup.h, fold(cam), fold(fi), fold(pad)};   // order = jss::kCompNameImpl
@@ -510,3 +584,86 @@ extern "C" void jsp_register_fight_hash_overrides(void)
     std::fprintf(stderr, "[hash] hooks installed (%zu addresses)\n", sizeof k_ents / sizeof k_ents[0]);
 }
 #endif  // JSP_FIGHT_TICK_TEST
+// ENHANCEMENT (online rematch): forget the fight that just ended so the next fight (Fight again / a re-select) finds its own scene object,
+// cameras, fighters and pads and anchors again from k=0. Without this g_fight / g_anchored / g_scene stay set from the first fight: a new
+// scene object at another heap address is never counted (k freezes) and one at the same address continues the old count. Call it on the
+// main thread once the rollback session of the old fight has ended (no save or rollback may run during it). Keeps the hooks, the seed
+// override and the parsed pad / anchor press lists; clears the per-fight counters and the anchor's tick state.
+// FIX: also the KO counter addresses and their heap search (jsp_game.cpp), so a rematch never reads the previous fight's KO counters.
+extern "C" void jsp_ko_counters_reset(void);
+extern "C" void jsp_fight_hash_reset_fight(void)
+{
+    jsp_ko_counters_reset();
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_fight = false; g_f0 = 0; g_first_hashed = false; g_first_n = 0;
+        g_scene = g_cur_scene = 0; g_pass_cam = false;
+        g_anchored = g_have_prev = false; g_prev_cam_fp = 0;
+        g_last_log = 0; g_stall_logged = false; g_stall_k = 0;
+        g_done = 0;
+        g_anchor_flip = g_last_tick_flip = g_last_tick_reads = g_scene_passes = g_cam_calls = g_reads = g_outside = 0;
+        g_cams.clear(); g_fighters.clear(); g_pads.clear();
+        for (uint32_t& c : g_rngc) c = 0;
+    }
+    { std::lock_guard<std::mutex> lk(g_anc_mu); g_anc.done = 0; g_anc.set = false; g_anc.skip = 0; }
+    std::fprintf(stderr, "[tick] fight state reset (the next fight anchors again)\n");
+    // FIX (two-PC desync at tick 1, second cause; testers on 0.7.0-test3): 0x009540E4 is Free Battle's battle setup table (0x2C per slot: player /
+    // CPU type, character, CPU level ...), hashed as `setup`. Free Battle's character select writes it; an online fight neither writes nor clears
+    // it (two-copy runs: all zero through whole online matches and rematches). So a PC that played an offline Free Battle before the online match
+    // still held that fight's picks there while a fresh PC held zeroes, and `setup` (and `all`) differed from the first compared tick (run os-fix-a:
+    // host after one offline Free Battle vs a fresh joiner, rng / glob / seed / cam / pad equal).
+    // FIX (review of PR 248): this used to CLEAR the table (44 words), and this function also runs on a desync, a disconnect and a lobby open, where the
+    // title goes on locally. Nothing is written now: the native online fight never reads the table (jsp_fight_hash_native_online), so it is left out of
+    // that mode's checksum instead, and teardown and failed opens leave the player's Free Battle picks alone. Read only: the count is logged.
+    std::fprintf(stderr, "[tick] battle setup table 0x%08X: %u nonzero words (left as they are)\n", A_BSETUP,
+                 jfs::nonzero_words([](uint32_t a) { return (uint32_t)vm_read32(a); }));
+}
+// FIX (review of PR 248, the battle setup table at 0x009540E4 + 0xB0): which code reads it, from the lifted code of the US 1.00 EBOOT. The table is reached
+// only through two TOC words, r2-0x31D0 = 0x009540A4 (the table at +0x40) and r2-0x3194 = 0x009540E8 (= record +0x04); no lis/addi pair builds it. Every
+// function that loads either word lies in 0x00183794..0x001898B8, the battle setup / character select module. Following their callers (direct calls) up to
+// the functions nothing calls directly and resolving those through the descriptor tables: the character select scene (ctor 0x001898B8, vtable
+// 0x0087BDB0 and its neighbours 0x0087BD48..0x0087BE48, created by the scene factories 0x00155F68 and 0x001EB430), the menu pages of 0x0018D278..
+// 0x00190298 (descriptors at 0x0087BF28..0x0087BF74) and the module's static constructor / destructor (0x00184C60 / 0x00184C70 / 0x00185090 /
+// 0x001850A0 in the init and fini lists). The online battle mode (vtable 0x00878A70), the online battle builder 0x002EEE90 and its callers
+// (0x002EF788, 0x002EFBC8, 0x002EFCEC), the online pad take 0x0F76C4 / 0x0F7234, the scene update 0x0014EA68 and the manager update 0x0045222C reach none
+// of them by direct calls. The runs agree: the table stays all zero through whole native
+// online matches while the fighters are the room's picks. So a native online fight's state does not depend on it, and its checksum leaves it out
+// (hash_tick). The offline fight (the rollback bench, the non-native path) is BUILT from it by Free Battle, so there it stays in the checksum.
+// Set by jsp_net_game.cpp at the session start (before its first save), 0 again when the match is reset. Any thread; read by the hash on the game thread.
+extern "C" void jsp_fight_hash_native_online(int on)
+{
+    if (g_setup_out.exchange(on ? 1 : 0) != (on ? 1 : 0))
+        std::fprintf(stderr, "[tick] battle setup table %s the rollback checksum (%s)\n", on ? "left out of" : "back in", on ? "a native online fight never reads it" : "not a native online fight");
+}
+// ENHANCEMENT (online match end): KO state of the current fight, read from the two KO counter objects (vtable 0x00876558, +0x24 KOs scored,
+// +0x28 KOs needed; jsp_game.cpp finds them). Guest heap words: they roll back with the snapshot, so on a confirmed tick both copies agree.
+// Returns -1 while the counters are not known, 0 while nobody has won, 1 red won, 2 blue won.
+extern "C" uint32_t g_ko_counter_addr(int side);
+extern "C" int jsp_fight_ko_winner(void)
+{
+    int won = 0;
+    for (int s = 0; s < 2; s++) {
+        const uint32_t a = g_ko_counter_addr(s);
+        if (!a || vm_read32(a) != 0x00876558u) return -1;
+        const int32_t cnt = (int32_t)vm_read32(a + 0x24), lim = (int32_t)vm_read32(a + 0x28);
+        if (lim > 0 && cnt >= lim && !won) won = s + 1;
+    }
+    return won;
+}
+// ENHANCEMENT (online match end, time-up): the round result object M = *(u32*)0x00952310 (0x14 bytes, guest heap, reset to 0 at round start by
+// 0x000E1A4C; written inside the tick's update, so it rolls back and is deterministic). M+0: a low nibble other than 0 = decided (4 = time up),
+// bit0 red won / bit1 blue won once the judge 0x000E62E8 ran; M+4 the reason (2 = time up). The timer that sets it: rule object vtable 0x00879730,
+// 60 per game second (static analysis; the winner bits are to be confirmed by a run that reaches time-up).
+// Returns -1 unknown (no object), 0 running, 1 red won, 2 blue won, 3 time up with the winner not written yet.
+extern "C" int jsp_fight_end_state(void)
+{
+    const uint32_t m = vm_read32(0x00952310u);
+    if (m < 0x10000000u || m >= 0x20000000u) return -1;
+    const uint32_t ph = vm_read32(m), why = vm_read32(m + 4);
+    if (ph & 1u) return 1;
+    if (ph & 2u) return 2;
+    if (why == 2u && (ph & 0xFu)) return 3;
+    return 0;
+}
+// DIAGNOSTIC (jsp_net_game.cpp JSP_NET_CAM_WATCH): the guest address of camera i, 0 = none.
+extern "C" uint32_t jsp_fight_hash_cam_addr(int i) { return i >= 0 && (size_t)i < g_cams.size() ? g_cams[(size_t)i] : 0u; }

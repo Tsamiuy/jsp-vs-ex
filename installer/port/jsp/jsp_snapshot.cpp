@@ -60,6 +60,7 @@
 #include "jsp_snapshot_sync.h"
 #include "jsp_snapshot_flow.h"
 #include "jsp_thread_registry.h"
+#include "jsp_audit_start.h"   // jau::Starter: the background audit worker's start and the synchronous fallback (registry_audit_tick)
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -92,6 +93,7 @@ extern "C" int jsp_vm_write_watch;                        // main.cpp: 1 = the g
 struct Ps3GateLine { volatile uint32_t seq; volatile int32_t waiters; volatile uint32_t bumps[12]; uint8_t pad[8]; };   // one 64-byte line of everything the bumps write
 extern "C" Ps3GateLine g_ps3_gate_line;
 extern "C" void ps3_lwm_census_invalidate(void);   // patch 7914: drop the lwmutex census's page-readability cache
+extern "C" volatile unsigned long long g_lwm_rd_hits, g_lwm_rd_vq, g_lwm_rd_uncacheable, g_lwm_rd_vq_ns, g_lwm_rd_invalidates;   // its page-readability cache counters (census profile)
 extern "C" void ps3_gate_arm(int on, const uint32_t* park_lrs, int n);
 extern "C" void ps3_gate_arm_transit(const uint32_t* nids, int n);
 extern "C" void ps3_gate_bump_counts(uint32_t* out);   // out[12]
@@ -112,9 +114,28 @@ bool g_fw_on = true;   // frozen-interval write check (JSP_SNAPSHOT_FROZEN_WRITE
 bool g_on = false, g_failed = false, g_suspend = true, g_ls = false, g_dirty = false;
 // A failed ResumeThread can leave a process lock held by a frozen worker. No CRT, logging, mutex or cleanup path is safe.
 // Stop this opt-in diagnostic process without application callbacks; do not continue with partially restored host state.
+// The thread whose ResumeThread failed last (recorded by the resume call) and the Win32 error.
+volatile void* g_rf_handle = nullptr; volatile unsigned long g_rf_err = 0, g_rf_count = 0;
+#ifdef _WIN32
+// Crash note without the CRT (a frozen thread may hold its locks): kernel32 calls only, the text built by hand. Appended to snapshot_fatal.txt in the
+// working folder (game/run), so a run that ends here says why instead of vanishing.
+void write_fatal_note()
+{
+    char b[160]; int n = 0;
+    auto put = [&](const char* t) { while (*t && n < (int)sizeof b - 1) b[n++] = *t++; };
+    auto hex = [&](unsigned long long v) { char d[17]; int k = 0; do { d[k++] = "0123456789ABCDEF"[v & 15]; v >>= 4; } while (v && k < 16); put("0x"); while (k) { if (n < (int)sizeof b - 1) b[n++] = d[--k]; } };
+    put("[snap] FATAL resume failed: tid="); hex(g_rf_handle ? GetThreadId((HANDLE)g_rf_handle) : 0);
+    put(" err="); hex(g_rf_err); put(" failed_resumes="); hex(g_rf_count); put("\r\n");
+    HANDLE f = CreateFileA("snapshot_fatal.txt", FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) { DWORD w = 0; WriteFile(f, b, (DWORD)n, &w, nullptr); FlushFileBuffers(f); CloseHandle(f); }
+    HANDLE e = GetStdHandle(STD_ERROR_HANDLE);
+    if (e && e != INVALID_HANDLE_VALUE) { DWORD w = 0; WriteFile(e, b, (DWORD)n, &w, nullptr); }
+}
+#endif
 [[noreturn]] void resume_failed()
 {
 #ifdef _WIN32
+    write_fatal_note();
     TerminateProcess(GetCurrentProcess(), 0xE0534E50u); // snapshot resume failure; deliberately no stdio diagnostic
     __fastfail(7); // FAST_FAIL_FATAL_APP_EXIT: fallback if self-termination unexpectedly returns
 #else
@@ -214,6 +235,144 @@ struct CostStats {
         for (int b = 0; b < 16; b++) { persist[b] += g.persist[b]; timeout_by[b] += g.timeout_by[b]; }
     }
 } g_cost_commit, g_cost_rb;
+
+// ENHANCEMENT (rollback latency, JSP_SNAPSHOT_COPY_THREADS=N, default 3 in rollback mode, 0 = off): the page copies of a commit or a rollback (the ring's jss::PageCopy
+// batches: ~3,500 pages, 28 MB a commit in a two-copy match, 2.7 ms commit / 5.2 ms rollback on one thread) are split across N worker threads plus the main thread
+// while the other threads are frozen. Every op of a batch touches pages no other op touches (jsp_snapshot_ring.h; host-tested run in reverse order), and the main
+// thread returns only after every op ran, so memory after a batch is byte for byte what the serial loop leaves. The workers are exempt from the freeze (freeze_exempt),
+// idle on a kernel semaphore between batches (ReleaseSemaphore is one system call: WakeByAddress* could spin on an ntdll wait-table lock that a frozen thread holds),
+// and never allocate, log or lock. Claims: one 64-bit word = generation (24 bits) | batch size (20) | next op (20), taken by CAS,
+// so a worker late from an older batch can never claim an op of a newer one; the ops of generation g sit in slot g & 1, rewritten only after batch g has finished.
+// The main thread copies too: a worker that is slow to wake (or still registering) only means the main thread does more of the batch.
+void exempt_add(uint32_t tid);   // with freeze_exempt, below
+namespace pcopy {
+constexpr int kMaxWorkers = 6; constexpr uint32_t kChunk = 8, kMinOps = 64, kMaxOps = 0xFFFFF;
+std::atomic<uint64_t> g_st{0};
+std::atomic<const jss::PageCopy*> g_ops[2];
+std::atomic<uint32_t> g_done{0};
+uint32_t g_gen = 0; int g_workers = 0;
+#ifdef _WIN32
+HANDLE g_sem = nullptr;
+#endif
+uint64_t g_batches = 0, g_serial = 0, g_ops_total = 0; std::atomic<uint64_t> g_ops_workers{0};
+inline void run_op(const jss::PageCopy& o) { std::memcpy(o.d1, o.s1, jss::kPage); if (o.d2) std::memcpy(o.d2, o.s2, jss::kPage); }
+uint32_t drain()   // claims and runs chunks of the current batch until none is left; the ops this thread ran
+{
+    uint32_t mine = 0;
+    for (;;) {
+        uint64_t s = g_st.load(std::memory_order_acquire);
+        const uint32_t n = (uint32_t)(s >> 20) & 0xFFFFFu, i = (uint32_t)s & 0xFFFFFu;
+        if (i >= n) return mine;
+        const jss::PageCopy* ops = g_ops[(s >> 40) & 1].load(std::memory_order_acquire);
+        const uint32_t c = std::min(kChunk, n - i);
+        if (!g_st.compare_exchange_weak(s, s + c, std::memory_order_acq_rel, std::memory_order_acquire)) continue;
+        for (uint32_t j = i; j < i + c; j++) run_op(ops[j]);
+        g_done.fetch_add(c, std::memory_order_release);
+        mine += c;
+    }
+}
+#ifdef _WIN32
+DWORD WINAPI worker_main(void*)
+{
+    for (;;) {
+        if (WaitForSingleObject(g_sem, INFINITE) != WAIT_OBJECT_0) return 0;   // a late count only finds an empty (or a newer) batch: harmless
+        g_ops_workers.fetch_add(drain(), std::memory_order_relaxed);
+    }
+}
+#endif
+int start(int n)   // main thread, outside any freeze (the baseline): the workers live for the process
+{
+#ifdef _WIN32
+    if (!g_sem) g_sem = CreateSemaphoreW(nullptr, 0, 0x7FFFFFFF, nullptr);
+    if (!g_sem) return g_workers;
+    for (int i = g_workers; i < n && i < kMaxWorkers; i++) {
+        DWORD tid = 0;
+        HANDLE h = CreateThread(nullptr, 64 * 1024, worker_main, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, &tid);
+        if (!h) break;
+        exempt_add((uint32_t)tid);   // before the next freeze, which only this thread takes
+        SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL);
+        CloseHandle(h); g_workers++;
+    }
+#else
+    (void)n;
+#endif
+    return g_workers;
+}
+void run(void*, const jss::PageCopy* ops, size_t n)   // jss::CopyFn, frozen: no allocation, no lock
+{
+    g_ops_total += n;
+    if (!g_workers || n < kMinOps || n > kMaxOps) { for (size_t i = 0; i < n; i++) run_op(ops[i]); g_serial++; return; }
+    g_batches++;
+    const uint32_t gen = ++g_gen & 0xFFFFFFu;
+    g_ops[gen & 1].store(ops, std::memory_order_release);
+    g_done.store(0, std::memory_order_relaxed);
+    g_st.store(((uint64_t)gen << 40) | ((uint64_t)n << 20), std::memory_order_release);
+#ifdef _WIN32
+    ReleaseSemaphore(g_sem, g_workers, nullptr);
+#endif
+    drain();
+    while (g_done.load(std::memory_order_acquire) < n) YieldProcessor();
+}
+}  // namespace pcopy
+bool g_audit_exempt = false;   // JSP_SNAPSHOT_AUDIT_EXEMPT (see freeze_exempt)
+
+// ENHANCEMENT (rollback latency, measurement): one `[snap] cost window` line every JSP_SNAPSHOT_COST_WINDOW_S seconds (default 10, 0 = off) and one at the session end
+// (jsp_snapshot_ext_guard_summary), with the threads running: what a commit (save), a rollback (restore) and a whole recovery (rollback request .. the save of the
+// last re-run tick) cost the main thread, as percentiles. save own = save minus the unfrozen waits (the SPU job drain and the precheck: game work the boundary's
+// file/SPU barrier would wait for anyway when no snapshot is taken) and minus the gate-sequence wait. rerun sim/tick = (recovery - restore - re-run saves) / ticks.
+struct CostWindow {
+    std::vector<float> save, own, restore, rerun, sim;
+    double copy_save = 0, copy_rb = 0, freezes_save = 0, freezes_rb = 0; uint32_t rerun_ticks = 0, rerun_ticks_max = 0;
+    Clock::time_point t0 = Clock::now(); unsigned secs = 10; bool read = false;
+    // rerun tracking: set by a rollback, closed by the commit / hash-only save of the tick the rollback came from
+    bool rr_on = false; uint32_t rr_from = 0, rr_ticks = 0; Clock::time_point rr_t0{}; double rr_restore = 0, rr_saves = 0;
+    void init() {
+        if (read) return; read = true;
+        const char* e = std::getenv("JSP_SNAPSHOT_COST_WINDOW_S"); if (e && *e) secs = (unsigned)std::strtoul(e, nullptr, 10);
+        for (auto* v : {&save, &own, &restore, &rerun, &sim}) v->reserve(4096);
+    }
+    static void put(std::vector<float>& v, double x) { if (v.size() < v.capacity()) v.push_back((float)x); }
+    static void pct(std::vector<float>& v, char* b, size_t n) {
+        if (v.empty()) { std::snprintf(b, n, "-"); return; }
+        std::sort(v.begin(), v.end()); double s = 0; for (float x : v) s += x;
+        auto at = [&](double q) { return (double)v[std::min(v.size() - 1, (size_t)(q * (double)(v.size() - 1) + 0.5))]; };
+        std::snprintf(b, n, "p50=%.2f p90=%.2f p99=%.2f max=%.2f mean=%.2f", at(0.5), at(0.9), at(0.99), (double)v.back(), s / (double)v.size());
+    }
+    void note_op(bool commit, double real, double waits, double copy, uint32_t freezes) {
+        init();
+        if (commit) { put(save, real); put(own, real - waits); copy_save += copy; freezes_save += freezes; if (rr_on) rr_saves += real; }
+        else { put(restore, real); copy_rb += copy; freezes_rb += freezes; }
+    }
+    void rollback_begin(uint32_t from, uint32_t to) { rr_on = true; rr_from = from; rr_ticks = from - to; rr_t0 = Clock::now(); rr_restore = 0; rr_saves = 0; }
+    void rollback_done(double real) { if (rr_on) rr_restore = real; }
+    void rollback_failed() { rr_on = false; }
+    void saved(uint32_t k, bool snapshot) {   // a commit (after note_op) or a hash-only save of tick k
+        (void)snapshot;
+        if (!rr_on || k < rr_from) return;
+        rr_on = false; init();
+        const double ms = ms_since(rr_t0);
+        put(rerun, ms); put(sim, rr_ticks ? (ms - rr_restore - rr_saves) / rr_ticks : 0.0);
+        rerun_ticks += rr_ticks; if (rr_ticks > rerun_ticks_max) rerun_ticks_max = rr_ticks;
+    }
+    void maybe_print(bool force) {
+        init();
+        if (!secs && !force) return;
+        const double el = ms_since(t0) / 1000.0;
+        if (!force && el < (double)secs) return;
+        if (save.empty() && restore.empty()) { t0 = Clock::now(); return; }
+        char a[160], b[160], c[160], d[160], e[160];
+        const size_t ns = save.size(), nr = restore.size(), nrr = rerun.size();
+        pct(save, a, sizeof a); pct(own, b, sizeof b); pct(restore, c, sizeof c); pct(rerun, d, sizeof d); pct(sim, e, sizeof e);
+        const uint64_t ow = pcopy::g_ops_workers.load();
+        std::fprintf(stderr, "[snap] cost window secs=%.1f%s | saves=%zu ms %s | save own (excl. job/precheck wait) %s | copy mean %.3f, freezes/save %.2f | restores=%zu ms %s | copy mean %.3f, freezes/restore %.2f | "
+                     "reruns=%zu ticks mean %.2f max %u, recovery ms %s | sim ms/tick %s | copy_threads=%d batches=%llu serial=%llu worker_share=%.0f%% precheck_us=%u audit_exempt=%d\n",
+                     el, force ? " (end)" : "", ns, a, b, ns ? copy_save / (double)ns : 0.0, ns ? freezes_save / (double)ns : 0.0, nr, c, nr ? copy_rb / (double)nr : 0.0, nr ? freezes_rb / (double)nr : 0.0,
+                     nrr, nrr ? (double)rerun_ticks / (double)nrr : 0.0, rerun_ticks_max, d, e, pcopy::g_workers, (unsigned long long)pcopy::g_batches, (unsigned long long)pcopy::g_serial,
+                     pcopy::g_ops_total ? 100.0 * (double)ow / (double)pcopy::g_ops_total : 0.0, g_cfg.precheck_us, g_audit_exempt ? 1 : 0);
+        for (auto* v : {&save, &own, &restore, &rerun, &sim}) v->clear();
+        copy_save = copy_rb = freezes_save = freezes_rb = 0; rerun_ticks = rerun_ticks_max = 0; t0 = Clock::now();
+    }
+} g_cw;
 bool g_pass1 = false;   // between a save and its restore
 bool g_active = false;  // from the first save on (per-tick rng lines)
 std::vector<jss::Range> g_keep;   // the saved set of the current round (for the coverage checks)
@@ -235,6 +394,15 @@ void rng_line(const char* what, uint32_t k)
     std::fprintf(stderr, "[snap] rng %s k=%u P=0x%08X %s s=%08X %08X %08X %08X\n", what, k, P,
                  jss::covers(g_keep, P, 0x28) ? "saved" : "NOT-SAVED", vm_read32(P + 0x14), vm_read32(P + 0x18), vm_read32(P + 0x1C), vm_read32(P + 0x20));
 }
+
+// ENHANCEMENT (rollback latency): host threads of this module that the freeze leaves running. They never touch guest memory outside what the frozen main thread
+// hands them, and no frozen-path step waits for them to be suspended: the parallel page copy workers (always exempt: they do the copy while the others are frozen)
+// and the background thread audit (JSP_SNAPSHOT_AUDIT_EXEMPT, default 1 in rollback mode: frozen inside its Toolhelp system-wide listing, GetThreadContext waits
+// until the listing call returns to user mode, tens of ms). Set on the main thread before any freeze that could see the thread; read during the listing.
+constexpr int kExempt = 8;
+std::atomic<uint32_t> g_exempt_tid[kExempt];
+void exempt_add(uint32_t tid) { for (auto& e : g_exempt_tid) { uint32_t z = 0; if (e.compare_exchange_strong(z, tid)) return; } }
+bool freeze_exempt(unsigned long tid) { for (const auto& e : g_exempt_tid) { const uint32_t x = e.load(std::memory_order_relaxed); if (!x) return false; if (x == tid) return true; } return false; }
 
 struct Th { void* h; unsigned long tid; bool paused = false, context = false; uintptr_t ip = 0; bool gone = false; };
 // Why the last enumeration / freeze failed (raw numbers; formatted only after the threads run again). step: 1 snapshot, 2 enumeration end, 3 OpenThread, 4 SuspendThread, 5 GetThreadContext.
@@ -268,7 +436,7 @@ std::vector<Th> collect_threads(bool* complete, PauseFail* why = nullptr, unsign
     BOOL found = Thread32First(s, &t);
     if (!found) { *complete = GetLastError() == ERROR_NO_MORE_FILES; if (!*complete && why) *why = {2, 0, GetLastError()}; }
     for (; found; found = Thread32Next(s, &t)) {
-        if (t.th32OwnerProcessID != pid || t.th32ThreadID == self) continue;
+        if (t.th32OwnerProcessID != pid || t.th32ThreadID == self || freeze_exempt(t.th32ThreadID)) continue;
         HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, t.th32ThreadID);
         if (h) v.push_back({h, t.th32ThreadID});
         else {
@@ -360,7 +528,7 @@ struct Suspended {
 #ifdef _WIN32
         uint32_t kd[jsy::kThr], id[jsy::kThr], ob[jsy::kThr], lr[jsy::kThr], ov = 0, ub = 0; uint8_t al[jsy::kThr], un[jsy::kThr];
         ps3_hle_thread_census(kd, id, ob, lr, al, un, &ov, &ub);
-        uint64_t m = 0; for (int i = 1; i < jsy::kThr; i++) if (al[i]) m |= 1ull << (i - 1);
+        uint64_t m = 0; for (int i = 1; i < jsy::kThr; i++) if (al[i]) m |= jtb::thread_bit((uint32_t)i);
         return m;
 #else
         return 0;
@@ -400,7 +568,7 @@ struct Suspended {
             const size_t n = R.copy_live(buf, jtr::kSlots, (uint32_t)GetCurrentThreadId(), &ovf);
             if (ovf) { fail = {7, 0, 2}; return false; }
             th.clear();
-            for (size_t i = 0; i < n; i++) th.push_back({buf[i].h, buf[i].tid});   // capacity reserved in prepare()
+            for (size_t i = 0; i < n; i++) if (!freeze_exempt(buf[i].tid)) th.push_back({buf[i].h, buf[i].tid});   // capacity reserved in prepare(); exempt threads stay running
             ppu_alive_at_listing = ppu_alive_mask();
         }
         for (Th& t : th) {
@@ -435,7 +603,10 @@ struct Suspended {
     bool resume()
     {
 #ifdef _WIN32
-        const bool ok = jso::resume_threads(th, [](void* h) { return ResumeThread((HANDLE)h) != (DWORD)-1; });
+        const bool ok = jso::resume_threads(th, [](void* h) {
+            if (ResumeThread((HANDLE)h) != (DWORD)-1) return true;
+            g_rf_handle = h; g_rf_err = GetLastError(); g_rf_count = g_rf_count + 1;   // read by write_fatal_note (resume_failed)
+            return false; });
         if (reg_frozen) { reg_frozen = false; jsp_thread_registry().freeze_end([](std::atomic<uint32_t>* a) { jsp_thread_registry_wake(a); }); }   // births go on
         return ok;
 #else
@@ -540,28 +711,82 @@ void sample_jobserver(jsy::View* v)
     (void)v;
 #endif
 }
+// ENHANCEMENT (rollback latency, measurement): JSP_SNAPSHOT_CENSUS_PROF=1 times each part of the census (frozen samples only) and prints the means every 300
+// samples AFTER the threads run again (report_census_prof, called from the commit path), so nothing is formatted while frozen. Off: one branch per sample.
+// ENHANCEMENT (rollback latency, A/B, off by default): JSP_SNAPSHOT_LWM_CACHE=keep. The lwmutex census caches the readability of each guest page it reads (patch 7914);
+// by default the cache is dropped before every frozen sample and after every per-tick layout discovery, so every sample re-queries Windows for each page (VirtualQuery on the
+// write-watched reservation): 7.6 ms of an 8 ms census, measured (JSP_SNAPSHOT_CENSUS_PROF). With keep it is dropped only when the discovery finds a committed set that differs
+// from the accepted one. Residual race (accepted for the A/B): memory holding a live lwmutex decommitted between this tick's unfrozen discovery and the freeze.
+inline bool lwm_cache_keep() { static const int v = [] { const char* e = std::getenv("JSP_SNAPSHOT_LWM_CACHE"); return e && !std::strcmp(e, "keep") ? 1 : 0; }(); return v != 0; }
+struct CensusProf { bool on = false, read = false; uint64_t n = 0; double part[7] = {0, 0, 0, 0, 0, 0, 0}; } g_cprof;
+inline bool census_prof_on() { if (!g_cprof.read) { g_cprof.read = true; const char* e = std::getenv("JSP_SNAPSHOT_CENSUS_PROF"); g_cprof.on = e && e[0] == '1'; } return g_cprof.on; }
+void report_census_prof()
+{
+    if (!g_cprof.on || g_cprof.n < 300) return;
+    const double n = (double)g_cprof.n; const double* p = g_cprof.part;
+    std::fprintf(stderr, "[snap] census-prof n=%llu ms mean: threads=%.3f lwmutex=%.3f syscalls=%.3f spurs=%.3f fibers=%.3f jobserver=%.3f flip=%.3f\n",
+                 (unsigned long long)g_cprof.n, p[0] / n, p[1] / n, p[2] / n, p[3] / n, p[4] / n, p[5] / n, p[6] / n);
+    {   // the lwmutex census's page-readability cache (toolkit counters, cumulative): hits, VirtualQuery calls and their time, uncacheable addresses, invalidations
+        std::fprintf(stderr, "[snap] census-prof lwm cache: hits=%llu vq=%llu vq_ms=%.3f uncacheable=%llu invalidates=%llu\n", (unsigned long long)g_lwm_rd_hits, (unsigned long long)g_lwm_rd_vq,
+                     (double)g_lwm_rd_vq_ns / 1e6, (unsigned long long)g_lwm_rd_uncacheable, (unsigned long long)g_lwm_rd_invalidates);
+    }
+    g_cprof = CensusProf{}; g_cprof.read = true; g_cprof.on = true;
+}
 void sample_view(jsy::View* v, bool fibers = true)
 {
     *v = jsy::View{};
 #ifdef _WIN32
+    const bool prof = fibers && census_prof_on();   // frozen samples only (the unfrozen presample passes fibers = false)
+    auto t = prof ? Clock::now() : Clock::time_point{};
+    auto lap = [&](int i) { if (prof) { g_cprof.part[i] += ms_since(t); t = Clock::now(); } };
     ps3_hle_thread_census(v->t_kind, v->t_id, v->t_obj, v->t_lr, v->t_alive, v->t_unrel, &v->mark_overflows, &v->mark_unbalanced);
+    lap(0);
     uint32_t o[7] = {0, 0, 0, 0, 0, 0, 0};
     ps3_lwmutex_census(v->t_alive, o, &v->lwm_first_live, &v->lwm_first_stale);
     v->lwm_tracked = o[0]; v->lwm_live_held = o[1]; v->lwm_abandoned = o[2]; v->lwm_dead = o[3]; v->lwm_stale = o[4]; v->lwm_unreadable = o[5]; v->lwm_held_unowned = o[6];
+    lap(1);
     ps3_syscall_census(v->evq_count, v->evq_wait, v->sem_val, v->sem_wait, &v->mtx_held, &v->rw_held);
+    lap(2);
     if (ppu_hle_inject_base) {   // GCM control words (runtime/memory: GCM_CONTROL_GUEST_ADDR = inject base + 0x2000): put at +0, get at +4
         v->rsx_put = vm_read32(ppu_hle_inject_base + 0x2000u); v->rsx_get = vm_read32(ppu_hle_inject_base + 0x2004u); v->rsx_valid = 1;
     }
     {   // (patch 7913) SPURS jobs, fibers, flip state. Read-only, no lock, no allocation; the fiber census must run on the thread that runs the hook (its own fiber is not "away")
         uint32_t s[8] = {0}, f[9] = {0}, g[9] = {0};
-        ps3_spurs_census(s); if (fibers) ps3_fiber_census(f); cellGcm_flip_census(g);
+        ps3_spurs_census(s); lap(3); if (fibers) ps3_fiber_census(f); lap(4); cellGcm_flip_census(g); lap(6);
         v->jobs_valid = 1; v->jobs_inflight = s[0]; v->jq_pending = s[1]; v->pm_busy = s[2]; v->jc_running = s[3]; v->jc_total = s[4]; v->spurs_inst = s[5]; v->async_running = s[6];
         v->fiber_valid = fibers ? 1 : 0; v->fb_total = f[0]; v->fb_ready = f[1]; v->fb_running = f[2]; v->fb_wait_signal = f[3]; v->fb_wait_join = f[4]; v->fb_done = f[5]; v->fb_away = f[6];
         v->fb_sched_running = f[7]; v->fb_lock_held = f[8];
-        sample_jobserver(v);
+        sample_jobserver(v); lap(5);
+        if (prof) g_cprof.n++;
         v->flip_valid = 1; v->flip_status = g[0]; v->flip_req_seq = g[1]; v->flip_tick_seq = g[2]; v->flips_queued = g[3]; v->flips_reached = g[4]; v->flips_completed = g[5];
         v->flip_direct = g[6]; v->gcm_pending = g[7]; v->flip_lock = g[8];
     }
+#endif
+}
+
+// ENHANCEMENT (rollback latency, A/B: JSP_SNAPSHOT_QUICK=1): most saves found the SPURS jobs or the job server still busy on the first freeze (first_reasons
+// 0x12600 on ~90% of depth-2 saves, ~2.6 freezes a save, each a full suspend of ~73 threads plus the census). Two cheap steps around the same frozen judge:
+//  - before each freeze, the job words are read UNFROZEN (read-only, as the gate_ev presample does) and the freeze waits, spinning in 50 us steps, until
+//    they read idle (bounded: quick_wait_us, default 4000), so the freeze lands after the jobs drained instead of finding them busy;
+//  - a frozen sample reads the job words first; when they block, the try is refused right there and the thread, lwmutex and syscall census are skipped
+//    (that try is retried in any case; only a full sample can pass the judge, so what is captured is unchanged).
+inline bool quick_gate_on() { static const int v = [] { const char* e = std::getenv("JSP_SNAPSHOT_QUICK"); return e && e[0] == '1' ? 1 : 0; }(); return v != 0; }
+// JSP_SNAPSHOT_QUICK_SLEEP=1: the unfrozen wait gives its time slice away (Sleep(0)) between reads instead of spinning, in case the spin starves the job threads.
+inline bool quick_wait_sleep() { static const int v = [] { const char* e = std::getenv("JSP_SNAPSHOT_QUICK_SLEEP"); return e && e[0] == '1' ? 1 : 0; }(); return v != 0; }
+inline unsigned quick_wait_us() { static const unsigned v = [] { const char* e = std::getenv("JSP_SNAPSHOT_QUICK_WAIT_US"); return e && *e ? (unsigned)std::strtoul(e, nullptr, 0) : 4000u; }(); return v; }
+// The job words only (no thread walk: the job server's manager is learned by a frozen sample first). True when they would block the judge.
+bool quick_jobs_view(jsy::View* v)
+{
+#ifdef _WIN32
+    *v = jsy::View{};
+    uint32_t sp[8] = {0};
+    ps3_spurs_census(sp);
+    v->jobs_valid = 1; v->jobs_inflight = sp[0]; v->jq_pending = sp[1]; v->pm_busy = sp[2]; v->jc_running = sp[3]; v->jc_total = sp[4]; v->spurs_inst = sp[5]; v->async_running = sp[6];
+    if (g_js_mgr) sample_jobserver(v);
+    const bool jobs = v->jobs_inflight + v->jq_pending != 0, jobsrv = v->js_bits != 0 || v->js_state2 != 0;
+    return (g_cfg.block_jobs && (jobs || jobsrv)) || (g_cfg.block_jobserver && jobsrv);
+#else
+    (void)v; return false;
 #endif
 }
 
@@ -575,6 +800,11 @@ struct GateOps {
     Clock::time_point t_frozen{};           // the last successful freeze (frozen_ms = resume - this)
     bool suspend() {
         if (!g_suspend) { t_frozen = Clock::now(); return true; }
+        if (quick_gate_on()) {   // unfrozen: let the jobs drain before the freeze (bounded)
+            const auto t = Clock::now(); jsy::View qv;
+            while (quick_jobs_view(&qv) && ms_since(t) * 1000.0 < (double)quick_wait_us()) { if (quick_wait_sleep()) Sleep(0); else { const auto s0 = Clock::now(); while (ms_since(s0) < 0.05) YieldProcessor(); } }
+            presample_ms += ms_since(t);
+        }
         for (;;) {   // a thread set that changed under the freeze (a thread listed, then gone or refusing) is retried with a fresh listing, bounded; the cause is logged either way
             if (sp.suspend()) { t_frozen = Clock::now(); return true; }
             if (!sp.retryable() || sp.retries >= 4) return false;
@@ -585,11 +815,26 @@ struct GateOps {
         }
     }
     bool resume() { return sp.resume(); }
-    void sample(jsy::View* v) { const auto t = Clock::now(); ps3_lwm_census_invalidate(); sample_view(v); sample_ms += ms_since(t); }   // frozen: always a fresh page-readability cache (the unfrozen precheck reuses the per-tick one)
+    // frozen: a fresh page-readability cache by default (the unfrozen precheck reuses the per-tick one). ENHANCEMENT (rollback latency, A/B):
+    // JSP_SNAPSHOT_LWM_CACHE=keep keeps it while the committed layout is unchanged (lwm_cache_keep): measured 7.6 ms of the 8 ms census per sample was this re-query.
+    void sample(jsy::View* v) {
+        const auto t = Clock::now();
+        if (quick_gate_on() && g_sync == jsy::Mode::Wait && quick_jobs_view(v)) { sample_ms += ms_since(t); return; }   // the jobs block: refused without the full census (retried)
+        if (!lwm_cache_keep()) ps3_lwm_census_invalidate(); sample_view(v); sample_ms += ms_since(t); }
     void yield() {
 #ifdef _WIN32
         Sleep(1);   // gives the parked threads the CPU to finish what they were in the middle of; the exit is the condition, not this time
         idle_service();   // the threads are running here (resumed): the session's network is polled so the peer's grace timer does not run
+#endif
+    }
+    // ENHANCEMENT (rollback latency, jsy::Cfg::precheck_us): the precheck's poll step, threads running: the time slice is offered once, then ~0.1 ms of pause
+    // instructions (Sleep(1) is 1-2 ms with timeBeginPeriod(1), longer than most of the waits it would cover).
+    void spin() {
+#ifdef _WIN32
+        const auto s0 = Clock::now();
+        SwitchToThread();
+        while (ms_since(s0) < 0.1) YieldProcessor();
+        idle_service();
 #endif
     }
     bool rsx_busy()
@@ -615,6 +860,9 @@ struct GateOps {
 #endif
     }
 };
+// FIX (smoothness audit cause 7): in a rollback match the per-save [snap] ww line and the routine commit [snap] sync lines are unbuffered writes on the main
+// thread every tick; they print only with JSP_NET_TICK_LOG=1 (the two-copy test sets it). Rollbacks, blocked or failed gates and slow saves always print.
+static bool snap_tick_log() { static const bool v = [] { const char* e = std::getenv("JSP_NET_TICK_LOG"); return e && e[0] == '1'; }(); return v; }
 void log_sync(const char* what, uint32_t k, const jsy::GateResult& g, double census_ms, bool no_saved_view = false)
 {
     rsx_guard_flush_log();   // the guard's finding of this gate, printed with the threads running
@@ -809,6 +1057,9 @@ const jsy::Cfg& commit_cfg(uint32_t restore_to)
 {
     static jsy::Cfg c; c = g_cfg;
     if (g_ext && restore_to == kNoTick) c.rsx_idle = false;
+    // ENHANCEMENT (rollback latency, A/B): JSP_SNAPSHOT_PREWAIT=1 waits unfrozen (at most 30 ms) for the helpers to go idle before the first freeze (jsy::Cfg::prewait_ms)
+    static const unsigned pw = [] { const char* e = std::getenv("JSP_SNAPSHOT_PREWAIT"); return e && e[0] == '1' ? 30u : 0u; }();
+    c.prewait_ms = pw;
     return c;
 }
 struct TickBlob { ppu_context ctx; JspTickState ts; };
@@ -947,6 +1198,7 @@ uint32_t ww_peek_dirty(uint32_t* first)
 // occurs inside its frozen interval. Get/set of hash counters stays outside that interval because it takes mutexes.
 bool g_gate_jobserver = false;   // JSP_SNAPSHOT_GATE_JOBSERVER=1: the job server work state is a quiesce condition of the gate (also on with QUIESCE_JOBS)
 bool ww_layout_changed();   // defined after WwOps
+extern bool g_layout_force;   // set before a forced re-discovery (defined with ww_layout_changed)
 bool frozen_layout_same();
 struct WwOps {
     Suspended& threads;
@@ -978,6 +1230,7 @@ struct WwOps {
             const auto t_redo = Clock::now();
             gop.resume();
             if (g_sync_ms && g_gate_used_ms >= (double)g_sync_ms) { std::fprintf(stderr, "[snap] FAILED: guest memory kept being committed during the gate (%.0f ms of gate time, budget %u ms, %u re-checks)\n", g_gate_used_ms, g_sync_ms, redo + 1); g_layout_redo_failed = true; gr.ok = false; gr.suspended = false; break; }
+            g_layout_force = true;   // the frozen walk saw a different set: discover for real (a commit path that did not bump the generation)
             const bool chg = ww_layout_changed();
             if (!g_on) { gr.ok = false; gr.suspended = false; break; }   // the re-discovery failed (capture_failed ran): no commit on top of it
             if (chg) { std::fprintf(stderr, "[snap] FAILED: the committed set changed (not a pure growth: a thread born in between can lose a guard page of an already committed stack block, or memory was decommitted) between the layout check and the freeze at k=%u\n", k); g_layout_redo_failed = true; gr.ok = false; gr.suspended = false; break; }
@@ -1008,7 +1261,7 @@ struct WwOps {
         bool ok = true;
         if (action == jso::Action::Baseline) g_ring.baseline(k, vm_base, &blob);
         else if (action == jso::Action::Commit)
-            ok = g_ring.newest() + 1 == k && g_ring.commit(k, vm_base, g_ww_slots.data(), g_ww_slots.size(), &blob);
+            ok = g_ring.newest() < k /* newest + 1, or later after saves that took no snapshot */ && g_ring.commit(k, vm_base, g_ww_slots.data(), g_ww_slots.size(), &blob);
         else { pres_save(); ok = g_ring.rollback(restore_to, vm_base, g_ww_slots.data(), g_ww_slots.size(), &blob); pres_apply(); }
         if (ok && action != jso::Action::Baseline) g_ext_new_slots.clear();   // consumed: the commit stored their zero pre-image / the rollback zeroed them
         apply_ms = ms_since(t); return ok;
@@ -1061,6 +1314,75 @@ bool registry_audit(const char* what, uint32_t k, bool first = false)
     return true;
 }
 
+// ENHANCEMENT (rollback smoothness, A/B: JSP_SNAPSHOT_AUDIT_ASYNC=1): the periodic audit's Toolhelp listing walks every thread of the system and cost
+// 41-46 ms on the game thread every JSP_SNAPSHOT_THREADS_AUDIT ticks (a ~50 ms save every 2 s: a visible hitch). It reads the registry only through
+// has_any (atomic), outside any freeze by nature, so it runs on its own thread at the same cadence; the game thread keeps the cheap part (reclaim of
+// ended threads) and fails the run at its next audit tick when the background listing found an unregistered thread. The audit thread registers itself
+// (TLS callback) and is frozen with the others; it never formats or allocates while the game thread holds a freeze it could wait on (it does not wait on one).
+std::atomic<int> g_async_audit_bad{0};
+std::atomic<uint32_t> g_async_audits{0};
+std::atomic<uint64_t> g_async_audit_us_sum{0}, g_async_audit_us_max{0};
+char g_async_audit_why[256];
+inline bool audit_async_on() { static const int v = [] { const char* e = std::getenv("JSP_SNAPSHOT_AUDIT_ASYNC"); return e && e[0] == '1' ? 1 : 0; }(); return v != 0; }
+#ifdef _WIN32
+DWORD g_async_audit_period_ms = 0;   // ENHANCEMENT (rollback smoothness): JSP_SNAPSHOT_AUDIT_PERIOD_MS, default the tick cadence below (JSP_SNAPSHOT_THREADS_AUDIT x 33 ms)
+DWORD WINAPI async_audit_main(void*)
+{
+    const DWORD period = g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u;
+    for (;;) {   // the first listing at once: the scheduled audit that started this worker is covered by it
+        char why[256] = {0}; unsigned listed = 0, rechecked = 0;
+        const auto t = Clock::now();
+        const int bad = jsp_thread_registry_audit(why, sizeof why, &listed, &rechecked);
+        const uint64_t us = (uint64_t)(ms_since(t) * 1000.0);
+        g_async_audit_us_sum.fetch_add(us); if (us > g_async_audit_us_max.load()) g_async_audit_us_max.store(us);
+        g_async_audits.fetch_add(1);
+        if (bad && !g_async_audit_bad.load()) { std::memcpy(g_async_audit_why, why, sizeof why); g_async_audit_bad.store(1); }
+        Sleep(period);
+    }
+}
+#endif
+// FIX (review: a failed worker start skipped the audits): the worker start is retried at every scheduled audit until it runs (jau::Starter), and a
+// scheduled audit whose start failed runs here, on the game thread, as the synchronous audit does.
+jau::Starter g_audit_starter;
+bool start_audit_worker()
+{
+#ifdef _WIN32
+    { const char* e = std::getenv("JSP_SNAPSHOT_AUDIT_PERIOD_MS"); if (e && *e) g_async_audit_period_ms = (DWORD)std::strtoul(e, nullptr, 10); }
+    DWORD tid = 0; HANDLE h = CreateThread(nullptr, 0, async_audit_main, nullptr, 0, &tid);
+    if (!h) {
+        if (g_audit_starter.failures < 5)
+            std::fprintf(stderr, "[snap] threads audit (background): the worker thread did not start (error %lu); this audit runs on the game thread, the start is tried again at the next audit\n", (unsigned long)GetLastError());
+        return false;
+    }
+    if (g_audit_exempt) exempt_add((uint32_t)tid);   // exempt: listed in freeze_exempt before the next freeze (this thread takes them)
+    CloseHandle(h);
+    std::fprintf(stderr, "[snap] threads audit (background) every %lu ms, %s%s\n", (unsigned long)(g_async_audit_period_ms ? g_async_audit_period_ms : (DWORD)(g_audit_every ? g_audit_every : 60) * 33u),
+                 g_audit_exempt ? "left running by the freeze (JSP_SNAPSHOT_AUDIT_EXEMPT=1)" : "frozen with the others (JSP_SNAPSHOT_AUDIT_EXEMPT=0)",
+                 g_audit_starter.failures ? " (started after earlier failed starts; those audits ran on the game thread)" : "");
+    return true;
+#else
+    return false;   // no worker here: every scheduled audit runs synchronously
+#endif
+}
+bool registry_audit_tick(const char* what, uint32_t k)
+{
+    if (!audit_async_on()) return registry_audit(what, k);
+    if (g_audit_starter.at_audit(start_audit_worker) == jau::Path::Sync) return registry_audit(what, k);
+    const auto t = Clock::now();
+    jtr::Registry& R = jsp_thread_registry();
+    R.reclaim([](void* h) { jsp_thread_registry_close(h); }, [](void* h) { return jsp_thread_registry_ended(h); }, true);
+    g_audit_pending_ms += ms_since(t);
+    if (g_async_audit_bad.load()) {
+        std::fprintf(stderr, "[snap] threads audit (background) %s k=%u THREAD-NOT-REGISTERED %s\n", what, k, g_async_audit_why);
+        capture_failed("THREAD-NOT-REGISTERED"); return false;
+    }
+    if (R.full.load() || R.handle_failed.load()) { capture_failed("REGISTRY-FULL"); return false; }
+    const uint32_t n = g_async_audits.load();
+    if (n && k % (g_audit_every * 10u) == 0)
+        std::fprintf(stderr, "[snap] threads audit (background) k=%u audits=%u ms mean=%.3f max=%.3f\n", k, n, (double)g_async_audit_us_sum.load() / 1000.0 / n, (double)g_async_audit_us_max.load() / 1000.0);
+    return true;
+}
+
 // initial = the first save of the run; false = a re-baseline after the saved layout changed: the history is dropped, the round in progress is aborted by the caller.
 void ww_baseline(uint32_t k, ppu_context* c, bool initial = true)
 {
@@ -1074,6 +1396,11 @@ void ww_baseline(uint32_t k, ppu_context* c, bool initial = true)
     g_ww_slots.reserve(g_ring.map().pages());
     g_ext_new_slots.clear();
     g_ww_addrs.assign(4096, nullptr);
+    {   // ENHANCEMENT (rollback latency, JSP_SNAPSHOT_COPY_THREADS): workers started here, outside any freeze; the ring hands them its Copy2 batches
+        static const int want = [] { const char* e = std::getenv("JSP_SNAPSHOT_COPY_THREADS"); return e && *e ? (int)std::strtol(e, nullptr, 10) : (g_ext ? 3 : 0); }();
+        g_ring.set_copier(want > 0 && pcopy::start(want) > 0 ? pcopy::run : nullptr, nullptr);
+        if (initial) std::fprintf(stderr, "[snap] page copy: %d worker thread(s) + the main thread (JSP_SNAPSHOT_COPY_THREADS=%d; 0 = the main thread alone, as before)\n", pcopy::g_workers, want);
+    }
     if (g_thr_registry) { if (!registry_audit("baseline", k, initial)) return; g_audit_pending_ms = 0; }   // the baseline is not a per-tick operation
     std::vector<Mod> mods; Suspended sp; Census cen;
     if (g_suspend) { mods = collect_modules(); sp.prepare(); }
@@ -1103,9 +1430,12 @@ void ww_baseline(uint32_t k, ppu_context* c, bool initial = true)
 
 // One tick in incremental mode. `restore_to` = kNoTick for a commit, else the tick to roll back to.
 // Allocation-free: the committed raw ranges of the saved windows against g_keep_raw (same windows and predicate as discover()). Runs with the threads frozen; its cost is logged in the summary.
+bool frozen_walk_skippable();   // defined with ww_layout_changed
+uint64_t g_walk_skipped = 0;
 bool frozen_layout_same()
 {
 #ifdef _WIN32
+    if (frozen_walk_skippable()) { g_walk_skipped++; return true; }
     const auto t0 = Clock::now();
     size_t gi = 0; bool have = false, bad = false; uint64_t rs = 0, re = 0;
     auto flush = [&]() { if (!have) return; if (gi >= g_keep_raw.size() || g_keep_raw[gi].a != rs || (uint64_t)g_keep_raw[gi].a + g_keep_raw[gi].n != re) bad = true; gi++; have = false; };
@@ -1137,12 +1467,42 @@ bool frozen_layout_same()
 }
 // True when the committed set differs from the saved layout (logged with the diff). Exact discovery is outside the freeze because it allocates; a writer committing
 // or remapping memory between this check and the suspension is a known race. Incomplete discovery stops the run.
+// ENHANCEMENT (rollback latency, A/B: JSP_SNAPSHOT_LAYOUT_GEN=1): the per-tick discovery walks the whole write-watched reservation (2-3 ms a tick, measured).
+// The toolkit bumps g_vm_layout_gen after every commit or protection change of guest memory; while it is unchanged since the last discovery, that discovery
+// still holds and is not repeated. The generation is read BEFORE a discovery (a commit racing it bumps it again, so the next tick discovers). The frozen walk
+// (frozen_layout_same) still runs on every gate as the net for a commit path that does not bump; its redo forces a full discovery (g_layout_force).
+extern "C" volatile uint32_t g_vm_layout_gen;
+inline bool layout_gen_on() { static const int v = [] { const char* e = std::getenv("JSP_SNAPSHOT_LAYOUT_GEN"); return e && e[0] == '1' ? 1 : 0; }(); return v != 0; }
+uint32_t g_layout_gen_seen = 0; bool g_layout_gen_valid = false, g_layout_force = false; uint64_t g_layout_skips = 0;
+bool ww_layout_changed_full();
+// ENHANCEMENT (rollback latency, A/B: JSP_SNAPSHOT_FROZEN_WALK_EVERY=N, default 1 = every gate): the frozen layout walk (frozen_layout_same, ~2 ms of VirtualQuery
+// inside every freeze, measured) runs only on every Nth frozen gate while the toolkit's layout generation still equals the one the last full discovery saw
+// (JSP_SNAPSHOT_LAYOUT_GEN=1). The walk is the net for a commit path that does not bump the generation; in 16 logged sessions it never fired (re-checks 0).
+// Read with the threads frozen: an atomic load and a counter, no allocation.
+bool frozen_walk_skippable()
+{
+    static const unsigned every = [] { const char* e = std::getenv("JSP_SNAPSHOT_FROZEN_WALK_EVERY"); const unsigned v = e && *e ? (unsigned)std::strtoul(e, nullptr, 10) : 1u; return v ? v : 1u; }();
+    static unsigned n = 0;
+    if (every <= 1 || !layout_gen_on() || !g_layout_gen_valid || g_layout_force) return false;
+    if (__atomic_load_n(&g_vm_layout_gen, __ATOMIC_SEQ_CST) != g_layout_gen_seen) return false;   // something committed since the last discovery: walk
+    return ++n % every != 0;
+}
 bool ww_layout_changed()
+{
+    const uint32_t gen0 = __atomic_load_n(&g_vm_layout_gen, __ATOMIC_SEQ_CST);
+    if (layout_gen_on() && !g_layout_force && g_layout_gen_valid && gen0 == g_layout_gen_seen) { g_layout_ms = 0; g_layout_skips++; return false; }
+    g_layout_force = false;
+    const bool chg = ww_layout_changed_full();
+    g_layout_gen_seen = gen0; g_layout_gen_valid = g_on;
+    return chg;
+}
+bool ww_layout_changed_full()
 {
     uint64_t exb = 0; bool complete = false;
     const auto tl = Clock::now();
     const auto now = discover(&exb, &complete);
-    ps3_lwm_census_invalidate();   // the committed set is re-read once per tick: the census's cached page readability is valid until the next one
+    // the committed set is re-read once per tick: the census's cached page readability is valid until the next one (keep: until the set really changes)
+    if (!lwm_cache_keep() || !complete || !jso::same_ranges(g_pending_raw, g_keep_raw)) ps3_lwm_census_invalidate();
     g_layout_ms = ms_since(tl);   // logged on the commit/rollback line that follows (flow.h runs this check first on every tick)
     if (!complete) { capture_failed("WW layout discovery incomplete"); return false; }
     if (!jso::same_ranges(g_ex_exact, g_keep_ex)) { std::fprintf(stderr, "[snap] the exclusion list changed (the GCM command buffer or the IO map moved): the saved layout is not comparable, re-baselining\n"); return true; }   // exclusions are static in rollback mode
@@ -1173,12 +1533,12 @@ bool ww_transaction(uint32_t k, ppu_context* c, uint32_t restore_to)
         std::fprintf(stderr, "[snap] rollback k=%u -> tick %u refused: the capture of that tick has no clean census (never stored, or it had blocking reasons)\n", k, restore_to);
         capture_failed("WW ROLLBACK-TARGET-NOT-CLEAN"); return false;
     }
-    if (restore_to != kNoTick && (restore_to < g_ring.oldest() || restore_to > g_ring.newest())) {   // named, never "tick transaction failures=0x4"
+    if (restore_to != kNoTick && !g_ring.has(restore_to)) {   // named, never "tick transaction failures=0x4" (outside the window, or a tick that took no snapshot)
         std::fprintf(stderr, "[snap] ww EVICTED k=%u target=%u oldest=%u newest=%u depth=%u pool_used=%zu pool=%zu\n", k, restore_to, g_ring.oldest(), g_ring.newest(), g_ring.depth_now(), g_ring.pool_used(), g_ww_pool);
         capture_failed("WW ROLLBACK-TARGET-EVICTED"); return false;
     }
     g_audit_pending_ms = 0;
-    if (g_thr_registry && g_audit_every && k % g_audit_every == 0 && !registry_audit(restore_to == kNoTick ? "commit" : "rollback", k)) return false;
+    if (g_thr_registry && g_audit_every && k % g_audit_every == 0 && !registry_audit_tick(restore_to == kNoTick ? "commit" : "rollback", k)) return false;
     const double audit_ms = g_audit_pending_ms; g_audit_pending_ms = 0;
     const double layout_ms = g_layout_ms;
     const auto tp = Clock::now();
@@ -1195,6 +1555,7 @@ bool ww_transaction(uint32_t k, ppu_context* c, uint32_t restore_to)
     const jso::Result result = jso::capture(op, restore_to == kNoTick ? jso::Action::Commit : jso::Action::Rollback);
     if (result.failures & jso::Resume) resume_failed();
     rsx_guard_flush_log();   // threads running again: the guard's finding is printed whether or not this commit is logged
+    report_census_prof();    // ENHANCEMENT (measurement, JSP_SNAPSHOT_CENSUS_PROF=1): threads running again
     const double total_ms = ms_since(t0);
     if ((result.failures & jso::Pause) && (!g_last_gate_reasons || (g_last_gate_reasons & jsy::PauseFailed))) sp.log_failure(restore_to == kNoTick ? "commit" : "rollback", k);
     if (op.gr.wake_stop) std::fprintf(stderr, "[snap] gate stopped after %u wakes (JSP_SNAPSHOT_GATE_WAKES=%u) at k=%u: the precheck never cleared, reasons=0x%X\n", op.gr.wakes, g_ev_lim.max_wakes, k, op.gr.reasons);
@@ -1204,12 +1565,16 @@ bool ww_transaction(uint32_t k, ppu_context* c, uint32_t restore_to)
     const double close_ms = ms_since(tc);   // Toolhelp mode closes one handle per thread here (not counted in total= or prep=)
     const double save_ms = total_ms + prep_ms;   // gate (incl. the wait W) + collect + copy + prep, the earlier `save` figure
     const double real_ms = CostStats::real_of(save_ms, layout_ms, close_ms, audit_ms);   // what the main thread really pays for this operation
-    char tail[600];   // cost fields, appended to the ww / ww-rollback line
-    std::snprintf(tail, sizeof tail, " | thr=%s threads=%zu layout=%.3f close=%.3f audit=%.3f real=%.3f gate=%s prechecks=%u freezes=%u wakes=%u wake_timeouts=%u retry_waits=%u retry_timeouts=%u retry_immediate=%u presample=%.3f gate_wait=%.3f frozen=%.3f ring=%s",
+    char tail[700];   // cost fields, appended to the ww / ww-rollback line
+    std::snprintf(tail, sizeof tail, " | thr=%s threads=%zu layout=%.3f close=%.3f audit=%.3f real=%.3f gate=%s prechecks=%u freezes=%u wakes=%u wake_timeouts=%u retry_waits=%u retry_timeouts=%u retry_immediate=%u presample=%.3f gate_wait=%.3f frozen=%.3f ring=%s first_reasons=0x%X first_notes=0x%X",
                   g_thr_registry ? "registry" : "toolhelp", nthr, layout_ms, close_ms, audit_ms, real_ms, g_gate_ev ? "ev" : "poll", op.gr.prechecks, op.gr.freezes, op.gr.wakes, op.gr.wake_timeouts, op.gr.retry_waits, op.gr.retry_timeouts, op.gr.retry_immediate,
-                  op.presample_ms, op.gate_wait_ms, op.frozen_ms, g_ring_mode == jss::RingMode::PagePtr ? "ptr" : "copy2");
+                  op.presample_ms, op.gate_wait_ms, op.frozen_ms, g_ring_mode == jss::RingMode::PagePtr ? "ptr" : "copy2", op.gr.first_reasons, op.gr.first_notes);
     (restore_to == kNoTick ? g_cost_commit : g_cost_rb).add(save_ms, prep_ms, layout_ms, close_ms, audit_ms, op.presample_ms, op.gate_wait_ms, op.frozen_ms, op.collect_ms, op.apply_ms, op.gr, (uint32_t)nthr);
-    if (g_sync != jsy::Mode::Off && (restore_to != kNoTick || op.gr.reasons || op.gr.verdict.notes != g_last_commit_notes || !op.gr.ok || k % 300 == 0)) {
+    if (g_ext && result.ok()) {   // ENHANCEMENT (measurement): the `[snap] cost window` percentiles (threads running)
+        g_cw.note_op(restore_to == kNoTick, real_ms, op.presample_ms + op.gate_wait_ms, op.apply_ms, op.gr.freezes);
+        if (restore_to != kNoTick) g_cw.rollback_done(real_ms);
+    }
+    if (g_sync != jsy::Mode::Off && (restore_to != kNoTick || op.gr.reasons || !op.gr.ok || ((!g_ext || snap_tick_log()) && (op.gr.verdict.notes != g_last_commit_notes || k % 300 == 0)))) {
         log_sync(restore_to == kNoTick ? "commit" : "rollback", k, op.gr, op.census_ms, op.no_saved);
         if (restore_to == kNoTick) g_last_commit_notes = op.gr.verdict.notes;   // commits log on a change of the note set, on a block, and every 300th tick
     }
@@ -1225,7 +1590,7 @@ bool ww_transaction(uint32_t k, ppu_context* c, uint32_t restore_to)
         for (int b = 0; b < 16; b++) { if (op.gr.first_notes & (1u << b)) g_ss.first_note[b]++; if (op.gr.verdict.notes & (1u << b)) g_ss.final_note[b]++; }
         g_ss.suspend_sum += op.suspend_ms; if (op.suspend_ms > g_ss.suspend_max) g_ss.suspend_max = op.suspend_ms;
         if (g_t_rb_valid) { g_replay_saves += real_ms; g_replay_w += op.gate_wait_ms; }   // commits inside the replay count toward the recovery (real cost, W apart)
-        std::fprintf(stderr, "[snap] ww k=%u pages=%u collect=%.3f commit=%.3f suspend=%.3f total=%.3f prep=%.3f ms depth=%u pool_used=%zu reset=%.3f%s\n", k,
+        if (!g_ext || snap_tick_log() || real_ms > 33.0) std::fprintf(stderr, "[snap] ww k=%u pages=%u collect=%.3f commit=%.3f suspend=%.3f total=%.3f prep=%.3f ms depth=%u pool_used=%zu reset=%.3f%s\n", k,
                      g_ring.stats().last_commit_pages, op.collect_ms, op.apply_ms, op.suspend_ms, total_ms, prep_ms, g_ring.depth_now(), g_ring.pool_used(), op.reset_ms, tail);
         // the pool is shared by all entries; when a commit evicted a tick that the round in progress still needs, the rollback is impossible. Say so now, loudly,
         // with the size that would have been enough, instead of failing the rollback later as an unnamed Apply failure.
@@ -1237,6 +1602,9 @@ bool ww_transaction(uint32_t k, ppu_context* c, uint32_t restore_to)
         }
         return true;
     }
+    if (op.gr.site_waited || (op.gr.first_notes & jsy::NSiteMoved))   // a thread was parked elsewhere than at the target's save (first sample): JSP_SNAPSHOT_SITE=1 waits for it
+        std::fprintf(stderr, "[snap] site k=%u -> tick %u tid=%u lr 0x%08X -> 0x%08X waited=%d gave_up=%d still_moved=%u\n", k, restore_to,
+                     op.gr.site_tid, op.gr.site_lr_was, op.gr.site_lr_now, op.gr.site_waited ? 1 : 0, op.gr.site_gave_up ? 1 : 0, op.gr.verdict.site_moved);
     std::fprintf(stderr, "[snap] ww-rollback k=%u -> tick %u ok=1 pages=%u pending=%zu collect=%.3f rollback=%.3f suspend=%.3f total=%.3f ms prep=%.3f ms reset=%.3f%s\n", k, restore_to,
                  g_ring.stats().last_rollback_pages, g_ww_slots.size(), op.collect_ms, op.apply_ms, op.suspend_ms, total_ms, prep_ms, op.reset_ms, tail);
     rng_line("restored", restore_to);
@@ -1403,6 +1771,8 @@ extern "C" int jsp_snapshot_init(uint32_t hash_start, uint32_t hash_n)
     ev = std::getenv("JSP_SNAPSHOT_SUSPEND"); g_suspend = !(ev && ev[0] == '0');
     ev = std::getenv("JSP_SNAPSHOT_SYNC"); if (ev && *ev) g_sync = ev[0] == '0' ? jsy::Mode::Off : ev[0] == '2' ? jsy::Mode::Wait : jsy::Mode::Log;
     ev = std::getenv("JSP_SNAPSHOT_SYNC_STRICT"); g_cfg.strict = ev && *ev && ev[0] != '0';
+    ev = std::getenv("JSP_SNAPSHOT_SITE"); g_cfg.block_site = ev && *ev && ev[0] != '0';
+    ev = std::getenv("JSP_SNAPSHOT_SITE_MS"); if (ev && *ev) g_cfg.site_wait_ms = (unsigned)std::strtoul(ev, nullptr, 10);
     ev = std::getenv("JSP_SNAPSHOT_SYNC_MS"); if (ev && *ev) g_sync_ms = (unsigned)std::strtoul(ev, nullptr, 10);
     ev = std::getenv("JSP_SNAPSHOT_SYNC_TRIES"); if (ev && *ev) g_sync_tries = (unsigned)std::strtoul(ev, nullptr, 10);
     ev = std::getenv("JSP_SNAPSHOT_QUIESCE"); g_quiesce = ev && *ev ? (ev[0] == '2' ? 2 : ev[0] == '1' ? 1 : 0) : 0;
@@ -1452,6 +1822,12 @@ extern "C" int jsp_snapshot_init(uint32_t hash_start, uint32_t hash_n)
         if (g_thr_registry && !jsp_thread_registry_enabled()) { std::fprintf(stderr, "[snap] REFUSED: JSP_SNAPSHOT_THREADS=registry must be in the environment at process start (the TLS callback reads it once)\n"); return 0; }
         x = std::getenv("JSP_SNAPSHOT_GATE_JOBSERVER"); g_gate_jobserver = x && *x && x[0] == '1'; g_cfg.block_jobserver = g_gate_jobserver;
         x = std::getenv("JSP_SNAPSHOT_FROZEN_WRITES"); g_fw_on = !(x && *x && x[0] == '0');
+        // ENHANCEMENT (rollback latency; defaults on in rollback mode, off otherwise; =0 turns each off for an A/B): the gate's unfrozen precheck before every freeze
+        // (jsy::Cfg::precheck_us, total per gate), the background thread audit left running by the freeze (freeze_exempt). JSP_SNAPSHOT_COPY_THREADS: see pcopy.
+        x = std::getenv("JSP_SNAPSHOT_PRECHECK_US"); g_cfg.precheck_us = x && *x ? (unsigned)std::strtoul(x, nullptr, 10) : (g_ext ? 20000u : 0u);
+        x = std::getenv("JSP_SNAPSHOT_AUDIT_EXEMPT"); g_audit_exempt = x && *x ? x[0] != '0' : g_ext;
+        std::fprintf(stderr, "[snap] latency switches: precheck_us=%u (JSP_SNAPSHOT_PRECHECK_US) audit_exempt=%d (JSP_SNAPSHOT_AUDIT_EXEMPT) copy_threads=%s (JSP_SNAPSHOT_COPY_THREADS, default 3 in rollback) cost window every %s s (JSP_SNAPSHOT_COST_WINDOW_S)\n",
+                     g_cfg.precheck_us, g_audit_exempt ? 1 : 0, std::getenv("JSP_SNAPSHOT_COPY_THREADS") ? std::getenv("JSP_SNAPSHOT_COPY_THREADS") : "default", std::getenv("JSP_SNAPSHOT_COST_WINDOW_S") ? std::getenv("JSP_SNAPSHOT_COST_WINDOW_S") : "10");
         x = std::getenv("JSP_SNAPSHOT_BIRTHGATE");
         if (x && *x == '0') { if (g_thr_registry) { jsp_thread_registry().gate_births.store(0); std::fprintf(stderr, "[snap] JSP_SNAPSHOT_BIRTHGATE=0: the registry does not hold threads born or exiting during a freeze (A/B)\n"); } else std::fprintf(stderr, "[snap] JSP_SNAPSHOT_BIRTHGATE=0 ignored without JSP_SNAPSHOT_THREADS=registry\n"); }
         x = std::getenv("JSP_SNAPSHOT_THREADS_AUDIT"); if (x && *x) g_audit_every = (uint32_t)std::strtoul(x, nullptr, 10);
@@ -1561,6 +1937,15 @@ static void pass_end_impl(uint32_t k, ppu_context* c)
 // main thread's ppu_context of that call. Returns: 1 ok, 2 ok but the committed layout changed (re-baselined: every older rollback target is gone, the caller
 // must end the session), 0 fatal (capture_failed ran). *hash = the port's per-tick hash of tick k (0 when the tick has none).
 extern "C" int jsp_snapshot_ext_active(void) { return g_on && g_ext && g_ww; }
+// FIX (rollback determinism, jsp_net_game.cpp background barrier): SPU work in flight right now, threads running (racy, read-only): SPURS job-chain jobs + the HLE
+// queue (ps3_spurs_census out[0] + out[1]) + the job server's dispatched records and its busy word (sample_jobserver; 0 until the manager was learned at a gate).
+extern "C" uint32_t jsp_snapshot_spu_busy(void)
+{
+    uint32_t sp[7] = {0, 0, 0, 0, 0, 0, 0};
+    ps3_spurs_census(sp);
+    jsy::View v; sample_jobserver(&v);
+    return sp[0] + sp[1] + (v.js_valid ? (v.js_bits != 0 ? 1u : 0u) + v.js_state2 : 0u);
+}
 static uint32_t ext_hash_of(uint32_t k) { return g_ext_hash_tick == k ? g_ext_hash : 0; }
 extern "C" int jsp_snapshot_ext_commit(uint32_t k, ppu_context* c, uint32_t* hash)
 {
@@ -1571,7 +1956,17 @@ extern "C" int jsp_snapshot_ext_commit(uint32_t k, ppu_context* c, uint32_t* has
     const bool changed = env.layout_changed(k);
     if (!g_on) return 0;
     if (changed) return env.rebaseline(k) ? 2 : 0;
-    return env.commit(k) ? 1 : 0;
+    const bool ok = env.commit(k);
+    if (ok) { g_cw.saved(k, true); g_cw.maybe_print(false); }   // ENHANCEMENT (measurement): threads running
+    return ok ? 1 : 0;
+}
+// ENHANCEMENT (rollback latency): the per-tick hash of tick k without a commit (a save that can never be loaded takes no snapshot). 0 = none.
+extern "C" uint32_t jsp_snapshot_ext_hash(uint32_t k)
+{
+    if (!jsp_snapshot_ext_active()) return 0u;
+    const uint32_t h = ext_hash_of(k);
+    if (h) g_cw.saved(k, false);   // a hash-only save of a re-run tick also ends its recovery (cost window)
+    return h;
 }
 // Restore the state with `to` completed ticks while `k` ticks are done now.
 extern "C" int jsp_snapshot_ext_rollback(uint32_t k, uint32_t to, ppu_context* c)
@@ -1582,7 +1977,10 @@ extern "C" int jsp_snapshot_ext_rollback(uint32_t k, uint32_t to, ppu_context* c
     const bool changed = env.layout_changed(k);
     if (!g_on) return 0;
     if (changed) { std::fprintf(stderr, "[snap] ext: layout changed at the rollback request (tick %u): not rolled back\n", k); return 0; }
-    return env.rollback(k, to) ? 1 : 0;
+    g_cw.rollback_begin(k, to);   // ENHANCEMENT (measurement): the recovery runs until the save of tick k (cost window)
+    const bool ok = env.rollback(k, to);
+    if (!ok) g_cw.rollback_failed();
+    return ok ? 1 : 0;
 }
 // Entries the ring evicted because its page POOL was short while an entry slot was free (the reachable depth shrank). 0 = fine; > 0 = the pool is too small
 // (JSP_SNAPSHOT_WW_POOL). The SPAN newest-oldest is not a signal: after a rollback of >= 2 ticks it is below the depth until the ring refills.
@@ -1599,9 +1997,24 @@ extern "C" void jsp_snapshot_ext_budget_reset(void) { g_gate_used_ms = 0; }
 extern "C" void jsp_snapshot_ext_set_idle_hook(void (*fn)()) { g_idle_hook = fn; }
 extern "C" void jsp_snapshot_ext_guard_summary(void)   // session end: how often RSX-side writes into saved memory happened (the log-only measurement)
 {
+    if (g_ext) g_cw.maybe_print(true);   // ENHANCEMENT (measurement): the last cost window of the session
     if (!g_ext || !g_rg_commits) return;
     rsx_guard_flush_log();
-    std::fprintf(stderr, "[snap] RSX write guard summary: %u commits checked, %u with the previous capture RSX-pending, %u of those had saved-memory RSX writes (data %u, label/semaphore %u, ring wraps %u); %u RSX-side main-memory writes noted in all; hazard=%d; ring extensions (committed set grew, history kept): %u; frozen layout walks %llu (mean %.3f ms, max %.3f ms), re-checks %u\n",
-                 g_rg_commits, g_rg_armed, g_rg_hit_commits, g_rg_data, g_rg_label, g_rg_wrapped, g_rg_noted, g_rsx_hazard ? 1 : 0, g_ww_grown, (unsigned long long)g_walk_n, g_walk_n ? g_walk_ms_sum / (double)g_walk_n : 0.0, g_walk_ms_max, g_layout_redo_count);
+    std::fprintf(stderr, "[snap] RSX write guard summary: %u commits checked, %u with the previous capture RSX-pending, %u of those had saved-memory RSX writes (data %u, label/semaphore %u, ring wraps %u); %u RSX-side main-memory writes noted in all; hazard=%d; ring extensions (committed set grew, history kept): %u; frozen layout walks %llu (mean %.3f ms, max %.3f ms, skipped %llu), re-checks %u\n",
+                 g_rg_commits, g_rg_armed, g_rg_hit_commits, g_rg_data, g_rg_label, g_rg_wrapped, g_rg_noted, g_rsx_hazard ? 1 : 0, g_ww_grown, (unsigned long long)g_walk_n, g_walk_n ? g_walk_ms_sum / (double)g_walk_n : 0.0, g_walk_ms_max, (unsigned long long)g_walk_skipped, g_layout_redo_count);
+}
+// FIX (same-link rematch, run native-rm1): the rollback session is over. Its ring, per-tick capture views, last hash and the cost window's open recovery are
+// dropped, so the next session in this process starts with a full baseline at its tick 1 (jsp_snapshot_ext_commit -> ww_baseline resets the write watch,
+// the layout, the guard records and the ring). Without it the rematch's first commit failed (the ring's newest tick was the first match's last one; "WW tick
+// transaction failures=0x4"), which also set g_failed and left rollback off for the rest of the process. A capture that FAILED stays failed (g_failed: the
+// guest state is unverifiable; restart the process). Main thread, no capture in progress.
+extern "C" void jsp_snapshot_ext_session_end(void)
+{
+    if (!g_ext) return;
+    g_ring.invalidate();
+    g_views.clear();
+    g_ext_hash = 0; g_ext_hash_tick = 0;
+    g_cw.rollback_failed();   // no recovery is open across sessions
+    g_gate_used_ms = 0;
 }
 extern "C" int jsp_snapshot_ext_rsx_write_hazard(void) { return g_rsx_hazard ? 1 : 0; }   // an RSX-side write into guest memory happened with commands pending at a commit (write guard)

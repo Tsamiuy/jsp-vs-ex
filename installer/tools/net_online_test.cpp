@@ -293,6 +293,14 @@ int main()
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "1" }, { "JSP_ROLLBACK_JOIN", "192.0.2.10:36200" } }) == Boot::Refused && code == Refusal::RoleKeys);
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_LISTEN", "99999" } }) == Boot::Refused && code == Refusal::BadListen);
       CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_JOIN", "host:1" } }) == Boot::Refused && code == Refusal::BadJoin);
+      // ENHANCEMENT (rollback bench): a depth 1..8 alone is a valid start with the rollback defaults; with a role key, or out of range, it is refused
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "4" } }) == Boot::Go && code == Refusal::None && get("JSP_SNAPSHOT") && get("JSP_STEP_TURBO"));
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "8" } }) == Boot::Go);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "9" } }) == Boot::Refused && code == Refusal::RoleKeys && !get("JSP_SNAPSHOT"));
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "12" } }) == Boot::Refused && code == Refusal::RoleKeys);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "2" }, { "JSP_ROLLBACK_LISTEN", "36200" } }) == Boot::Refused && code == Refusal::RoleKeys && why.find("BENCH") != std::string::npos);
+      CHECK(run({ { "JSP_ROLLBACK", "1" }, { "JSP_ROLLBACK_BENCH", "0" }, { "JSP_ROLLBACK_LISTEN", "36200" } }) == Boot::Go);   // 0 = no bench: the usual host start
+      CHECK(bench_depth("1") == 1 && bench_depth("8") == 8 && !bench_depth("0") && !bench_depth("9") && !bench_depth("") && !bench_depth(nullptr) && !bench_depth("3x"));
       env = { { "JSP_ROLLBACK", "1" } }; CHECK(resolve_env(get, set, &own, &why) == Boot::Refused && std::string(get("JSP_ROLLBACK")) == "0");   // the code pointer stays optional
       CHECK(!notice_text(Refusal::None).any() && !notice_text(Refusal::Count).any() && !notice_text(static_cast<Refusal>(99)).any());
       for (int c = 1; c < static_cast<int>(Refusal::Count); ++c)
@@ -327,6 +335,13 @@ int main()
       // the visibility rule: only while the top list is up, for kNoticeMs after it came up
       CHECK(notice_visible(true, true, 1000, 1000) && notice_visible(true, true, 1000, 1000 + kNoticeMs - 1));
       CHECK(!notice_visible(true, true, 1000, 1000 + kNoticeMs) && !notice_visible(true, false, 1000, 1001) && !notice_visible(false, true, 1000, 1001));
+    }
+    {   // FIX (an F9 tap cancelled rollback at fight start): the cancel key counts only once held kCancelHoldMs; a tap or a release resets it
+      uint64_t since = 0;
+      CHECK(!cancel_held(true, 5000, since) && since == 5000);                  // pressed
+      CHECK(!cancel_held(true, 5000 + kCancelHoldMs, since));                   // not yet past the hold
+      CHECK(!cancel_held(false, 5100 + kCancelHoldMs, since) && since == 0);    // released: a tap never cancels
+      CHECK(!cancel_held(true, 9000, since) && !cancel_held(true, 9000 + kCancelHoldMs - 1, since) && cancel_held(true, 9001 + kCancelHoldMs, since));
     }
     // the page: Connection and Relay toggles, saved to the file; re-psn needs a server and a name
     { Fake fk3; FakeIO io3; Menu m; m.be = &fk3; m.io = &io3; m.enter_online(); press(m, BTN_RIGHT); press(m, BTN_RIGHT); CHECK(m.nc == NC_ROLLBACK);

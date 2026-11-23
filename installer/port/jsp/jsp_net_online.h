@@ -33,6 +33,10 @@ static const char* const kKeyJoin = "JSP_ROLLBACK_JOIN";
 static const char* const kKeyVia = "JSP_ROLLBACK_VIA";       // "repsn": the session is arranged through a re-psn room (jsp_net_repsn.h); absent or "direct": direct IP (LISTEN / JOIN)
 static const char* const kKeyRole = "JSP_ROLLBACK_ROLE";     // re-psn only: "host" (create the room) or "join"
 static const char* const kKeyRelay = "JSP_ROLLBACK_RELAY";   // re-psn only: 1 = the player allows the server's relay when a direct path fails
+// ENHANCEMENT (rollback bench, test tooling): JSP_ROLLBACK=1 with JSP_ROLLBACK_BENCH=N (1..8) runs the fight through a LOCAL stress session that rolls back N ticks on every
+// tick, with no peer and no socket; it logs the cost (jsp_net_game.cpp, bench_report). It replaces the role keys: with LISTEN, JOIN or VIA also set it is refused.
+static const char* const kKeyBench = "JSP_ROLLBACK_BENCH";
+inline int bench_depth(const char* v) { return (v && v[0] >= '1' && v[0] <= '8' && !v[1]) ? v[0] - '0' : 0; }
 // The real psnr transport (PsnrClientTransport over the re-psn v0.8.0 client, jsp_net_repsn_client.h) is wired into jsp_net_game.cpp: a re-psn start is allowed.
 static const bool kRepsnWired = true;
 static const char* const kKeyModsOff = "JSP_MODS_ONLINE_OFF";   // set to 1 by jsp_online.cpp when a gameplay mod set turned the game's own online off (ENHANCEMENT, mods)
@@ -205,6 +209,30 @@ static const KV kDefaults[] = {
     {"JSP_SNAPSHOT_THREADS", "registry"}, {"JSP_SNAPSHOT_QUIESCE", "2"}, {"JSP_SNAPSHOT_GATE", "poll"}, {"JSP_SNAPSHOT_GATE_JOBSERVER", "1"},
     // The commit gate gives up after 15 s of gate time between two session updates; the frozen-write check stays off.
     {"JSP_SNAPSHOT_SYNC_MS", "15000"}, {"JSP_SNAPSHOT_FROZEN_WRITES", "0"},
+    // Save cost (measured with JSP_ROLLBACK_BENCH, docs/ROLLBACK.md): the lwmutex census keeps its page-readability cache while the layout is unchanged;
+    // the per-tick layout walk is skipped while the toolkit's layout generation (patch 7920) is unchanged; a frozen sample whose job words block is
+    // refused before the full census, with no unfrozen wait; the thread audit's Toolhelp listing runs on its own thread (no 45 ms save every 2 s).
+    {"JSP_SNAPSHOT_LWM_CACHE", "keep"}, {"JSP_SNAPSHOT_LAYOUT_GEN", "1"}, {"JSP_SNAPSHOT_QUICK", "1"},
+    {"JSP_SNAPSHOT_AUDIT_ASYNC", "1"},
+    // 2026-11-21, replay-driven depth 2, same build: before the freeze the save waits UNFROZEN (up to 20 ms) for the job words to go idle, instead of
+    // freezing, finding them busy and retrying (each try ~1.75 ms and it halts the jobs it waits for); the frozen layout walk (~2 ms per freeze) runs every
+    // 30th gate while the layout generation is unchanged. Together: 13.1 -> 16.1 ticks/s, save 12.9 -> 8.3 ms, restore 16.4 -> 12.7 ms, 0 desyncs.
+    {"JSP_SNAPSHOT_QUICK_WAIT_US", "20000"}, {"JSP_SNAPSHOT_FROZEN_WALK_EVERY", "30"},
+    // Saves GekkoNet can never load again (frames below its final frame: gekko_final_frame) take no snapshot, only the checksum (jsp_net_glue.h). Host tests:
+    // the skip_final_* scenarios (loss, blackout, cheat at exactly 300, replays). Two copies over a 66 ms link: 58% / 8% of the saves skipped, 301 rollbacks.
+    {"JSP_ROLLBACK_SKIP_FINAL", "1"},
+    // A restore waits (at most JSP_SNAPSHOT_SITE_MS, 50 ms) until every helper thread is parked where it was at the target's save (jsp_snapshot_sync.h, SiteMoved). Soak
+    // 2026-11-21 (replay-driven depth 2, ~3,200 restores): a CRI loader worker was caught inside its file read at a restore; 0 desyncs, restore 10.7 ms avg (no cost).
+    {"JSP_SNAPSHOT_SITE", "1"},
+    // WORKAROUND TO REPLACE (crash, 2026-11-21): with the D3D12 backend's asynchronous fragment-program builds on (PSO_ASYNC, 4 workers), every depth-2 bench
+    // run on a cold pipeline cache ended in heap corruption (0xC0000374, detected in D3DCompile's free on vp_fp_async_worker) within 15-60 s; with PSO_ASYNC=0
+    // two runs of 14 windows (~200 s) did not. The writer is not found yet. Off in rollback until it is: a new program is built on the drawing thread (a hitch
+    // once per program; the pipeline cache on disk removes it the next time).
+    {"PSO_ASYNC", "0"},
+    // Re-run cost (2026-11-21, two copies, --rollback --link 80,10,10, one 10,000-tick match each): the frames of a rollback re-run are never shown, so the
+    // RSX command handler skips their draws, clears and state flushes (patch 7919; labels, reports, flips still run; the D3D12 backend only reads guest memory).
+    // Re-run FIFO drain 14-22 -> 0.6-0.8 ms per tick, re-run tick 18.6 -> 10.4 ms (222 rollbacks), 0 differing of 9,863 compared ticks.
+    {"JSP_STEP_SKIP_DRAWS", "1"},
 };
 enum class Boot { NotRequested, Go, Refused };
 
@@ -261,6 +289,16 @@ inline bool notice_visible(bool have_notice, bool top_up, uint64_t up_since_ms, 
     return have_notice && top_up && now_ms - up_since_ms < kNoticeMs;
 }
 
+// FIX (an F9 tap cancelled rollback at fight start; recording hotkeys use F9): the rollback cancel key (jsp_net_game.cpp) counts only once held
+// kCancelHoldMs, in every phase (waiting, armed and running). since: when the key went down (0 = up; the caller keeps it).
+static constexpr uint64_t kCancelHoldMs = 1500;
+inline bool cancel_held(bool down, uint64_t now_ms, uint64_t& since)
+{
+    if (!down) { since = 0; return false; }
+    if (!since) since = now_ms;
+    return now_ms - since > kCancelHoldMs;
+}
+
 // ONE place decides whether a rollback start happens, and it runs after the online files were applied (so PS3_NET_ONLINE is final):
 //   - JSP_ROLLBACK off: nothing.
 //   - the game's own online on (PS3_NET_ONLINE set to anything, the runtime's test) too: REFUSED, neither runs (one multiplayer method at a time):
@@ -287,6 +325,11 @@ Boot resolve_env(Get get, Set set, std::vector<std::string>* own, std::string* w
     const char* l = get(kKeyListen); const char* j = get(kKeyJoin);
     const bool hl = l && *l, hj = j && *j;
     const char* via = get(kKeyVia);
+    if (const char* bn = get(kKeyBench); flag_on(bn)) {   // ENHANCEMENT (rollback bench): a local test, no role
+        if (hl || hj || (via && *via)) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK_BENCH is a local test without a peer: remove JSP_ROLLBACK_LISTEN, JOIN and VIA: rollback off");
+        if (!bench_depth(bn)) return refuse(Refusal::RoleKeys, "JSP_ROLLBACK_BENCH must be 1 to 8 (the ticks rolled back on every tick): rollback off");
+        goto defaults;
+    }
     if (via && jps::ieq(via, "repsn")) {
         const char* role = get(kKeyRole);
         if (!role || !(jps::ieq(role, "host") || jps::ieq(role, "join"))) return refuse(Refusal::RepsnNoRole, "JSP_ROLLBACK_VIA=repsn needs JSP_ROLLBACK_ROLE=host or join: rollback off");
