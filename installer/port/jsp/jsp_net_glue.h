@@ -34,7 +34,8 @@ public:
 class Glue {
 public:
     Glue(NetSession& s, jsx::Stepper& st, IGlueGame& g) : s_(s), st_(st), g_(g) {}
-    // allow_update=false: pacing (frames_ahead >= 1) or the caller is not ready; the stepper is still serviced (commits, replays).
+    // allow_update=false: the caller is not ready for a session update; the stepper is still serviced (commits, replays). frames_ahead never gates
+    // update (jsp_net_game.cpp always passes true; the time sync stretches the next period instead, NetSession::pace_sleep_ms).
     jsx::Op iteration(bool allow_update = true)
     {
         bool updated = false;

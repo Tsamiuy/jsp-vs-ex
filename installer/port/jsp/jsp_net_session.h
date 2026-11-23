@@ -6,8 +6,21 @@
 //   UdpMux           one UDP socket per process, 1-byte channel tag in front of every datagram: 'G' GekkoNet, 'M' rendezvous channel, 'S' settings-handshake
 //                    datagrams (unreliable: the handshake has its own Resender), 'K' heartbeat. Thread-safe; queues are bounded.
 //   MessageChannel   reliable ordered messages to one peer (stop-and-wait) with a per-run epoch: used by the rendezvous only (HELO/PLAN).
-//   IRendezvous      how two peers learn each other: DirectRendezvous (host/join by IP:port, implemented) or a re-psn room (design only).
+//   IRendezvous      how two peers learn each other: DirectRendezvous (host/join by IP:port) or a re-psn room (RePsnRendezvous, jsp_net_repsn.h).
 //   NetSession       GekkoNet wrapper: slots, local delay, QUEUED events (the stepper runs them one tick per main-loop iteration), desync/disconnect events.
+//
+// Thread safety and ownership (the contract the rollback layer relies on; review of PR 248):
+//   UdpMux       owned by the game glue (jsp_net_game.cpp, one per process). send / pump / pop / set_link_model / open / close take its recursive mu_, so
+//                any thread may call them (the game thread through GekkoNet, the settings pump thread, the heartbeat PumpThread, the keepalive worker).
+//                NOT locked: is_open(), local_port() and the public counters (sent, received, dropped, ...): read them for logs only, or from the
+//                thread that opened / closes the mux. close() must not race open(): both run on the owning thread while no session is running.
+//   PumpThread   heartbeats: its thread calls UdpMux::pump and UdpMux::send (both under the mux lock) and nothing else. start / stop are for the owning
+//                thread; the object holds a raw Impl* and must not be copied (stop() joins and frees it).
+//   NetSession   owned by the game glue. Every GekkoNet call and events_ / psaves_ / pending_ / failed_ / failure_ access is under its recursive gmu_;
+//                start / start_local / stop / poll / update / pace_sleep_ms / running / failed / failure / host_abort_handle take it. Lifecycle (start*,
+//                stop) belongs to ONE owning thread (the game thread); stop() retires the host abort and joins the keepalive worker WITHOUT holding gmu_.
+//                The keepalive worker takes gmu_ only by try_lock (the game thread inside the session keeps it busy and polls anyway).
+//                Lock order where two are held: (the settings pump's mutex) -> NetSession::gmu_ -> UdpMux::mu_; never the reverse.
 #pragma once
 #include "jsp_host_abort.h"
 #include <array>
@@ -55,6 +68,8 @@ uint64_t now_ms();   // monotonic milliseconds (steady clock); timers only, neve
 class UdpMux {
 public:
     static constexpr size_t kMaxQueued = 512;                // datagrams per tag; beyond it the OLDEST is dropped (overflow counts)
+    // The largest datagram on the wire as this mux frames it: the 1-byte tag plus its payload (send refuses len + 1 > kMaxDatagram; pump drops a larger one).
+    // A relayed datagram (re-psn) arrives with a relay header in front, which rx_hook unwraps first; the receive buffer has 1 + 64 spare bytes for it.
     static constexpr size_t kMaxDatagram = 1400;
     ~UdpMux() { close(); }
     bool open(uint16_t port, std::string* err = nullptr);   // port 0 = any
@@ -174,7 +189,7 @@ struct SessionPlan {
     std::array<uint8_t, 4> peer_slot_mask() const;
 };
 
-// Pluggable: (a) DirectRendezvous below; (b) a re-psn room (design in the doc, not implemented). poll() never blocks.
+// Pluggable: (a) DirectRendezvous below; (b) a re-psn room (RePsnRendezvous, jsp_net_repsn.h). poll() never blocks.
 class IRendezvous {
 public:
     virtual ~IRendezvous() {}
@@ -327,8 +342,8 @@ public:
     void abort(const std::string& why);
     // Leave the session: disconnects one local actor (GekkoNet: the peer leaves, every remote actor is dropped).
     bool leave(uint8_t local_player);
-    // Receive and send without advancing the session (time sync, acks, disconnect timer). frames_ahead() is recomputed from received messages only, so a caller that
-    // waits for frames_ahead() < 1 MUST call this while it waits, or it waits forever and the peer times out.
+    // Receive and send without advancing the session (time sync, acks, disconnect timer). frames_ahead() is recomputed from received messages only. Nothing
+    // waits on it: the glue calls update every iteration it may (see pace_sleep_ms).
     void poll();
     // Longest stretch (ms) the game thread went without calling poll/update since the last call of this (reset). What the keepalive thread had to cover.
     uint32_t take_max_gap_ms();
@@ -338,7 +353,7 @@ public:
     // other's advantage, so waiting on it feeds back (runaway sleeps of seconds). The ONLY deadlock rule is the caller's: update must be
     // called every iteration it may (a two-copy test: the game skipped update while the figure was >= 1, so the figure never changed again).
     uint32_t pace_sleep_ms(uint32_t tick_ms);
-    float frames_ahead() const;                               // >= ~1: the caller should wait a tick (pacing)
+    float frames_ahead() const;                               // diagnostic and time-sync input only (pace_sleep_ms, the lockstep stretch, the status line); it never gates update()
     bool failed() const { std::lock_guard<std::recursive_mutex> lk(gmu_); return failed_; }
     std::string failure() const { std::lock_guard<std::recursive_mutex> lk(gmu_); return failure_; }   // by value: the keepalive worker may write it
     // FIX (host abort): the frame clock's failure request for this session; empty unless a Game session with a live keepalive worker (stress, replay and
