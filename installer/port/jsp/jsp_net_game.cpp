@@ -14,7 +14,8 @@
 //   JSP_ROLLBACK_BADGE=1      ENHANCEMENT (display, opt-in): the status badge "Rollback | path | delay Nf | last Mf" in the top-left corner while the session
 //                             runs, and a "[net] status:" line every 30 s and at the end (jsp_net_badge.h; docs/ROLLBACK.md)
 //   JSP_ROLLBACK_ALLOW_DEBUG=1  test tooling only (WORKAROUND to replace): the handshake's debug-switch refusal is off (the two-instance test runs the auto-pilot route; both peers need the same fight
-//                             seed until the host's plan seed is applied to the game, see the doc)
+//                             seed until the host's plan seed is applied to the game, see the doc). It also lets the test switches apply (jsp_net_debug_gate.h: JSP_NET_LINK,
+//                             JSP_AUDIO_TICKLOCK, JSP_NET_CRI_LOCK, JSP_NET_GUEST_CLOCK, JSP_NET_THREAD_REGS, JSP_ROLLBACK_LIMITED_SAVING, JSP_ROLLBACK_START); without it they are ignored
 // Flow: settings handshake on a pump thread (starts at once; survives scene loads) -> Started -> at the first fight tick the session starts: GekkoNet session,
 // stepper (frame base = that tick), snapshot ring as save/load (jsp_snapshot_ext_*), canonical pad table, handover() of the handshake on both sides.
 #include <cstdint>
@@ -51,6 +52,7 @@ extern "C" unsigned jsp_net_notice_gen(void) { return 0; }
 #include "jsp_net_ko_rule.h"      // FIX (review of PR 248): the KO / time-up end rules and the live confirmation watermark, shared with net_session_test
 #include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
+#include "jsp_net_debug_gate.h"   // FIX (review of PR 248): the test switches apply only with JSP_ROLLBACK_ALLOW_DEBUG=1
 extern uint8_t* vm_base;   // the guest address space (DIAGNOSTIC page_dump)
 // The per-tick log lines ([net] commit / rollback to tick) cost an unbuffered write each in the hot path: off unless JSP_NET_TICK_LOG=1 (the two-copy test
 // compares them, build/bench/iterate.py turns it on). JSP_NET_CLOCK_DIAG=1: count which threads read the guest clock (printed at the end of a match).
@@ -109,6 +111,16 @@ using namespace jspnet;
 constexpr uint32_t kMaxPrediction = 8, kRingDepth = 12;   // ring depth must exceed the prediction window (NetSession::start refuses otherwise)
 
 bool env_on(const char* n) { const char* e = std::getenv(n); return e && *e && e[0] != '0'; }
+// FIX (review of PR 248): a test switch of the rollback layer (jpdg::kGated, jsp_net_debug_gate.h) through the gate: its value with JSP_ROLLBACK_ALLOW_DEBUG=1,
+// else nothing (the built-in default) and one log line that it was ignored. Every read of a gated key in this file goes through here (net_debug_gate_test.sh).
+const char* gated_get(const char* key, char* b, int n)
+{
+    if (!jsp_setting_get(key, b, n)) b[0] = 0;
+    bool ignored = false;
+    const char* v = jpdg::honoured(key, b, env_on(jpdg::kAllowKey), &ignored);
+    if (ignored) std::fprintf(stderr, "[net] %s=%s ignored: a rollback test switch, honoured only with %s=1 (set on one PC alone it would desync the match)\n", key, b, jpdg::kAllowKey);
+    return v;
+}
 std::vector<std::string> g_own_env;   // names this module set itself: they must not count as debug switches
 
 // ENHANCEMENT (in-game netcode option): ONE place decides the rollback start, before main(), once the online files have been applied (jsp_online.cpp's boot sets PS3_NET_ONLINE).
@@ -435,7 +447,7 @@ extern "C" volatile int g_ps3_audio_lock_mute;
 extern "C" int ps3_audio_lock_idle(void);
 extern "C" void ps3_audio_lock_rewind(long long blocks);
 extern "C" void ps3_audio_lock_set_target(long long blocks);   // sets the target and wakes the mix thread
-bool audio_lock_on() { static const bool v = [] { char b[8] = {}; return !(jsp_setting_get("JSP_AUDIO_TICKLOCK", b, sizeof b) && b[0] == '0'); }(); return v; }
+bool audio_lock_on() { static const bool v = [] { char b[8] = {}; const char* g = gated_get("JSP_AUDIO_TICKLOCK", b, sizeof b); return !(g && g[0] == '0'); }(); return v; }
 long long audio_blocks_at(uint32_t done) { return (long long)(done - g.base) * 25 / 4; }   // 48000 / 256 / 30 = 6.25 blocks per tick
 uint64_t g_audio_waits = 0, g_audio_timeouts = 0; double g_audio_wait_ms = 0;
 void audio_lock_wait()
@@ -518,7 +530,7 @@ int cri_usleep_hook(ppu_context* c, uint64_t)
     g_cri_parked.store(0);
     return 1;
 }
-bool cri_lock_on() { static const bool v = [] { char b[8] = {}; return !(jsp_setting_get("JSP_NET_CRI_LOCK", b, sizeof b) && b[0] == '0'); }(); return v; }
+bool cri_lock_on() { static const bool v = [] { char b[8] = {}; const char* g = gated_get("JSP_NET_CRI_LOCK", b, sizeof b); return !(g && g[0] == '0'); }(); return v; }
 void cri_wait(uint32_t want, double budget_ms)
 {
     const int64_t t0 = qpc_now();
@@ -607,7 +619,7 @@ int64_t guest_tb_shift(uint64_t real)
     g_vc_total_reads++;
     return (int64_t)(vt - real);
 }
-bool guest_clock_on() { static const bool v = [] { char b[8] = {}; return !(jsp_setting_get("JSP_NET_GUEST_CLOCK", b, sizeof b) && b[0] == '0'); }(); return v; }
+bool guest_clock_on() { static const bool v = [] { char b[8] = {}; const char* g = gated_get("JSP_NET_GUEST_CLOCK", b, sizeof b); return !(g && g[0] == '0'); }(); return v; }
 void guest_clock_start()
 {
     if (!guest_clock_on() || g.bench) return;
@@ -635,7 +647,7 @@ struct ThrRegs { uint32_t kind, lr; uint64_t gpr[32]; double fpr[32]; u128 vr[32
 struct TickRegs { uint32_t tick = 0xFFFFFFFFu; uint64_t mask = 0; ThrRegs t[65]; };
 constexpr int kRegRing = 16;
 TickRegs* g_regs = nullptr;
-bool thread_regs_on() { static const bool v = [] { char b[8] = {}; return !(jsp_setting_get("JSP_NET_THREAD_REGS", b, sizeof b) && b[0] == '0'); }(); return v; }
+bool thread_regs_on() { static const bool v = [] { char b[8] = {}; const char* g = gated_get("JSP_NET_THREAD_REGS", b, sizeof b); return !(g && g[0] == '0'); }(); return v; }
 void regs_save(uint32_t tick)
 {
     if (g.bench || !thread_regs_on()) return;
@@ -1176,7 +1188,7 @@ void task_watch_start()
 // TEST (A/B): JSP_ROLLBACK_START=fight starts a match session at the first fight HUD draw instead of the camera anchor (see boundary()). Not the default: the
 // tick count spent loading then differs between the PCs, and per-tick state the checksum does not cover drifts (the CPU opponent acted 1 tick apart, two-copy test).
 extern "C" volatile uint32_t g_hud_calls;   // jsp_game.cpp: calls of the fight HUD draw
-bool start_at_anchor() { static const bool v = [] { char b[16] = {}; return !(jsp_setting_get("JSP_ROLLBACK_START", b, sizeof b) && !std::strcmp(b, "fight")); }(); return v; }
+bool start_at_anchor() { static const bool v = [] { char b[16] = {}; const char* g = gated_get("JSP_ROLLBACK_START", b, sizeof b); return !(g && !std::strcmp(g, "fight")); }(); return v; }
 void load_feed()
 {
     char fp[400] = {}, sk[16] = {};
@@ -1212,7 +1224,7 @@ void start_session(ppu_context* c)
     cfg.local_delay.assign(g.plan.local_count, (uint8_t)vals.v[static_cast<size_t>(jpsm::Id::InputDelay)]);          // from the manifest: both peers agree
     g.bv.delay = (int)vals.v[static_cast<size_t>(jpsm::Id::InputDelay)];   // status badge: the match's input delay (the same on both PCs)
     cfg.disconnect_timeout_ms = vals.v[static_cast<size_t>(jpsm::Id::GraceSeconds)] * 1000u;                          // the grace window = the disconnect timeout
-    { char ls[8] = {}; cfg.limited_saving = jsp_setting_get("JSP_ROLLBACK_LIMITED_SAVING", ls, sizeof ls) && ls[0] == '1';   // TEST (A/B, both PCs alike): GekkoNet sparse saving (SessionConfig::limited_saving)
+    { char ls[8] = {}; const char* lv = gated_get("JSP_ROLLBACK_LIMITED_SAVING", ls, sizeof ls); cfg.limited_saving = lv && lv[0] == '1';   // TEST (A/B, both PCs alike): GekkoNet sparse saving (SessionConfig::limited_saving)
       if (cfg.limited_saving) std::fprintf(stderr, "[net] TEST: sparse saving on (JSP_ROLLBACK_LIMITED_SAVING=1)\n"); }
     { char rb[16] = {}; g.record = jsp_setting_get("JSP_ROLLBACK_RECORD", rb, sizeof rb) && rb[0] && rb[0] != '0'; }   // ENHANCEMENT (replays): see save_replay
     if (g.record) { cfg.record = true; cfg.record_user_data = replay_user_data(vals); }
@@ -1229,7 +1241,8 @@ void start_session(ppu_context* c)
     }
     // TEST ONLY (two copies on one PC): JSP_NET_LINK="delay_ms,jitter_ms,loss_permille" impairs every datagram this copy sends from here on (the plan
     // exchange before it is not impaired), so a loopback match sees a real link's latency. Unset: nothing changes. Logged, so a run says it was impaired.
-    if (const char* le = std::getenv("JSP_NET_LINK"); le && *le) {
+    char lb[64] = {};
+    if (const char* le = gated_get("JSP_NET_LINK", lb, sizeof lb); le && *le) {
         LinkModel lm; unsigned d = 0, j = 0, l = 0;
         std::sscanf(le, "%u,%u,%u", &d, &j, &l);
         lm.delay_ms = d; lm.jitter_ms = j; lm.loss_permille = l > 1000 ? 1000 : l; lm.seed = g.host ? 11 : 12;
