@@ -1,0 +1,57 @@
+Patch 7919 (experimental, rollback netcode): the RSX command handler can skip the draws of rollback re-run frames.
+
+libs/video/rsx_commands.c gains g_rsx_skip_draws. While a title port sets it (the rollback stepper does, for the ticks of a re-run,
+JSP_STEP_SKIP_DRAWS=1 with JSP_STEP_TURBO), clears, the per-draw state flush and draw_arrays / draw_indexed are skipped; register
+state, labels, semaphores and flips still run, so the frame pipeline stays in step. The re-run frames are never shown.
+No behaviour change: the flag is 0 unless the port sets it. Applies after 7918.
+
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -27,6 +27,10 @@
+  * -----------------------------------------------------------------------*/
+ 
+ static rsx_backend* s_backend = NULL;
++/* ENHANCEMENT (rollback latency, opt-in): while set, the commands of a frame that will never be shown (a rollback re-run tick on the turbo clock) skip the
++ * backend's draws, clears and per-draw state flushes; the dirty flags stay set, so the first shown draw applies the state. Every register write, label,
++ * semaphore, report and flip is processed as before. Set by the port (jsp_stepper.cpp, JSP_STEP_SKIP_DRAWS=1). */
++volatile int g_rsx_skip_draws = 0;
+ 
+ /* Last NV406E_SET_REFERENCE value seen in the FIFO. The title writes a
+  * reference then spins on the GCM control register's `ref` field until the RSX
+@@ -669,7 +673,7 @@
+           if (k == ns && ns < 16) { seen[ns++] = data;
+               if (!_first) fprintf(stderr, "[RSX] CLEAR_SURFACE new mask=0x%X color=0x%08X\n",
+                                    data, state->color_clear_value); } }
+-        if (s_backend && s_backend->clear) {
++        if (s_backend && s_backend->clear && !g_rsx_skip_draws) {
+             float depth = (float)(state->zstencil_clear_value >> 8) / (float)0xFFFFFF;
+             u8 stencil = state->zstencil_clear_value & 0xFF;
+             s_backend->clear(s_backend->userdata, data,
+@@ -873,7 +877,7 @@
+             state->begin_epoch++;
+ 
+             /* Flush dirty state to backend before drawing */
+-            if (s_backend) {
++            if (s_backend && !g_rsx_skip_draws) {
+                 if (state->surface_dirty && s_backend->set_render_target)
+                     s_backend->set_render_target(s_backend->userdata, state);
+                 if (state->viewport_dirty && s_backend->set_viewport)
+@@ -942,7 +946,7 @@
+             }
+         }
+         ps3_ms("rsx:draw_arrays");
+-        if (s_backend && s_backend->draw_arrays)
++        if (s_backend && s_backend->draw_arrays && !g_rsx_skip_draws)
+             s_backend->draw_arrays(s_backend->userdata, state->primitive_type, first, count);
+         return 0;
+     }
+@@ -976,7 +980,7 @@
+         u32 count = ((data >> 24) & 0xFF) + 1;
+         { static int _d=0; if (PS3_LOG_FIRST(_d, 8)) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
+         ps3_ms("rsx:draw_indexed");
+-        if (s_backend && s_backend->draw_indexed)
++        if (s_backend && s_backend->draw_indexed && !g_rsx_skip_draws)
+             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,
+                                     first, count);
+         return 0;
