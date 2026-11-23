@@ -15,7 +15,7 @@ coding tools of any kind) and to the people who run them. The rules for people a
    it has to be larger.
 3. **Run the checks before you push:** `python3 tools/ci/repo_checks.py --commits origin/main..HEAD`
    (Python 3 and git only). CI runs these and more on every pull request (`.github/workflows/ci.yml`: the features page, the installer and release
-   scripts, shell and PowerShell parsing, the launcher and toolkit builds); run the relevant ones too when you touch those areas.
+   scripts, shell and PowerShell parsing, the launcher build, the toolkit patch series and a syntax check of the port's sources); run the relevant ones too when you touch those areas.
 4. **Open the pull request and wait for CI.** All checks must be green. If one fails, push a fix to the same
    branch; do not open a new pull request for the same change.
 5. **A maintainer merges.** Ask for a review and stop. Do not merge your own pull request, even when you have

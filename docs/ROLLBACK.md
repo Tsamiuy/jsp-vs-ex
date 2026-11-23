@@ -1,4 +1,4 @@
-# Rollback netcode: how it works and how this port will do it
+# Rollback netcode: how it works and how this port does it
 
 Status: **experimental, opt-in.** A first version for two PCs connected by IP address is in the build, off unless you turn
 it on ([section 5](#5-try-it-experimental-direct-ip-rollback)). Turned off, the game runs exactly as before. Today's
