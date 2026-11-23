@@ -63,6 +63,7 @@ posix   | installer/tools/snapshot_ring_test.sh
 posix   | installer/tools/thread_audit_test.sh
 posix   | installer/tools/host_abort_test.sh
 posix   | installer/tools/net_debug_gate_test.sh
+posix   | installer/tools/net_team_rule_test.sh
 posix   | installer/tools/mods_overlay_test.sh {toolkit}
 windows | installer/tools/launcher_settings_test.py {launcher} {fake_tool} {scratch}
 windows | installer/tools/script_paths_test.py {fake_tool} {scratch}
@@ -93,5 +94,6 @@ exclude | installer/tools/snapshot_ring_test.cpp | compiled and run by snapshot_
 exclude | installer/tools/thread_audit_test.cpp | compiled and run by thread_audit_test.sh
 exclude | installer/tools/host_abort_test.cpp | compiled and run by host_abort_test.sh
 exclude | installer/tools/net_debug_gate_test.cpp | compiled and run by net_debug_gate_test.sh
+exclude | installer/tools/net_team_rule_test.cpp | compiled and run by net_team_rule_test.sh
 exclude | installer/tools/mods_overlay_test.cpp | compiled and run by mods_overlay_test.sh
 exclude | docs/archive/jstars-notes/patches/* | archived notes of the earlier v0.15 port: standalone C harnesses for patches that are not in the build, no runner

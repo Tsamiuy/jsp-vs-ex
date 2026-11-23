@@ -52,6 +52,7 @@ extern "C" unsigned jsp_net_notice_gen(void) { return 0; }
 #include "jsp_net_ko_rule.h"      // FIX (review of PR 248): the KO / time-up end rules and the live confirmation watermark, shared with net_session_test
 #include "jsp_net_repsn_client.h"
 #include "jsp_net_glue.h"
+#include "jsp_net_team_rule.h"    // FIX (review of PR 248): rollback matches are 2 vs 2 only (3 vs 3 refused at the start)
 #include "jsp_net_debug_gate.h"   // FIX (review of PR 248): the test switches apply only with JSP_ROLLBACK_ALLOW_DEBUG=1
 extern uint8_t* vm_base;   // the guest address space (DIAGNOSTIC page_dump)
 // The per-tick log lines ([net] commit / rollback to tick) cost an unbuffered write each in the hot path: off unless JSP_NET_TICK_LOG=1 (the two-copy test
@@ -1230,6 +1231,11 @@ void start_session(ppu_context* c)
     if (g.record) { cfg.record = true; cfg.record_user_data = replay_user_data(vals); }
     std::string why;
     g.sess.stop(); g.ended_ms = 0;   // ENHANCEMENT (lobby): a previous match's lingering session goes (no-op for the first match)
+    {   // FIX (review of PR 248): 3 vs 3 is refused (jsp_net_team_rule.h: its in-fight hooks are not rollback-safe); an unreadable team size goes on, logged
+        const jptr::Teams tm = jptr::classify([](uint32_t ea) { return vm_read32(ea); });
+        if (tm == jptr::Teams::ThreeVsThree) why = jptr::kRefusal;
+        else if (tm == jptr::Teams::Unknown) std::fprintf(stderr, "[net] team size: the battle world is not readable at the session start; assumed 2 vs 2\n");
+    }
     if (why.empty()) {
         if (!jsp_snapshot_ext_active()) why = "the snapshot ring is not active (JSP_SNAPSHOT_EXT/WW did not start)";
         else if (!g.sess.start(g.mux, g.plan, cfg)) why = "session refused: " + g.sess.error();
