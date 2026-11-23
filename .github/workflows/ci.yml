@@ -325,7 +325,7 @@ jobs:
           "$cc" -O2 -mwindows -s -o "$RUNNER_TEMP/exes/jsp-launcher.exe" installer/launcher/launcher.c
           "$cc" -O2 -municode -o "$RUNNER_TEMP/exes/fake_tool.exe" installer/tools/fake_tool.c   # wmain entry point
 
-      - name: Patched ps3recomp folder (audio_lock_test builds the toolkit's own Windows test from it)
+      - name: Patched ps3recomp folder (sys_net_test builds the toolkit's own Windows test from it)
         run: python installer/tools/export_toolkit.py --out "$RUNNER_TEMP/ps3recomp"
 
       - name: Host tests on Windows (one result per test)

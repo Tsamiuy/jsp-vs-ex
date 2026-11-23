@@ -23,7 +23,7 @@ case "$(uname -s)" in
         fi
         exe="$out/test_sys_net.exe"
         (cd "$tk" && "$cc" -std=gnu17 -O1 -UNDEBUG -Iinclude libs/network/tests/test_sys_net.c -lws2_32 -o "$exe")
-        # the compiler's runtime DLLs next to the exe, as audio_lock_test.sh does
+        # the compiler's runtime DLLs (llvm-mingw's libunwind and libc++, MinGW's winpthread) next to the exe, so it starts outside the toolchain
         bindir=$(dirname "$cc")
         for d in "$bindir/../x86_64-w64-mingw32/bin" "$bindir"; do
             for f in "$d"/libunwind.dll "$d"/libc++.dll "$d"/libwinpthread-1.dll; do [[ -f "$f" ]] && cp -f "$f" "$out/"; done
