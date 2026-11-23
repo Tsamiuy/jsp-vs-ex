@@ -272,13 +272,13 @@ struct State {
     // What it measures, per 10 s window: live ticks per second (30 = the rollback load fits), the wall time of a main-loop iteration that ran a live tick, a re-run tick or
     // no tick, and the snapshot save / restore calls. Main thread only.
     int bench = 0;
-    // ENHANCEMENT (replay-driven bench, JSP_ROLLBACK_INPUTS=<replay_dump csv>): player 1's input of every session update comes from a recorded fight instead of the
+    // ENHANCEMENT (replay-driven bench, JSP_ROLLBACK_INPUTS=<inputs csv, see load_feed>; gated, jsp_net_debug_gate.h): player 1's input of every session update comes from a recorded fight instead of the
     // pad, one row per update in order (then a centred, connected pad), so a bench run replays a real human fight with no one at the pad and two runs are comparable.
     std::vector<std::array<uint8_t, 8>> feed; size_t feed_i = 0; bool feed_end_said = false;
     struct Acc { double sum = 0, max = 0; uint64_t n = 0; void add(double v) { sum += v; n++; if (v > max) max = v; } double avg() const { return n ? sum / (double)n : 0; } };
     // ph[k][i]: phase i (1 F.vt[8], 2 F.vt[0xC], 3 pad_update, 4 the scene update) of iterations of kind k (0 live, 1 re-run)
     struct Bench { Acc live, rerun, idle, save, restore; Acc ph[2][5]; uint64_t desyncs = 0; int first_desync = -1; uint64_t win_ms = 0; int64_t last_qpc = 0; int last_kind = -1; } bs, bs_total;
-    // ENHANCEMENT (lobby): per-match state that used to be function statics (boundary's HUD-draw watch before the start; reset by reset_match), and the pump
+    // ENHANCEMENT (per-match state): state that used to be function statics (boundary's HUD-draw watch before the start; reset by reset_match), and the pump
     // thread's per-connection timers and last logged handshake state (pump_tick; reset by conn_close, with the pump thread stopped).
     uint32_t hud_seen = 0; bool hud_seen_set = false;
     uint64_t ev_first = 0, ev_next = 0, wait_next = 0; int hs_last = -2;
@@ -295,7 +295,7 @@ struct State {
 jkr::Ring g_ko;
 jkr::Watermark g_ko_live;
 void ko_clear() { g_ko.clear(); g_ko_live.reset(); }
-// ENHANCEMENT (lobby): an ended match keeps its GekkoNet session this long (its keepalive thread still answers), so the other PC can confirm the last ticks
+// ENHANCEMENT (session linger): an ended match keeps its GekkoNet session this long (its keepalive thread still answers), so the other PC can confirm the last ticks
 // (a natural match end has no abort, see end_match_over) before it is destroyed; stopped earlier by a new session or conn_close.
 constexpr uint64_t kLingerMs = 2000;
 
@@ -758,7 +758,7 @@ void save_replay(bool final = true)
     if (final) g_replay_path.clear();
 }
 
-// ENHANCEMENT (lobby, later): the per-match state back to what a fresh process has, so another session can start in this process (a runtime lobby or a
+// ENHANCEMENT (per-match state): the per-match state back to what a fresh process has, so another session can start in this process (a runtime lobby or a
 // rematch, neither in this build). Main thread; the audio / clock / sound-server locks are already ended (end_with runs their end functions first). The GekkoNet session itself
 // is stopped separately (kLingerMs, boundary / conn_close / the next start), so the other PC can still confirm the last ticks.
 void reset_match()
@@ -781,7 +781,7 @@ void reset_match()
 }
 
 // The match is over (session failure, Cancel, disconnect, End match): the local settings come back (handshake end_match / match_ended), the pad hook goes, the fight runs on locally.
-// ENHANCEMENT (lobby): the link (socket, rendezvous, handshake objects, pump thread) stays open and the per-match state is reset (reset_match), so a new
+// ENHANCEMENT (per-match state): the link (socket, rendezvous, handshake objects, pump thread) stays open and the per-match state is reset (reset_match), so a new
 // session can start in this process; the GekkoNet session lingers kLingerMs (boundary stops it).
 void end_with(const std::string& text, bool quiet = false)
 {
@@ -805,7 +805,7 @@ void end_with(const std::string& text, bool quiet = false)
     { std::lock_guard<std::mutex> lk(g.pump.mutex()); if (g.host && g.mh) g.mh->end_match(); else if (!g.host && g.mc) g.mc->match_ended(); }
     log("ended", text);
     if (quiet) set_text(""); else show(text);   // quiet: the rendezvous texts are on the main menu's notice (jsp_net_notice); the message line stays empty so it does not clear that layer
-    g.ended_ms = GetTickCount64();   // ENHANCEMENT (lobby): the session is stopped kLingerMs from now (boundary)
+    g.ended_ms = GetTickCount64();   // ENHANCEMENT (session linger): the session is stopped kLingerMs from now (boundary)
     reset_match();
 }
 // After a local failure the peer is told WHY by a handshake Cancel (Gekko's disconnect alone would show it only 'Opponent disconnected'). The peer waits a moment for it.
@@ -1015,7 +1015,7 @@ public:
         }
         // ENHANCEMENT (rollback, A/B, off by default): JSP_NET_STICK_DEADZONE=N (0..64) sends a stick within N of centre as centred, and
         // JSP_NET_STICK_LEVELS=L (2..128) rounds each axis's deflection to L steps over the full range. The value sent is what both PCs simulate, so nothing has to
-        // agree; it removes the mispredictions of stick jitter. Measured on a recorded fight (build/replays, replay_inputs.py): 954 input changes, 731 with
+        // agree; it removes the mispredictions of stick jitter. Measured on the inputs of one recorded fight: 954 input changes, 731 with
         // dead zone 24 and 4 levels, 782 with 8 levels; the dead zone alone 901. Not a default until a fight confirms the game ignores the dropped precision.
         { static const int dz = [] { char b[16] = {}; const int v = jsp_setting_get("JSP_NET_STICK_DEADZONE", b, sizeof b) ? std::atoi(b) : 0; return v < 0 ? 0 : v > 64 ? 64 : v; }();
           static const int lv = [] { char b[16] = {}; const int v = jsp_setting_get("JSP_NET_STICK_LEVELS", b, sizeof b) ? std::atoi(b) : 0; return v < 2 ? 0 : v > 128 ? 128 : v; }();
@@ -1081,8 +1081,9 @@ std::string match_over_text(int w) { return jkr::match_over_text(w); }
 // sends the 250-500 ms health ping the peer's disconnect timer counts). This constant is only the point where a gate that never clears is declared hung. Warm pipeline caches shorten the frames.
 constexpr unsigned kGateBudgetMs = 15000;
 
-// ENHANCEMENT (replay-driven tests): JSP_ROLLBACK_INPUTS=<a replay_dump csv> feeds this copy's local player from a recorded fight, one row per session update
-// (JSP_ROLLBACK_INPUTS_SKIP=N starts N rows in, so two copies fed from one recording do not press alike). Bench and two-copy test runs only; the pad is not read.
+// ENHANCEMENT (replay-driven tests): JSP_ROLLBACK_INPUTS=<csv> feeds this copy's local player from a recorded fight, one row per session update
+// ("tick,buttons,lx,ly,rx,ry[,connected]"; lines not starting with a digit are skipped; load_feed). JSP_ROLLBACK_INPUTS_SKIP=N starts N rows in, so two
+// copies fed from one recording do not press alike. Bench and two-copy test runs only, and only with JSP_ROLLBACK_ALLOW_DEBUG=1; the pad is not read.
 // DIAGNOSTIC (JSP_NET_TASK_WATCH=1, local test only): a hardware write watchpoint (DR0) on the game's task count 0x0094DEC4, set on every thread of the
 // process when a session starts. Each write logs the writing thread, the new count, the tick and the host call stack as jsp+0xRVA frames (the recompiled
 // functions func_XXXXXXXX, symbolized afterwards with llvm-nm), i.e. the guest call chain that added or removed a task.
@@ -1232,7 +1233,7 @@ void start_session(ppu_context* c)
     { char rb[16] = {}; g.record = jsp_setting_get("JSP_ROLLBACK_RECORD", rb, sizeof rb) && rb[0] && rb[0] != '0'; }   // ENHANCEMENT (replays): see save_replay
     if (g.record) { cfg.record = true; cfg.record_user_data = replay_user_data(vals); }
     std::string why;
-    g.sess.stop(); g.ended_ms = 0;   // ENHANCEMENT (lobby): a previous match's lingering session goes (no-op for the first match)
+    g.sess.stop(); g.ended_ms = 0;   // ENHANCEMENT (session linger): a previous match's lingering session goes (no-op for the first match)
     {   // FIX (review of PR 248): 3 vs 3 is refused (jsp_net_team_rule.h: its in-fight hooks are not rollback-safe); an unreadable team size goes on, logged
         const jptr::Teams tm = jptr::classify([](uint32_t ea) { return vm_read32(ea); });
         if (tm == jptr::Teams::ThreeVsThree) why = jptr::kRefusal;
@@ -1291,7 +1292,7 @@ void start_bench()
     { char rb[16] = {}; g.record = jsp_setting_get("JSP_ROLLBACK_RECORD", rb, sizeof rb) && rb[0] && rb[0] != '0'; }
     if (g.record) { cfg.record = true; cfg.record_copy_every = 30; cfg.record_user_data = replay_user_data(jpsm::defaults()); }
     std::string why;
-    g.sess.stop(); g.ended_ms = 0;   // ENHANCEMENT (lobby): no-op for the first run
+    g.sess.stop(); g.ended_ms = 0;   // ENHANCEMENT (session linger): no-op for the first run
     if (!jsp_snapshot_ext_active()) why = "the snapshot ring is not active (JSP_SNAPSHOT_EXT/WW did not start)";
     else if (!g.sess.start_stress(1, (uint32_t)g.bench, cfg)) why = "session refused: " + g.sess.error();
     if (!why.empty()) { end_with("Rollback bench could not start: " + why); return; }
@@ -1397,7 +1398,7 @@ void boundary(ppu_context* c)
     task_watch_flush();
     if (g.fight_seen && g.phase == Phase::Running) cam_watch_maybe(g.hud_tick);
     Phase ph = g.phase;
-    if (g.ended_ms && GetTickCount64() - g.ended_ms > kLingerMs) { g.sess.stop(); g.ended_ms = 0; }   // ENHANCEMENT (lobby): the ended match's session goes after its linger
+    if (g.ended_ms && GetTickCount64() - g.ended_ms > kLingerMs) { g.sess.stop(); g.ended_ms = 0; }   // ENHANCEMENT (session linger): the ended match's session goes after its linger
     if (ph == Phase::Off) return;
     if (g.m2_ended.load() && ph != Phase::Ended) {   // a Cancel / failure of the settings layer while waiting, armed or in the match: the match ends on this side too
         std::string t; bool quiet = false; { std::lock_guard<std::mutex> lk(g.txt_mu); t = g.m2_text; quiet = g.m2_quiet; }
@@ -1412,7 +1413,7 @@ void boundary(ppu_context* c)
     // tick while loading, so the tick count spent loading does not matter, and the checksum's tick number is session-relative. (The task count is no scene
     // id: it stayed at 0x0D through a whole fight in one test.) JSP_ROLLBACK_START=anchor: the old start (A/B). The bench keeps the anchor start.
     if (ph == Phase::Armed && ts.done >= 1 && !g.bench && !start_at_anchor()) {
-        uint32_t& seen = g.hud_seen; bool& seen_set = g.hud_seen_set;   // ENHANCEMENT (lobby): per match (reset_match), so a second session waits for its own fight's HUD
+        uint32_t& seen = g.hud_seen; bool& seen_set = g.hud_seen_set;   // ENHANCEMENT (per-match state): per match (reset_match), so a second session waits for its own fight's HUD
         const uint32_t n = g_hud_calls;
         const bool drawn = seen_set && n != seen;
         seen = n; seen_set = true;

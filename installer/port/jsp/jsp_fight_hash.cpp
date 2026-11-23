@@ -44,7 +44,7 @@
 #include <vector>
 #include <utility>
 #include <string>
-#include "jsp_fight_setup_rule.h"   // FIX (review of PR 248): the battle setup table in the checksum (native online: out)
+#include "jsp_fight_setup_rule.h"   // FIX (review of PR 248): the battle setup table in the checksum
 #include "jsp_net_debug_gate.h"     // FIX (review of split PR A): the A/B switches below apply only with JSP_ROLLBACK_ALLOW_DEBUG=1
 
 namespace jft {   // tick-keyed pad events (pure)
@@ -127,7 +127,6 @@ struct Anchor {
 }  // namespace jft
 
 #ifndef JSP_FIGHT_TICK_TEST
-#include <atomic>
 #include <mutex>
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
@@ -184,7 +183,6 @@ std::vector<uint32_t> g_cams, g_fighters, g_pads;
 uint32_t g_rngc[k_nrng];
 FILE* g_dump = nullptr;
 bool g_snap_on = false;   // JSP_SNAPSHOT=1 accepted by jsp_snapshot_init()
-std::atomic<int> g_setup_out{0};   // FIX (review of PR 248): 1 = a native online fight: the battle setup table is not in `all` (jsp_fight_hash_native_online)
 
 struct Fnv {
     uint64_t h = 0xCBF29CE484222325ull;
@@ -238,8 +236,8 @@ void dump_all(uint32_t n)
 }
 
 // @ the end of counted scene pass n (= k), state after the step. n is the tick, not a flip.
-// FIX (review of split PR A): an A/B switch of the hash (jpdg::kGatedHash) is on only when set to 1 AND JSP_ROLLBACK_ALLOW_DEBUG=1 (test tooling), the rule
-// JSP_FIGHT_HASH_SETUP already had: each one puts back a part that differs between PCs with equal game state, so set on one PC alone (a stray
+// FIX (review of split PR A): an A/B switch of the hash (jpdg::kGatedHash) is on only when set to 1 AND JSP_ROLLBACK_ALLOW_DEBUG=1 (test tooling), the
+// rule the battle setup table's A/B switch had in PR 248: each one puts back a part that differs between PCs with equal game state, so set on one PC alone (a stray
 // play_settings.txt line: the launcher exports every line) it would end the match as a false desync. A dropped value is logged once (each caller caches it).
 bool hash_ab(const char* key)
 {
@@ -267,13 +265,10 @@ void hash_tick(uint32_t n, uint32_t flip)
     if (P) { if (rng_ptrs) H.bytes(rng, P, 0x28); else H.bytes(rng, P + 0x14, 0x14); }
     H.bytes(glob, A_GLOB, 0x10);
     if (S) { H.bytes(seed, S + 0x1C, 4); H.bytes(seed, S + 0x48140, 4); }
-    // FIX (second cause of the tick-1 desync; review of PR 248): the battle setup table, see jsp_fight_hash_native_online. In a native online fight it is
-    // still logged (setup=) but left out of `all`, the rollback checksum: that fight never reads it. JSP_FIGHT_HASH_SETUP=1 keeps it in (A/B), only together
-    // with JSP_ROLLBACK_ALLOW_DEBUG=1 (test tooling): set on one PC alone it would only make a false desync, so a player's settings cannot turn it on.
-    {   static const bool setup_keep = [] {
-            const char* e = std::getenv("JSP_FIGHT_HASH_SETUP"); const char* d = std::getenv("JSP_ROLLBACK_ALLOW_DEBUG");
-            return e && e[0] == '1' && d && d[0] && d[0] != '0'; }();
-        jfs::hash([](uint32_t a) { return (uint8_t)vm_read8(a); }, setup, H.all, jfs::in_checksum(g_setup_out.load(std::memory_order_relaxed) != 0, setup_keep)); }
+    // FIX (second cause of the tick-1 desync; review of PR 248): the battle setup table (jsp_fight_setup_rule.h). Every rollback fight of this build is a
+    // Free Battle, which is built from the table, so it is in `all`, the rollback checksum (jfs::in_checksum's native online case, where it is left out,
+    // has no caller in this build: the native online path is not part of it).
+    jfs::hash([](uint32_t a) { return (uint8_t)vm_read8(a); }, setup, H.all, jfs::in_checksum(/*native_online=*/false, /*keep_ab=*/false));
     // FIX (rollback false desync): 0x0094DEC4 is no scene step in a fight: it counts the sound library's active playbacks (the stores are in func_00662784 /
     // func_006624DC, called from func_0048DC70 and the CRI range 0x0048xxxx-0x0057xxxx). A playback ends on the host's audio clock, so two PCs saw the count
     // change 0-4 ticks apart while every gameplay part matched (two-copy tests, ticks 969-1031). Left out of the per-tick hash; JSP_FIGHT_HASH_SCENE=1 keeps it (A/B, with JSP_ROLLBACK_ALLOW_DEBUG=1, hash_ab).
@@ -625,9 +620,9 @@ extern "C" void jsp_fight_hash_reset_fight(void)
     // it (two-copy runs: all zero through whole online matches and rematches). So a PC that played an offline Free Battle before the online match
     // still held that fight's picks there while a fresh PC held zeroes, and `setup` (and `all`) differed from the first compared tick (run os-fix-a:
     // host after one offline Free Battle vs a fresh joiner, rng / glob / seed / cam / pad equal).
-    // FIX (review of PR 248): this used to CLEAR the table (44 words), and this function also runs on a desync, a disconnect and a lobby open, where the
-    // title goes on locally. Nothing is written now: the native online fight never reads the table (jsp_fight_hash_native_online), so it is left out of
-    // that mode's checksum instead, and teardown and failed opens leave the player's Free Battle picks alone. Read only: the count is logged.
+    // FIX (review of PR 248): this used to CLEAR the table (44 words), and this function also runs on a desync, a disconnect and a Cancel, where the
+    // title goes on locally. Nothing is written now: teardown and failed opens leave the player's Free Battle picks alone (a native online fight, which never
+    // reads the table, leaves it out of its checksum instead: jfs::in_checksum, survey below). Read only: the count is logged.
     std::fprintf(stderr, "[tick] battle setup table 0x%08X: %u nonzero words (left as they are)\n", A_BSETUP,
                  jfs::nonzero_words([](uint32_t a) { return (uint32_t)vm_read32(a); }));
 }
@@ -641,13 +636,8 @@ extern "C" void jsp_fight_hash_reset_fight(void)
 // (0x002EF788, 0x002EFBC8, 0x002EFCEC), the online pad take 0x0F76C4 / 0x0F7234, the scene update 0x0014EA68 and the manager update 0x0045222C reach none
 // of them by direct calls. The runs agree: the table stays all zero through whole native
 // online matches while the fighters are the room's picks. So a native online fight's state does not depend on it, and its checksum leaves it out
-// (hash_tick). The offline fight (the rollback bench, the non-native path) is BUILT from it by Free Battle, so there it stays in the checksum.
-// Set by jsp_net_game.cpp at the session start (before its first save), 0 again when the match is reset. Any thread; read by the hash on the game thread.
-extern "C" void jsp_fight_hash_native_online(int on)
-{
-    if (g_setup_out.exchange(on ? 1 : 0) != (on ? 1 : 0))
-        std::fprintf(stderr, "[tick] battle setup table %s the rollback checksum (%s)\n", on ? "left out of" : "back in", on ? "a native online fight never reads it" : "not a native online fight");
-}
+// (jfs::in_checksum). The offline fight (the rollback bench, direct-IP Free Battle) is BUILT from it by Free Battle, so there it stays in the checksum.
+// This build has no native online path, so hash_tick always keeps the table in (the switch that selects the native case comes with that path).
 // ENHANCEMENT (online match end): KO state of the current fight, read from the two KO counter objects (vtable 0x00876558, +0x24 KOs scored,
 // +0x28 KOs needed; jsp_game.cpp finds them). Guest heap words: they roll back with the snapshot, so on a confirmed tick both copies agree.
 // Returns -1 while the counters are not known, 0 while nobody has won, 1 red won, 2 blue won.

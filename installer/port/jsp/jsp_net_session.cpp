@@ -464,7 +464,7 @@ bool read_replay_head(const std::vector<uint8_t>& b, ReplayHead* h)
 NetSession::NetSession() {}
 NetSession::~NetSession() { stop(); }
 
-// ENHANCEMENT (lobby): see the header. Everything start() / start_local() set or counted goes back to its initial value; the next start creates a new GekkoNet
+// ENHANCEMENT (sessions opened and closed at runtime): see the header. Everything start() / start_local() set or counted goes back to its initial value; the next start creates a new GekkoNet
 // session (a new session magic, so stragglers of the old one addressed to it are dropped by GekkoNet) and binds the adapter to its own mux again.
 void NetSession::stop()
 {
@@ -612,7 +612,7 @@ bool NetSession::start_local(SessionMode m, const SessionPlan& plan, const Sessi
         gekko_start(g, &c);
         for (unsigned s = 0; s < p.total_players; s++)
             if (gekko_add_actor(g, GekkoLocalPlayer, nullptr) != (int)s) { gekko_destroy(&g); return refuse("local actor handle mismatch"); }
-        // ENHANCEMENT (replays): a stress session records the INPUTS only (the bench: real local play for the input analysis, installer/tools/replay_inputs.py).
+        // ENHANCEMENT (replays): a stress session records the INPUTS only (the bench: real local play, kept for input analysis).
         // No checksums: the stress session stores a frame's checksum at the end of the update that issued its save, before our asynchronous commit fills it.
         if (cfg.record) {
             const bool ok = gekko_start_recording(g, false, false) &&

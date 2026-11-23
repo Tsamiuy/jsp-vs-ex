@@ -296,7 +296,7 @@ struct SessionStats {
     float last_ping_ms = -1;                 // ENHANCEMENT (adaptive input delay, rule 2): GekkoNet's last single round trip to that player (one every 500 ms)
     uint32_t rtt_seq = 0;                    // FIX (RTT sampling): round trips measured so far for that player (GekkoNet's count, +1 per ping answer): a reader
                                              // that sees the same count again has no new round trip, whatever last_ping_ms says
-    int32_t acked_frame = -1;                // ENHANCEMENT (match perf summary): the newest frame of this PC's input that player acknowledged (-1 none)
+    int32_t acked_frame = -1;                // DIAGNOSTIC: the newest frame of this PC's input that player acknowledged (-1 none); no reader in this build
     uint8_t local_delay = 0;                  // the input delay this peer's local players run with now
     uint64_t keepalive_polls = 0;            // polls made by the keepalive thread (the game thread was busy)
 };
@@ -316,7 +316,7 @@ public:
     // its player count must be 1..4. set_local_input is ignored. Ends with a ReplayFinished event; the first checksum that differs from the recording
     // raises a Desync event (tick = stepper numbering, local_hash = this run, remote_hash = the recording). The stored user data: replay_user_data().
     bool start_replay(const std::vector<uint8_t>& bytes, const SessionConfig& cfg);
-    // ENHANCEMENT (lobby: sessions opened and closed at runtime): ends the session (keepalive thread joined, GekkoNet session destroyed, the adapter
+    // ENHANCEMENT (sessions opened and closed at runtime): ends the session (keepalive thread joined, GekkoNet session destroyed, the adapter
     // singleton unbound) and returns this object to its constructed state, so start(), start_stress() or start_replay() may run again in the same process.
     // The peer is NOT told: abort() first for that. Read recording() / stats() before it. Idempotent; never call it from inside a session callback.
     void stop();

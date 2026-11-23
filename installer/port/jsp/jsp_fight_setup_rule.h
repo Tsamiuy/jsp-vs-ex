@@ -2,12 +2,13 @@
 // fight hash. Pure; used by jsp_fight_hash.cpp (hash_tick, jsp_fight_hash_reset_fight) and host-tested by installer/tools/fight_setup_rule_test.sh.
 //
 // Free Battle's character select writes the table; a native online fight (the game's own Online Battle under the rollback session) neither writes nor
-// reads it (jsp_fight_hash.cpp, before jsp_fight_hash_native_online, names the lifted code that was checked). A PC that played an offline Free Battle
+// reads it (jsp_fight_hash.cpp, after jsp_fight_hash_reset_fight, names the lifted code that was checked). A PC that played an offline Free Battle
 // first held those picks there and a fresh PC zeroes, so the checksum split at tick 1 (0.7.0-test4). The rule:
 //   - native online fight: the table is logged (its part hash) but NOT in `all`, the rollback checksum;
 //   - any other fight (offline under the bench, the non-native path): in `all`, as before (there the fight is built from it);
-//   - JSP_FIGHT_HASH_SETUP=1 keeps it in `all` in every mode (A/B; only with JSP_ROLLBACK_ALLOW_DEBUG=1, test tooling).
-// Nothing in the port writes the table any more: the match teardown (desync, disconnect), a lobby open and a rematch only count its nonzero words.
+//   - keep_ab keeps it in `all` in every mode (an A/B switch for test tooling).
+// This build has only the second case: no native online path, so jsp_fight_hash.cpp calls in_checksum(false, false).
+// Nothing in the port writes the table any more: the match teardown (any match end: desync, disconnect, Cancel) only counts its nonzero words.
 #pragma once
 #include <cstdint>
 

@@ -45,7 +45,7 @@ int main()
       CHECK(ph != pj); }
     // offline (the bench, the non-native path): the fight is built from the table, so a difference is a real difference
     CHECK(all_of(host, false, false, nullptr) != all_of(join, false, false, nullptr));
-    // A/B JSP_FIGHT_HASH_SETUP=1: in every mode
+    // A/B keep (keep_ab, test tooling): in every mode
     CHECK(all_of(host, true, true, nullptr) != all_of(join, true, true, nullptr));
     CHECK(jfs::in_checksum(false, false) && !jfs::in_checksum(true, false) && jfs::in_checksum(true, true) && jfs::in_checksum(false, true));
     // equal tables: equal in both modes, and the mode only changes `all`, never the part hash

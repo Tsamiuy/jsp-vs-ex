@@ -12,7 +12,7 @@ The rollback session library used by the experimental rollback netcode (`jsp_net
   of states that can never be loaded (`jsp_net_glue.h`). It should go upstream; re-apply it when updating.
   The second: `GekkoNetworkStats` gained `rtt_count` (`NetStats::rtt_count`, +1 in `AddRTT`) and `last_acked_frame` (that player's
   `NetStats::last_acked_frame`), filled in `NetworkStats` of game_session.cpp and spectator_session.cpp. The adaptive input delay keeps only round trips
-  whose count is new (`jsp_net_delay_rule.h`), and the match's input-latency summary reads the ack (`jsp_net_perf.h`). Re-apply it when updating. Left out: the asio copy (the port has its own UDP transport and builds with
+  whose count is new (`jsp_net_delay_rule.h`), and the session copies the ack into its stats (`SessionStats::acked_frame`, `jsp_net_session.h`; no reader in this build yet). Re-apply it when updating. Left out: the asio copy (the port has its own UDP transport and builds with
   `GEKKONET_NO_ASIO`), the examples, the documentation (also zpp_bits' README) and the upstream build files.
 - Built by `installer/port/jsp/CMakeLists.txt` as part of the game exe (`GEKKONET_STATIC`, `GEKKONET_NO_ASIO`, `ws2_32`).
 

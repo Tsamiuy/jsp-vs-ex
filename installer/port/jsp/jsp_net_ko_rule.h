@@ -75,7 +75,7 @@ inline int disconnect_result(const Ring& r, uint32_t base, const Watermark& wm, 
 // The end texts of the boundary (end_with). A result ends as "Match over: ..."; a disconnect that keeps no result as "Opponent disconnected".
 inline std::string match_over_text(int w) { return w == 3 ? std::string("Match over: time up") : std::string("Match over: ") + (w == 1 ? "red" : "blue") + " wins"; }
 inline std::string disconnect_end_text(int kept) { return kept > 0 ? match_over_text(kept) : std::string("Opponent disconnected"); }
-// A normal match end: only a "Match over" text. The share pad watchdog (rematch black screen, jsp_native_fight_end_normal) may act only after one,
+// A normal match end: only a "Match over" text. A watchdog that acts after a match end (not in this build) may act only after one,
 // so a disconnect that ignored a predicted result never arms it, and a confirmed KO kept across a disconnect still does.
 inline bool normal_end(const std::string& text) { return text.rfind("Match over", 0) == 0; }
 
