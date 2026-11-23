@@ -296,7 +296,7 @@ jkr::Ring g_ko;
 jkr::Watermark g_ko_live;
 void ko_clear() { g_ko.clear(); g_ko_live.reset(); }
 // ENHANCEMENT (lobby): an ended match keeps its GekkoNet session this long (its keepalive thread still answers), so the other PC can confirm the last ticks
-// (a natural match end has no abort, see end_match_over) before it is destroyed; stopped earlier by a new session or jsp_net_lobby_close.
+// (a natural match end has no abort, see end_match_over) before it is destroyed; stopped earlier by a new session or conn_close.
 constexpr uint64_t kLingerMs = 2000;
 
 // ENHANCEMENT (rollback bench): milliseconds from QueryPerformanceCounter (timers only, never simulation).
@@ -758,15 +758,15 @@ void save_replay(bool final = true)
     if (final) g_replay_path.clear();
 }
 
-// ENHANCEMENT (lobby): the per-match state back to what a fresh process has, so another session can start in this process (a second jsp_net_lobby_open, or a
-// rematch later). Main thread; the audio / clock / sound-server locks are already ended (end_with runs their end functions first). The GekkoNet session itself
+// ENHANCEMENT (lobby, later): the per-match state back to what a fresh process has, so another session can start in this process (a runtime lobby or a
+// rematch, neither in this build). Main thread; the audio / clock / sound-server locks are already ended (end_with runs their end functions first). The GekkoNet session itself
 // is stopped separately (kLingerMs, boundary / conn_close / the next start), so the other PC can still confirm the last ticks.
 void reset_match()
 {
     g.glue.reset();   // holds references to sess and stepper; a new one is made at the next start
     g.base = 0; g.fight_seen = false; g.hud_mark = g.hud_tick = 0; g.hud_seen = 0; g.hud_seen_set = false;
     g.skip_sim = g.skip_pad = g.was_replaying = false; g.cancel_since = 0;
-    g.last_run_ms = g.started_ms = 0; g.settings_shown_ms = 0;   // started_ms = 0: the presence no longer counts a match
+    g.last_run_ms = g.started_ms = 0; g.settings_shown_ms = 0;
     g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every(); g.ping_every = jpnb::Every();
     g.record = false; g.match_winner = 0; ko_clear();
     g_ad = jpdr::State();   // ENHANCEMENT (adaptive input delay): per match
@@ -1616,13 +1616,13 @@ struct SceneTimer {
 fn_t SceneTimer::orig;
 
 // ---- the process-wide install and the per-session connection ------------------------------------------------------------------------------------------------
-// ENHANCEMENT (lobby: sessions opened and closed at runtime, jsp_net_lobby.h). jsp_net_game_install used to do both at once; now:
+// The process-wide part and the per-session part are separate (a runtime lobby, later, opens sessions with conn_open too). jsp_net_game_install does both:
 //   install_process_wide  once per process: the frame hooks, the F9 binding, the settings text hook, the badge switch (nothing per peer)
 //   conn_open / conn_close  per session: role, socket, re-psn client and room, rendezvous, link, handshake objects, pump thread; Phase Off <-> Handshake
-// The start-up role paths (LISTEN / JOIN, VIA=repsn + ROLE) and jsp_net_lobby_open both call conn_open: one implementation.
+// The start-up role paths (LISTEN / JOIN, VIA=repsn + ROLE) call conn_open.
 struct Conn { bool host = true, repsn = false, relay = false; uint16_t port = 0; Endpoint join{}; };
 uint32_t g_net_build = 0;     // build_id() with the mod set folded in (jsp_net_game_install)
-bool g_installed = false;     // install_process_wide ran: a rollback-capable process (not the bench), so jsp_net_lobby_open may run
+bool g_installed = false;     // install_process_wide ran: a rollback-capable process (not the bench)
 
 void install_process_wide()
 {
@@ -1661,7 +1661,7 @@ bool conn_open(const Conn& c, std::string* why, jpno::Refusal* code)
     if (!g.mux.open(c.host || c.repsn ? c.port : 0, &err)) { *code = jpno::Refusal::NoSocket; *why = "cannot open the UDP socket: " + err; return false; }
     g.caps.build = g_net_build;   // build_id() with the mod set folded in
     // local preferences into the effective-value object (the proposal of a host starts from these; a client's own layer sits under the host's). Read per
-    // session, so a setting changed in the game before a lobby opens counts.
+    // session.
     for (size_t i = 0; i < jpsm::kCount; ++i) {
         const jpsm::Id id = static_cast<jpsm::Id>(i);
         char t[64]; uint32_t v;
@@ -1753,7 +1753,7 @@ extern "C" void jsp_net_game_install(void)
             return;
         }
     }
-    // The start-up role (play_settings.txt keys, validated before main() by jpno::resolve_env) -> the same connection code as the lobby (conn_open).
+    // The start-up role (play_settings.txt keys, validated before main() by jpno::resolve_env) -> conn_open.
     char b[96] = {};
     const bool have_listen = jsp_setting_get("JSP_ROLLBACK_LISTEN", b, sizeof b) && b[0];
     char j[96] = {};
