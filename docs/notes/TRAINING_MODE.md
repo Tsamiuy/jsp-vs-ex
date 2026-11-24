@@ -258,20 +258,28 @@ rim) on a translucent dark box, drawn with the port overlay as the rollback badg
   game's own count (+0x3F0) drops (6 -> 2), and the newest hits since the last tick, as many as that count, become the new combo.
   ASSUMPTION: the game restarts its count for a new combo while the number shows; if it keeps counting, the readout keeps one combo as
   the game does.
-- **When it shows:** in a Training fight only (never in other modes or online), not while the pause menu is up, with Hide HUD on, or in
-  Turn-based. It is redrawn only when its text changes (recorded as drawn only after `jsp_overlay_begin` succeeded, so a refused draw is
+- **When it shows:** in a Training fight only (never in other modes), not while the pause menu is up, with Hide HUD on, or in
+  Turn-based. The game's own online (Online Battle) has no Training fight; a rollback session (`JSP_ROLLBACK=1`, for example its local
+  bench, which runs any fight against the CPU) can run one, see Rollback below. It is redrawn only when its text changes (recorded as drawn only after `jsp_overlay_begin` succeeded, so a refused draw is
   tried again on the next tick), and closed when the fight ends or Training is left.
 - **Shared overlay layer:** the port overlay is one layer, and each `jsp_overlay_begin` clears it. `jsp_port_menu.cpp` draws the Port
-  Settings page, the version line and the pad-join prompt on it; `jsp_net_game.cpp` the rollback badge (online fights only, so never in
-  Training). The readout yields to the port menu: while `jsp_port_menu_overlay_held()` is 1 it neither draws nor closes the layer, and it
-  draws again once that drawing is gone. The pad-join prompt is the one of these that can come up in a fight.
+  Settings page, the version line and the pad-join prompt on it; `jsp_net_game.cpp` the rollback message line and status badges. The
+  readout yields to both: while `jsp_port_menu_overlay_held()` or `jsp_net_overlay_held()` is 1 it neither draws nor closes the layer,
+  and it draws again once that drawing is gone; it closes only its own drawing (`jptr::layer_step`). The pad-join prompt and the rollback
+  line are the ones that can come up in a fight.
+- **Rollback:** after a rollback the core runs ticks again (its replay flag, `jsp_stepper_in_replay()` in `jsp_stepper.cpp`, set from
+  the restore to the end of the replay's last tick; the same span as the skipped draws). A re-run tick calls the damage function again
+  for a hit already counted, and the restored memory shows an older combo count (which on a first-run tick would mean a new combo). The
+  glue passes the flag, and the readout ignores re-run ticks: each hit is counted once, when its tick first runs. A hit that only exists
+  in the corrected timeline is not counted, and one the correction removed stays counted; with local inputs only (the bench) the re-run
+  repeats the same hits. Host-tested; not run.
 - **Switch:** `TRAINING_READOUT`, on when unset; `TRAINING_READOUT=0` turns it off (read live, like `FPS_COUNTER`). No pause-menu row
   yet: a Training settings row needs a free game text slot confirmed in a run.
 - **Code:** `installer/port/jsp/jsp_train_readout.h` (state, text, layout; no game calls) and its glue in `jsp_game.cpp`
   (`readout_tick`, the @0x00085B84 Training branch and `training_tick`).
 - **Tested:** host test `installer/tools/train_readout_test.sh` (combo sums, the gauge edge, a new combo inside a shown number, heals
-  ignored, requested versus capped damage, units, the key, the redraw gate with a refused draw, printable ASCII and box width, reset on a
-  new fight); the port syntax check (`tools/ci/port_syntax_check.py`, all port sources) run with MinGW GCC (`x86_64-w64-mingw32-g++` /
+  ignored, requested versus capped damage, units, the key, the redraw gate with a refused draw, a rollback re-run counted once, the
+  shared layer yielded to another user, printable ASCII and box width, reset on a new fight); the port syntax check (`tools/ci/port_syntax_check.py`, all port sources) run with MinGW GCC (`x86_64-w64-mingw32-g++` /
   `-gcc` from the project's Windows shell), not with the llvm-mingw clang the CI uses.
 - **Not run:** no build, no game or Proton run. The combo number does come up for a single hit (pf3, "Refill timing" above: 0.77 s
   after one hit). Still to confirm in a Training run: the placement against the real HUD (top right above the top bar is an ASSUMPTION

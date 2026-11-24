@@ -345,11 +345,14 @@ bool fight_status_visible() { return jsp_fight_status_visible && jsp_fight_statu
 
 // The glue's overlay layer holds the message line (bottom left), when on the status badge (top left) and the UI module's status badge in fights (under the fight
 // timer, bottom right); a change of any redraws all.
+// The layer is shared: the Training readout (jsp_game.cpp) yields while this glue holds it (jsp_net_overlay_held, read from the game's pad thread).
+std::atomic<bool> g_layer_held{false};
 void redraw()
 {
     const std::string& s = g.shown; const std::string& b = g.badge_shown; const bool p = fight_status_visible();
-    if (s.empty() && b.empty() && !p) { jsp_overlay_close(); return; }
-    if (!jsp_overlay_begin(1280, 720)) return;
+    if (s.empty() && b.empty() && !p) { g_layer_held = false; jsp_overlay_close(); return; }
+    g_layer_held = true;   // before begin(): the readout must not start a drawing over this one
+    if (!jsp_overlay_begin(1280, 720)) { g_layer_held = false; return; }
     if (!b.empty()) {
         const float bw = jsp_overlay_text_width(b.c_str(), jpnb::kScale);
         jsp_overlay_fill_rect(jpnb::kBoxX, jpnb::kBoxY, (int)(bw > 0 ? bw : 360) + 2 * jpnb::kBoxPad, jpnb::kBoxH, JSP_RGBA(0, 0, 0, 160));
@@ -1732,6 +1735,9 @@ void conn_close()
 }
 
 }  // namespace
+
+// The Training readout (jsp_game.cpp) asks before it draws: 1 while the message line or a status badge is on the shared overlay layer.
+extern "C" int jsp_net_overlay_held(void) { return g_layer_held.load() ? 1 : 0; }
 
 extern "C" int jsp_mods_net_build(uint32_t stock, uint32_t* out);   // jsp_mods.cpp: the build word with the mod set folded in; 0 = refused
 

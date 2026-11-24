@@ -13,6 +13,12 @@
 //   vitals   health object +0x90 current health, +0x98 max (both in hundredths); +0x9C Stamina, +0xA0 Stamina limit (whole units:
 //            1000 at the start, the limit 1000..2000, docs/balance/Shared.md).
 //
+// Rollback (JSP_ROLLBACK=1, also its local bench): after a rollback the core runs ticks again (its replay flag, jsp_stepper_in_replay).
+// A re-run tick calls the damage function again for a hit already counted, and the restored memory shows an older combo count. The
+// readout counts each hit once: only ticks run for the first time feed it (rerun = true is ignored). A hit that only exists in the
+// corrected timeline is therefore not counted, and one the correction removed stays counted (with local inputs only, as in the bench,
+// the re-run repeats the same hits); the vitals are read again on the next first-run tick.
+//
 // Switch: TRAINING_READOUT (play_settings.txt or the environment, read live through jsp_setting_get). Unset means on; empty or a value
 // starting with '0' means off (the same rule as the other port keys, jpnb::key_on), so only "0" switches it off in practice.
 #pragma once
@@ -29,7 +35,7 @@ inline bool key_on(const char* v) { return !v || (*v && v[0] != '0'); }
 
 // Layout in the 1280x720 overlay space, right-aligned. ASSUMPTION (not seen on screen yet): the top-right corner above the fight HUD's
 // top bar, which starts at about y 50 (measured for the rollback badge, jsp_net_badge.h kHudTop); the badge sits top left (and only in
-// online fights), the FPS counter bottom left. Text ink at scale s spans baseline - 24 s .. baseline + 9 s, baseline = y + 21 s.
+// rollback sessions), the FPS counter bottom left. Text ink at scale s spans baseline - 24 s .. baseline + 9 s, baseline = y + 21 s.
 inline constexpr float kScale = 0.45f;
 inline constexpr float kY1 = 8.0f, kY2 = 24.0f;          // the tops of the two lines' capitals
 inline constexpr int kRight = 1274;                      // the box's right edge (6 px margin, as the badge's left one)
@@ -57,11 +63,25 @@ struct Side {
     int32_t st = 0, st_max = 0;     // whole Stamina units
 };
 
+// The overlay is one shared layer, and each begin() clears it. Its other users: the Port Settings page, the version line and the pad-join
+// prompt (jsp_port_menu.cpp, jsp_port_menu_overlay_held) and the rollback glue's message line and status badges (jsp_net_game.cpp,
+// jsp_net_overlay_held). show: the readout should be on screen; mine: the readout's drawing is the one on the layer; others: another user
+// holds the layer. While another user holds it the readout neither draws nor closes (its drawing is gone anyway) and draws again after.
+enum class Layer : uint8_t { Draw, Yield, Close, Idle };
+inline Layer layer_step(bool show, bool mine, bool others)
+{
+    if (others) return Layer::Yield;
+    if (!show) return mine ? Layer::Close : Layer::Idle;
+    return Layer::Draw;   // the redraw gate (changed) decides whether the text is drawn again
+}
+
 class Readout {
 public:
     // One damage call in Training. d90 is the game's requested damage to +0x90 (before the cap). Returns true when it counted as a hit.
-    bool on_hit(uint32_t defender, int32_t d90, uint64_t tick)
+    // rerun: the rollback core is running this tick again (the hit was counted when the tick first ran): ignored.
+    bool on_hit(uint32_t defender, int32_t d90, uint64_t tick, bool rerun = false)
     {
+        if (rerun) return false;
         if (d90 <= 0) return false;                      // a heal (or nothing): not a hit
         if (!combo_open_ || defender != defender_) {     // the first hit after the gauge went down, or a hit on the other fighter
             combo_open_ = true;
@@ -84,8 +104,10 @@ public:
     // The number stays up for a while after the last hit (0.77 s after one hit, 0.9 s after three, docs/notes/TRAINING_MODE.md), so a
     // new combo can start before it goes away. The game's own count tells: when it drops while the number is up (8 -> 1), the game
     // started a new combo, and the newest `hits` hits seen since the last tick are that combo; the older ones stay with the old one.
-    void on_gauge(bool up, uint32_t hits)
+    // rerun: a re-run tick (restored memory, an older count): ignored, so a rollback is never read as a new combo.
+    void on_gauge(bool up, uint32_t hits, bool rerun = false)
     {
+        if (rerun) return;
         if (up && hits) {
             if (combo_open_ && game_hits_ && hits < game_hits_) restart(hits);
             game_hits_ = hits;
@@ -95,9 +117,9 @@ public:
         recent_n_ = 0;                                   // the hits before this tick belong to a count the game has shown
     }
 
-    void set_vitals(int slot, int32_t hp, int32_t hp_max, int32_t st, int32_t st_max)
+    void set_vitals(int slot, int32_t hp, int32_t hp_max, int32_t st, int32_t st_max, bool rerun = false)
     {
-        if (slot < 0 || slot >= kSides) return;
+        if (rerun || slot < 0 || slot >= kSides) return;
         Side& s = side_[slot];
         s.known = true; s.hp = hp; s.hp_max = hp_max; s.st = st; s.st_max = st_max;
     }

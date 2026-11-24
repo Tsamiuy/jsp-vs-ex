@@ -70,6 +70,8 @@ extern "C" int32_t cellGameContentPermit(char* contentInfoPath, char* usrdirPath
 extern "C" int32_t cellGameCreateGameData(void* init, char* tmp_contentInfoPath, char* tmp_usrdirPath);
 extern "C" volatile unsigned long long g_ppu_fs_last_read_ms;   /* ppu_fs.cpp: last cellFsRead */
 extern "C" int jsp_port_menu_overlay_held(void);   /* jsp_port_menu.cpp: 1 while its page, version line or join prompt holds the overlay */
+extern "C" int jsp_net_overlay_held(void);         /* jsp_net_game.cpp: 1 while the rollback message line or a status badge holds the overlay */
+extern "C" int jsp_stepper_in_replay(void);        /* jsp_stepper.cpp: 1 while the rollback core runs ticks again after a rollback */
 extern "C" void (*g_spu_put_hook_img)(int image_id, uint32_t ea, uint32_t size);   /* spu_channels.c */
 extern "C" void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly);   /* cellPad.c */
 extern "C" void (*g_cellpad_rstick_filter)(uint32_t port_no, uint16_t* rx, uint16_t* ry);   /* cellPad.c */
@@ -2847,7 +2849,7 @@ int training_icall(uint32_t target, uint64_t* gpr)
     const unsigned long long now = GetTickCount64();
     /* ENHANCEMENT: the readout takes the damage the game asked for (r4 as it came in, before the cap above rewrote gpr[4]),
      * so a move's real damage shows even near the cap; the capped value stays in the log line below only. */
-    if (training_fight_scene()) { std::lock_guard<std::mutex> lk(g_readout_mu); g_readout.on_hit(obj, d90, now); }
+    if (training_fight_scene()) { const bool rr = jsp_stepper_in_replay() != 0; std::lock_guard<std::mutex> lk(g_readout_mu); g_readout.on_hit(obj, d90, now, rr); }   /* a re-run tick: counted already */
     bal_hit(obj, gpr, cur, rec, d90, d94);
     std::printf("[training] hit 0x%08X health %d (%d) damage %d (%d) -> %d (%d)\n", obj, cur, rec, d90, d94,
                 (int32_t)gpr[4], (int32_t)gpr[5]);
@@ -2932,13 +2934,14 @@ void training_tick()
     { /* ENHANCEMENT: the readout's combo (the gauge's up-to-down edge closes it) and vitals. Fighter health object +0x90 health,
        * +0x98 max (hundredths), +0x9C Stamina, +0xA0 its limit. ASSUMPTION: g_bal_obj[0] (the first fighter the HUD's health getter
        * noted) is Player 1 and [1] the dummy; to be confirmed in a run. */
+      const bool rr = jsp_stepper_in_replay() != 0;   /* a re-run tick after a rollback (restored memory): the readout ignores it */
       std::lock_guard<std::mutex> lk(g_readout_mu);
-      g_readout.on_gauge(up, combo_hits);
+      g_readout.on_gauge(up, combo_hits, rr);
       for (int i = 0; i < g_bal_nobj && i < jptr::kSides; i++) {
           const uint32_t o = g_bal_obj[i];
           const int32_t max = (int32_t)vm_read32(o + 0x98);
           if (max <= 0 || max > 1000000) continue;
-          g_readout.set_vitals(i, (int32_t)vm_read32(o + 0x90), max, (int32_t)vm_read32(o + 0x9C), (int32_t)vm_read32(o + 0xA0));
+          g_readout.set_vitals(i, (int32_t)vm_read32(o + 0x90), max, (int32_t)vm_read32(o + 0x9C), (int32_t)vm_read32(o + 0xA0), rr);
       }
     }
     for (int i = 0; i < g_train_count; i++) {
@@ -2970,7 +2973,7 @@ void training_tick()
 
 /* ENHANCEMENT: draws the Training readout (jsp_train_readout.h) on the port overlay, in the game's menu font with its black rim on a
  * translucent dark box, as the rollback badge and the Port Settings page. Once per pad poll; redraws only when the text changed. Shown
- * only in a Training fight, never with the pause menu up, Hide HUD on or in Turn-based; anywhere else the readout's drawing is closed. */
+ * only in a Training fight, never with the pause menu up, Hide HUD on or in Turn-based; anywhere else the readout's own drawing is closed. */
 void readout_tick()
 {
     static int gen = -1;
@@ -2985,15 +2988,16 @@ void readout_tick()
     {
         std::lock_guard<std::mutex> lk(g_readout_mu);
         if (!training_active()) g_readout.reset();
-        if (!show) {
-            if (g_readout_drawn) { jsp_overlay_close(); g_readout_drawn = false; }
-            g_readout.invalidate();
-            return;
-        }
         /* The layer is shared with the Port Settings page, the version line and the pad-join prompt (jsp_port_menu.cpp), and with the
-         * rollback badge (jsp_net_game.cpp, online fights only, so never in Training). Each begin() clears the layer, so the readout
-         * yields: while the port menu holds the layer it neither draws nor closes, and draws again once that drawing is gone. */
-        if (jsp_port_menu_overlay_held()) { g_readout_drawn = false; g_readout.invalidate(); return; }
+         * rollback glue's message line and status badges (jsp_net_game.cpp; with JSP_ROLLBACK=1 a Training fight can run under rollback,
+         * e.g. the local bench). Each begin() clears the layer, so the readout yields (jptr::layer_step): while another user holds the
+         * layer it neither draws nor closes, and draws again once that drawing is gone; it closes only its own drawing. */
+        switch (jptr::layer_step(show, g_readout_drawn, jsp_port_menu_overlay_held() || jsp_net_overlay_held())) {
+        case jptr::Layer::Yield: g_readout_drawn = false; g_readout.invalidate(); return;
+        case jptr::Layer::Close: jsp_overlay_close(); g_readout_drawn = false; g_readout.invalidate(); return;
+        case jptr::Layer::Idle: g_readout.invalidate(); return;
+        case jptr::Layer::Draw: break;
+        }
         if (g_readout_drawn && !jsp_overlay_active()) g_readout.invalidate();   /* someone closed the layer: draw again */
         if (!g_readout.changed()) return;
         l1 = g_readout.line1(); l2 = g_readout.line2();

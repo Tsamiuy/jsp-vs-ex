@@ -149,6 +149,72 @@ int main()
     CHECK(b1 + 9.0f * kScale <= b2 - 24.0f * kScale);
     CHECK(kBoxY + kBoxH + 8 <= kHudTop);
 
+    // rollback: the core rolls back 3 ticks and runs them again (rerun = true, jsp_stepper_in_replay). The damage calls of the re-run ticks
+    // repeat hits already counted and the restored memory shows the older combo count: neither changes the readout.
+    Readout rb;
+    CHECK(rb.on_hit(0x100, 1000, 1));  rb.on_gauge(true, 1);
+    CHECK(rb.on_hit(0x100, 800, 2));   rb.on_gauge(true, 2);
+    CHECK(rb.on_hit(0x100, 1200, 3));  rb.on_gauge(true, 3);
+    rb.set_vitals(1, 70000, 100000, 1000, 1000);
+    const std::string before = rb.text();
+    CHECK(rb.combo_hits() == 3 && rb.combo_total() == 3000);
+    // a rollback to the end of tick 1 and a re-run of ticks 2..3: the restored memory shows the count 1 (a drop from 3 while the number
+    // is up, which on a first-run tick means a new combo), then the same two damage calls; the restored health is older
+    rb.on_gauge(true, 1, true);
+    CHECK(rb.combo_hits() == 3 && rb.combo_total() == 3000 && rb.combo_open());   // not read as a new combo
+    CHECK(!rb.on_hit(0x100, 800, 2, true));  rb.on_gauge(true, 2, true);
+    CHECK(!rb.on_hit(0x100, 1200, 3, true)); rb.on_gauge(true, 3, true);
+    rb.set_vitals(1, 90000, 100000, 1000, 1000, true);
+    CHECK(rb.combo_hits() == 3 && rb.combo_total() == 3000 && rb.combo_open());   // counted once
+    CHECK(rb.text() == before);
+    // a deeper one, to before the first hit (no number up), re-running all three: still counted once
+    rb.on_gauge(false, 0, true);
+    CHECK(!rb.on_hit(0x100, 1000, 1, true)); rb.on_gauge(true, 1, true);
+    CHECK(!rb.on_hit(0x100, 800, 2, true));  rb.on_gauge(true, 2, true);
+    CHECK(!rb.on_hit(0x100, 1200, 3, true)); rb.on_gauge(true, 3, true);
+    CHECK(rb.combo_hits() == 3 && rb.combo_total() == 3000 && rb.combo_open());
+    CHECK(rb.text() == before);
+    // the first tick after the replay counts again
+    rb.on_gauge(true, 3);
+    CHECK(rb.on_hit(0x100, 500, 4)); rb.on_gauge(true, 4);
+    CHECK(rb.combo_hits() == 4 && rb.combo_total() == 3500 && rb.last_damage() == 500);
+    // the same sequence fed without the flag shows what it prevents: the hits count twice
+    Readout dbl;
+    for (int pass = 0; pass < 2; pass++) { dbl.on_hit(0x100, 1000, 1); dbl.on_hit(0x100, 800, 2); dbl.on_hit(0x100, 1200, 3); }
+    CHECK(dbl.combo_total() == 6000);
+
+    // the shared overlay layer (jptr::layer_step): another user (the Port Settings page or the rollback glue's line / badge) always wins
+    CHECK(layer_step(true, false, true) == Layer::Yield && layer_step(true, true, true) == Layer::Yield);
+    CHECK(layer_step(false, true, true) == Layer::Yield);           // its drawing is already gone: closing would wipe the other user's
+    CHECK(layer_step(false, false, true) == Layer::Yield);
+    CHECK(layer_step(false, true, false) == Layer::Close);          // the readout closes only its own drawing
+    CHECK(layer_step(false, false, false) == Layer::Idle);
+    CHECK(layer_step(true, false, false) == Layer::Draw && layer_step(true, true, false) == Layer::Draw);
+    {   // the glue's sequence: drawn, the rollback message line comes up, goes away: the readout yields, then draws once again
+        Readout y; bool mine = false; int draws = 0, closes = 0;
+        auto tick = [&](bool show, bool others) {
+            switch (layer_step(show, mine, others)) {
+            case Layer::Yield: mine = false; y.invalidate(); return;
+            case Layer::Close: closes++; mine = false; y.invalidate(); return;
+            case Layer::Idle: y.invalidate(); return;
+            case Layer::Draw: break;
+            }
+            if (!y.changed()) return;
+            draws++; mine = true; y.drawn(y.text());
+        };
+        tick(true, false); tick(true, false);
+        CHECK(draws == 1 && mine);
+        tick(true, true); tick(true, true);                          // the other user holds the layer: no draw, no close
+        CHECK(draws == 1 && closes == 0 && !mine);
+        tick(true, false);                                           // it let go: the readout draws again, once
+        tick(true, false);
+        CHECK(draws == 2 && mine);
+        tick(false, true);                                           // pause menu up while the other user holds the layer: not closed
+        CHECK(closes == 0);
+        tick(true, false); tick(false, false);                       // drawn again, then hidden: its own drawing is closed
+        CHECK(draws == 3 && closes == 1 && !mine);
+    }
+
     // a new fight clears everything
     r.reset();
     CHECK(r.line1() == "Damage - | Combo -" && r.line2() == "P1 - | P2 -" && !r.combo_open() && r.combo_total() == 0);
