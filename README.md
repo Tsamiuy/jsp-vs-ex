@@ -111,7 +111,7 @@ The full list is in [docs/INSTALL.md](docs/INSTALL.md#what-setup-refuses). If th
 
 ## What goes online and where your data goes
 
-Nothing goes online unless you turn Online Battle on. There is no update check, no crash report and no telemetry. The support bundle is a file on your Desktop that you attach yourself. Saves stay in `%APPDATA%\JSP Fan Revival\hdd0` (a portable install: `hdd0` in the install folder). Details: [installer/README.md](installer/README.md).
+Nothing goes online unless you turn online play on in the Online settings (Port Settings > Online in the game, or the settings window's Online tab). With Netcode set to Delay, the game's own online connects to the re-psn server or community server you chose. Rollback (experimental) connects to the other player's PC, either by direct IP (one player hosts on a UDP port, the other types the host's address) or through a room on a re-psn server. A re-psn or community server sees your online name and the rooms you create or join. With rollback over re-psn and Allow relay set to Yes, if the two PCs cannot reach each other directly and the server offers a relay, the match inputs go through the server. There is no update check, no crash report and no telemetry. The support bundle is a file on your Desktop that you attach yourself. Saves stay in `%APPDATA%\JSP Fan Revival\hdd0` (a portable install: `hdd0` in the install folder). Details: [installer/README.md](installer/README.md).
 
 <p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
