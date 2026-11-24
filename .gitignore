@@ -183,6 +183,8 @@ __pycache__/
 !/installer/tools/net_badge_test.sh
 !/installer/tools/net_delay_rule_test.cpp
 !/installer/tools/net_delay_rule_test.sh
+!/installer/tools/train_readout_test.cpp
+!/installer/tools/train_readout_test.sh
 !/installer/tools/settings_test.cpp
 !/installer/tools/settings_test.sh
 !/installer/tools/port_overlay_test.c
