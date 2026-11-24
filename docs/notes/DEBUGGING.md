@@ -43,6 +43,7 @@ run per hop (addresses were stable between runs).
 | `GCM_CIRCLE_DUMP=1` | last 64 non-zero FIFO words when the walker circles (local edit) |
 | `GCM_FIFO_SNAP=N` | raw words at get and put for N drains |
 | `AUDIO_SILENCE=1` | toolkit patch 3900: `[audio-silence]` running total of all-zero mixed audio blocks, every 1000 blocks (crackling shows as silent blocks) |
+| `HANG_WATCH=<seconds>` | toolkit patch 3901 (Windows): when the guest requests no flip for that long, then every 10 s, `[HANGWATCH]` lines per guest thread: import calls in the last second, the import it is inside (`(guest code)` = none), the last one entered, and the guest call chain. Tells a lifted-code spin from a blocked wait |
 | `PS3_FSLOG_EOF=fd,bytes` | fake EOF on a descriptor (J-Stars' movie player just retries — not useful) |
 
 `docs\DIAGNOSTICS.md` in ps3recomp lists ~470 more.
