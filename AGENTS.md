@@ -23,6 +23,25 @@ coding tools of any kind) and to the people who run them. The rules for people a
 6. If `main` moved and the pull request conflicts, rebase the branch on `main` and push it again. A pull request
    with no conflict does not need a rebase.
 
+## Where things are
+
+Netcode, menus and other in-game UI, the launcher, docs and tools each go in a pull request of their own. Every
+pull request adds its own line to `CHANGELOG.md` under `## [Unreleased]`. The full folder list is
+[docs/LAYOUT.md](docs/LAYOUT.md); file by file, with entry points and line numbers, see
+[docs/code-map/README.md](docs/code-map/README.md). The last column names the docs that describe each area; changes to
+them go in a docs pull request of their own, like any other docs change.
+
+| Area | Path | What lives there | Check or test to run | Docs that describe it |
+|---|---|---|---|---|
+| Game glue | `installer/port/jsp/` | the port's C++ around the recompiled game: netcode (`jsp_net_*`, `jsp_session_*`, `jsp_snapshot*`, `jsp_stepper*`, the vendored `gekkonet/`), menus and in-game UI (`jsp_port_menu*`, `feat_*`), `main.cpp`, `CMakeLists.txt` | `tools/ci/port_syntax_check.py` (needs the exported toolkit), the matching rows of `tools/ci/run_host_tests.py` | `docs/code-map/layers.md` (one row per file), `docs/code-map/netcode.md` for netcode, `docs/ROLLBACK.md` or `docs/ONLINE.md` when players see it |
+| Toolkit patches | `installer/port/patches/` | the numbered patch series on the pinned toolkit, `INDEX.md`, `upstream.tsv` | `installer/tools/patch_index.py --check`, `tools/ci/check_patch_series.py` | `INDEX.md` (run `patch_index.py`), `docs/code-map/patches.md` |
+| Setup and release | `installer/` | the installer, `jsp-launcher.exe` source (`installer/launcher/`), the first-run build, the release version | `tools/release.py --check`, `installer/tools/firstrun_selftest.py --units` | `installer/README.md`, `docs/code-map/build-and-test.md` |
+| Host tests and helpers | `installer/tools/` | payload, first run, art, and the host tests (`*_test.*`) | `python3 tools/ci/run_host_tests.py --check-coverage`; list a new test in `tools/ci/host-tests.txt` | `docs/code-map/build-and-test.md` |
+| Repository tools | `tools/`, `tools/ci/` | CI scripts (`repo_checks.py`, `run_host_tests.py`, `host-tests.txt`), the release and features tools | `tools/ci/test_*.py`, `tools/test_*.py` | `docs/code-map/build-and-test.md` |
+| Settings window | `launcher/` | `JStarsLauncher.cs`, the settings window: CI's `launcher` job builds `J-Stars Launcher.exe` from it, and the installer builds `jsp-settings.exe` from the same source | CI's `launcher` job; `installer/tools/settings_test.sh` compares its keys with the game's | `docs/notes/LAUNCHER.md` |
+| Docs | `docs/` | player pages (`ONLINE.md`, `ROLLBACK.md`, ...), research notes in `docs/notes/`, the code map in `docs/code-map/`, the features page | `python3 tools/features.py --check` | `docs/features.tsv`, then `python3 tools/features.py` (it writes `docs/FEATURES.md`) |
+| CI | `.github/workflows/` | `ci.yml` and the release, installer, site and contributors workflows | pin every action by commit SHA, as the existing steps do | `docs/code-map/build-and-test.md` |
+
 ## What the pull request says
 
 - What changed and why, in a few lines.
