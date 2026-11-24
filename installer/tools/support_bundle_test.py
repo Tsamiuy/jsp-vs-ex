@@ -4,6 +4,7 @@
 """
 import os
 import pathlib
+import re
 import struct
 import sys
 import tempfile
@@ -58,6 +59,7 @@ def main():
 
         zp = sb.make(app, out, ad, tmp)
         check(zp.parent == out and zp.name.startswith("jsp-support-") and zp.suffix == ".zip", "zip named jsp-support-*.zip in --out")
+        check(re.fullmatch(r"jsp-support-0\.18\.0-test-\d{8}-\d{6}\.zip", zp.name) is not None, f"zip name carries VERSION.txt's version: {zp.name}")
         z = zipfile.ZipFile(zp)
         names = set(z.namelist())
         want = {"facts.txt", "logs/firstrun-20260101-000000.log", "build/configure.log", "build/analysis/lift.log", "game/run/launcher_log.txt",
@@ -455,6 +457,45 @@ def main():
         z12 = zipfile.ZipFile(zp12)
         check(not any(n.endswith(".bin") for n in z12.namelist()), "the cache files themselves are not in the zip")
         z12.close()
+
+        check(re.fullmatch(r"jsp-support-\d{8}-\d{6}\.zip", zp12.name) is not None, f"no VERSION.txt: the old name jsp-support-STAMP.zip: {zp12.name}")
+
+        # the version in the zip's name: only [0-9A-Za-z.+-], at most 40 characters, the old name when VERSION.txt gives nothing usable
+        appv = t / "app-ver"
+        appv.mkdir()
+        cases = [
+            (b"0.19.0\n", "0.19.0"),
+            (b"\xef\xbb\xbf0.19.0+build.7\r\n", "0.19.0+build.7"),            # BOM and CRLF
+            (b"  1.2.3-rc1  \n\nsecond line\n", "1.2.3-rc1"),                  # only the first line
+            (b"..\\..\\Windows\\evil\n", "Windowsevil"),                   # back slashes dropped, end dots trimmed
+            (b"../../etc/x\n", "etcx"),                                         # forward slashes dropped, end dots trimmed
+            (b"C:\\Temp\\x:y\n", "CTempxy"),                                  # drive colon and back slashes dropped
+            (b"0.19 beta 2\n", "0.19beta2"),                                     # spaces dropped
+            (b"v" * 500 + b"\n", "v" * 40),                                      # long: cut at 40
+            (b"1.0<>|?*\"\x00\x07%USERPROFILE%\n", "1.0USERPROFILE"),            # reserved and control characters dropped
+            (b"\xc3\xa9t\xc3\xa9-1\n", "t-1"),                                  # non-ASCII dropped
+            (b"-..-\n", ""),                                                    # only dots and dashes: nothing usable
+            (b"   \n", ""),                                                     # blank
+            (b"", ""),                                                           # empty
+            (b"/\\:*?\n", ""),                                                  # nothing allowed
+        ]
+        for data, want in cases:
+            (appv / "VERSION.txt").write_bytes(data)
+            got = sb.version_tag(appv)
+            check(got == want, f"version_tag of {data[:24]!r}: {got!r} (want {want!r})")
+            name = sb.bundle_name(appv, "20260101-000000")
+            check(name == (f"jsp-support-{want}-20260101-000000.zip" if want else "jsp-support-20260101-000000.zip"), f"bundle name {name!r}")
+            check(re.fullmatch(r"jsp-support-[0-9A-Za-z.+-]*\.zip", name) is not None and len(name) <= len("jsp-support--20260101-000000.zip") + 40,
+                  f"bundle name of {data[:24]!r} has only safe characters and a bounded length")
+        (appv / "VERSION.txt").unlink()
+        check(sb.version_tag(appv) == "" and sb.bundle_name(appv, "20260101-000000") == "jsp-support-20260101-000000.zip", "missing VERSION.txt: the old name")
+        (appv / "VERSION.txt").mkdir()                                       # present but unreadable as a file
+        check(sb.version_tag(appv) == "", "VERSION.txt that cannot be read: the old name")
+        (appv / "VERSION.txt").rmdir()
+        (appv / "VERSION.txt").write_bytes(b"0.19.0 / hostile\n")
+        zpv = sb.make(appv, out, None, None)
+        check(zpv.parent == out and re.fullmatch(r"jsp-support-0\.19\.0hostile-\d{8}-\d{6}\.zip", zpv.name) is not None,
+              f"make() writes the zip under the sanitised name, in --out: {zpv.name}")
 
         # a missing --out folder is made; a non-existent install folder is an error exit
         check(sb.main(["--root", str(t / "nope")]) == 2, "missing install folder: exit 2")

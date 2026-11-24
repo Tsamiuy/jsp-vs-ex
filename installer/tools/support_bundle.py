@@ -3,7 +3,9 @@
 
 Run by the payload's bundled Python (the Start-menu entry "Make a support bundle" runs support-bundle.cmd, which does):
     toolchain\\python\\python.exe -X utf8 support_bundle.py --root APP [--out DIR]
-Writes jsp-support-YYYYmmdd-HHMMSS.zip to DIR (default: the Desktop, else the install folder) and prints its path.
+Writes jsp-support-VERSION-YYYYmmdd-HHMMSS.zip to DIR (default: the Desktop, else the install folder) and prints its path. VERSION is the
+first line of the install's VERSION.txt with only 0-9 A-Z a-z . + - kept (at most 40 characters); without a usable VERSION.txt the name is
+jsp-support-YYYYmmdd-HHMMSS.zip.
 Stdlib only. Contacts no server: the zip is only made, never sent; the tester attaches it by hand.
 
 What goes in (text only: .log .txt .ini .cmd), every file and file name through firstrun.scrub (the user's profile folder becomes
@@ -975,6 +977,28 @@ def zip_name(name, secrets=None):
     return "/".join(out)
 
 
+VERSION_CAP = 40   # characters of VERSION.txt kept in the zip's name
+
+
+def version_tag(app):
+    """The version for the zip's name: the first line of APP/VERSION.txt with only [0-9A-Za-z.+-] kept, at most VERSION_CAP characters,
+    no '.' or '-' at either end; '' when the file is missing, unreadable or has nothing usable (the zip then keeps the old name)."""
+    try:
+        with open(pathlib.Path(app) / "VERSION.txt", "rb") as fh:
+            raw = fh.read(4096)                                  # a version is one short line; a huge file is not read whole
+    except OSError:
+        return ""
+    lines = raw.decode("utf-8", "replace").strip().splitlines()
+    tag = re.sub(r"[^0-9A-Za-z.+-]", "", lines[0] if lines else "")[:VERSION_CAP]
+    return tag.strip(".-")
+
+
+def bundle_name(app, stamp):
+    """jsp-support-VERSION-STAMP.zip, or jsp-support-STAMP.zip without a usable VERSION.txt (the uninstaller's jsp-support-*.zip matches both)."""
+    v = version_tag(app)
+    return f"jsp-support-{v}-{stamp}.zip" if v else f"jsp-support-{stamp}.zip"
+
+
 def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
     """Builds the zip; -> its path. out None: the Desktop, else app."""
     app = pathlib.Path(app)
@@ -1002,10 +1026,11 @@ def make(app, out=None, appdata=None, temp=None, cap=CAP_BYTES):
     names = sorted(list(blobs) + ["facts.txt"])
     f = facts(app, blobs, refused, not_text, cuts, names, net).encode("utf-8")
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    zip_file = bundle_name(app, stamp)
     for d in ([pathlib.Path(out)] if out else [pathlib.Path(x) for x in (desktop(),) if x] + [app]):
         try:
             d.mkdir(parents=True, exist_ok=True)
-            zp = d / f"jsp-support-{stamp}.zip"
+            zp = d / zip_file
             with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("facts.txt", f)
                 for n in names:

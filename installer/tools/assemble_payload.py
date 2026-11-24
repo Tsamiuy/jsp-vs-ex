@@ -35,7 +35,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 # Written into the payload root (so the portable zip has it too). The Python prints only the zip's path with --quiet.
 SUPPORT_CMD = """@echo off
-rem Makes jsp-support-<time>.zip (logs and settings, user name removed) on the Desktop, to attach to an issue. Nothing is sent anywhere.
+rem Makes jsp-support-<version>-<time>.zip (logs and settings, user name removed) on the Desktop, to attach to an issue. Nothing is sent anywhere.
 chcp 65001 >nul
 setlocal
 set "PY=%~dp0toolchain\\python\\python.exe"

@@ -125,6 +125,7 @@ Type: dirifempty; Name: "{app}\dev_flash"
 Type: files; Name: "{app}\*.log"
 Type: files; Name: "{app}\jsp-install.ini"
 Type: files; Name: "{app}\build-again.cmd"
+; support bundles: jsp-support-<version>-<time>.zip, and jsp-support-<time>.zip from older builds or without VERSION.txt
 Type: files; Name: "{app}\jsp-support-*.zip"
 Type: files; Name: "{app}\paths.txt"
 Type: filesandordirs; Name: "{app}\game"
