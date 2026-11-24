@@ -25,8 +25,9 @@ patched video library uses them for the "SMAA" edge smoothing option. Keep the h
 ## GekkoNet
 
 The experimental rollback netcode (off unless `JSP_ROLLBACK=1`) is built on [GekkoNet](https://github.com/HeatXD/GekkoNet)
-by Jamie Meyer, licensed under the BSD 2-Clause licence. `installer/port/jsp/gekkonet/` is an unchanged copy of its library
-sources at commit `45dac7e5` (`installer/port/jsp/gekkonet/PIN.md` lists what was taken), with its `LICENSE`. It includes
+by Jamie Meyer, licensed under the BSD 2-Clause licence. `installer/port/jsp/gekkonet/` is a copy of its library
+sources at commit `45dac7e5` with two small local additions, each marked "jsp-vs-ex local addition" in the code
+(`installer/port/jsp/gekkonet/PIN.md` lists what was taken and what was added), with its `LICENSE`. It includes
 [zpp_bits](https://github.com/eyalz800/zpp_bits) by Eyal Z (MIT, `installer/port/jsp/gekkonet/thirdparty/zpp/LICENSE`). Both
 licence texts travel with the sources into the installer package (`port\gekkonet\`) and are compiled into the game exe on the
 player's PC. Keep both licence texts with any copy of these files.
