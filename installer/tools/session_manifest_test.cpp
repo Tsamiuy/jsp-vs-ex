@@ -237,6 +237,46 @@ int main(int argc, char** argv)
         v = rb_values(); v.v[(size_t)Id::UnlockAll] = 1; CHECK(r.p[0].host->propose(v, 0) == Reason::OutOfRange);
         CHECK(r.p[0].host->state() == State::Open && r.p[0].host->revision() == 0 && all_clean(r));
     }
+    {   // a host whose own graphics preferences are not the defaults proposes the shared profile and the match starts
+        // jpss::conservative() is the registry's default for every shared field, the only value Caps accepts for each
+        const jpss::Profile c = jpss::conservative();
+        for (size_t i = (size_t)Id::ModelDetail; i <= (size_t)Id::Render60; ++i) {
+            jpss::Key k; CHECK(shares_jpss((Id)i, &k)); CHECK(kRules[i].def == c.choices[(size_t)k]);
+            CHECK(Caps().supports((Id)i, c.choices[(size_t)k]));
+        }
+        Room r(0x03); r.make_host(); r.make_client(1, r.caps); r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
+        EffectiveValues& hev = r.p[0].ev;
+        hev.set_local(Id::Rollback, 1); hev.set_local(Id::KoTarget, 3); hev.set_local(Id::InputDelay, 3);
+        hev.set_local(Id::ModelDetail, 2); hev.set_local(Id::ObjectDistance, 2); hev.set_local(Id::ShadowRange, 1);
+        const Values local = hev.local_values();
+        CHECK(r.p[0].host->propose(local, 0) == Reason::Unsupported && r.p[0].host->bad_id() == Id::ModelDetail);   // the old proposal: refused
+        const Values hp = host_proposal(local, r.p[0].rd);
+        CHECK(hp.v[(size_t)Id::ModelDetail] == 0 && hp.v[(size_t)Id::ObjectDistance] == 1 && hp.v[(size_t)Id::ShadowRange] == 0);
+        CHECK(hp.v[(size_t)Id::InputDelay] == 3 && hp.v[(size_t)Id::KoTarget] == 3 && hp.v[(size_t)Id::Rollback] == 1);   // match rules stay the host's
+        CHECK(host_proposal(local) .v[(size_t)Id::Pipe] == local.v[(size_t)Id::Pipe]);   // the pure helper leaves the startup fields alone
+        CHECK(r.p[0].host->propose(hp, 0) == Reason::None); r.pump();
+        CHECK(r.p[0].host->state() == State::Ready && r.p[0].host->acks() == 0x03 && r.p[1].cl->applied());
+        CHECK(r.p[0].host->start(500) == Reason::None); r.pump();
+        CHECK(r.p[0].host->state() == State::Started && r.p[1].cl->state() == State::Started);
+        for (int q = 0; q < 2; ++q)
+            for (size_t i = (size_t)Id::ModelDetail; i <= (size_t)Id::Render60; ++i) { jpss::Key k; shares_jpss((Id)i, &k);
+                CHECK(r.p[q].ev.get((Id)i).value == c.choices[(size_t)k] && r.p[q].ev.controlled_by_host((Id)i)); }
+        r.p[0].host->end_match(); r.p[1].cl->match_ended(); r.pump();
+        CHECK(!hev.active() && hev.get(Id::ModelDetail).value == 2 && hev.get(Id::ObjectDistance).value == 2 && hev.get(Id::ShadowRange).value == 1);
+        CHECK(r.p[0].rd.live.v[(size_t)Id::ModelDetail] == 2 && r.p[0].rd.live.v[(size_t)Id::ShadowRange] == 1);   // the reader shows the preference again
+    }
+    {   // a host started with PIPE off: host_proposal takes the startup value (never its configuration); Caps refuses PIPE=0 before install
+        Room r(0x03); r.make_host(); r.make_client(1, r.caps); r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
+        r.p[0].rd.startup[(size_t)Id::Pipe] = 0;
+        EffectiveValues& hev = r.p[0].ev; hev.set_local(Id::Rollback, 1); hev.set_local(Id::KoTarget, 3);   // configuration says PIPE on (default 1)
+        const Values hp = host_proposal(hev.local_values(), r.p[0].rd);
+        CHECK(hev.local_values().v[(size_t)Id::Pipe] == 1 && hp.v[(size_t)Id::Pipe] == 0);
+        CHECK(r.p[0].host->propose(hp, 0) == Reason::Unsupported && r.p[0].host->bad_id() == Id::Pipe && all_clean(r));
+        // with the configuration value instead, the same host gets RestartRequired at its own install (the field is named either way)
+        CHECK(r.p[0].host->propose(hev.local_values(), 0) == Reason::RestartRequired && r.p[0].host->bad_id() == Id::Pipe && all_clean(r));
+        r.p[0].rd.have_startup[(size_t)Id::Pipe] = false;   // no evidence: the local value stays in the proposal
+        CHECK(host_proposal(hev.local_values(), r.p[0].rd).v[(size_t)Id::Pipe] == 1);
+    }
     {   // client-side limits narrower than the host's (a client without a wide delay range)
         Room r(0x03); Caps narrow = r.caps; narrow.build = 0xB001; narrow.hi[(size_t)Id::InputDelay] = 1; r.make_host(); r.make_client(1, narrow);
         r.p[0].host->begin(77, 0x03, 1, 0); r.join_all();
