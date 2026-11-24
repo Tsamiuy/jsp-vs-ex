@@ -16,6 +16,7 @@ all     | installer/tools/quote_arg_test.py
 all     | installer/tools/support_bundle_test.py
 all     | installer/tools/unlock_option_test.py
 all     | installer/tools/repsn_app_bundle_test.py
+all     | installer/tools/launcher_repsn_app_test.py
 all     | installer/tools/menu_option_test.py
 all     | tools/test_features.py
 all     | tools/test_release.py
