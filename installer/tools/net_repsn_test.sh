@@ -15,7 +15,7 @@ out="${2:-}"
 if [[ -z "$out" ]]; then out=$(mktemp -d "${TMPDIR:-/tmp}/jsp_net_repsn_test.XXXXXX"); trap 'rm -rf "$out"' EXIT; fi
 mkdir -p "$out/obj"
 common=(-std=c++20 -O1 -Wall -Wextra -Wno-unused-parameter -DGEKKONET_STATIC -DGEKKONET_NO_ASIO -I"$g/include" -I"$port" -I"$psnr")
-for f in "$g"/src/*.cpp; do   # third-party, unchanged: compiled without warnings
+for f in "$g"/src/*.cpp; do   # third-party (two marked local additions, gekkonet/PIN.md): compiled without warnings
   g++ "${common[@]}" -I"$g/include/private" -I"$g/thirdparty" -w -c "$f" -o "$out/obj/$(basename "$f" .cpp).o"
 done
 gcc -O1 -Wall -Wno-unused-function -c "$psnr/psnr.c" -o "$out/psnr.o"

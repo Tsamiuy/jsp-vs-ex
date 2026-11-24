@@ -83,6 +83,7 @@ float Gekko::NetStats::CalculateAvgRTT()
 
 void Gekko::NetStats::AddRTT(u16 rtt_ms)
 {
+    rtt_count++;   // jsp-vs-ex local addition (PIN.md)
     rtt.push_back(rtt_ms);
     while (rtt.size() > RTT_HISTORY_SIZE) {
         rtt.erase(rtt.begin());

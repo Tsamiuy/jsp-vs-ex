@@ -141,6 +141,8 @@ public:
         bool allow_relay = false;       // the player's choice
         uint8_t local_count = 1;
         int punch_ms = 4000;            // direct/punch window before relay is considered
+        bool force_relay = false;       // TEST ONLY (JSP_ROLLBACK_FORCE_RELAY=1 with debug allowed): skip the direct try and use the relay at once (when allowed and offered),
+                                        // so the relay path can be tested from one PC, where the direct path always works
         int give_up_ms = kRendezvousWindowMs;   // finding the other player (connect, room list / room, until its endpoint is known); the punch has its own windows
         int lookup_every_ms = kLookupEveryMs;   // joiner: the pause between two room lists without a matching room
         int progress_every_ms = kProgressEveryMs;
@@ -209,6 +211,7 @@ public:
             if (peer_user_) {
                 local_index_ = player_index(members_, t_.self_user());
                 Path_(Path::Punch);
+                if (c_.force_relay && c_.allow_relay && t_.relay_offered()) { relay_ = true; Path_(Path::Relay); }   // TEST ONLY: see Config::force_relay
                 start_inner(); punch_start_ = t; last_punch_ = 0; state_ = kPunch;
             }
         }
@@ -246,7 +249,7 @@ private:
     int give_up()
     {
         std::string what;
-        if (state_ == kConnect) what = "the re-psn server did not answer within " + window_words(c_.give_up_ms);
+        if (state_ == kConnect) what = "the online server did not answer within " + window_words(c_.give_up_ms);
         else if (!c_.host && state_ == kLookup) what = "no host with this version found within " + window_words(c_.give_up_ms) + (other_builds_.empty() ? std::string() : " (" + other_builds_text() + ")");
         else if (c_.host) what = "no player with this version joined within " + window_words(c_.give_up_ms) + (rejected_members ? " (" + std::to_string(rejected_members) + " with another version refused)" : "");
         else what = "the host's room did not answer within " + window_words(c_.give_up_ms);
@@ -275,7 +278,7 @@ private:
         const std::string w = std::to_string((t - t0_) / 1000) + " s of " + std::to_string(c_.give_up_ms / 1000) + " s";
         const std::string b = "build " + build_hex(c_.build);
         std::string line, n1, n2;
-        if (state_ == kConnect) { line = "re-psn: connecting to the server (" + w + ", " + b + ")"; n1 = "Rollback: connecting to the re-psn server (" + w + ")."; }
+        if (state_ == kConnect) { line = "re-psn: connecting to the server (" + w + ", " + b + ")"; n1 = "Rollback: connecting to the online server (" + w + ")."; }
         else if (c_.host) {
             line = "re-psn: room open, waiting for a player with " + b + " (" + w + (rejected_members ? ", " + std::to_string(rejected_members) + " with another version refused" : "") + ")";
             n1 = "Rollback: room open, waiting for the other player (" + w + ").";

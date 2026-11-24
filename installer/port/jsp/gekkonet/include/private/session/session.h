@@ -17,6 +17,7 @@ struct GekkoSession {
     virtual GekkoGameEvent** UpdateSession(i32* count) = 0;
     virtual GekkoSessionEvent** Events(i32* count) = 0;
     virtual f32 FramesAhead() { return 0.f; }
+    virtual i32 FinalFrame() { return -1; }   // jsp-vs-ex local addition (PIN.md)
     virtual i32 SpectatorBufferedFrames() { return 0; }
     virtual void NetworkStats(i32 player, GekkoNetworkStats* stats) {}
     virtual void RollbackStats(GekkoRollbackStats* stats) { *stats = GekkoRollbackStats(); }

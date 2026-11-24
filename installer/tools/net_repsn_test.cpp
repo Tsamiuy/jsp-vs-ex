@@ -151,7 +151,7 @@ int main()
     // a server that never answers HELLO: the window names that instead
     { FakeServer sv; Side c; c.init(sv, 22, cfg(false, B)); c.cl->is_ready = false;
       CHECK(c.run_alone(1000) == 0 && c.progress.size() == 1 && c.progress[0] == "re-psn: connecting to the server (0 s of 120 s, build a1b2c3d4)");
-      CHECK(c.run_alone(125000) == -1 && c.rz->error().find("re-psn: the re-psn server did not answer within 2 minutes: ") == 0 && c.cl->searches == 0); }
+      CHECK(c.run_alone(125000) == -1 && c.rz->error().find("re-psn: the online server did not answer within 2 minutes: ") == 0 && c.cl->searches == 0); }
     // a shorter window from the config is used in the texts
     { FakeServer sv; Side c; auto cc = cfg(false, B); cc.give_up_ms = 20000; c.init(sv, 22, cc);
       CHECK(c.run_alone(30000) == -1 && c.rz->error().find("found within 20 seconds: start both games at about the same time (the host first is best; each waits 20 seconds after its own start-up)") != std::string::npos); }
@@ -191,6 +191,13 @@ int main()
     // a direct path never asks for the relay even when allowed and offered
     { FakeServer sv; sv.relay = true; Side h, c; h.init(sv, 11, cfg(true, B, true)); c.init(sv, 22, cfg(false, B, true)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
       int rh, rc; drive(h, c, 400, &rh, &rc); CHECK(rh == 1 && rc == 1 && h.rz->path() == Path::Direct && c.rz->path() == Path::Direct); }
+    // TEST ONLY force_relay: the relay at once, though the direct path works (one-PC relay tests); never without allow_relay
+    for (int allow = 0; allow < 2; allow++) { FakeServer sv; sv.relay = true; auto ch = cfg(true, B, allow), cc = cfg(false, B, allow); ch.force_relay = cc.force_relay = true;
+      Side h, c; h.init(sv, 11, ch); c.init(sv, 22, cc); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
+      h.rz->on_path = [&](Path p, uint32_t) { if (p == Path::Relay) h.relay_calls++; }; c.rz->on_path = [&](Path p, uint32_t) { if (p == Path::Relay) c.relay_calls++; };
+      int rh, rc; drive(h, c, 400, &rh, &rc); CHECK(rh == 1 && rc == 1);
+      if (allow) CHECK(h.rz->path() == Path::Relay && c.rz->path() == Path::Relay && h.relay_calls >= 1 && c.relay_calls >= 1);
+      else CHECK(h.rz->path() == Path::Direct && c.rz->path() == Path::Direct && h.relay_calls == 0); }
     // a stranger that knows the host's UDP port sends a well-formed HELO first: the host's session is with the room's other player, never with the stranger
     { FakeServer sv; Side h, c, x; h.init(sv, 11, cfg(true, B)); c.init(sv, 22, cfg(false, B)); x.init(sv, 33, cfg(false, B)); h.cl->peers[0] = c.cl.get(); c.cl->peers[0] = h.cl.get();
       MessageChannel* ch = x.hub->open(h.cl->ep); const uint8_t hello[5] = { 'H', 'E', 'L', 'O', 1 };

@@ -1,4 +1,5 @@
 // Host test of installer/port/jsp/jsp_net_badge.h: the rollback status badge's text, key, values, refresh gate and layout. No game, no GPU.
+// (The round trip under the fight timer is not part of the netcode core: an optional UI module draws it, with its own host test; it is not in this build.)
 // With a file argument it writes the status lines it built there, one per line, for net_badge_test.sh to match against support_bundle.py.
 #include "../port/jsp/jsp_net_badge.h"
 #include <cstdio>

@@ -26,7 +26,7 @@ FLAGS = ["-fsyntax-only", "-w", "-ffp-contract=off", "-mavx2", "-mfma", "-fno-st
 # CMakeLists.txt: the jsp target is built with JSP_ROLLBACK_BUILD and links jsp_gekkonet, whose include folder and definitions are PUBLIC
 PORT_DEFS = ["-DJSP_ROLLBACK_BUILD=1", "-DGEKKONET_STATIC", "-DGEKKONET_NO_ASIO"]
 SCAFFOLD = ["ppu_loader", "ppu_hle", "ppu_fs", "ppu_sysprx"]
-FILE_INCS = {"jsp_net_probe.cpp": ["libs/network"]}   # CMakeLists.txt: set_source_files_properties(... INCLUDE_DIRECTORIES)
+FILE_INCS = {"jsp_net_probe.cpp": ["libs/network"], "jsp_stepper.cpp": ["libs/input"]}   # CMakeLists.txt: set_source_files_properties(... INCLUDE_DIRECTORIES)
 
 
 def main():

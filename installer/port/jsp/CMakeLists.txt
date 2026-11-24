@@ -260,7 +260,7 @@ endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_SESSION_RENDER60_ABSENT=1)
 add_dependencies(${PROJECT_NAME} jsp_verify_lod_hooks)
 
-# EXPERIMENTAL rollback netcode (off unless JSP_ROLLBACK=1 at run time): GekkoNet, a pinned unchanged copy in gekkonet/ (BSD-2-Clause,
+# EXPERIMENTAL rollback netcode (off unless JSP_ROLLBACK=1 at run time): GekkoNet, a pinned copy in gekkonet/ with two marked local additions (BSD-2-Clause,
 # gekkonet/PIN.md), built as its own static library so its private headers (net.h, event.h, sync.h, ...) never shadow the toolkit's. Built
 # without asio: jsp_net_session.cpp has its own UDP transport (ws2_32 is linked below with the runtime's imports).
 file(GLOB GEKKONET_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/src/*.cpp")
@@ -270,7 +270,7 @@ target_include_directories(jsp_gekkonet
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/include/private" "${CMAKE_CURRENT_SOURCE_DIR}/gekkonet/thirdparty")
 target_compile_definitions(jsp_gekkonet PUBLIC GEKKONET_STATIC GEKKONET_NO_ASIO)
 if(NOT MSVC)
-    target_compile_options(jsp_gekkonet PRIVATE -w)   # third-party code, unchanged: its warnings are upstream's
+    target_compile_options(jsp_gekkonet PRIVATE -w)   # third-party code (two marked local additions, gekkonet/PIN.md): its warnings are upstream's
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE jsp_gekkonet)
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_ROLLBACK_BUILD=1)
@@ -311,6 +311,8 @@ endif()
 
 set_source_files_properties(jsp_net_probe.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/network")
+set_source_files_properties(jsp_stepper.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/libs/input")
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"              # verified LOD capability header
