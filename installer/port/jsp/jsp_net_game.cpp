@@ -264,8 +264,6 @@ struct State {
     std::string shown;
     // ENHANCEMENT (status badge, JSP_ROLLBACK_BADGE=1): main-thread only (boundary, the glue's rollback, end_with). path_word is set once the plan exists.
     bool badge_on = false; std::string badge_shown; jpnb::Values bv; jpnb::Every badge_every, status_every;
-    // ENHANCEMENT (ping counter, default on; JSP_ROLLBACK_PING=0 hides it): the round trip under the fight timer (jsp_net_badge.h). Main thread only.
-    bool ping_on = true; std::string ping_shown; uint32_t ping_rgba = 0; jpnb::Every ping_every;
     std::atomic<int> path_kind{0};   // 0 unknown, 1 direct, 2 relay: written by the pump thread when the rendezvous ends, read by the main thread
     bool record = false;             // ENHANCEMENT (replays, JSP_ROLLBACK_RECORD=1): save the match's recording when it ends (save_replay)
     // ENHANCEMENT (rollback bench, JSP_ROLLBACK_BENCH=N): the fight runs through a local stress session that rolls back N ticks on every tick (no peer, no socket).
@@ -334,23 +332,30 @@ uint32_t build_id()
 #endif
 }
 
-// The glue's overlay layer holds the message line (bottom left), when on the status badge (top left) and the ping counter (under the fight timer, bottom right);
-// a change of any redraws all.
+// ENHANCEMENT (status badge in fights, an optional UI module; the core keeps a no-op when it is absent): the round trip under the fight timer (bottom right)
+// belongs to a UI module (feat_fight_status_badge.cpp, may be absent: it is not in this build). Declared weak and null-checked: without the module the calls
+// are skipped and nothing is drawn. The core still owns the one overlay layer: the tick tells the module whether a non-bench session runs
+// and hands it the session's round trip as a function (called only when the module's refresh is due, at most twice a second, as before: stats() takes the
+// session lock); 1 back = draw the layer again. redraw() asks whether it has anything to draw and lets it draw between begin and end. Main thread only.
+extern "C" __attribute__((weak)) int jsp_fight_status_update(float (*ping_ms)(void), int running, uint64_t now_ms);
+extern "C" __attribute__((weak)) int jsp_fight_status_visible(void);
+extern "C" __attribute__((weak)) void jsp_fight_status_draw(void);
+float session_ping_ms() { return g.sess.stats().ping_ms; }   // GekkoNet's averaged round trip (< 0: not known yet)
+bool fight_status_visible() { return jsp_fight_status_visible && jsp_fight_status_draw && jsp_fight_status_visible(); }
+
+// The glue's overlay layer holds the message line (bottom left), when on the status badge (top left) and the UI module's status badge in fights (under the fight
+// timer, bottom right); a change of any redraws all.
 void redraw()
 {
-    const std::string& s = g.shown; const std::string& b = g.badge_shown; const std::string& p = g.ping_shown;
-    if (s.empty() && b.empty() && p.empty()) { jsp_overlay_close(); return; }
+    const std::string& s = g.shown; const std::string& b = g.badge_shown; const bool p = fight_status_visible();
+    if (s.empty() && b.empty() && !p) { jsp_overlay_close(); return; }
     if (!jsp_overlay_begin(1280, 720)) return;
     if (!b.empty()) {
         const float bw = jsp_overlay_text_width(b.c_str(), jpnb::kScale);
         jsp_overlay_fill_rect(jpnb::kBoxX, jpnb::kBoxY, (int)(bw > 0 ? bw : 360) + 2 * jpnb::kBoxPad, jpnb::kBoxH, JSP_RGBA(0, 0, 0, 160));
         jsp_overlay_text_style(jpnb::kX, jpnb::kY, b.c_str(), jpnb::kScale, JSP_RGBA(255, 255, 255, 255), 0);
     }
-    if (!p.empty()) {
-        const float pw = jsp_overlay_text_width(p.c_str(), jpnb::kPingScale);
-        jsp_overlay_fill_rect(jpnb::ping_box_x(p, pw), jpnb::kPingBoxY, jpnb::ping_box_w(p, pw), jpnb::kPingBoxH, JSP_RGBA(0, 0, 0, 160));
-        jsp_overlay_text_style(jpnb::ping_x(p, pw), jpnb::kPingY, p.c_str(), jpnb::kPingScale, g.ping_rgba, 0);
-    }
+    if (p) jsp_fight_status_draw();
     if (!s.empty()) {
         const float w1 = jsp_overlay_text_width(s.c_str(), 1.0f), sc = w1 > 1180 ? 1180 / w1 : 1.0f, w = w1 * sc;   // a long line (the version mismatch) shrinks to fit the width
         jsp_overlay_fill_rect(30, 640, (int)(w > 0 ? w : 800) + 40, 50, JSP_RGBA(0, 0, 0, 190));
@@ -360,7 +365,7 @@ void redraw()
 }
 void show(const std::string& s) { if (s == g.shown) return; g.shown = s; redraw(); }
 void badge(const std::string& b) { if (b == g.badge_shown) return; g.badge_shown = b; redraw(); }
-void ping_hide() { if (g.ping_shown.empty()) return; g.ping_shown.clear(); redraw(); }
+void fight_status_hide() { if (jsp_fight_status_update && jsp_fight_status_update(nullptr, 0, GetTickCount64())) redraw(); }   // the session ended: the module hides at once
 std::string path_word() { const int k = g.path_kind.load(); return k == 1 ? "direct" : k == 2 ? "relay" : ""; }
 // ENHANCEMENT (input lag, smoothness audit cause 2): ON by default since 2026-11-21 (JSP_INPUT_DELAY_AUTO=0 turns it off). On a good link (ping <= ~40 ms with little jitter) it settles on 1 tick (the start value is the
 // manifest's InputDelay, default 2), and it only goes higher when the trip needs it. The peers need not agree on it: GekkoNet stamps each input with its
@@ -767,7 +772,7 @@ void reset_match()
     g.base = 0; g.fight_seen = false; g.hud_mark = g.hud_tick = 0; g.hud_seen = 0; g.hud_seen_set = false;
     g.skip_sim = g.skip_pad = g.was_replaying = false; g.cancel_since = 0;
     g.last_run_ms = g.started_ms = 0; g.settings_shown_ms = 0;
-    g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every(); g.ping_every = jpnb::Every();
+    g.bv = jpnb::Values(); g.badge_every = jpnb::Every(); g.status_every = jpnb::Every();
     g.record = false; g.match_winner = 0; ko_clear();
     g_ad = jpdr::State();   // ENHANCEMENT (adaptive input delay): per match
     g_audio_waits = g_audio_timeouts = 0; g_audio_wait_ms = 0;
@@ -795,7 +800,7 @@ void end_with(const std::string& text, bool quiet = false)
     jsp_snapshot_ext_set_idle_hook(nullptr);   // the gate must not call into a finished session
     jsp_snapshot_ext_guard_summary();
     if (g.started_ms) log_status();   // the session ran: its last status line
-    badge(""); ping_hide();
+    badge(""); fight_status_hide();
     set_text(text); g.phase = Phase::Ended; g.skip_sim = g.skip_pad = false;
     if (g.was_replaying || g.stepper.replaying()) jsp_stepper_replay(0, g.done_now);   // an end during a replay: gate, clock and flag off
     g.was_replaying = false;
@@ -1528,10 +1533,7 @@ void boundary(ppu_context* c)
         g.bv.path = path_word();
         if (g.badge_on) { const std::string b = jpnb::text(g.bv); if (b != g.badge_shown || !jsp_overlay_active()) { g.badge_shown = b; redraw(); } }
     }
-    if (g.ping_on && !g.bench && g.ping_every.due(now, jpnb::kPingRefreshMs)) {   // the ping counter: at most twice a second; drawn again if the layer was closed
-        const float ms = g.sess.stats().ping_ms; const std::string pt = jpnb::ping_text(ms); const uint32_t col = jpnb::ping_rgba(ms);
-        if (pt != g.ping_shown || (!pt.empty() && (col != g.ping_rgba || !jsp_overlay_active()))) { g.ping_shown = pt; g.ping_rgba = col; redraw(); }
-    }
+    if (jsp_fight_status_update && jsp_fight_status_update(session_ping_ms, g.bench ? 0 : 1, now)) redraw();   // the UI module's badge (its own refresh gate)
     if (g.status_every.due(now, jpnb::kLogMs) && now - g.started_ms >= 1000) {
         log_status();
     }
@@ -1639,7 +1641,6 @@ void install_process_wide()
         if (end != eq + 1 && vk == 0x78) { const std::string name(*e, (size_t)(eq - *e)); _putenv_s(name.c_str(), ""); std::fprintf(stderr, "[net] binding %s = F9 dropped (F9 is the rollback cancel key)\n", name.c_str()); e = environ - 1; }
     }
     { char bb[16] = {}; g.badge_on = jsp_setting_get(jpnb::kKey, bb, sizeof bb) && jpnb::key_on(bb); }
-    { char pb[16] = {}; g.ping_on = !jsp_setting_get(jpnb::kPingKey, pb, sizeof pb) || jpnb::ping_key_on(pb); }   // default on
     jsp_session_text_hook = session_text;
     install_all(std::make_integer_sequence<int, sizeof k_ents / sizeof k_ents[0]>());   // inert while the phase is Off (boundary returns, the phase hooks run the original)
     task_diag_install();
@@ -1727,7 +1728,7 @@ void conn_close()
     g.ev_first = g.ev_next = g.wait_next = 0; g.hs_last = -2;
     g.listen_port = 0; g.join = Endpoint{};
     g.phase = Phase::Off;
-    show(""); badge(""); ping_hide();
+    show(""); badge(""); fight_status_hide();
 }
 
 }  // namespace
