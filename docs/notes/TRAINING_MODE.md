@@ -238,6 +238,57 @@ the maintainer's plan: a setting that lets R3 start Victory Burst from the start
 - **Useful recipe:** Luffy with Unlimited Stamina, tapping Circle in 14 rounds of 16 presses, moves the marker near full in about 2 minutes. Dumps of that were taken while the game ran (g0 middle, g1 near full) and are not in this repository. That run didn't reach the R3 prompt, so it needs a few more rounds.
 - **Hit record +0x6C:** with `BAL_TEST` at 5000 per hit the marker still barely moved, and the amount goes into a Stamina call on the hit fighter (`0x00082B3C`, slot +0x74). So "gauge gain" in the Balance notes may not be a direct gauge amount (reading).
 
+### Training readout (2026-11-24, host-tested only)
+
+ENHANCEMENT, display only: two short lines in the top-right corner of a Training fight, in the game's menu font (white with the black
+rim) on a translucent dark box, drawn with the port overlay as the rollback badge and the Port Settings page are:
+
+    Damage 8.0 | Combo 4 hits 38.0
+    P1 HP 812/1000 ST 1200/2000 | P2 HP 1000/1000 ST 1000/1000
+
+- **What it shows:** the damage of the last hit; the combo's hit count (the game's own combo number, gauge class `0x00879DA0` +0x3F0,
+  or the hits the readout saw when no number came up) and its total damage; both fighters' health (+0x90 of +0x98) and Stamina (+0x9C of
+  +0xA0). It reads only addresses Training already uses and writes nothing to the game, so it does not change the fight.
+- **Damage:** taken in the damage call @0x00085B84 from r4 as the game asked for it, before Training's leave-1-health cap rewrites it, so
+  a move's real damage shows even when the dummy is near the cap (the capped value stays in the `[training] hit` log line). r4 <= 0 is a
+  heal and is not counted. Health is stored in hundredths. ASSUMPTION: shown as whole health points, damage to one decimal.
+- **Combo:** the combo gauge going from up (+0x3EC non-zero) to down closes the combo; its numbers stay on screen until the next hit,
+  which opens a new combo with its own damage. A hit on the other fighter while a combo is open also starts a new one. The number stays
+  up for a while after the last hit (0.77 s to 1.4 s, "Refill timing" above), so a new combo can start while it still shows; then the
+  game's own count (+0x3F0) drops (6 -> 2), and the newest hits since the last tick, as many as that count, become the new combo.
+  ASSUMPTION: the game restarts its count for a new combo while the number shows; if it keeps counting, the readout keeps one combo as
+  the game does.
+- **When it shows:** in a Training fight only (never in other modes), not while the pause menu is up, with Hide HUD on, or in
+  Turn-based. The game's own online (Online Battle) has no Training fight; a rollback session (`JSP_ROLLBACK=1`, for example its local
+  bench, which runs any fight against the CPU) can run one, see Rollback below. It is redrawn only when its text changes (recorded as drawn only after `jsp_overlay_begin` succeeded, so a refused draw is
+  tried again on the next tick), and closed when the fight ends or Training is left.
+- **Shared overlay layer:** the port overlay is one layer, and each `jsp_overlay_begin` clears it. `jsp_port_menu.cpp` draws the Port
+  Settings page, the version line and the pad-join prompt on it; `jsp_net_game.cpp` the rollback message line and status badges. The
+  readout yields to both: while `jsp_port_menu_overlay_held()` or `jsp_net_overlay_held()` is 1 it neither draws nor closes the layer,
+  and it draws again once that drawing is gone; it closes only its own drawing (`jptr::layer_step`). The pad-join prompt and the rollback
+  line are the ones that can come up in a fight.
+- **Rollback:** after a rollback the core runs ticks again (its replay flag, `jsp_stepper_in_replay()` in `jsp_stepper.cpp`, set from
+  the restore to the end of the replay's last tick; the same span as the skipped draws). A re-run tick calls the damage function again
+  for a hit already counted, and the restored memory shows an older combo count (which on a first-run tick would mean a new combo). The
+  glue passes the flag, and the readout ignores re-run ticks: each hit is counted once, when its tick first runs. A hit that only exists
+  in the corrected timeline is not counted, and one the correction removed stays counted; with local inputs only (the bench) the re-run
+  repeats the same hits. Host-tested; not run.
+- **Switch:** `TRAINING_READOUT`, on when unset; `TRAINING_READOUT=0` turns it off (read live, like `FPS_COUNTER`). No pause-menu row
+  yet: a Training settings row needs a free game text slot confirmed in a run.
+- **Code:** `installer/port/jsp/jsp_train_readout.h` (state, text, layout; no game calls) and its glue in `jsp_game.cpp`
+  (`readout_tick`, the @0x00085B84 Training branch and `training_tick`).
+- **Tested:** host test `installer/tools/train_readout_test.sh` (combo sums, the gauge edge, a new combo inside a shown number, heals
+  ignored, requested versus capped damage, units, the key, the redraw gate with a refused draw, a rollback re-run counted once, the
+  shared layer yielded to another user, printable ASCII and box width, reset on a new fight); the port syntax check (`tools/ci/port_syntax_check.py`, all port sources) run with MinGW GCC (`x86_64-w64-mingw32-g++` /
+  `-gcc` from the project's Windows shell), not with the llvm-mingw clang the CI uses.
+- **Not run:** no build, no game or Proton run. The combo number does come up for a single hit (pf3, "Refill timing" above: 0.77 s
+  after one hit). Still to confirm in a Training run: the placement against the real HUD (top right above the top bar is an ASSUMPTION
+  from the badge's measurement), how the game's count behaves when a new combo starts while the number shows (see Combo), and which
+  fighter is P1 (ASSUMPTION: the first fighter the HUD's health getter notes).
+- **Not done (needs a run or a decision):** infinite support and unlimited Victory Burst (no field or writer found yet), a one-key reset of
+  positions and meters (key and behaviour undecided; the pause menu's Restart handler is not found), and "normal stamina gain" (meaning
+  undecided).
+
 ## The v18 tree (installer/port, 2026-11-05)
 
 Now (2026-11-10): Training is ported to the `v18` tree in `installer/port/jsp/jsp_game.cpp`. Free Battle shows a Free Battle /

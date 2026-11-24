@@ -39,6 +39,7 @@ posix   | installer/tools/net_badge_test.sh
 posix   | installer/tools/net_delay_rule_test.sh
 posix   | installer/tools/fight_setup_rule_test.sh
 posix   | installer/tools/stall_rule_test.sh
+posix   | installer/tools/train_readout_test.sh
 posix   | installer/tools/settings_test.sh
 posix   | installer/tools/session_reader_effects_test.py
 posix   | installer/tools/session_startup_test.py
@@ -81,6 +82,7 @@ exclude | installer/tools/net_badge_test.cpp | compiled and run by net_badge_tes
 exclude | installer/tools/net_delay_rule_test.cpp | compiled and run by net_delay_rule_test.sh
 exclude | installer/tools/fight_setup_rule_test.cpp | compiled and run by fight_setup_rule_test.sh
 exclude | installer/tools/stall_rule_test.cpp | compiled and run by stall_rule_test.sh
+exclude | installer/tools/train_readout_test.cpp | compiled and run by train_readout_test.sh
 exclude | installer/tools/settings_test.cpp | compiled and run by settings_test.sh
 exclude | installer/tools/overlay_font_test.cpp | compiled and run by overlay_font_test.sh
 exclude | installer/tools/session_manifest_test.cpp | compiled and run by session_manifest_test.sh

@@ -203,6 +203,10 @@ extern "C" void jsp_stepper_replay(int on, uint32_t done)
     }
 }
 
+// 1 while a replay runs (from the restore to the end of its last tick, the flag set above): a tick run again after a rollback. Read by display-only
+// code that must count each tick once (the Training readout, jsp_game.cpp). Atomic, any thread.
+extern "C" int jsp_stepper_in_replay(void) { return g_in_replay.load(); }
+
 // The run ended (capture_failed / finish_run, possibly mid-replay): nothing may keep the replay clock or the replay flag on. Atomics and one log line, no lock
 // (capture_failed logs right after this anyway).
 extern "C" void jsp_stepper_abort(void)
