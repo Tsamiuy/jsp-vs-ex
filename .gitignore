@@ -33,6 +33,9 @@
 !/docs/character-details/
 /docs/character-details/*
 !/docs/character-details/*.md
+!/docs/code-map/
+/docs/code-map/*
+!/docs/code-map/*.md
 
 # Notes: text, patches and scripts only
 !/docs/archive/jstars-notes/

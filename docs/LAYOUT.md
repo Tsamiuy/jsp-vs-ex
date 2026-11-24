@@ -14,6 +14,7 @@ ps3recomp v0.15.0 (`jstars/`) was removed from the tree in #173 (issue #152); it
 | `installer/tools/` | Payload and portable zip, toolchain fetch, first-run build steps, art and host tests |
 | `launcher/` | The launcher window source: `JStarsLauncher.cs` is the installer's settings window (`jsp-settings.exe`), `JStarsLauncher19.cs` is the development launcher (not shipped) with `build_launcher19.bat` |
 | `docs/` | Players and contributors, see [README.md](README.md). `docs/notes/` are the research notes, `docs/balance/` and `docs/character-details/` the balance notes, `docs/archive/jstars-notes/` the archive of the v0.15 work (patches, analysis tools, measurements) |
+| `docs/code-map/` | The code map for maintainers: layers and entry points, netcode, toolkit patches to glue, build and CI ([code-map/README.md](code-map/README.md)) |
 | `tools/` | CI checks (`tools/ci/`), the release tool (`release.py`), the fan site and the drawn art (`site/`: `site.py` builds the site, `repo_art.py` draws the banner, social preview, dividers and README buttons, `badges.py` writes the README's badge and button blocks, `check_site.py` checks the site; palette and button list in `data/`), the feature and contributor generators, and `boost/` (power-plan scripts: read `tools/boost/README.txt` first) |
 | `assets/` | Banner, social preview and icon (our own generated art) |
 | `third_party/ps3recomp` | The ps3recomp toolkit as a submodule, pinned to the v0.19.0 commit; only the pointer is stored here |

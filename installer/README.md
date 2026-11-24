@@ -36,7 +36,7 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/port/jsp/`, `installer/port/patches/` | The current port: the game glue (`CMakeLists.txt`, `main.cpp`, `stubs.cpp`, `jsp_*.cpp`) and the toolkit patches. Nothing from the game is in them; the PPU and SPU lift are made on the player's PC from the player's EBOOT |
 | `installer/port/test/` | Scripted pad routes for testing the installed current-tree game without a controller (see "Test routes" below) |
 | `installer/tools/installer_art.py` | Draws the wizard images and icons at build time in the site's menu look, with the helpers of `tools/site/repo_art.py` and the palette `data/theme.json` (needs Pillow, no font file); nothing generated is committed |
-| `installer/tools/ex_logo_art.py` | Draws `ex_logo_A.rgba`, the "EX" that toolkit patch 0006 puts in place of the "+" in the title logo, from polygons (our own art, needs Pillow and numpy); `assemble_payload.py` runs it and `firstrun.py` places the file next to `JStarsRecomp.exe`. `JSP_EX_LOGO=0` in the settings file keeps the "+" |
+| `installer/tools/ex_logo_art.py` | Draws `ex_logo_A.rgba`, the "EX" that toolkit patch 2013 puts in place of the "+" in the title logo, from polygons (our own art, needs Pillow and numpy); `assemble_payload.py` runs it and `firstrun.py` places the file next to `jsp.exe`. `JSP_EX_LOGO=0` in the settings file keeps the "+" |
 | `installer/tools/installer_music.py`, `installer/music/` | Renders the six opt-in music tracks (formulas, credits and sources in `tracks.tsv`) to WAV files at build time with plain Python; the wizard's "Enable Music?" box (bottom left, off by default, silent installs never play) loops one at random. Credits and licence in `NOTICE.md` |
 | `installer/tools/rpcs3_locate.py`, `installer/tools/test_rpcs3_locate.py` | A shared, read-only helper that finds the folders, game, update, fonts, saves and decrypted `EBOOT.elf` of an RPCS3 install, vendored unchanged (see `NOTICE.md`), with its own test |
 | `installer/tools/rpcs3_wizard.py`, `installer/tools/rpcs3_wizard_test.py` | The wizard's side of it: the page "Use your RPCS3 install?" pre-fills the disc folder, the dev_flash folder and an already decrypted `EBOOT.elf`, and offers the save import (see below). The test uses fake RPCS3 trees |
@@ -249,8 +249,8 @@ What has been tested, and what has not (the settings reader has a host test, 21 
 reached a Friendly Match room together, started the battle and played into the fight with data going both ways; first
 with psnr, then with the re-psn v0.3.0 Linux release (same result). Both runs used a build of the port on ps3recomp
 v0.18.0; the tree on v0.19.0 has not been re-checked online yet. Not run: the re-psn Windows build.
-Not yet: Windows, two PCs, a fight to its end, Rank Match. Rollback netcode is planned (see `docs/ROADMAP.md`); until
-then the game's own netcode runs the match.
+Not yet: Windows, two PCs, a fight to its end, Rank Match. Online Battle runs the match on the game's own netcode; rollback
+netcode is in the build as a separate experimental opt-in for Free Battle (see `docs/ROLLBACK.md`), and with both on, neither starts: the game runs offline and the main menu says why.
 
 ## Checks before the build
 
