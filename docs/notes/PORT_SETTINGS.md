@@ -124,6 +124,7 @@ least certain parts.
 - Build the v19 tree with the feature and run the page (open it from the Options list, both sub-pages, edit and save, close it, check the menu keeps working, and that the written `repsn.ini` is read back at the next start).
 - The port's "Exit Game" option shares the Options list (it takes over Cross-Save, the bottom row) and opens its box only when the Options cursor word 0x008E63FC reads 0 and the menu state word 0x0095654C reads 5. ASSUMPTION: both still read that way with the sixth row present (0x008E63FC 0 only on Cross-Save, never on Port Settings; 0x0095654C 5 on the six-row list and while the Port Settings page is open over it). Neither has been read in a run with both options on; check both options with the sixth row present.
 - The overlay is drawn before 2508's and 2509's pictures, so those land on top (a page open with the FPS counter or the time-limit stamp).
+- The overlay is one layer shared with the Training readout (`jsp_game.cpp`); the readout yields while this file holds it (`jsp_port_menu_overlay_held()`), see TRAINING_MODE.md, "Training readout". Not run.
 - The sixth row's parts after the game's own per-update loop with the instruction patch (the earlier tree needed the patch to keep them shown).
 - Pressure-capable pads: the game's menu reading pressure words behind the page.
 - PlayStation pads (7909): try a DualShock 4 (USB and Bluetooth) and a DualSense (USB and Bluetooth) with real hardware, one alone, two together, and beside an Xbox pad; check Cross, Circle, sticks, triggers and the hot-plug.

@@ -51,8 +51,8 @@ int main()
     r.on_gauge(true, 4);
     CHECK(r.combo_total() == 3800 && r.combo_hits() == 4);
     CHECK(r.line1() == "Damage 8.0 | Combo 4 hits 38.0");
-    r.on_gauge(true, 2);                                             // a smaller count on another gauge in the same tick does not lower it
-    CHECK(r.combo_hits() == 4);
+    r.on_gauge(true, 4);                                             // the same count on the next tick: still the same combo
+    CHECK(r.combo_hits() == 4 && r.combo_total() == 3800 && r.combo_open());
 
     // a heal is not a hit
     CHECK(!r.on_hit(0x100, -500, 24) && !r.on_hit(0x100, 0, 24));
@@ -69,6 +69,33 @@ int main()
     CHECK(r.on_hit(0x200, 300, 41));
     CHECK(r.combo_total() == 300 && r.combo_hits() == 1);
 
+    // a new combo while the old number still shows: the game's count drops (5 -> 2), so the newest two hits since the last tick are
+    // the new combo and the older one stays with the old combo
+    Readout n;
+    for (int i = 0; i < 5; i++) { n.on_hit(0x100, 1000, 50 + i); n.on_gauge(true, (uint32_t)i + 1); }
+    CHECK(n.combo_hits() == 5 && n.combo_total() == 5000);
+    n.on_hit(0x100, 700, 60);                                        // the last hit of the old combo, before the tick that shows 6
+    n.on_gauge(true, 6);
+    CHECK(n.combo_hits() == 6 && n.combo_total() == 5700);
+    n.on_hit(0x100, 300, 70);                                        // a new combo starts while 6 still shows
+    n.on_hit(0x100, 200, 71);
+    n.on_gauge(true, 2);
+    CHECK(n.combo_open() && n.combo_hits() == 2 && n.combo_total() == 500);
+    CHECK(n.line1() == "Damage 2.0 | Combo 2 hits 5.0");
+    n.on_hit(0x100, 100, 72);
+    n.on_gauge(true, 3);
+    CHECK(n.combo_hits() == 3 && n.combo_total() == 600);
+    // the game counted the new combo's first hit before the readout saw it: the old combo closes and that hit opens the new one
+    n.on_gauge(true, 1);
+    CHECK(!n.combo_open() && n.combo_total() == 600);
+    n.on_hit(0x100, 450, 73);
+    n.on_gauge(true, 1);
+    CHECK(n.combo_open() && n.combo_hits() == 1 && n.combo_total() == 450);
+    // a count that keeps rising while the number shows is one combo (the game chained the hits): no restart
+    n.on_hit(0x100, 50, 74);
+    n.on_gauge(true, 2);
+    CHECK(n.combo_hits() == 2 && n.combo_total() == 500);
+
     // requested damage, not the capped one: the glue passes r4 as the game asked (here 25.0 although the cap left only 1.0 to take)
     Readout c;
     const int32_t requested = 2500, cur = 200;
@@ -84,19 +111,24 @@ int main()
     r.set_vitals(-1, 1, 1, 1, 1);
     CHECK(r.line2() == "P1 HP 812/1000 ST 1200/2000 | P2 HP 1000/1000 ST 1000/1000");
 
-    // the redraw gate: the first call draws, unchanged values do not, a change does, invalidate() draws again
+    // the redraw gate: the first tick draws, unchanged values do not, a change does, invalidate() draws again
     Readout g;
-    CHECK(g.changed() && !g.changed() && !g.changed());
+    auto draw = [&g]() { const bool c = g.changed(); if (c) g.drawn(g.text()); return c; };   // the glue, with the overlay taking it
+    CHECK(draw() && !draw() && !draw());
     g.set_vitals(0, 100000, 100000, 1000, 1000);
-    CHECK(g.changed() && !g.changed());
+    CHECK(draw() && !draw());
     g.set_vitals(0, 100000, 100000, 1000, 1000);                     // the same values written again
-    CHECK(!g.changed());
+    CHECK(!draw());
     g.set_vitals(0, 100000, 100000, 999, 1000);
-    CHECK(g.changed());
+    CHECK(draw());
     g.set_vitals(0, 100099, 100000, 999, 1000);                      // a change below one shown point does not redraw
-    CHECK(!g.changed());
+    CHECK(!draw());
     g.invalidate();
-    CHECK(g.changed() && !g.changed());
+    CHECK(draw() && !draw());
+    // the overlay refused the drawing (jsp_overlay_begin failed): nothing is recorded, so the next tick tries again
+    g.set_vitals(1, 100000, 100000, 1000, 1000);
+    CHECK(g.changed() && g.changed());                               // asked twice, not drawn: still due
+    CHECK(draw() && !draw());
 
     // every line is printable ASCII (the overlay font is 0x20-0x7E) and the widest lines fit the box
     Readout w;
@@ -120,7 +152,7 @@ int main()
     // a new fight clears everything
     r.reset();
     CHECK(r.line1() == "Damage - | Combo -" && r.line2() == "P1 - | P2 -" && !r.combo_open() && r.combo_total() == 0);
-    CHECK(r.changed());                                              // and draws again
+    CHECK(r.changed());                                              // and is due to be drawn
 
     if (fails) { std::printf("train readout: %d of %d checks failed\n", fails, checks); return 1; }
     std::printf("train readout: all %d checks pass\n", checks);

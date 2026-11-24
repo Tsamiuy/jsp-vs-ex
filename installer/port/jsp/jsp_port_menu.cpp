@@ -63,6 +63,7 @@
 #include "jsp_settings.h"        // the launcher's settings as data and the settings file model (host-tested: installer/tools/settings_test.cpp)
 
 #ifndef JSP_PORT_MENU_TEST
+#include <atomic>
 #include <mutex>
 #ifdef _WIN32
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void*, char*, unsigned long);   // no <windows.h>: its macros clash with the recomp headers
@@ -663,7 +664,7 @@ GameSettingsIO g_settings_io;
 
 uint32_t g_obj = 0;            // the main-menu object (r3 of @0x001E0830)
 int g_last_panel = -1, g_last_open = -1, g_last_cursor = -1, g_last_top = -1;
-bool g_drawn = false;
+std::atomic<bool> g_drawn{false};   // this file holds the overlay layer (read by the Training readout, jsp_game.cpp)
 bool g_help = false;   // the help line for row 5 is up (overlay)
 
 constexpr uint32_t k_build_options = 0x001E0830u;   // builds the Options panel (menu id 8), cursor struct at the main-menu object (cursor struct at +0xF4)
@@ -1182,6 +1183,9 @@ bool install(uint32_t addr, fn_t wrapper, fn_t* orig)
 }
 
 }  // namespace
+
+// The overlay layer is shared: the Training readout (jsp_game.cpp) yields while this file's page, version line or join prompt is drawn.
+extern "C" int jsp_port_menu_overlay_held(void) { return g_drawn ? 1 : 0; }
 
 extern "C" void jsp_register_port_menu_overrides(void)
 {

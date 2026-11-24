@@ -69,6 +69,7 @@ extern "C" int32_t cellGameDataCheck(uint32_t type, const char* dirName, void* s
 extern "C" int32_t cellGameContentPermit(char* contentInfoPath, char* usrdirPath);
 extern "C" int32_t cellGameCreateGameData(void* init, char* tmp_contentInfoPath, char* tmp_usrdirPath);
 extern "C" volatile unsigned long long g_ppu_fs_last_read_ms;   /* ppu_fs.cpp: last cellFsRead */
+extern "C" int jsp_port_menu_overlay_held(void);   /* jsp_port_menu.cpp: 1 while its page, version line or join prompt holds the overlay */
 extern "C" void (*g_spu_put_hook_img)(int image_id, uint32_t ea, uint32_t size);   /* spu_channels.c */
 extern "C" void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly);   /* cellPad.c */
 extern "C" void (*g_cellpad_rstick_filter)(uint32_t port_no, uint16_t* rx, uint16_t* ry);   /* cellPad.c */
@@ -2989,11 +2990,15 @@ void readout_tick()
             g_readout.invalidate();
             return;
         }
+        /* The layer is shared with the Port Settings page, the version line and the pad-join prompt (jsp_port_menu.cpp), and with the
+         * rollback badge (jsp_net_game.cpp, online fights only, so never in Training). Each begin() clears the layer, so the readout
+         * yields: while the port menu holds the layer it neither draws nor closes, and draws again once that drawing is gone. */
+        if (jsp_port_menu_overlay_held()) { g_readout_drawn = false; g_readout.invalidate(); return; }
         if (g_readout_drawn && !jsp_overlay_active()) g_readout.invalidate();   /* someone closed the layer: draw again */
         if (!g_readout.changed()) return;
         l1 = g_readout.line1(); l2 = g_readout.line2();
     }
-    if (!jsp_overlay_begin(1280, 720)) return;
+    if (!jsp_overlay_begin(1280, 720)) return;   /* nothing recorded as drawn: the next tick tries again */
     const float w1 = jsp_overlay_text_width(l1.c_str(), jptr::kScale), w2 = jsp_overlay_text_width(l2.c_str(), jptr::kScale);
     float w = w1 > w2 ? w1 : w2;
     if (w <= 0) w = (float)(l1.size() > l2.size() ? l1.size() : l2.size()) * jptr::kGlyphMax * jptr::kScale;   /* no atlas: the widest estimate */
@@ -3004,6 +3009,8 @@ void readout_tick()
     jsp_overlay_text_style((float)(jptr::kRight - jptr::kBoxPad) - (w2 > 0 ? w2 : w), jptr::kY2, l2.c_str(), jptr::kScale, white, 0);
     jsp_overlay_end();
     g_readout_drawn = true;
+    std::lock_guard<std::mutex> lk(g_readout_mu);
+    g_readout.drawn(l1 + "\n" + l2);
 }
 
 /* Character select in Training, found by the screen tracking: the slot cursor is

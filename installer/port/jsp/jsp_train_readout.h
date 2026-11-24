@@ -8,7 +8,8 @@
 //            The readout takes r4 as the game asked for it, before Training's leave-1-health cap rewrites it, so a move's real damage
 //            shows even when the dummy is near the cap. r4 <= 0 is a heal and is not a hit.
 //   combo    the gauge over the characters, class 0x00879DA0: +0x3EC is non-zero while the combo number is up, +0x3F0 the hit count.
-//            The up-to-down edge closes a combo; the next hit opens a new one with its own damage.
+//            The up-to-down edge closes a combo; the next hit opens a new one with its own damage. A drop of +0x3F0 while the number
+//            is up (a new combo before the old number went away) splits the newest hits off as the new combo (on_gauge).
 //   vitals   health object +0x90 current health, +0x98 max (both in hundredths); +0x9C Stamina, +0xA0 Stamina limit (whole units:
 //            1000 at the start, the limit 1000..2000, docs/balance/Shared.md).
 //
@@ -67,22 +68,31 @@ public:
             combo_total_ = 0;
             own_hits_ = 0;
             game_hits_ = 0;
+            recent_n_ = 0;
             defender_ = defender;
         }
         combo_total_ += d90;
         own_hits_++;
+        if (recent_n_ < kRecent) recent_[recent_n_++] = d90;
         last_dmg_ = d90;
         have_hit_ = true;
         last_tick_ = tick;
         return true;
     }
 
-    // Once per tick: the combo gauge's state (any gauge up) and the largest hit count among the gauges.
+    // Once per tick: the combo gauge's state (any gauge up) and the largest hit count among the gauges this tick.
+    // The number stays up for a while after the last hit (0.77 s after one hit, 0.9 s after three, docs/notes/TRAINING_MODE.md), so a
+    // new combo can start before it goes away. The game's own count tells: when it drops while the number is up (8 -> 1), the game
+    // started a new combo, and the newest `hits` hits seen since the last tick are that combo; the older ones stay with the old one.
     void on_gauge(bool up, uint32_t hits)
     {
-        if (up && hits > game_hits_) game_hits_ = hits;
+        if (up && hits) {
+            if (combo_open_ && game_hits_ && hits < game_hits_) restart(hits);
+            game_hits_ = hits;
+        }
         if (gauge_up_ && !up) combo_open_ = false;       // the combo number went away: the combo is over, its numbers stay on screen
         gauge_up_ = up;
+        recent_n_ = 0;                                   // the hits before this tick belong to a count the game has shown
     }
 
     void set_vitals(int slot, int32_t hp, int32_t hp_max, int32_t st, int32_t st_max)
@@ -123,16 +133,11 @@ public:
 
     std::string text() const { return line1() + "\n" + line2(); }
 
-    // The redraw gate: true when the text differs from the one last drawn (and records it as drawn).
-    bool changed()
-    {
-        const std::string t = text();
-        if (drawn_ && t == shown_) return false;
-        shown_ = t;
-        drawn_ = true;
-        return true;
-    }
-    // The overlay was closed or taken by someone else: the next changed() draws again.
+    // The redraw gate: true when the text differs from the one last drawn. It records nothing: the glue calls drawn(text) only after
+    // the overlay took the drawing, so a failed jsp_overlay_begin is tried again on the next tick.
+    bool changed() const { return !drawn_ || text() != shown_; }
+    void drawn(const std::string& t) { shown_ = t; drawn_ = true; }
+    // The overlay was closed or taken by someone else: the next changed() is true.
     void invalidate() { drawn_ = false; }
 
     // A new fight (or leaving Training): everything goes.
@@ -145,6 +150,20 @@ private:
     int32_t combo_total_ = 0;
     uint32_t own_hits_ = 0, game_hits_ = 0;
     uint64_t last_tick_ = 0;
+    // A new combo inside a shown number: the game's count dropped to n, so the newest n hits since the last tick are the new combo
+    // (fewer when the game counted a hit the readout has not seen yet: that hit adds on arrival). With none seen yet, the old combo is
+    // closed and the coming hit opens the new one.
+    void restart(uint32_t n)
+    {
+        const uint32_t k = n < recent_n_ ? n : recent_n_;
+        if (!k) { combo_open_ = false; return; }
+        combo_total_ = 0;
+        for (uint32_t i = recent_n_ - k; i < recent_n_; i++) combo_total_ += recent_[i];
+        own_hits_ = k;
+    }
+    static constexpr uint32_t kRecent = 64;              // hits between two ticks (one pad poll); far more than a frame can land
+    int32_t recent_[kRecent] = {};
+    uint32_t recent_n_ = 0;
     bool have_hit_ = false, combo_open_ = false, gauge_up_ = false;
     std::string shown_;
     bool drawn_ = false;
