@@ -1,0 +1,94 @@
+Patch 7921 (experimental, rollback netcode): the lwmutex census walks the occupied slots only and caches readability per page.
+
+runtime/ppu/ppu_sysprx.cpp: the lwmutex table records the slots it claims (slots are never freed), and ps3_lwmutex_census walks that
+list instead of all 65,536 slots. The census's readability check is cached per 4 KB guest page (commit and protection work in whole
+pages) in 4,096 direct-mapped slots, keyed by the census epoch and the layout generation of patch 7920; an address that straddles a
+page checks both pages. Measured with the rollback snapshot: VirtualQuery on the write-watched reservation costs ~0.19 ms a call, and
+the 128-slot cache that did not cache straddling addresses left ~12 calls (2.3 ms) in every frozen census. Counters for the snapshot's
+census profile (JSP_SNAPSHOT_CENSUS_PROF=1): g_lwm_rd_hits, g_lwm_rd_vq, g_lwm_rd_vq_ns, g_lwm_rd_uncacheable, g_lwm_rd_invalidates.
+Applies after 7920.
+
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -168,6 +168,9 @@
+              unsigned long long ppu_thread_cpu_us(unsigned tid);   /* sys_ppu_thread.c */
+              unsigned ppu_thread_prof_pc(unsigned tid); }
+ static volatile long g_lwm_tab_lock = 0;
++/* The occupied slots in claim order (slots are never freed), so the snapshot census walks a few hundred
++ * entries instead of all 65,536. Appended under g_lwm_tab_lock after the slot is published. */
++static uint32_t g_lwm_used[LWM_HASH]; static volatile long g_lwm_used_n = 0;
+ static void lwm_clear_dead(struct LwmSlot* sl) { sl->dead = 0; }
+ /* PS3_LWMUTEX_TRACE=1: reconstruct the lwmutex lock-convoy that stalls LBP's loader.
+  * Records, per mutex, the acquiring tid + a QPC microsecond timestamp; on a
+@@ -207,6 +210,7 @@
+                 g_lwm[idx].sem = CreateSemaphoreA(NULL, 0, 1, NULL);   /* wake channel, empty */
+                 g_lwm[idx].state = 0;                                   /* free */
+                 g_lwm[idx].addr = (long)addr;   /* publish AFTER init (x86 TSO: readers see init) */
++                g_lwm_used[g_lwm_used_n] = idx; _InterlockedExchange(&g_lwm_used_n, g_lwm_used_n + 1);
+                 r = &g_lwm[idx];
+             } else if ((uint32_t)g_lwm[idx].addr == addr) {
+                 r = &g_lwm[idx];
+@@ -417,23 +421,40 @@
+ /* Patch 7914: readability is cached per 4 KB guest page in a small direct-mapped table so the census costs one VirtualQuery per distinct
+  * page instead of one per lwmutex (91 per precheck). The cache is dropped by ps3_lwm_census_invalidate(): the port calls it after every per-tick layout
+  * discovery (the committed set is unchanged while it stays valid) and before every frozen sample; the census is only ever called from the port's snapshot thread. */
+-#define LWM_RD_SLOTS 128
+-static struct { uint32_t page, epoch; uint8_t ok; } s_lwm_rd[LWM_RD_SLOTS];
++#define LWM_RD_SLOTS 4096
++static struct { uint32_t page, epoch, gen; uint8_t ok; } s_lwm_rd[LWM_RD_SLOTS];
+ static uint32_t s_lwm_rd_epoch = 1;
+ extern "C" { volatile uint32_t g_vm_layout_gen = 0; }   /* runtime/memory/vm.h: guest layout generation */
+-extern "C" void ps3_lwm_census_invalidate(void) { s_lwm_rd_epoch++; }
+-static int lwm_census_readable(uint32_t a)
+-{
++/* Census profile counters (read by the port's JSP_SNAPSHOT_CENSUS_PROF report): cache hits, VirtualQuery calls, uncacheable addresses, microseconds in VirtualQuery. */
++extern "C" { volatile unsigned long long g_lwm_rd_hits = 0, g_lwm_rd_vq = 0, g_lwm_rd_uncacheable = 0, g_lwm_rd_vq_ns = 0, g_lwm_rd_invalidates = 0; }
++extern "C" void ps3_lwm_census_invalidate(void) { s_lwm_rd_epoch++; g_lwm_rd_invalidates++; }
++/* Readability of one 4 KB guest page (commit and protection work in whole pages), cached by page in a direct-mapped table. An entry is valid for the
++ * census epoch AND the guest layout generation (vm.h, bumped by every commit or protection change), so a page committed or protected since it was
++ * cached is queried again even if the port did not invalidate. VirtualQuery on the write-watched reservation costs ~0.19 ms a call (measured: 36,148
++ * calls, 6.97 s); with 128 slots and the page-straddling addresses never cached, ~12 calls a census were left (2.3 ms of every frozen sample). */
+ #ifdef _WIN32
+-    const uint32_t pg = a >> 12;
+-    const int cacheable = (a & 0xFFFu) <= 0xFF0u;   /* owner (+0) .. count (+0xC) inside the page */
+-    if (cacheable) { const auto& c = s_lwm_rd[pg % LWM_RD_SLOTS]; if (c.epoch == s_lwm_rd_epoch && c.page == pg) return c.ok; }
++static int lwm_page_readable(uint32_t pg)
++{
++    auto& c = s_lwm_rd[pg % LWM_RD_SLOTS];
++    const uint32_t gen = g_vm_layout_gen;
++    if (c.epoch == s_lwm_rd_epoch && c.gen == gen && c.page == pg) { g_lwm_rd_hits++; return c.ok; }
+     MEMORY_BASIC_INFORMATION m;
+     int ok = 0;
+-    if (VirtualQuery(vm_base + a, &m, sizeof m) && m.State == MEM_COMMIT && !(m.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && m.Protect)
+-        ok = (uint8_t*)m.BaseAddress + m.RegionSize >= vm_base + (uint64_t)a + 0x10;   /* owner (+0) and count (+0xC) in the same region */
+-    if (cacheable) { auto& c = s_lwm_rd[pg % LWM_RD_SLOTS]; c.page = pg; c.epoch = s_lwm_rd_epoch; c.ok = (uint8_t)ok; }
++    g_lwm_rd_vq++;
++    LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0);
++    const SIZE_T vqr = VirtualQuery(vm_base + ((uint64_t)pg << 12), &m, sizeof m);
++    QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&qf); g_lwm_rd_vq_ns += (unsigned long long)((q1.QuadPart - q0.QuadPart) * 1000000000ll / qf.QuadPart);
++    if (vqr && m.State == MEM_COMMIT && !(m.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && m.Protect) ok = 1;
++    c.page = pg; c.epoch = s_lwm_rd_epoch; c.gen = gen; c.ok = (uint8_t)ok;
+     return ok;
++}
++#endif
++static int lwm_census_readable(uint32_t a)
++{
++#ifdef _WIN32
++    const uint32_t p0 = a >> 12, p1 = (a + 0xFu) >> 12;   /* owner (+0) .. count (+0xC) */
++    if (p1 != p0) g_lwm_rd_uncacheable++;   /* straddles a page: both pages are checked (each cached) */
++    return lwm_page_readable(p0) && (p1 == p0 || lwm_page_readable(p1));
+ #else
+     (void)a; return 1;
+ #endif
+@@ -441,7 +462,9 @@
+ extern "C" void ps3_lwmutex_census(const uint8_t* thread_alive, uint32_t* out, uint32_t* first_live_ea, uint32_t* first_stale_ea)
+ {
+     uint32_t o[7] = {0, 0, 0, 0, 0, 0, 0}, fl = 0, fs = 0;
+-    for (uint32_t i = 0; i < LWM_HASH; i++) {
++    const uint32_t used = (uint32_t)g_lwm_used_n;
++    for (uint32_t u = 0; u < used; u++) {
++        const uint32_t i = g_lwm_used[u];
+         const uint32_t a = (uint32_t)g_lwm[i].addr;
+         if (!a) continue;
+         o[0]++;

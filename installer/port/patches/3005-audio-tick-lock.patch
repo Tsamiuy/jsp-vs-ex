@@ -1,0 +1,156 @@
+Patch 3005: cellAudio tick-locked mode for rollback matches.
+
+Symptom (two-copy rollback tests): the match desynced 30-35 s into every fight. The game's sound library advances on the audio
+device clock (one block of 256 samples per notify event, paced by WASAPI or the performance counter), and the game acts on it:
+a voice line that ends starts the next sound, and the pre-fight intro camera waits for one. Two PCs reached those points on ticks
+1-4 apart, so the per-tick checksums differed although every input was the same.
+
+Now: g_ps3_audio_lock_target (-1 = off, the default: paced as before) is the total number of blocks the mix thread may have mixed.
+The port's rollback layer sets it to 6.25 blocks per game tick (48000 / 256 / 30) and waits for ps3_audio_lock_idle (every block
+mixed, every notify queue drained and its receiver back in the receive) before the next tick runs, so the guest's audio progress is
+a function of the tick on every PC. Blocks mixed for rollback re-runs are not sent to the device (g_ps3_audio_lock_mute), and
+ps3_audio_lock_rewind moves every running port's read index back with a rollback (the guest memory itself is restored by the
+snapshot). When the lock ends the mix thread re-bases its clock and paces on the device again. While it has
+mixed every block it may, the mix thread waits on an event (ps3_audio_lock_set_target wakes it): it runs at TIME_CRITICAL, and a
+Sleep(0) spin there starved a new pool thread past the snapshot thread audit (THREAD-NOT-REGISTERED, two-copy test).
+
+Revision 2 (review of the rollback PR): the mix thread counts a block in g_ps3_audio_lock_done (release) only after audio_notify_event_queues()
+returned, and ps3_audio_lock_idle reads it with acquire and reads each notify queue's active / count / waiters under the queue's own lock (the one
+sys_event_queue_receive holds while it takes the event and leaves). Before, the game thread could see done == target while the last event was not
+yet pushed, or a receive that had taken its event (count--) but not yet left (waiters--), and run the next tick before the guest took the block. The
+step (mix, output, notify, publish) runs under a lock that ps3_audio_lock_rewind also takes, so a rewind never lands inside a block, even after the
+game's 250 ms wait gave up. Test: libs/audio/tests/test_audio_lock_race.c (patch 3007).
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 9e6c083..614ed55 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -23,6 +23,7 @@
+ #include "ps3emu/log_first.h"
+ #include "audio_wasapi_recover.h"
+ #include "ps3emu/thread_name.h"
++#include "../../runtime/syscalls/sys_event.h"   /* patch 3005: g_sys_event_queues (ps3_audio_lock_idle) */
+ 
+ /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
+  * rather than including sys_event.h to avoid pulling PPU context/syscall
+@@ -728,7 +729,106 @@ static void audio_dump_mix(void)
+     if (wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, wf);
+ }
+ 
++/* J-Stars patch 3005 (rollback): tick-locked audio. While a rollback match runs, the game thread decides how many blocks the mix thread may have
++ * mixed in total (g_ps3_audio_lock_target, -1 = off: paced on the device as before), 6.25 per game tick at 30 ticks/s, and waits (ps3_audio_lock_idle) until
++ * every block is mixed and the game's audio thread took its notify event before the next tick runs. The guest's audio progress (and every sound that ends
++ * and starts another) is then a function of the tick on every PC, not of the PC's audio clock. Blocks of rollback re-runs are mixed with the output muted
++ * (g_ps3_audio_lock_mute). ps3_audio_lock_rewind moves the ports' read index back with a rollback (the guest memory is restored by the snapshot). */
++volatile long long g_ps3_audio_lock_target = -1;
++volatile long long g_ps3_audio_lock_done = 0;
++volatile int g_ps3_audio_lock_mute = 0;
+ #ifdef _WIN32
++static HANDLE s_lock_wake = NULL;   /* the mix thread sleeps on it while it has mixed every block it may (never a spin: it runs at TIME_CRITICAL) */
++/* Held for one whole locked block (mix, output, notify, publish) and by ps3_audio_lock_rewind: a rewind never lands inside a block. Statically
++ * initialised (no init order with cellAudioInit); lock order: this, then s_audio_mutex or an event queue's lock, never the other way. */
++static SRWLOCK s_lock_step = SRWLOCK_INIT;
++#define lock_step_enter() AcquireSRWLockExclusive(&s_lock_step)
++#define lock_step_leave() ReleaseSRWLockExclusive(&s_lock_step)
++#else
++static pthread_mutex_t s_lock_step = PTHREAD_MUTEX_INITIALIZER;
++#define lock_step_enter() pthread_mutex_lock(&s_lock_step)
++#define lock_step_leave() pthread_mutex_unlock(&s_lock_step)
++#endif
++/* Sets the total the mix thread may have mixed and wakes it. Release: the mute flag written before it is seen with it. */
++void ps3_audio_lock_set_target(long long blocks)
++{
++    __atomic_store_n(&g_ps3_audio_lock_target, blocks, __ATOMIC_RELEASE);
++#ifdef _WIN32
++    if (s_lock_wake) SetEvent(s_lock_wake);
++#endif
++}
++/* One queue's state, read under the queue's own lock (the one sys_event_queue_receive and the push hold): a receive takes the event (count--) and
++ * leaves (waiters--) in one locked section, so no half-done receive can look like a drained queue with its receiver parked. The lock is never
++ * destroyed (sys_event_queue_destroy leaves it for this kind of late reader), so the unlocked `active` test before it is safe, as in the receive. */
++static int audio_lock_queue_busy(sys_event_queue_info* q)
++{
++    if (!__atomic_load_n(&q->active, __ATOMIC_ACQUIRE)) return 0;
++#ifdef _WIN32
++    EnterCriticalSection(&q->lock);
++#else
++    pthread_mutex_lock(&q->lock);
++#endif
++    const int busy = q->active && (q->count > 0 || q->waiters < 1);
++#ifdef _WIN32
++    LeaveCriticalSection(&q->lock);
++#else
++    pthread_mutex_unlock(&q->lock);
++#endif
++    return busy;
++}
++/* 1 when the lock's blocks are all mixed and every notify queue is drained with its receiver back in the receive. `done` is published by the mix
++ * thread only after the block's events are in every queue (audio_lock_step), and read here with acquire: done == target implies those pushes are visible. */
++int ps3_audio_lock_idle(void)
++{
++    const long long target = __atomic_load_n(&g_ps3_audio_lock_target, __ATOMIC_ACQUIRE);
++    if (target < 0) return 1;
++    if (__atomic_load_n(&g_ps3_audio_lock_done, __ATOMIC_ACQUIRE) < target) return 0;
++    for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
++        if (!s_notify_queues[i].in_use) continue;
++        const uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
++        if (!qid || qid > SYS_EVENT_QUEUE_MAX) continue;
++        if (audio_lock_queue_busy(&g_sys_event_queues[qid - 1])) return 0;
++    }
++    return 1;
++}
++/* Called while the mix thread is idle (done == target): the read index of every running port and the counters move to `blocks`. Under the step lock,
++ * so even after audio_lock_wait gave up (250 ms) it lands between two blocks, and the mix thread reads done and target as one pair. */
++void ps3_audio_lock_rewind(long long blocks)
++{
++    lock_step_enter();
++    const long long d = g_ps3_audio_lock_done - blocks;
++    mutex_lock(&s_audio_mutex);
++    for (int p = 0; p < CELL_AUDIO_PORT_MAX; p++) if (s_ports[p].in_use) s_ports[p].read_index -= (u64)d;
++    mutex_unlock(&s_audio_mutex);
++    __atomic_store_n(&g_ps3_audio_lock_target, blocks, __ATOMIC_RELEASE);
++    __atomic_store_n(&g_ps3_audio_lock_done, blocks, __ATOMIC_RELEASE);
++    lock_step_leave();
++}
++#ifdef _WIN32   /* the tick-locked branch is the Windows mix thread's */
++/* The tick-locked mix thread's work: one block if it may mix one (returns 1), else 0 (the caller waits for ps3_audio_lock_set_target). The block goes
++ * to `output` unless muted, its notify event to every queue, and only then is it counted in g_ps3_audio_lock_done (release): counted before the push,
++ * the game thread could see done == target with the queue still empty and its receiver parked, and run the next tick before the guest took the block. */
++static int audio_lock_step(void (*output)(void))
++{
++    lock_step_enter();
++    const long long target = __atomic_load_n(&g_ps3_audio_lock_target, __ATOMIC_ACQUIRE), done = g_ps3_audio_lock_done;
++    if (target < 0 || done >= target) { lock_step_leave(); return 0; }
++    audio_mix_one_block();
++    if (!g_ps3_audio_lock_mute && output) output();
++    audio_notify_event_queues();
++    __atomic_store_n(&g_ps3_audio_lock_done, done + 1, __ATOMIC_RELEASE);
++    lock_step_leave();
++    return 1;
++}
++#endif
++
++#ifdef _WIN32
++/* patch 3005: the locked block to the device, whole, when it has room for it (else it is dropped). */
++static void audio_lock_output(void)
++{
++    const int rm = audio_backend_room();
++    if (rm < 0 || rm >= CELL_AUDIO_BLOCK_SAMPLES) audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++}
+ static unsigned long long g_audio_underruns;
+ static unsigned __stdcall audio_mix_thread_func(void* arg)
+ {
+@@ -756,7 +856,13 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+      * With no device, pace on the performance counter instead. */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
++    if (!s_lock_wake) s_lock_wake = CreateEventW(NULL, FALSE, FALSE, NULL);   /* patch 3005 */
+     while (s_mix_thread_running) {
++        if (__atomic_load_n(&g_ps3_audio_lock_target, __ATOMIC_ACQUIRE) >= 0) {   /* patch 3005: tick-locked (see ps3_audio_lock_idle) */
++            if (!audio_lock_step(audio_lock_output)) { WaitForSingleObject(s_lock_wake, 2); continue; }
++            QueryPerformanceCounter(&q0); blocks = 0;   /* back on the clock from here when the lock ends */
++            continue;
++        }
+         const int room = audio_backend_room();
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+ #if AUDIO_BACKEND_WASAPI

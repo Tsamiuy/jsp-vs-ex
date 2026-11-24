@@ -1,0 +1,84 @@
+Patch 7927 (experimental, rollback netcode): write off a queued flip the FIFO walker can never reach, and say where it was.
+
+Two live freezes in online fights on one tester's PC (0.7.0-test1 room 37 and 0.7.0-test3 room 51, both hosting) ended the same way:
+flip status WAITING, flips queued = reached + 1, the main thread polling cellGcmGetFlipStatus in the frame pacing (func_006507DC step 1,
+lr 0x00650820), no flip for good. The rollback lockstep clock then gives no vblank (correctly) and the game never moves again.
+libs/video/cellGcmSys.c: gcm_flip_into_fifo remembers the IO offset of the newest marker it wrote; cellGcm_flip_write_off_lost(want, out)
+takes the walker's lock and the flip lock, reports get, put, the marker's offset and the word there now, the flip counters and status,
+and with `want` set and the walker idle at put with exactly one flip outstanding counts that flip as reached (what the resync paths
+already do for the markers they skip), so the next cellGcmTickFlip completes it. The rollback frame clock (installer/port/jsp/
+jsp_stepper.cpp) calls it only after that state has held for a while. No behaviour change: nothing calls it unless the port does.
+Test switch GCM_TEST_LOSE_FLIP=<n> (off by default): the walker passes the n-th queued flip without counting it, once, which puts a
+fight in exactly that state (two copies on one PC reproduce the freeze, and with the port's recovery, its write-off).
+Applies after 7924.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -123,6 +123,7 @@ static volatile int s_flip_pending = 0;
+  * executes it; until the drain reaches the marker, the flip has not happened,
+  * however many vblanks go by. */
+ static volatile u32 s_fifo_flips_queued = 0, s_fifo_flips_reached = 0;
++static volatile u32 s_flip_marker_io = 0xFFFFFFFFu;   /* patch 7927: IO offset of the newest flip marker gcm_flip_into_fifo wrote */
+ static u32 s_fifo_flips_completed = 0;   /* reached count at the last completion */
+ /* FRAME_TL=1 (diagnostic, off by default): per flip the time from its request (marker queued, guest thread)
+  * to the drain reaching it ("draw"), from there to the DONE the guest sees ("tick"), and from that DONE to
+@@ -2330,6 +2331,36 @@ void cellGcm_rsx_process_fifo(void)
+     }
+ }
+ 
++/* Patch 7927 (rollback netcode): a queued flip the walker can never reach. A guest that polls cellGcmGetFlipStatus for a flip it wrote
++ * into its ring (gcm_flip_into_fifo, "queued") waits forever when the walker has drained everything up to `put` and the flip is still
++ * not "reached": nothing the walker will ever see executes it (two live freezes on one tester's PC, 0.7.0-test1 and test3: queued =
++ * reached + 1, flip status WAITING, main thread in the frame pacing step 1, no flip for good). The frame clock calls this only after it
++ * has seen that state for a while. Under the walker's lock (no pass in flight), `out` (9 words) gets the evidence for the log line:
++ * [0] get, [1] put, [2] the newest marker's IO offset, [3] the word there now (the marker, or what overwrote it), [4] queued,
++ * [5] reached, [6] completed, [7] flip status, [8] 1 = written off. With want_write_off and the walker idle at `put` with exactly one
++ * flip outstanding, that flip counts as reached (as the resync paths do with the flips they skip: "a flip marker skipped here will never
++ * be reached"), so the next cellGcmTickFlip completes it; a marker the walker meets later is not counted twice (the reached != queued
++ * guard). Returns out[8]. */
++int cellGcm_flip_write_off_lost(int want_write_off, uint32_t* out)
++{
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    FLIP_LOCK();
++    const u32 put = vm_read32(GCM_CONTROL_GUEST_ADDR + 0);
++    const u32 mio = s_flip_marker_io;
++    const u32 mea = mio != 0xFFFFFFFFu ? gcm_io2ea(mio) : 0;
++    out[0] = s_fifo_getoff; out[1] = put; out[2] = mio; out[3] = mea ? vm_read32(mea) : 0xFFFFFFFFu;
++    out[4] = s_fifo_flips_queued; out[5] = s_fifo_flips_reached; out[6] = s_fifo_flips_completed; out[7] = (u32)s_flip_status;
++    out[8] = 0;
++    if (want_write_off && s_fifo_getoff == put && s_flip_status == CELL_GCM_FLIP_STATUS_WAITING &&
++        s_fifo_flips_queued == s_fifo_flips_reached + 1u && s_fifo_flips_reached == s_fifo_flips_completed) {
++        s_fifo_flips_reached = s_fifo_flips_queued;
++        out[8] = 1;
++    }
++    FLIP_UNLOCK();
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++    return (int)out[8];
++}
++
+ /* The methods rsx_process_method acts on beyond its own rsx_state: the notify
+  * and semaphore DMA contexts, the notify write, the back-end label offset and
+  * label writes, and SET_REFERENCE (g_rsx_last_reference). Everything else only
+@@ -2721,6 +2752,13 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                 s_flip_request_count++;
+                 /* Not past `queued`: a resync may already have written off
+                  * this flip. */
++                /* Patch 7927 test switch GCM_TEST_LOSE_FLIP=<n> (off by default): the walker passes the n-th queued flip without
++                 * counting it, once -- the state of the live freezes (queued = reached + 1, get == put), for testing the recovery. */
++                static long lose_at = -1; if (lose_at < 0) { const char* e = getenv("GCM_TEST_LOSE_FLIP"); lose_at = e ? atol(e) : 0; }
++                if (lose_at > 0 && s_fifo_flips_reached + 1u == (u32)lose_at) {
++                    lose_at = 0;
++                    fprintf(stderr, "[cellGcmSys] GCM_TEST_LOSE_FLIP: flip %u passed without counting it (test)\n", s_fifo_flips_reached + 1u);
++                } else
+                 if (s_fifo_flips_reached != s_fifo_flips_queued) { s_fifo_flips_reached++; ftl_reach(s_fifo_flips_reached); }
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+@@ -3665,6 +3703,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     const u32 end = vm_read32(ctx + 4), cur = vm_read32(ctx + 8);
+     if (gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
+     vm_write32(cur, GCM_FLIP_MARKER | bufferId);
++    s_flip_marker_io = gcm_ea2io(cur);   /* patch 7927: where the newest queued flip sits */
+     s_fifo_flips_queued++;
+     ftl_request(s_fifo_flips_queued);
+     /* Wrap here, on the guest thread, once the ring is nearly used -- what the
