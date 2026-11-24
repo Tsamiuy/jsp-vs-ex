@@ -115,6 +115,9 @@ jobs:
         run: |
           python installer\tools\fetch_toolchain.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # The optional re-psn desktop app (toolchain.json entry re-psn-app, hash-checked above): its one folder, outside the payload
+          python installer\tools\stage_repsn_app.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           python installer\tools\installer_art.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python installer\tools\installer_music.py
@@ -131,7 +134,7 @@ jobs:
           $rel = @(); if ($env:RELEASE_VERSION) { $rel = @('--release', $env:RELEASE_VERSION) }
           python installer\tools\assemble_payload.py @rel
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $env:ISCC "/DPayload=$PWD\build\installer\payload" "/O$PWD\build\installer\out" "$PWD\installer\jsp.iss"
+          & $env:ISCC "/DPayload=$PWD\build\installer\payload" "/DRepsnApp=$PWD\build\installer\re-psn-app" "/O$PWD\build\installer\out" "$PWD\installer\jsp.iss"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (-not (Test-Path build\installer\out\jsp-setup.exe)) { exit 1 }
 

@@ -70,6 +70,9 @@ More in licenses/jstars-port-NOTICE.md.
 Python (PSF licence, toolchain/python/LICENSE.txt) is the Windows embeddable package. The build uses the bundled llvm-mingw
 (LLVM: Apache-2.0 with LLVM exception; MinGW-w64 and winpthreads: see licenses/llvm-mingw/), CMake (BSD-3-Clause) and Ninja
 (Apache-2.0); their licence texts are in licenses/. Nothing from Microsoft is needed or included.
+Only when its box was ticked in setup: the re-psn desktop app (a separate program only you start) is in re-psn-app-v0.9.0-windows-amd64/ with its own LICENSE (MIT) and NOTICE.md.
+That NOTICE.md covers its two Go programs, the only programs in that folder.
+The folder's THIRD-PARTY-LICENSES.txt holds the licence texts of the Go modules built into them.
 """
 def tree_bytes(p):
     return sum(f.stat().st_size for f in pathlib.Path(p).rglob("*") if f.is_file())
