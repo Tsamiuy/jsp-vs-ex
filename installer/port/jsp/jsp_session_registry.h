@@ -206,9 +206,9 @@ inline Values conservative_profile()
     return d;
 }
 
-// FIX (review 2026-11-24): what a host proposes. Before, the host proposed its own local values, so a player whose Model detail, Object draw
-// distance or Shadow range was not the default could never host: Caps accepts only the shared profile for those fields (Unsupported). The
-// SharedProfile fields exist to hold every peer to one conservative value, so the host proposes jpss::conservative() for each Live one and
+// What a host proposes. Caps accepts only the shared profile for the Live SharedProfile fields (anything else is Unsupported), so proposing
+// the host's own Model detail, Object draw distance or Shadow range would refuse every match it hosts. The SharedProfile fields exist
+// to hold every peer to one conservative value, so the host proposes jpss::conservative() for each Live one and
 // keeps its own value for everything else (MatchRule fields are the host's to choose). Its own preference is untouched: it comes back when
 // the session layer is removed (kRestoreBase). The Startup SharedProfile fields (PIPE, JSP_RENDER60) are set from the value the renderer
 // actually started with by the overload in jsp_session_effective.h.

@@ -237,7 +237,7 @@ int main(int argc, char** argv)
         v = rb_values(); v.v[(size_t)Id::UnlockAll] = 1; CHECK(r.p[0].host->propose(v, 0) == Reason::OutOfRange);
         CHECK(r.p[0].host->state() == State::Open && r.p[0].host->revision() == 0 && all_clean(r));
     }
-    {   // FIX (review 2026-11-24): a host whose own graphics preferences are not the defaults proposes the shared profile and the match starts
+    {   // a host whose own graphics preferences are not the defaults proposes the shared profile and the match starts
         // jpss::conservative() is the registry's default for every shared field, the only value Caps accepts for each
         const jpss::Profile c = jpss::conservative();
         for (size_t i = (size_t)Id::ModelDetail; i <= (size_t)Id::Render60; ++i) {
