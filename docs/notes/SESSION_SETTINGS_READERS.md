@@ -10,6 +10,10 @@ connects it to the actual player settings store. A trusted local lifecycle must 
 installing a proposal. The caller must authenticate the sender and bind its roster/owner/revision; these fields are
 not network authentication by themselves.
 
+A rollback host proposes `jpsm::host_proposal` (`jsp_session_registry.h`, `jsp_session_effective.h`): its own match rules, the
+conservative value for model detail, object distance and shadow range whatever its own preference is, and PIPE and render60 as its
+renderer started; its preference returns when the layer is removed.
+
 `reader_install` stages validation and the temporary layer before replacing the current state. Rejected proposals
 leave the prior layer and generation intact. The three live values override ordinary local values in
 `jsp_setting_get`; environment, local edits and preference files are not changed by a session installation.

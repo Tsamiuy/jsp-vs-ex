@@ -46,6 +46,21 @@ inline Digest values_digest(uint64_t session, uint32_t revision, const Values& v
     return sha256(b, n);
 }
 
+// FIX (review 2026-11-24): the host's proposal (jsp_session_registry.h host_proposal) with each Startup SharedProfile field (PIPE, JSP_RENDER60)
+// set to the value this process actually started with, never its configuration: a session cannot change those, so proposing anything else
+// could only fail at install. A field the reader has no evidence for keeps the local value (install then reports NoStartupEvidence).
+inline Values host_proposal(const Values& local, Reader& r)
+{
+    Values v = host_proposal(local);
+    for (size_t i = 0; i < kCount; ++i) {
+        const Id id = static_cast<Id>(i);
+        jpss::Key k;
+        uint32_t have = 0;
+        if (rule(id).cls == NetClass::SharedProfile && rule(id).boundary == Boundary::Startup && shares_jpss(id, &k) && r.startup_value(id, &have)) v.v[i] = have;
+    }
+    return v;
+}
+
 class EffectiveValues {
 public:
     using Persist = std::function<void(Id, uint32_t)>;

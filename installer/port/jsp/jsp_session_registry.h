@@ -206,6 +206,24 @@ inline Values conservative_profile()
     return d;
 }
 
+// FIX (review 2026-11-24): what a host proposes. Before, the host proposed its own local values, so a player whose Model detail, Object draw
+// distance or Shadow range was not the default could never host: Caps accepts only the shared profile for those fields (Unsupported). The
+// SharedProfile fields exist to hold every peer to one conservative value, so the host proposes jpss::conservative() for each Live one and
+// keeps its own value for everything else (MatchRule fields are the host's to choose). Its own preference is untouched: it comes back when
+// the session layer is removed (kRestoreBase). The Startup SharedProfile fields (PIPE, JSP_RENDER60) are set from the value the renderer
+// actually started with by the overload in jsp_session_effective.h.
+inline Values host_proposal(const Values& local)
+{
+    Values v = local;
+    const jpss::Profile c = jpss::conservative();
+    for (size_t i = 0; i < kCount; ++i) {
+        const Id id = static_cast<Id>(i);
+        jpss::Key k;
+        if (rule(id).cls == NetClass::SharedProfile && rule(id).boundary == Boundary::Live && shares_jpss(id, &k)) v.v[i] = c.choices[static_cast<size_t>(k)];
+    }
+    return v;
+}
+
 // Canonical text of a value (what an environment or file reader would see), for the readers that still take text.
 inline std::string value_text(Id id, uint32_t v)
 {

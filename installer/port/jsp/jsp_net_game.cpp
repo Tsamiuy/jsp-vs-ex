@@ -926,7 +926,9 @@ void pump_tick(uint64_t t)
         g.mh->tick(t);
         const jpsm::State st = g.mh->state();
         if (st == jpsm::State::Open && (g.mh->hellos() & 0b10) && g.propose_tries < 20) {
-            jpsm::Values v = g.ev.local_values();
+            // FIX (review 2026-11-24): the shared graphics profile, not the host's own Model detail / Object draw distance / Shadow range (a non-default
+            // one made Caps refuse every room this player hosted); PIPE and render60 as the renderer started (startup evidence is ready here, above).
+            jpsm::Values v = jpsm::host_proposal(g.ev.local_values(), g.reader);
             v.v[static_cast<size_t>(jpsm::Id::Rollback)] = 1;
             const jpsm::Reason r = g.mh->propose(v, t);
             g.propose_tries++;
