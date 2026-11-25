@@ -196,7 +196,8 @@ static unsigned long long g_mp_trans_t = 0;
  * text and row-label pictures AND the disc's texture hashes for that language (jml::hashes; g_mp_off is set by the backstop in mp_tex_upload when
  * no label of the language matches); else the game's own menu, with one log line. */
 static std::atomic<bool> g_mp_off{false}; static bool g_mp_us_seen = false;
-static int g_mp_disc = -1;   /* jml::Disc: 1 a US disc, 2 the EU disc, 0 another known one, -1 not known: the title id, set by jsp_mp_init before the menu exists */
+static int g_mp_disc = -1;   /* jml::Disc: 1 a US disc, 2 the EU disc, 0 another known one, -1 not known: the title id, set by jsp_mp_init before the menu exists. Only the US 1.00
+                                * build has the menu-page hooks, so the pages never show on the EU disc (2 is kept for a future EU hook set) */
 extern "C" void jsp_mp_init(const char* title_id) { g_mp_disc = jml::disc_kind(title_id); }   /* main.cpp, next to jsp_mods_init */
 static const std::string& mp_lang()
 {

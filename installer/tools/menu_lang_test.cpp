@@ -29,7 +29,7 @@ int main()
     for (const char* l : k_langs) { CHECK(complete(l)); for (int i = 0; i < N_IDS; i++) CHECK(!text((Id)i, l).empty()); }
     CHECK(text(MENU_HELP_BATTLE, "en") == "Choose a battle mode."); CHECK(text(MENU_BATTLE_MODES, "es") == "Modos de combate");
     CHECK(text(MENU_BATTLE_MODES, "xx").empty()); CHECK(!complete("xx"));
-    // the hash tables: US disc en, es, fr; EU disc all five; every table has 18 label hashes + title + mark, all nonzero and all different
+    // the hash tables (table tests only: the EU tables are data for a future EU hook set, the EU build has no menu-page hooks): US disc en, es, fr; EU disc all five; every table has 18 label hashes + title + mark, all nonzero and all different
     CHECK(hashes(DISC_US, "en") && hashes(DISC_US, "es") && hashes(DISC_US, "fr") && !hashes(DISC_US, "de") && !hashes(DISC_US, "it"));
     CHECK(hashes(DISC_EU, "en") && hashes(DISC_EU, "es") && hashes(DISC_EU, "fr") && hashes(DISC_EU, "de") && hashes(DISC_EU, "it"));
     CHECK(!hashes(DISC_OTHER, "en") && !hashes(DISC_UNKNOWN, "en") && !hashes(DISC_US, "xx"));
@@ -73,13 +73,13 @@ int main()
     // every cell encodes, and no code point is above U+00FF (the catalogue's Latin-1 rule)
     for (const char* l : k_langs) for (int i = 0; i < N_IDS; i++) { const auto e = encode_utf16(text((Id)i, l)); CHECK(!e.empty());
         for (size_t k = 1; k < e.size(); k += 2) CHECK(e[k] == 0); }
-    // the disc: US title ids keep the feature; the EU one has its own tables; another known id (JP ...) is off before the menu is set up; an unreadable PARAM.SFO
+    // the disc: US title ids keep the feature; the EU one has its own tables (unused in the game until the EU build has the hooks); another known id (JP ...) is off before the menu is set up; an unreadable PARAM.SFO
     // (the default "BLES00000"), an empty or null id are unknown and leave it to the texture backstop
     CHECK(disc_us("BLUS31519") == 1); CHECK(disc_us("NPUB31647") == 1); CHECK(disc_us("BLES02136") == 0); CHECK(disc_us("BLJS10258") == 0); CHECK(disc_us("BLJS10257") == 0); CHECK(disc_us("NPEB02204") == -1);   // the EU save-folder name, not a confirmed disc id: unknown, tries both tables
     CHECK(disc_us("") == -1); CHECK(disc_us(nullptr) == -1); CHECK(disc_us("BLES00000") == -1); CHECK(disc_us("BLUS99999") == -1); CHECK(disc_us("blus31519") == -1);
     CHECK(disc_kind("BLUS31519") == DISC_US && disc_kind("NPUB31647") == DISC_US && disc_kind("BLES02136") == DISC_EU && disc_kind("BLJS10258") == DISC_OTHER && disc_kind("BLES00000") == DISC_UNKNOWN);
     CHECK(gate_disc(DISC_OTHER).size() > 0); CHECK(gate_disc(DISC_US).empty()); CHECK(gate_disc(DISC_EU).empty()); CHECK(gate_disc(DISC_UNKNOWN).empty());
-    // the shown language: a US disc has en, fr, es; de and it show English there, so the feature stays on for them; the EU disc shows all five
+    // the shown language: a US disc has en, fr, es; de and it show English there, so the feature stays on for them; for the EU disc shown() keeps all five (a table value: the game shows its own menu there, the EU build has no menu-page hooks)
     CHECK(shown("de", 1) == "en"); CHECK(shown("it", 1) == "en"); CHECK(shown("es", 1) == "es"); CHECK(shown("fr", 1) == "fr"); CHECK(shown("de", DISC_EU) == "de"); CHECK(shown("it", -1) == "en"); CHECK(shown("de", -1) == "en"); CHECK(shown("de", DISC_OTHER) == "en"); CHECK(shown("es", -1) == "es"); CHECK(shown("fr", -1) == "fr");   // unknown disc: de and it could only be English
     label_sets() = 0x1Fu;
     CHECK(gate(shown(pick("de", 0), 1), 1, true).empty());               // US disc, German system: English shown, feature on

@@ -4,7 +4,9 @@
 // Why (a tester's screenshot, EU disc in Spanish): the row labels are swapped by matching the hash of the texture the game uploads, and the
 // hashes were the US English ones only, so on another disc the rows stayed the game's Spanish while mp_help wrote English help lines.
 // Now every (disc, language) has its own hash table (k_hashes_us, k_hashes_eu below: row labels, page title, help-bar watermark, taken from the
-// disc files with the project's own CPK / $CMP / STPK-SRD readers, which are not in this repository). The feature runs only when
+// disc files with the project's own CPK / $CMP / STPK-SRD readers, which are not in this repository). Only the US 1.00 build has the menu-page lifter
+// hooks (firstrun.py: lod_hooks.plan() enables them for the US region only), so the game shows the pages on a US disc only; the EU disc shows the
+// game's own menu, and k_hashes_eu and k_help_eu are data for a future EU hook set, unused by the EU build, which has none. The feature runs only when
 //   (a) the text language has a complete table here AND its pictures exist (labels_ready), and
 //   (b) the disc is known to have hashes for the language the disc shows (hashes(), the gate).
 // A title id that is not known (no PARAM.SFO) tries the tables of every disc for the language; a known disc with no tables (JP) is off. Otherwise the
@@ -53,7 +55,7 @@ static const Hashes k_hashes_us[5] = {   // US disc, packs en=US es=NS fr=FR
     {},   // de: no pack on this disc (the game shows English)
     {},   // it: no pack on this disc (the game shows English)
 };
-static const Hashes k_hashes_eu[5] = {   // EU disc, packs en=US es=SP fr=FR de=DE it=IT
+static const Hashes k_hashes_eu[5] = {   // EU disc, packs en=US es=SP fr=FR de=DE it=IT: data for a future EU hook set (the EU build has no menu-page hooks)
     { { { 0xF4B325B5u, 0x3F2447E9u }, { 0x3279759Au, 0x818DE97Fu }, { 0x9AD8290Fu, 0x43F7E08Eu }, { 0x6C080904u, 0x17F0DF08u }, { 0xF7AC5B9Fu, 0xABEFBBDEu }, { 0xB51E68F3u, 0x1094E6D6u }, { 0x4EF0C670u, 0x8409F6A1u }, { 0x4D537C25u, 0xB2D58678u }, { 0xFDC7E81Fu, 0x167EE758u } }, 0x31EB9C37u, 0x4D99F9AAu },   // en
     { { { 0x6A0FDAF9u, 0x56382323u }, { 0x6A5AFFF5u, 0xB44250FAu }, { 0x3178CC47u, 0x5F4B180Fu }, { 0x1D527721u, 0x12C608DDu }, { 0x0C591C39u, 0x75E59CEFu }, { 0x82344247u, 0x682B66EBu }, { 0xD8B28641u, 0x21E5CDF6u }, { 0xBE7EBE93u, 0x54BB4AA7u }, { 0x1F53F676u, 0x4485D72Bu } }, 0xDEB29747u, 0xE7F2BF22u },   // es
     { { { 0xC1FC75A9u, 0x8CF10586u }, { 0x830DB98Bu, 0x22ABE59Fu }, { 0xEA1F5271u, 0xAD5EB99Fu }, { 0xD4957139u, 0xF4CBC520u }, { 0x3D375F85u, 0xC29D0C8Eu }, { 0xE1F140B7u, 0x3EE06147u }, { 0x3D0875F1u, 0xB3447AE3u }, { 0xF9C12DABu, 0xE7517319u }, { 0x1F53F676u, 0x4485D72Bu } }, 0xEC613636u, 0x9DFC82F4u },   // fr
@@ -73,7 +75,7 @@ static const uint32_t k_help_us[5][9] = {
     { 0x0, 0xF0, 0x460, 0x50, 0xC0, 0x140, 0x1E0, 0x260, 0x2E0 },   // es (NS)
     { 0x0, 0x120, 0x4F0, 0x60, 0xF0, 0x180, 0x230, 0x2C0, 0x350 },   // fr
     { 0 }, { 0 } };
-static const uint32_t k_help_eu[5][9] = {
+static const uint32_t k_help_eu[5][9] = {   // EU disc: data for a future EU hook set (the EU build has no menu-page hooks)
     { 0x0, 0xF0, 0x3F0, 0x50, 0xC0, 0x140, 0x1D0, 0x250, 0x2B0 },   // en (US)
     { 0x0, 0xF0, 0x460, 0x50, 0xC0, 0x140, 0x1E0, 0x260, 0x2E0 },   // es (SP)
     { 0x0, 0x120, 0x4F0, 0x60, 0xF0, 0x180, 0x230, 0x2C0, 0x350 },   // fr
@@ -199,8 +201,8 @@ inline int disc_kind(const char* title_id)
 inline int disc_us(const char* title_id) { const int k = disc_kind(title_id); return k == DISC_UNKNOWN ? -1 : k == DISC_US ? 1 : 0; }
 // The language the disc SHOWS: the US disc has packs for en, fr and es only (it never asks for DE or IT: the review of the US disc), so de and it
 // show English there; so they do when the disc is not known (only the English tables could apply for sure; if it was an EU disc the texture backstop
-// turns the feature off), and on another known disc (JP: no tables, the feature is off there; ASSUMPTION: it has no de and it packs). The EU disc shows all
-// five. With the feature off the port's pop-up windows still follow this language, each window in one language (dialog_lang).
+// turns the feature off), and on another known disc (JP: no tables, the feature is off there; ASSUMPTION: it has no de and it packs). On the EU disc the
+// value keeps all five, for a future EU hook set; the EU build has no menu-page hooks, so the game shows its own menu there. With the feature off the port's pop-up windows still follow this language, each window in one language (dialog_lang).
 inline std::string shown(const std::string& lang, int disc)
 {
     if (disc != DISC_EU && (lang == "de" || lang == "it")) return "en";
@@ -262,6 +264,7 @@ inline std::vector<uint8_t> encode_utf16(const std::string& s)
     put(0); return o;
 }
 // the disc gate, before the menu is set up: "" = on (a disc with tables, or a title id not known: the texture backstop then decides)
+// (the EU disc has tables but its build has no menu-page hooks, so this gate is never reached there)
 inline std::string gate_disc(int disc) { return disc == DISC_OTHER ? "this disc has no label hash tables (only the US and EU discs do)" : ""; }
 // the gate: "" = on, else the reason (one log line). lang is the language the disc shows; disc as from disc_kind; textures_ok false = the backstop saw no label match
 inline std::string gate(const std::string& lang, int disc, bool textures_ok)
