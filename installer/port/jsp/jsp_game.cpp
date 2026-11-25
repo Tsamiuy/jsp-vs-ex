@@ -92,6 +92,12 @@ extern "C" int  cellOskDialog_overlay_key(unsigned vk);
 extern "C" int  cellOskDialog_confirm_open(const wchar_t* prompt);
 extern "C" int  cellOskDialog_confirm_poll(void);
 extern "C" int  cellOskDialog_choice_open(const wchar_t* prompt, const wchar_t* left, const wchar_t* right);
+#include "jsp_menu_lang.h"   // the pop-up texts per language (the game's own words), see feat_menu_pages.cpp
+extern "C" const char* jsp_mp_lang(void);
+/* the text of a pop-up window; one language per window: dlg is the language of the whole window (mpl: the shown language when every cell of the window is
+ * ASCII, else English, the overlay font being ASCII only); the buffers stay valid (the dialog may keep the pointer); slots 0-2 and 3-5 are the two windows */
+static const char* mpl(jml::Id a, jml::Id b, jml::Id c) { const jml::Id ids[3] = { a, b, c }; return jml::dialog_lang(ids, 3, jsp_mp_lang()) == jsp_mp_lang() ? jsp_mp_lang() : "en"; }   /* both pointers are stable */
+static const wchar_t* mpw(int slot, jml::Id id, const char* dlg) { static std::wstring b[6]; const std::u16string u = jml::text_overlay(id, dlg); b[slot].assign(u.begin(), u.end()); return b[slot].c_str(); }
 extern "C" void rsx_d3d12_request_close(void);                   /* rsx_d3d12_backend.c */
 extern "C" int (*g_rsx_copy_rects)(short (*rects)[6], int max);   /* rsx_d3d12_backend.c */
 extern "C" const uint32_t* (*g_rsx_stamp)(short* x, short* y, short* w, short* h, short* show_w, short* show_h);   /* rsx_d3d12_backend.c */
@@ -3476,7 +3482,8 @@ void imp_mode_tick(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
         if (g_mp_entry == 2) { g_imp_mode = 1; std::printf("[impmode] Impossible 2 vs 1 (Battle Modes page)\n"); std::fflush(stdout); }
     } else
     if (fb && cs && !was_cs && state == 0 && g_imp_mode == 0 &&
-        cellOskDialog_choice_open(L"Choose a fight", L"Free Battle", L"Impossible")) { state = 1; prev_dir = 0; }
+        cellOskDialog_choice_open(mpw(0, jml::MENU_CHOOSE_FIGHT, mpl(jml::MENU_CHOOSE_FIGHT, jml::MENU_FREE_BATTLE, jml::MENU_IMPOSSIBLE)),
+                                  mpw(1, jml::MENU_FREE_BATTLE, mpl(jml::MENU_CHOOSE_FIGHT, jml::MENU_FREE_BATTLE, jml::MENU_IMPOSSIBLE)), mpw(2, jml::MENU_IMPOSSIBLE, mpl(jml::MENU_CHOOSE_FIGHT, jml::MENU_FREE_BATTLE, jml::MENU_IMPOSSIBLE)))) { state = 1; prev_dir = 0; }
     was_cs = cs;
     if (state == 1) {
         if (!cellOskDialog_overlay_active()) {
@@ -4080,7 +4087,8 @@ void free_battle_box(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
         std::printf("[training] box not offered: step %u CCB0 %08X main %08X seen %llu ms ago\n", vm_read32(0x0094DEC4u),
                     vm_read32(0x0096CCB0u), (uint32_t)g_seen_main.obj, GetTickCount64() - g_seen_main.ms);
     if (!g_auto.on && !mp_on() && (pressed & (CROSS | START)) && on_menu && vm_read32(0x00956550u) == 3 &&
-        cellOskDialog_choice_open(L"Choose a mode", L"Free Battle", L"Training Mode")) {
+        cellOskDialog_choice_open(mpw(3, jml::MENU_CHOOSE_MODE, mpl(jml::MENU_CHOOSE_MODE, jml::MENU_FREE_BATTLE, jml::MENU_TRAINING_MODE)),
+                                  mpw(4, jml::MENU_FREE_BATTLE, mpl(jml::MENU_CHOOSE_MODE, jml::MENU_FREE_BATTLE, jml::MENU_TRAINING_MODE)), mpw(5, jml::MENU_TRAINING_MODE, mpl(jml::MENU_CHOOSE_MODE, jml::MENU_FREE_BATTLE, jml::MENU_TRAINING_MODE)))) {
         state = 1; owner = port; prev_dir_b[0] = prev_dir_b[1] = 0;
         *b = (uint16_t)(cur & ~(CROSS | START));
     }
