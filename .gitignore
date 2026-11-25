@@ -123,6 +123,11 @@ __pycache__/
 # CI workflows
 !/.github/
 
+# The list of mods a maintainer has played (docs/MODS.md)
+!/mods/
+/mods/*
+!/mods/tested.json
+
 # Our own art (generated, nothing from the game); after the never-list so these exact files are kept
 !/assets/
 /assets/*

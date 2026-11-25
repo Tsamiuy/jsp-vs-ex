@@ -1,0 +1,43 @@
+name: mod-verify
+
+# Automated checks for a mod verification issue (.github/ISSUE_TEMPLATE/mod_verification.yml).
+# It starts only when a maintainer adds the label `mod-check` to such an issue: never when the issue is opened or edited.
+# The mod's zip is downloaded and read as data by tools/ci/mod_verify.py (Python standard library): nothing in it is run,
+# imported or built, and it is not unpacked to disk, uploaded or cached. The script comes from the default branch.
+# No secrets are used. The only token is the automatic one of this run, with the permissions below.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read    # to read tools/ci/mod_verify.py from the default branch
+  issues: write     # posts one result comment on the issue
+
+concurrency:
+  group: mod-verify-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event.label.name == 'mod-check' && contains(github.event.issue.labels.*.name, 'mod-verification')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/ci/mod_verify.py
+          sparse-checkout-cone-mode: false
+
+      - name: Check the mod and write the comment
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: python3 -I tools/ci/mod_verify.py --out "$RUNNER_TEMP/mod-check.md"
+
+      - name: Post the result comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/mod-check.md"

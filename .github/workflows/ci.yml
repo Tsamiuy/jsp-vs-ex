@@ -70,6 +70,9 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: python3 tools/ci/repo_checks.py --commits "$BASE..$HEAD"
 
+      - name: Tested mods list is valid (mods/tested.json)
+        run: python3 tools/ci/check_tested_mods.py
+
       - name: Features page matches docs/features.tsv and ROADMAP.md (generator)
         run: python3 tools/features.py --check
 

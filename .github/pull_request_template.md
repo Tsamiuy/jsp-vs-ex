@@ -19,3 +19,7 @@ Log excerpts or output that show the change works. Say what you could not run.
 ## Overlap
 
 Open pull requests or issues that touch the same files, or "none" after checking `gh pr list`.
+
+## Tested mods list
+
+Only for a pull request that adds an entry to `mods/tested.json`: link the verification issue, and say that a maintainer played the mod (release and region).
