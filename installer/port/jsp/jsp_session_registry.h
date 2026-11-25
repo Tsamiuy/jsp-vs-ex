@@ -151,6 +151,7 @@ inline constexpr DebugSwitch kDebugSwitches[] = {
     { "TRAINING", Trigger::NonZero }, { "TRAINING_MODE", Trigger::StartsWithZero }, { "TRAINING_TEST", Trigger::NonEmpty },
     { "TRAINING_TEST_LOW", Trigger::NonEmpty }, { "TRAINING_NODUMMY", Trigger::NonEmpty }, { "TRAINING_NOLOCK", Trigger::NonEmpty },
     { "TRAINING_DUMMY_TEST", Trigger::NonEmpty },
+    { "TRAIN_CPU", Trigger::NonZero }, { "TRAIN_NOCOOL", Trigger::NonZero }, { "TRAIN_BURST", Trigger::NonZero },   // feat_training_opts.cpp: a Training state set from the start (the file itself does nothing in a session: jsp_tr_session)
     { "USLEEP_AFTER_US", Trigger::NonEmpty }, { "USLEEP_GAP_US", Trigger::NonEmpty }, { "USLEEP_REAL_US", Trigger::NonEmpty },
     { "USLEEP_SPIN", Trigger::StartsWithOne },
     { "LATE_FLIP", Trigger::StartsWithZero }, { "LATE_VBLANK_MS", Trigger::NonEmpty }, { "VBLANK_QPC", Trigger::StartsWithZero },
