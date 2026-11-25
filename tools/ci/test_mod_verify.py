@@ -339,7 +339,13 @@ check("file is also a folder", any("also a folder" in t for _, t in problems(mak
 check("casefold clash", any("case" in t for _, t in problems(make_zip({"mod.json": M, "stra\u00dfe": b"1", "STRASSE": b"2"}))))
 for ext in (".asi", ".js", ".hta", ".wsf", ".cpl", ".reg", ".pif", ".vbe", ".jse", ".sys", ".ocx", ".msix", ".appx", ".zip", ".7z", ".rar"):
     check("type " + ext, mv.refused_type("files/a" + ext))
-for magic in (b"MZ\x90", b"\x7fELF", b"#!/bin/sh", b"PK\x03\x04zz"):
+pe = bytearray(b"MZ" + bytes(0x80)); pe[0x3C:0x40] = (0x40).to_bytes(4, "little"); pe[0x40:0x44] = b"PE\0\0"
+check("sniff PE", mv.sniff(bytes(pe)) == "a Windows program")
+check("sniff MZ without PE header", mv.sniff(b"MZ\x90" + bytes(100)) == "" and mv.sniff(b"MZ") == "")
+bad_off = bytearray(pe); bad_off[0x3C:0x40] = (0x7fffffff).to_bytes(4, "little")
+check("sniff MZ offset out of range", mv.sniff(bytes(bad_off)) == "")
+check("sniff row says a maintainer can override", any("override" in x[2] for x in mv.check_zip(make_zip({"mod.json": M, "files/p.dat": bytes(pe)}))[0] if x[0] == "File types"))
+for magic in (bytes(pe), b"\x7fELF", b"#!/bin/sh", b"PK\x03\x04zz"):
     sc = mv.scan_zip(make_zip({"mod.json": M, "files/blob.dat": magic}))
     check("sniff %r" % magic, "files/blob.dat" in sc.sniffed)
     r = mv.check_zip(make_zip({"mod.json": M, "files/blob.dat": magic}))[0]

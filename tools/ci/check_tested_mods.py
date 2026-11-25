@@ -9,7 +9,7 @@ Schema 1: {"schema": 1, "mods": [{"id", "name", "version", "sha256", "tested_on"
   version    the mod's version, 1-40 characters, no spaces
   sha256     the canonical mod hash (docs/MODS.md), 64 lowercase hex digits
   tested_on  the port release it was played on, X.Y.Z
-  content    exactly "own-work": the list never holds a mod with game-derived or third-party content
+  content    exactly "own-work": the author's own work. The list never holds a mod with game-derived or third-party content
   notes      a string, may be empty
 An id and version appear once; a hash appears once. Entries are sorted by id, then version.
 """

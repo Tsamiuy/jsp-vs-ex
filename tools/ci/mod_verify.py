@@ -46,7 +46,7 @@ REFUSED_EXT = {".exe", ".dll", ".bat", ".cmd", ".ps1", ".py", ".sh", ".so",
                ".msi", ".com", ".scr", ".vbs", ".jar", ".dylib", ".lnk", ".pyc",
                ".asi", ".js", ".hta", ".wsf", ".cpl", ".reg", ".pif", ".vbe", ".jse", ".sys", ".ocx", ".msix", ".appx",
                ".zip", ".7z", ".rar"}   # the last three: a nested archive hides its files from the checks
-SNIFF = ((b"MZ", "a Windows program"), (b"\x7fELF", "a Linux program"), (b"#!", "a script"), (b"PK\x03\x04", "a nested zip"))
+SNIFF = ((b"\x7fELF", "a Linux program"), (b"#!", "a script"), (b"PK\x03\x04", "a nested zip"))
 SOURCE_EXT = {".cpp", ".h", ".c", ".cc", ".hpp", ".inc", ".patch", ".diff"}
 SOURCE_NAMES = {"cmakelists.txt"}
 SOURCE_DIRS = {"port", "installer", "third_party", "tools"}
@@ -222,6 +222,19 @@ def valid_rel_path(p):
     return True
 
 
+def sniff(head):
+    """What the first bytes of a file say it is, or ''. MZ counts only with 'PE\\0\\0' at the offset in bytes 0x3C-0x3F
+    (a PE header further than the first block is not seen)."""
+    if head.startswith(b"MZ") and len(head) >= 0x40:
+        off = int.from_bytes(head[0x3C:0x40], "little")
+        if off + 4 <= len(head) and head[off:off + 4] == b"PE\0\0":
+            return "a Windows program"
+    for magic, what in SNIFF:
+        if head.startswith(magic):
+            return what
+    return ""
+
+
 def refused_type(path):
     """Why a file of this path is refused, or ''."""
     low = path.lower()
@@ -338,9 +351,9 @@ def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=
                     if not block:
                         break
                     if got == 0:
-                        for magic, what in SNIFF:
-                            if block.startswith(magic):
-                                s.sniffed[rel] = what
+                        what = sniff(block)
+                        if what:
+                            s.sniffed[rel] = what
                     got += len(block)
                     total += len(block)
                     if got > max_file or total > max_unpacked:
@@ -658,7 +671,7 @@ def check_zip(data, form=None):
     for p in sorted(files):
         why = refused_type(p)
         if not why and p in s.sniffed:
-            why = "its content is %s" % s.sniffed[p]
+            why = "its content is %s (a maintainer can override a content check after looking at the file)" % s.sniffed[p]
         if why:
             bad.append("%s: %s" % (p, why))
     add("File types", not bad, "; ".join(bad[:3]) + (" (and %d more)" % (len(bad) - 3) if len(bad) > 3 else ""))

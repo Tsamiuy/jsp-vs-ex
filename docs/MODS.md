@@ -18,7 +18,7 @@ What the checks refuse:
 
 - a download that is not HTTPS, is over 200 MB, or redirects to a non-HTTPS or non-public address;
 - a zip with a folder name other than the mod id, more than 2000 entries or more than 500 MB unpacked, an encrypted entry, a symbolic link, a NUL in a name, a non-ASCII name that the zip does not mark as UTF-8, a file whose path is also a folder of another file, an absolute path, a `..` part, a backslash, a name Windows cannot use (a device name, a trailing dot or space, or one of `\ : < > " | ? *`), the same path twice or two paths that differ only in case (compared case-folded);
-- executables and scripts (`.exe .dll .bat .cmd .ps1 .py .sh .so .js .hta .reg` and more), nested archives (`.zip .7z .rar`), files whose first bytes are those of a program, a script or a zip, and source files or a path in the port's source tree (`port/`, `installer/`, `tools/`, `third_party/`, `CMakeLists.txt`, `.cpp .h` and other C and C++ files, patches);
+- executables and scripts (`.exe .dll .bat .cmd .ps1 .py .sh .so .js .hta .reg` and more), nested archives (`.zip .7z .rar`), files whose first bytes are those of a program (a Windows program needs `MZ` and a `PE` header at the offset in bytes 0x3C-0x3F), a script or a zip (a maintainer can override such a content hit after looking at the file), and source files or a path in the port's source tree (`port/`, `installer/`, `tools/`, `third_party/`, `CMakeLists.txt`, `.cpp .h` and other C and C++ files, patches);
 - a `mod.json` that breaks the schema 1 rules, an override file that is missing or whose SHA-256 differs, an id or version that differs from the form, or a pasted `mod.json` that differs from the one in the zip;
 - a mod that the form calls cosmetic while its manifest makes it gameplay.
 
@@ -32,7 +32,7 @@ Only the form and the zip are read. The checks cannot tell whether a mod is good
 
 ## Canonical mod hash
 
-The canonical mod hash names the exact content of a mod, however it was zipped. The checks and the port compute it the same way. Version 1:
+The canonical mod hash names the exact content of a mod, however it was zipped. The checks compute it; the port will compute it the same way. Version 1:
 
 1. The files of the mod are all files under the mod folder (the zip's top level, or its one top-level folder), `mod.json` included. Folders are not files. Each file's path is relative to the mod folder, with `/` between parts, with no leading `/`, and it must pass `valid_rel_path` in `jsp_mods_core.h`. The path is used as it is: no case folding, no Unicode normalisation. A path with a non-ASCII character is accepted only when the zip marks the name as UTF-8 (general purpose flag bit 11); otherwise the name's encoding is not known and the mod is refused.
 2. For each file compute `h`, the SHA-256 of its bytes as 64 lowercase hex digits.
@@ -40,8 +40,8 @@ The canonical mod hash names the exact content of a mod, however it was zipped. 
 4. Build the byte string: the ASCII text `jsp-mod-hash 1` and a line feed (`0x0A`), then for each file in that order `h`, one space (`0x20`), the path in UTF-8, and a line feed. No other bytes, no byte order mark, no carriage returns.
 5. The canonical mod hash is the SHA-256 of that byte string, as 64 lowercase hex digits.
 
-The hash is not computed by the port yet; today only `tools/ci/mod_verify.py` computes it.
+The port does not compute the hash yet; today only `tools/ci/mod_verify.py` does.
 
 Order of entries, compression, timestamps, folder entries and the name of the top-level folder do not matter. Changing a byte of any file, a file name or adding or removing a file changes the hash.
 
-Known answer: a mod whose files are `mod.json` containing `{}` and `game/logo/a.bin` containing `a` gives `ce2c86505349b1c37a35fc28a64aa9a5ddc4acac8b6a7e51962ab93e7f22a1ac`. The reference code is `canonical_hash()` in `tools/ci/mod_verify.py`; the port's code must give the same answer, and `tools/ci/test_mod_verify.py` holds the test.
+Known answer: a mod whose files are `mod.json` containing `{}` and `game/logo/a.bin` containing `a` gives `ce2c86505349b1c37a35fc28a64aa9a5ddc4acac8b6a7e51962ab93e7f22a1ac`. The reference code is `canonical_hash()` in `tools/ci/mod_verify.py`; the port's code, when it is written, must give the same answer, and `tools/ci/test_mod_verify.py` holds the test.
