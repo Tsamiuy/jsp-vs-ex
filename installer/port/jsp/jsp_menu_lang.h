@@ -10,7 +10,7 @@
 // A title id that is not known (no PARAM.SFO) tries the tables of every disc for the language; a known disc with no tables (JP) is off. Otherwise the
 // game's own one-page menu shows, with one log line saying why. Never a mixed menu: one language per menu and per pop-up window.
 //
-// Language pick: pick() mirrors the toolkit's sysutil_language() (libs/system/cellSysutil.c of ps3recomp v0.19.0, ae92407, read there), because the
+// Language pick: pick() mirrors the toolkit's sysutil_language() on Windows and POSIX (not its macOS CFLocale fallback: the port is Windows only) (libs/system/cellSysutil.c of ps3recomp v0.19.0, ae92407, read there), because the
 // game reads the same value and port and game must agree:
 //   - PS3_LANG set and not empty: a number read by strtol over the WHOLE string (so "005" is 5, "3x" is not a number), taken if 0..19 (the toolkit's
 //     CELL_SYSUTIL_LANG_TURKISH); else the code list matched EXACTLY and case-insensitively (ja en en-us fr es de it nl pt pt-pt ru ko zh-t zh-s fi sv da
@@ -61,6 +61,33 @@ static const Hashes k_hashes_eu[5] = {   // EU disc, packs en=US es=SP fr=FR de=
     { { { 0x8831FC1Bu, 0xDF716ECEu }, { 0x752A81A4u, 0x4BBD59C0u }, { 0xF1CFB3DFu, 0xA7A74EC3u }, { 0xB743EC28u, 0x9362E44Bu }, { 0x0F139C13u, 0x6878834Eu }, { 0xE08306C6u, 0xDCB15CBBu }, { 0x26E952ABu, 0x0AB45B5Cu }, { 0xD6FD0948u, 0x98A490E8u }, { 0xAE088AC8u, 0xC28AD462u } }, 0x791D72DAu, 0xC2C89898u },   // it
 };
 enum Disc { DISC_UNKNOWN = -1, DISC_OTHER = 0, DISC_US = 1, DISC_EU = 2 };
+
+// Help-line strings: the game's nine row help texts lie in one block of the resident pack (progress/resident/progress_resident_<pack>_m.pak, decoded, from
+// 0x6330: UTF-16LE strings with a BOM, each on a 16-byte boundary), and the port finds the block from the game's own pointer minus the row's offset. The
+// offsets differ per pack because the strings differ in length: help_us / help_eu[lang][row] = offset of main-menu row `row` from row 0 (the same row order
+// as lab[] above). Read from the disc files: the 9 strings are the 11 strings of the block at fixed positions 0, 3, 10, 1, 2, 4, 5, 6, 7 (ASSUMPTION for
+// de, it and the EU es: the order is the US one, spot-checked by reading the first words of rows 0 to 3; fr and the US es agree with an independent
+// reading). A row with offset 0 in column 1 means no table.
+static const uint32_t k_help_us[5][9] = {
+    { 0x0, 0xF0, 0x3F0, 0x50, 0xC0, 0x140, 0x1D0, 0x250, 0x2B0 },   // en (US)
+    { 0x0, 0xF0, 0x460, 0x50, 0xC0, 0x140, 0x1E0, 0x260, 0x2E0 },   // es (NS)
+    { 0x0, 0x120, 0x4F0, 0x60, 0xF0, 0x180, 0x230, 0x2C0, 0x350 },   // fr
+    { 0 }, { 0 } };
+static const uint32_t k_help_eu[5][9] = {
+    { 0x0, 0xF0, 0x3F0, 0x50, 0xC0, 0x140, 0x1D0, 0x250, 0x2B0 },   // en (US)
+    { 0x0, 0xF0, 0x460, 0x50, 0xC0, 0x140, 0x1E0, 0x260, 0x2E0 },   // es (SP)
+    { 0x0, 0x120, 0x4F0, 0x60, 0xF0, 0x180, 0x230, 0x2C0, 0x350 },   // fr
+    { 0x0, 0x100, 0x4E0, 0x50, 0xC0, 0x160, 0x210, 0x2B0, 0x350 },   // de
+    { 0x0, 0x110, 0x4C0, 0x50, 0xC0, 0x160, 0x210, 0x2A0, 0x300 } };   // it
+// The offset tables that can apply to the language on the disc (an unknown disc: every disc's table of the language, the caller keeps the one whose strings validate).
+inline std::vector<const uint32_t*> help_tables(int disc, const std::string& lang)
+{
+    std::vector<const uint32_t*> v;
+    for (int i = 0; i < 5; i++) if (lang == k_langs[i]) {
+        if ((disc == DISC_US || disc == DISC_UNKNOWN) && k_help_us[i][1]) v.push_back(k_help_us[i]);
+        if ((disc == DISC_EU || disc == DISC_UNKNOWN) && k_help_eu[i][1]) v.push_back(k_help_eu[i]); }
+    return v;
+}
 // the table of a disc (DISC_US, DISC_EU) and language, nullptr when there is none
 inline const Hashes* hashes(int disc, const std::string& lang)
 {
@@ -157,23 +184,26 @@ inline std::string pick(const char* ps3_lang, int win_primary, const char* lc_al
     return r.empty() ? "en" : r;
 }
 // the title id of a disc: DISC_US = a US disc (BLUS31519 or its PSN id NPUB31647), DISC_EU = the EU disc (BLES02136), DISC_OTHER = another known id
-// (JP BLJS10258, Anison BLJS10257, EU PSN NPEB02204), DISC_UNKNOWN = anything else (no PARAM.SFO gives "BLES00000", empty, null)
+// (JP BLJS10258, Anison BLJS10257), DISC_UNKNOWN = anything else (no PARAM.SFO gives "BLES00000", empty, null; NPEB02204 is only the EU save-folder
+// name, not a confirmed disc id, so it is unknown too and tries both tables)
 inline int disc_kind(const char* title_id)
 {
     if (!title_id) return DISC_UNKNOWN;
     const std::string t(title_id);
     if (t == "BLUS31519" || t == "NPUB31647") return DISC_US;
     if (t == "BLES02136") return DISC_EU;
-    if (t == "BLJS10258" || t == "BLJS10257" || t == "NPEB02204") return DISC_OTHER;
+    if (t == "BLJS10258" || t == "BLJS10257") return DISC_OTHER;
     return DISC_UNKNOWN;
 }
 // 1 = a US disc, 0 = another known disc, -1 = not known
 inline int disc_us(const char* title_id) { const int k = disc_kind(title_id); return k == DISC_UNKNOWN ? -1 : k == DISC_US ? 1 : 0; }
 // The language the disc SHOWS: the US disc has packs for en, fr and es only (it never asks for DE or IT: the review of the US disc), so de and it
-// show English there. Other discs show all five.
+// show English there; so they do when the disc is not known (only the English tables could apply for sure; if it was an EU disc the texture backstop
+// turns the feature off), and on another known disc (JP: no tables, the feature is off there; ASSUMPTION: it has no de and it packs). The EU disc shows all
+// five. With the feature off the port's pop-up windows still follow this language, each window in one language (dialog_lang).
 inline std::string shown(const std::string& lang, int disc)
 {
-    if (disc == DISC_US && (lang == "de" || lang == "it")) return "en";
+    if (disc != DISC_EU && (lang == "de" || lang == "it")) return "en";
     return lang;
 }
 // the window of the state the late switch-off puts back: the main list's words {count, cursor, visible, top, bottom} to the game's own 9 rows,

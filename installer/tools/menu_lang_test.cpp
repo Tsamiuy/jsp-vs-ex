@@ -75,12 +75,12 @@ int main()
         for (size_t k = 1; k < e.size(); k += 2) CHECK(e[k] == 0); }
     // the disc: US title ids keep the feature; the EU one has its own tables; another known id (JP ...) is off before the menu is set up; an unreadable PARAM.SFO
     // (the default "BLES00000"), an empty or null id are unknown and leave it to the texture backstop
-    CHECK(disc_us("BLUS31519") == 1); CHECK(disc_us("NPUB31647") == 1); CHECK(disc_us("BLES02136") == 0); CHECK(disc_us("BLJS10258") == 0); CHECK(disc_us("BLJS10257") == 0); CHECK(disc_us("NPEB02204") == 0);
+    CHECK(disc_us("BLUS31519") == 1); CHECK(disc_us("NPUB31647") == 1); CHECK(disc_us("BLES02136") == 0); CHECK(disc_us("BLJS10258") == 0); CHECK(disc_us("BLJS10257") == 0); CHECK(disc_us("NPEB02204") == -1);   // the EU save-folder name, not a confirmed disc id: unknown, tries both tables
     CHECK(disc_us("") == -1); CHECK(disc_us(nullptr) == -1); CHECK(disc_us("BLES00000") == -1); CHECK(disc_us("BLUS99999") == -1); CHECK(disc_us("blus31519") == -1);
     CHECK(disc_kind("BLUS31519") == DISC_US && disc_kind("NPUB31647") == DISC_US && disc_kind("BLES02136") == DISC_EU && disc_kind("BLJS10258") == DISC_OTHER && disc_kind("BLES00000") == DISC_UNKNOWN);
     CHECK(gate_disc(DISC_OTHER).size() > 0); CHECK(gate_disc(DISC_US).empty()); CHECK(gate_disc(DISC_EU).empty()); CHECK(gate_disc(DISC_UNKNOWN).empty());
     // the shown language: a US disc has en, fr, es; de and it show English there, so the feature stays on for them; the EU disc shows all five
-    CHECK(shown("de", 1) == "en"); CHECK(shown("it", 1) == "en"); CHECK(shown("es", 1) == "es"); CHECK(shown("fr", 1) == "fr"); CHECK(shown("de", DISC_EU) == "de"); CHECK(shown("it", -1) == "it");
+    CHECK(shown("de", 1) == "en"); CHECK(shown("it", 1) == "en"); CHECK(shown("es", 1) == "es"); CHECK(shown("fr", 1) == "fr"); CHECK(shown("de", DISC_EU) == "de"); CHECK(shown("it", -1) == "en"); CHECK(shown("de", -1) == "en"); CHECK(shown("de", DISC_OTHER) == "en"); CHECK(shown("es", -1) == "es"); CHECK(shown("fr", -1) == "fr");   // unknown disc: de and it could only be English
     label_sets() = 0x1Fu;
     CHECK(gate(shown(pick("de", 0), 1), 1, true).empty());               // US disc, German system: English shown, feature on
     CHECK(gate(shown(pick("es", 0), 1), 1, true).empty());               // US disc, Spanish: the NS pack's hashes and the Spanish pictures
@@ -88,6 +88,23 @@ int main()
     // a language turns on only when its picture set is in the build (the port sets the bits from the files)
     label_sets() |= 2u; CHECK(labels_ready("es")); CHECK(gate(shown(pick("es", 0), 1), 1, true).empty()); CHECK(!labels_ready("fr")); CHECK(!gate("fr", 1, true).empty()); CHECK(!labels_ready("xx"));
     label_sets() = 1u; CHECK(!labels_ready("es"));
+    // unknown disc (no PARAM.SFO): de and it show English, so the gate is on with the English tables and no mixed menu; a JP disc is off for every language
+    label_sets() = 0x1Fu;
+    CHECK(gate(shown(pick("de", 0), DISC_UNKNOWN), DISC_UNKNOWN, true).empty()); CHECK(shown(pick("it", 0), DISC_UNKNOWN) == "en");
+    CHECK(gate_disc(disc_kind("NPEB02204")).empty());
+    for (const char* l : k_langs) CHECK(!gate(shown(l, DISC_OTHER), DISC_OTHER, true).empty());
+    label_sets() = 1u;
+    // the help-line offsets (resident pack, per disc and language): one table per language that has hashes, row 0 at 0, 9 distinct 16-aligned offsets, the same tables
+    // where the packs are the same, an unknown disc tries every disc's table of the language
+    { for (int d : { (int)DISC_US, (int)DISC_EU }) for (const char* l : k_langs) { const auto t = help_tables(d, l); CHECK(t.size() == (hashes(d, l) ? 1u : 0u));
+          for (const uint32_t* o : t) { std::set<uint32_t> seen; CHECK(o[0] == 0); for (int r = 0; r < 9; r++) { CHECK(o[r] % 16 == 0 && o[r] < 0x600); seen.insert(o[r]); } CHECK(seen.size() == 9); } }
+      CHECK(help_tables(DISC_US, "en")[0][1] == 0xF0 && help_tables(DISC_US, "en")[0][2] == 0x3F0 && help_tables(DISC_US, "en")[0][8] == 0x2B0);   // the offsets the port had measured
+      CHECK(help_tables(DISC_US, "fr")[0][1] == 0x120 && help_tables(DISC_US, "fr")[0][2] == 0x4F0 && help_tables(DISC_US, "fr")[0][8] == 0x350);
+      CHECK(help_tables(DISC_US, "es")[0][2] == 0x460 && help_tables(DISC_US, "es")[0][8] == 0x2E0 && help_tables(DISC_EU, "es")[0][8] == 0x2E0);
+      CHECK(help_tables(DISC_EU, "de")[0][1] == 0x100 && help_tables(DISC_EU, "de")[0][2] == 0x4E0 && help_tables(DISC_EU, "it")[0][1] == 0x110 && help_tables(DISC_EU, "it")[0][8] == 0x300);
+      CHECK(help_tables(DISC_UNKNOWN, "fr").size() == 2 && help_tables(DISC_UNKNOWN, "de").size() == 1 && help_tables(DISC_UNKNOWN, "xx").empty() && help_tables(DISC_OTHER, "en").empty());
+      CHECK(help_tables(DISC_US, "de").empty());                               // never the English offsets for another language: that was the review's N1
+      const uint32_t* en = help_tables(DISC_US, "en")[0]; for (const char* l : { "es", "fr" }) CHECK(std::memcmp(en, help_tables(DISC_US, l)[0], 9 * 4) != 0); }
     // the late switch-off restores the game's 9-row list with the cursor on the real row
     { uint32_t w[5] = { 6, 4, 6, 0, 5 }; restore_list(w, 8); CHECK(w[0] == 9 && w[1] == 8 && w[2] == 9 && w[3] == 0 && w[4] == 8); }
     { uint32_t w[5] = { 7, 0, 7, 0, 6 }; restore_list(w, -1); CHECK(w[0] == 9 && w[1] == 0 && w[4] == 8); }

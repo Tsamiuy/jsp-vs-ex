@@ -193,8 +193,8 @@ static unsigned long long g_mp_trans_t = 0;
 /* on by default since 2026-11-21 (the maintainer: cleaner than the game's chain of pop-up windows); MENU_PAGES=0 gives the
  * game's own main menu */
 /* The text language (jsp_menu_lang.h): PS3_LANG, else the Windows UI language, else English. The feature runs only for a language with all of its
- * text and row-label pictures, on a disc whose label textures are the US ones (g_mp_off, set in mp_tex_upload); else the game's own menu, with
- * one log line. */
+ * text and row-label pictures AND the disc's texture hashes for that language (jml::hashes; g_mp_off is set by the backstop in mp_tex_upload when
+ * no label of the language matches); else the game's own menu, with one log line. */
 static std::atomic<bool> g_mp_off{false}; static bool g_mp_us_seen = false;
 static int g_mp_disc = -1;   /* jml::Disc: 1 a US disc, 2 the EU disc, 0 another known one, -1 not known: the title id, set by jsp_mp_init before the menu exists */
 extern "C" void jsp_mp_init(const char* title_id) { g_mp_disc = jml::disc_kind(title_id); }   /* main.cpp, next to jsp_mods_init */
@@ -579,16 +579,18 @@ void mp_help(ppu_context* ctx)
     static const uint32_t hpane = mpf_name_hash("_f_l_cl00");
     if (box < 0x10000u || box >= 0x30000000u || pn < 0x10000u || pn >= 0x30000000u || vm_read32(pn + 0x108) != hpane) return;
     const uint32_t menu = jsp_main_menu_obj(); if (menu < 0x10000u || vm_read32(menu) != 0x0087D600u) return;
-    static const uint32_t off[9] = { 0x0u, 0xF0u, 0x3F0u, 0x50u, 0xC0u, 0x140u, 0x1D0u, 0x250u, 0x2B0u };
+    static const uint32_t* off = nullptr;   /* the offset table of this disc and language whose strings validated (jml::help_tables) */
     static uint32_t base = 0, own[4] = { 0, 0, 0, 0 };
     const uint32_t cur = vm_read32(menu + 0x44), tp = vm_read32(box + 0x58);
     const int show = g_mp_pin >= 0 ? g_mp_pin : (int)cur;
-    if (cur < 9u && tp >= 0x10000u && tp < 0x30000000u && tp >= off[cur]) {   /* the game's own pointer: where the block is */
-        const uint32_t b0 = tp - off[cur]; bool ok = true;
-        for (int r = 0; r < 9 && ok; r++) ok = vm_read16(b0 + off[r] - 2u) == 0 && vm_read16(b0 + off[r]) != 0;
-        if (ok && b0 != base) { base = b0; std::printf("[mpages] help strings at %08X\n", base); std::fflush(stdout); }
+    if (cur < 9u && tp >= 0x10000u && tp < 0x30000000u) {   /* the game's own pointer: where the block is */
+        for (const uint32_t* t : jml::help_tables(g_mp_disc, mp_lang())) {
+            if (tp < t[cur]) continue;
+            const uint32_t b0 = tp - t[cur]; bool ok = true;
+            for (int r = 0; r < 9 && ok; r++) ok = vm_read16(b0 + t[r] - 2u) == 0 && vm_read16(b0 + t[r]) != 0;
+            if (ok) { if (b0 != base) { base = b0; std::printf("[mpages] help strings at %08X\n", base); std::fflush(stdout); } off = t; break; } }
     }
-    if (was_off) { if (cur < 9u && base) vm_write32(box + 0x58, base + off[cur]); mp_off_restore(menu); return; }   /* switched off late: the game's own line again */
+    if (was_off) { if (cur < 9u && base && off) vm_write32(box + 0x58, base + off[cur]); mp_off_restore(menu); return; }   /* switched off late: the game's own line again */
     if (!g_psbar_str) psbar_fill(mpf_game_new(ctx, kPsbarBytes));
     if (!own[0]) { static const jml::Id ids[4] = { jml::MENU_HELP_BATTLE, jml::MENU_HELP_TRAINING, jml::MENU_HELP_IMPOSSIBLE, jml::MENU_HELP_PORT_SETTINGS };
         for (int k = 0; k < 4; k++) { const std::vector<uint8_t> u = jml::encode_utf16(jml::text(ids[k], mp_lang()));   /* UTF-16LE, as the game's strings */
@@ -598,7 +600,7 @@ void mp_help(ppu_context* ctx)
     const int want = mp_lab_of(g_mp_page, show);
     uint32_t to = 0;
     if (want >= 100) to = own[want - 100];
-    else if (want >= 0 && base) { int r = 0; while (r < 9 && k_mp_row_lab[r] != want) r++; if (r < 9) to = base + off[r]; }
+    else if (want >= 0 && base && off) { int r = 0; while (r < 9 && k_mp_row_lab[r] != want) r++; if (r < 9) to = base + off[r]; }
     if (to) vm_write32(box + 0x58, to);
 }
 /* The port's settings screen gets the menu's plain background (the maintainer 2026-11-19: "the white manga like background be
