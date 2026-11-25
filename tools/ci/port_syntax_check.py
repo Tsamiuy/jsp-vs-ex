@@ -13,7 +13,9 @@ Two passes (--region both, the default; jsp_region.h):
   US  the stand-in declares every game function the port names (the US lift has them all), as the real US build sees it.
   EU  the port sources again with -DJSP_REGION_EU=1 (what CMakeLists.txt adds for JSP_GAME_REGION=EU), the stand-in declaring only the
       names in tools/ci/eu_lift_funcs.txt (those the EU lift also has): a direct call of a US-only function outside `#if JSP_US_CODE`
-      fails here as it fails in a real EU build (2026-11-25: 92 errors in five files of 6ada03e). The scaffold and SPU files run once.
+      fails here as it fails in a real EU build (2026-11-25: 92 errors in five files of 6ada03e); the other names are poisoned (#pragma GCC
+      poison), so a source that declares a US-only function itself (a link error in the real build) fails too. The scaffold and SPU
+      files run once.
 Not covered: anything generated (the lifted PPU and SPU code, the NID table), the runtime library, linking, running.
 Compilers: the llvm-mingw clang the installer bundles (x86_64-w64-mingw32-clang++ / -clang). Standard library only.
 """
@@ -59,9 +61,12 @@ def main():
             stub.mkdir()
             have = funcs if region == "US" else [f for f in funcs if f in eu_have]
             decls = "".join(f"void {f}(ppu_context* ctx);\n" for f in have)
+            # EU: the names the EU lift lacks are poisoned, so a source that declares one itself (and would only fail at the link) fails here too;
+            # code inside `#if JSP_US_CODE` and comments are not affected
+            poison = "".join(f"#pragma GCC poison {f}\n" for f in funcs if f not in have)
             (stub / "ppu_recomp.h").write_text(
                 lifter.HEADER_PREAMBLE + '\n#ifdef __cplusplus\nextern "C" {\n#endif\nvoid ppu_recomp_register(void);\n' + decls
-                + '#ifdef __cplusplus\n}\n#endif\n', encoding="utf-8")
+                + '#ifdef __cplusplus\n}\n#endif\n' + poison, encoding="utf-8")
             incs = [f"-I{stub}", *[f"-I{tk / d}" for d in INCS], f"-I{port}", f"-I{port / 'gekkonet/include'}"]
             rdef = ["-DJSP_REGION_EU=1"] if region == "EU" else []
             jobs += [(region, a.cxx, ["-std=c++20", *PORT_DEFS, *rdef, "-x", "c++"], incs, p) for p in sorted(port.glob("*.cpp"))]

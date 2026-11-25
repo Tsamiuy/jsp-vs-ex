@@ -37,7 +37,9 @@ extern "C" int jsp_in_menu_scene(void);        // jsp_game.cpp: the menu scene i
 extern "C" __attribute__((weak)) void jsp_ps_open(void);
 extern "C" __attribute__((weak)) int jsp_ps_active(void);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
-void func_00717C2C(ppu_context* ctx);          // the game's new (operator new)
+#if JSP_US_CODE
+void func_00717C2C(ppu_context* ctx);          // the game's new (operator new); US 1.00 only (an EU lift has no function there)
+#endif
 extern "C" { int g_jsp_ps_game_bar = 0; }      // 1: the game's button bar shows the Port Settings hints
 
 void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt);
@@ -54,8 +56,12 @@ static void mpf_read_name(uint32_t a, char* out, int max) { int q = 0; if (a >= 
 static uint32_t mpf_game_new(ppu_context* ctx, uint32_t size)
 {
     ppu_context c = *ctx; c.lr = 0; c.gpr[3] = size;
+#if JSP_US_CODE
     func_00717C2C(&c); while (g_trampoline_fn) { auto f = g_trampoline_fn; g_trampoline_fn = 0; f(&c); }
     return (uint32_t)c.gpr[3];
+#else
+    (void)c; return 0;   // never reached on EU (mp_on() is false); 0 = no memory, which every caller checks
+#endif
 }
 
 /* The menus' button bar with the port's settings screen (the maintainer 2026-11-19: the game's own PlayStation icons).

@@ -116,7 +116,7 @@ flowchart LR
 `-fsyntax-only` on every `installer/port/jsp/*.cpp` and the toolkit's PPU scaffold. It does this twice: once as the US build, and once as
 the EU build (`-DJSP_REGION_EU=1`, what `CMakeLists.txt` adds for `JSP_GAME_REGION=EU`) with a stand-in that declares only the names in
 `tools/ci/eu_lift_funcs.txt` (the ones the EU lift also has), so a direct call of a US-only game function outside `#if JSP_US_CODE`
-(`jsp_region.h`) fails CI as it fails the real EU build. Per-file include paths in its `FILE_INCS`
+(`jsp_region.h`) fails CI as it fails the real EU build; the other names are poisoned there (`#pragma GCC poison`), so a source that declares a US-only function itself (a link error in the real build) fails too. Per-file include paths in its `FILE_INCS`
 (`:29`: `jsp_net_probe.cpp`, `jsp_stepper.cpp`) mirror CMake's `set_source_files_properties` by hand. It does not cover lifted code, the runtime libraries, GekkoNet, the
 link or a run.
 
