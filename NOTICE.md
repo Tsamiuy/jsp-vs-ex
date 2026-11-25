@@ -81,6 +81,7 @@ applied (MIT, see above; SMAA as above); and the licence texts of this repositor
 time from the project's ASCII star mark and polygon lettering (`installer/tools/installer_art.py`, no font). The Port Settings menu labels and glyphs are drawn at build time in Fira Sans Heavy Italic 4.301
 (bBoxType/FiraSans, SIL Open Font License 1.1); the font file is not included here or in the package, and the art contains
 only the rendered text.
+The two-page Main Menu pictures (row labels, page title and help-bar watermark in English, Spanish, French, German and Italian, `installer/port/jsp/mp_*.inc`, made by `installer/tools/mp_label_langs.py`) are rendered from the same font (Fira Sans Heavy Italic 4.301, SIL OFL 1.1, file SHA-256 a30804a1...faee); the files hold only the rendered text, no font data.
 
 ## Installer music
 

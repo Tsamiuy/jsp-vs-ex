@@ -45,9 +45,11 @@ MENU_CHOOSE_FIGHT	Choose a fight	Elige un combate	Choisissez un combat	Wähle ei
 MENU_IMPOSSIBLE	Impossible	Imposible	Impossible	Unmöglich	Impossibile
 )MSG";
 
-// Row labels are pictures (300 x 43 DXT5 pairs, one white one black, feat_menu_pages.cpp k_mp_new_lab): only English ones exist.
-// Open: per-language pictures would be built at run time from the player's own label texture plus the table text; not done.
-inline bool labels_ready(const std::string& lang) { return lang == "en"; }
+// Row labels, the page title and the watermark are pictures (feat_menu_pages.cpp mp_set), made from this table by installer/tools/mp_label_langs.py.
+// Which languages have all their pictures (a bit per k_langs index): the port sets it from the picture files that are in the build
+// (feat_menu_pages.cpp mp_register_sets); English only until then, so the host test sees the default.
+inline unsigned& label_sets() { static unsigned m = 1; return m; }
+inline bool labels_ready(const std::string& lang) { for (int i = 0; i < 5; i++) if (lang == k_langs[i]) return (label_sets() >> i) & 1u; return false; }
 
 // code of a PS3 system language number (the PS3_LANG 0..19 order), "" when outside the five
 inline std::string code_of_number(int n) { switch (n) { case 1: case 18: return "en"; case 2: return "fr"; case 3: return "es"; case 4: return "de"; case 5: return "it"; } return ""; }

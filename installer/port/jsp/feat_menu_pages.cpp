@@ -130,34 +130,165 @@ void psbar_tick()
  * moves the list cursor to that real row on Cross; the highlight part (func_001E3BE0, +0x40 wanted row) is held on
  * the screen row meanwhile. The new labels are drawn by docs/archive/jstars-notes/tools/mm_label.ps1 from a Windows font.
  * ------------------------------------------------------------------------------------------------------------- */
-static const uint8_t k_mp_new_lab[4][2][13200] = {
+/* The row labels (300x43 DXT5, a light and a dark one each), the page-1 title (512x64) and the help-bar watermark (1024x128), one set per language:
+ * mp_label_<lang>_<name>_{light,dark}.inc, mp_title_<lang>.inc, mp_mark_<lang>.inc, drawn by installer/tools/mp_label_langs.py from the table in
+ * jsp_menu_lang.h (our own art from Fira Sans Heavy Italic, SIL OFL 1.1; nothing from the game). A language whose files are absent has no set and
+ * jml::labels_ready() is false for it, so the feature stays off there (the game's own menu). Added by this file's mp_register_sets(). */
+#if __has_include("mp_label_en_battle_light.inc") && __has_include("mp_title_en.inc") && __has_include("mp_mark_en.inc")
+#define MP_HAVE_EN 1
+static const uint8_t k_mp_lab_en[4][2][13200] = {
     { {
-#include "mm_label_battle_light.inc"
+#include "mp_label_en_battle_light.inc"
     }, {
-#include "mm_label_battle_dark.inc"
+#include "mp_label_en_battle_dark.inc"
     } },
     { {
-#include "mm_label_training_light.inc"
+#include "mp_label_en_training_light.inc"
     }, {
-#include "mm_label_training_dark.inc"
+#include "mp_label_en_training_dark.inc"
     } },
     { {
-#include "mm_label_impossible_light.inc"
+#include "mp_label_en_impossible_light.inc"
     }, {
-#include "mm_label_impossible_dark.inc"
+#include "mp_label_en_impossible_dark.inc"
     } },
     { {
-#include "mm_label_portset_light.inc"
+#include "mp_label_en_portset_light.inc"
     }, {
-#include "mm_label_portset_dark.inc"
+#include "mp_label_en_portset_dark.inc"
     } },
 };
-static const uint8_t k_mp_title_battle[32768] = {
-#include "mm_title_battle.inc"
+static const uint8_t k_mp_title_en[32768] = {
+#include "mp_title_en.inc"
 };
-static const uint8_t k_mp_mark_battle[131072] = {
-#include "mm_mark_battle.inc"
+static const uint8_t k_mp_mark_en[131072] = {
+#include "mp_mark_en.inc"
 };
+#endif
+#if __has_include("mp_label_es_battle_light.inc") && __has_include("mp_title_es.inc") && __has_include("mp_mark_es.inc")
+#define MP_HAVE_ES 1
+static const uint8_t k_mp_lab_es[4][2][13200] = {
+    { {
+#include "mp_label_es_battle_light.inc"
+    }, {
+#include "mp_label_es_battle_dark.inc"
+    } },
+    { {
+#include "mp_label_es_training_light.inc"
+    }, {
+#include "mp_label_es_training_dark.inc"
+    } },
+    { {
+#include "mp_label_es_impossible_light.inc"
+    }, {
+#include "mp_label_es_impossible_dark.inc"
+    } },
+    { {
+#include "mp_label_es_portset_light.inc"
+    }, {
+#include "mp_label_es_portset_dark.inc"
+    } },
+};
+static const uint8_t k_mp_title_es[32768] = {
+#include "mp_title_es.inc"
+};
+static const uint8_t k_mp_mark_es[131072] = {
+#include "mp_mark_es.inc"
+};
+#endif
+#if __has_include("mp_label_fr_battle_light.inc") && __has_include("mp_title_fr.inc") && __has_include("mp_mark_fr.inc")
+#define MP_HAVE_FR 1
+static const uint8_t k_mp_lab_fr[4][2][13200] = {
+    { {
+#include "mp_label_fr_battle_light.inc"
+    }, {
+#include "mp_label_fr_battle_dark.inc"
+    } },
+    { {
+#include "mp_label_fr_training_light.inc"
+    }, {
+#include "mp_label_fr_training_dark.inc"
+    } },
+    { {
+#include "mp_label_fr_impossible_light.inc"
+    }, {
+#include "mp_label_fr_impossible_dark.inc"
+    } },
+    { {
+#include "mp_label_fr_portset_light.inc"
+    }, {
+#include "mp_label_fr_portset_dark.inc"
+    } },
+};
+static const uint8_t k_mp_title_fr[32768] = {
+#include "mp_title_fr.inc"
+};
+static const uint8_t k_mp_mark_fr[131072] = {
+#include "mp_mark_fr.inc"
+};
+#endif
+#if __has_include("mp_label_de_battle_light.inc") && __has_include("mp_title_de.inc") && __has_include("mp_mark_de.inc")
+#define MP_HAVE_DE 1
+static const uint8_t k_mp_lab_de[4][2][13200] = {
+    { {
+#include "mp_label_de_battle_light.inc"
+    }, {
+#include "mp_label_de_battle_dark.inc"
+    } },
+    { {
+#include "mp_label_de_training_light.inc"
+    }, {
+#include "mp_label_de_training_dark.inc"
+    } },
+    { {
+#include "mp_label_de_impossible_light.inc"
+    }, {
+#include "mp_label_de_impossible_dark.inc"
+    } },
+    { {
+#include "mp_label_de_portset_light.inc"
+    }, {
+#include "mp_label_de_portset_dark.inc"
+    } },
+};
+static const uint8_t k_mp_title_de[32768] = {
+#include "mp_title_de.inc"
+};
+static const uint8_t k_mp_mark_de[131072] = {
+#include "mp_mark_de.inc"
+};
+#endif
+#if __has_include("mp_label_it_battle_light.inc") && __has_include("mp_title_it.inc") && __has_include("mp_mark_it.inc")
+#define MP_HAVE_IT 1
+static const uint8_t k_mp_lab_it[4][2][13200] = {
+    { {
+#include "mp_label_it_battle_light.inc"
+    }, {
+#include "mp_label_it_battle_dark.inc"
+    } },
+    { {
+#include "mp_label_it_training_light.inc"
+    }, {
+#include "mp_label_it_training_dark.inc"
+    } },
+    { {
+#include "mp_label_it_impossible_light.inc"
+    }, {
+#include "mp_label_it_impossible_dark.inc"
+    } },
+    { {
+#include "mp_label_it_portset_light.inc"
+    }, {
+#include "mp_label_it_portset_dark.inc"
+    } },
+};
+static const uint8_t k_mp_title_it[32768] = {
+#include "mp_title_it.inc"
+};
+static const uint8_t k_mp_mark_it[131072] = {
+#include "mp_mark_it.inc"
+};
+#endif
 volatile bool g_mp_training_start = false;
 volatile int g_mp_entry = 0;            /* 1 Training row, 2 Impossible row: read when Free Battle's screens open */
 static int g_mp_page = 0;               /* 0 top page, 1 Battle Modes */
@@ -201,13 +332,38 @@ static const std::string& mp_lang()
     return l;
 }
 extern "C" const char* jsp_mp_lang(void) { return mp_lang().c_str(); }   /* the language the disc shows, for the port's pop-up texts (jsp_game.cpp) */
+struct MpSet { const uint8_t (*lab)[2][13200]; const uint8_t* title; const uint8_t* mark; };
+static MpSet mp_set(const std::string& l)   /* the picture set of a language; {} when its files are not in the build */
+{
+#ifdef MP_HAVE_EN
+    if (l == "en") return { k_mp_lab_en, k_mp_title_en, k_mp_mark_en };
+#endif
+#ifdef MP_HAVE_ES
+    if (l == "es") return { k_mp_lab_es, k_mp_title_es, k_mp_mark_es };
+#endif
+#ifdef MP_HAVE_FR
+    if (l == "fr") return { k_mp_lab_fr, k_mp_title_fr, k_mp_mark_fr };
+#endif
+#ifdef MP_HAVE_DE
+    if (l == "de") return { k_mp_lab_de, k_mp_title_de, k_mp_mark_de };
+#endif
+#ifdef MP_HAVE_IT
+    if (l == "it") return { k_mp_lab_it, k_mp_title_it, k_mp_mark_it };
+#endif
+    return { nullptr, nullptr, nullptr };
+}
+static void mp_register_sets()   /* tells jsp_menu_lang.h which languages have all their pictures */
+{
+    for (int i = 0; i < 5; i++) if (mp_set(jml::k_langs[i]).lab) jml::label_sets() |= 1u << i;
+}
+static const MpSet& mp_cur_set() { static const MpSet m = mp_set(mp_lang()); return m; }
 /* US only for now (jsp_region.h): the pages rewrite guest memory at US 1.00 addresses and their lift hooks are in the US lift only, so an EU
  * build keeps the game's own one-page menu (mp_on() false: the pad filter, the texture patch and the row count leave the menu alone). */
 bool mp_on()
 {
     static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); if (e && e[0] == '0') return false;
         if (!jsp_game_is_us()) return false;   /* EU build: jsp_game.cpp logs it with the other US-only features */
-        std::string why = jml::gate_disc(g_mp_disc); if (why.empty()) why = jml::gate(mp_lang(), true);
+        mp_register_sets(); std::string why = jml::gate_disc(g_mp_disc); if (why.empty()) why = jml::gate(mp_lang(), true);
         if (!why.empty()) { std::printf("[mpages] off: %s\n", why.c_str()); std::fflush(stdout); return false; }
         return true; }();
     return on && !g_mp_off.load();
@@ -267,11 +423,11 @@ static void mp_write_page(int page)
     for (int r = 0; r < 9; r++) {
         const int want = mp_lab_of(page, r), slot = k_mp_row_lab[r];
         for (int st = 0; st < 2; st++) {
-            const uint8_t* src = want < 0 ? blank.data() : want >= 100 ? k_mp_new_lab[want - 100][st] : (g_mp_lab[want][st].orig.size() == kMpLabBytes ? g_mp_lab[want][st].orig.data() : nullptr);
+            const uint8_t* src = want < 0 ? blank.data() : want >= 100 ? mp_cur_set().lab[want - 100][st] : (g_mp_lab[want][st].orig.size() == kMpLabBytes ? g_mp_lab[want][st].orig.data() : nullptr);
             mp_put(g_mp_lab[slot][st], src); }
     }
-    mp_put(g_mp_title, page == 1 ? k_mp_title_battle : (g_mp_title.orig.empty() ? nullptr : g_mp_title.orig.data()));
-    mp_put(g_mp_mark, page == 1 ? k_mp_mark_battle : (g_mp_mark.orig.empty() ? nullptr : g_mp_mark.orig.data()));
+    mp_put(g_mp_title, page == 1 ? mp_cur_set().title : (g_mp_title.orig.empty() ? nullptr : g_mp_title.orig.data()));
+    mp_put(g_mp_mark, page == 1 ? mp_cur_set().mark : (g_mp_mark.orig.empty() ? nullptr : g_mp_mark.orig.data()));
     g_mp_applied = page;
 }
 /* g_tex_patch_hook: register the row textures by their bytes when the game uploads them as loaded (each main menu

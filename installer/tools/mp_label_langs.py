@@ -85,6 +85,53 @@ def dxt5_decode(data, w, h):
                 if x < w and y < h: out[y, x, :3] = cp[(idx >> (2 * i)) & 3]; out[y, x, 3] = pal[(ab >> (3 * i)) & 7]
     return out
 
+def _fit(mla, Image, font, text, w, h, left, base, cap, avail_right):
+    """Mask of the text at the given cap height on a canvas twice as wide, squeezed sideways to end before avail_right (texture px), cropped to w x h."""
+    old = mla.CAP; mla.CAP = cap
+    try: m = mla.letters(font, text, 2 * w, h, left, base)
+    finally: mla.CAP = old
+    bb = m.getbbox(); avail = avail_right * mla.SS
+    if bb and bb[2] > avail:
+        a = (bb[2] - left * mla.SS) / float(avail - left * mla.SS)
+        m = m.transform(m.size, Image.AFFINE, (a, 0, left * mla.SS * (1 - a), 0, 1, 0), Image.BICUBIC)
+    return m.crop((0, 0, w * mla.SS, h * mla.SS))
+
+def title_picture(mla, Image, np, font, text):
+    """The orange page title (512 x 64): yellow-to-orange italic letters with a dark brown rim. Colours and place measured on the title of the
+    tree's English picture (yellow 255,230,40 at the top to orange 220,128,3 at the bottom, rim 90,36,8, letters x 2..397, y 12..48); the shapes are ours."""
+    W2, H2, SS = 512, 64, mla.SS
+    m = _fit(mla, Image, font, text, W2, H2, 6, 44, 28, 500)
+    rim = m.filter(mla.ImageFilter.MaxFilter(2 * int(2.5 * SS) + 1)).filter(mla.ImageFilter.GaussianBlur(SS * 0.6))
+    fill = np.asarray(m.filter(mla.ImageFilter.GaussianBlur(SS * 0.35)), dtype=float) / 255
+    rim_a = np.asarray(rim, dtype=float) / 255
+    ys = (np.arange(H2 * SS)[:, None] / SS - (44 - 28)) / 28.0; g = np.clip(ys, 0, 1)
+    top = np.array([255.0, 230.0, 40.0]); bot = np.array([220.0, 128.0, 3.0]); rimc = np.array([90.0, 36.0, 8.0])
+    body = top[None, None, :] * (1 - g[..., None]) + bot[None, None, :] * g[..., None]
+    a_out = np.maximum(rim_a, fill)
+    col = body * fill[..., None] + rimc[None, None, :] * (1 - fill[..., None])
+    arr = np.zeros((H2 * SS, W2 * SS, 4)); arr[..., :3] = np.broadcast_to(col, (H2 * SS, W2 * SS, 3)); arr[..., 3] = a_out * 255
+    return mla._down(arr, W2, H2)
+
+def mark_picture(mla, Image, np, font, text):
+    """The help bar's grey watermark (1024 x 128): big heavy italic letters, flat grey 156,157,156 at alpha 26, ending at x 1004 (measured on the
+    tree's English picture: letters x 592..1004, y 33..86); the text is right aligned, the shapes are ours."""
+    W2, H2, SS = 1024, 128, mla.SS
+    old = mla.CAP; mla.CAP = 50
+    try: m = mla.letters(font, text, 2 * W2, H2, 0, 82)
+    finally: mla.CAP = old
+    bb = m.getbbox()
+    if bb:   # right align to x 1004 (the left edge may go to 8 at most; longer texts are squeezed)
+        wd = (bb[2] - bb[0]) / SS
+        if wd > 1004 - 8:
+            k = (1004 - 8) / wd; a = 1.0 / k
+            m = m.transform(m.size, Image.AFFINE, (a, 0, bb[0] * (1 - a), 0, 1, 0), Image.BICUBIC); bb = m.getbbox(); wd = (bb[2] - bb[0]) / SS
+        dx = int(round((1004 - wd) * SS)) - bb[0]
+        m = m.transform(m.size, Image.AFFINE, (1, 0, -dx, 0, 1, 0), Image.BILINEAR)
+    m = m.crop((0, 0, W2 * SS, H2 * SS))
+    a = np.asarray(m.filter(mla.ImageFilter.GaussianBlur(SS * 0.35)), dtype=float) / 255
+    arr = np.zeros((H2 * SS, W2 * SS, 4)); arr[..., 0] = 156; arr[..., 1] = 157; arr[..., 2] = 156; arr[..., 3] = a * 26
+    return mla._down(arr, W2, H2)
+
 def inc(data, note):
     return "/* %s */\n" % note + ",\n".join(", ".join("0x%02X" % b for b in data[i:i + 16]) for i in range(0, len(data), 16)) + "\n"
 
@@ -100,6 +147,7 @@ def main():
     if "--preview" in args:
         i = args.index("--preview"); prev = args[i + 1]; del args[i:i + 2]
     import menu_label_art as mla
+    import numpy as np
     from PIL import Image, ImageFont
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     tbl = table(os.path.join(root, "installer", "port", "jsp", "jsp_menu_lang.h"))
@@ -126,19 +174,37 @@ def main():
                 note = "main menu row label \"%s\" (%s), %s look: 300x43 DXT5 (13200 bytes), drawn by mp_label_langs.py from jsp_menu_lang.h (own art)" % (tbl[id_][lang], lang, style)
                 open(os.path.join(out, "mp_label_%s_%s_%s.inc" % (lang, name, style)), "w", encoding="utf-8").write(inc(dxt5(arr, clear), note))
                 new[(lang, name, style)] = arr; sheet.append(arr)
+    pics = {}   # lang -> (title, mark) arrays
+    for lang in LANGS:
+        t_, m_ = title_picture(mla, Image, np, font, tbl["MENU_BATTLE_MODES"][lang]), mark_picture(mla, Image, np, font, tbl["MENU_BATTLE_MODES"][lang])
+        pics[lang] = (t_, m_)
+        note = "main menu page-1 %s \"%s\" (%s), %s, DXT5, drawn by mp_label_langs.py from jsp_menu_lang.h (own art)"
+        open(os.path.join(out, "mp_title_%s.inc" % lang), "w", encoding="utf-8").write(inc(dxt5(t_, (0, 0, 0)), note % ("title", tbl["MENU_BATTLE_MODES"][lang], lang, "512x64 (32768 bytes)")))
+        open(os.path.join(out, "mp_mark_%s.inc" % lang), "w", encoding="utf-8").write(inc(dxt5(m_, (0, 0, 0)), note % ("watermark", tbl["MENU_BATTLE_MODES"][lang], lang, "1024x128 (131072 bytes)")))
+    if prev and pics:   # second sheet PREV_title.png: per row the old English then en es fr de it: the title (512 x 64) and the watermark at half size, its alpha x8 (it is 26 of 255)
+        P2 = Image.new("RGBA", (1024, 64 * 6), (92, 92, 130, 255))
+        for ri, c in enumerate(["old"] + LANGS):
+            if c == "old":
+                rd = lambda n, w, h: dxt5_decode(bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", re.sub(r"/\*.*?\*/", "", open(os.path.join(root, "installer", "port", "jsp", n)).read(), flags=re.S))), w, h)
+                tt, mm = rd("mm_title_battle.inc", 512, 64), rd("mm_mark_battle.inc", 1024, 128)
+            else: tt, mm = pics[c]
+            mm = mm.copy(); mm[..., 3] = np.minimum(255, mm[..., 3].astype(int) * 8).astype(np.uint8)
+            a = Image.fromarray(tt, "RGBA"); b = Image.fromarray(mm, "RGBA").resize((512, 64), Image.LANCZOS)
+            P2.paste(a, (0, ri * 64), a); P2.paste(b, (512, ri * 64), b)
+        P2.save(os.path.splitext(prev)[0] + "_title.png")
     if prev and sheet:   # contact sheet: per row the old Impact English (the .inc files of the tree) then en es fr de it; light looks above, dark looks below
         import numpy as np
         inc_dir = os.path.join(root, "installer", "port", "jsp"); cols = ["old"] + LANGS
-        P = Image.new("RGBA", (W * len(cols), H * len(LABELS) * 2), (92, 92, 130, 255))
+        P = Image.new("RGBA", (W * len(cols), H * len(LABELS) * 2 + 10), (92, 92, 130, 255)); P.paste((255, 255, 255, 255), (0, H * len(LABELS), W * len(cols), H * len(LABELS) + 10))   # a white bar between the light (above) and dark (below) looks
         for si, style in enumerate(("light", "dark")):
             for ri, (_, name) in enumerate(LABELS):
                 for ci, c in enumerate(cols):
                     if c == "old":
                         f = os.path.join(inc_dir, "mm_label_%s_%s.inc" % (name, style))
                         if not os.path.exists(f): continue
-                        arr = dxt5_decode(bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", open(f).read())), W, H)
+                        arr = dxt5_decode(bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", re.sub(r"/\*.*?\*/", "", open(f).read(), flags=re.S))), W, H)   # the comment holds "300x43", not a byte
                     else: arr = new[(c, name, style)]
-                    im = Image.fromarray(arr, "RGBA"); P.paste(im, (ci * W, (si * len(LABELS) + ri) * H), im)
+                    im = Image.fromarray(arr, "RGBA"); P.paste(im, (ci * W, (si * len(LABELS) + ri) * H + si * 10), im)
         P.save(prev)
     print("wrote", out); return 0
 

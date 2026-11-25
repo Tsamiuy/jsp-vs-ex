@@ -37,6 +37,9 @@ int main()
     CHECK(shown("de", 1) == "en"); CHECK(shown("it", 1) == "en"); CHECK(shown("es", 1) == "es"); CHECK(shown("fr", 1) == "fr"); CHECK(shown("de", 0) == "de"); CHECK(shown("it", -1) == "it");
     CHECK(gate(shown(pick("de", 0), 1), true).empty());                  // US disc, German system: English shown, feature on
     CHECK(!gate(shown(pick("es", 0), 1), true).empty());                 // US disc, Spanish: no Spanish label pictures yet: off, never mixed
+    // a language turns on only when its picture set is in the build (the port sets the bits from the files)
+    label_sets() |= 2u; CHECK(labels_ready("es")); CHECK(gate(shown(pick("es", 0), 1), true).empty()); CHECK(!labels_ready("fr")); CHECK(!gate("fr", true).empty()); CHECK(!labels_ready("xx"));
+    label_sets() = 1u; CHECK(!labels_ready("es"));
     // the late switch-off restores the game's 9-row list with the cursor on the real row
     { uint32_t w[5] = { 6, 4, 6, 0, 5 }; restore_list(w, 8); CHECK(w[0] == 9 && w[1] == 8 && w[2] == 9 && w[3] == 0 && w[4] == 8); }
     { uint32_t w[5] = { 7, 0, 7, 0, 6 }; restore_list(w, -1); CHECK(w[0] == 9 && w[1] == 0 && w[4] == 8); }
