@@ -324,3 +324,21 @@ Tested under Proton on Linux, US disc, with a scripted pad route (the same file 
 project's development tree, not from the installer): a Training fight with TIME at infinity, 16 hits all on the dummy
 and a refill after them; with `TRAINING_TEST_LOW=300` hits stop at 1 health and nobody is KO'd; without `TRAINING` a
 normal Free Battle with the timer counting down. Not run on Windows.
+
+## Training menu and options (2026-11-25, tried in scripted runs on Windows)
+
+`feat_training_opts.cpp` and `feat_training_menu.cpp` add to Training (on by default; `TRAIN_OPTS=0` and `TRAIN_MENU=0`
+turn them off):
+
+- A two-window pause menu over the game's own pause list: CPU Settings (CPU Level 0 to 5 stars, live; CPU Behavior
+  Stand, Guard, Jump, Attack, Fights back), System Settings (Unlimited Stamina, Support cooldown off, Infinite Victory
+  Burst), Position Reset, Camera / HUD (Free Camera, Hide HUD), Skill Table, Re-select Characters, Return to Main Menu.
+- Position keys in the fight: Select + Triangle brings the CPU to the player, Select + Circle puts the fighters close
+  together, Select + Cross goes to the start spots, Select + R1 saves the positions and Select + Square goes back to
+  them. A key line along the bottom of the picture shows the keys (`TRAIN_HINTS=0`: no line).
+- No fighter intros in Training (`TRAIN_INTROS=1` keeps them).
+- 2 Players: the two partner slots stay free (`TRAIN_2P_SLOTS=0`: locked as before), and a pause opened by Player 2's
+  pad can be closed by Player 1.
+
+The Training readout above and the key line share one overlay layer; while the key line is up it draws the readout's box
+too. Not tested: a real second controller, 4K, the EU and JP discs, a rollback match.
