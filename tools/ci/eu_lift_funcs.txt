@@ -1,0 +1,25 @@
+# The lifted game functions (func_XXXXXXXX) that the port's sources name and that the EU 1.00 lift (BLES02136, ps3recomp v0.19 lifter,
+# firstrun.py's lift) also declares. tools/ci/port_syntax_check.py's EU pass declares exactly these in its stand-in ppu_recomp.h, so a port
+# source that calls any other lifted function outside `#if JSP_US_CODE` (jsp_region.h) fails CI the way the real EU build fails.
+# A name on this list only means "the EU lift has a function at this address": the EU code is shifted, so it is a DIFFERENT function
+# there in general, and calling it from EU code is wrong unless checked. Taken 2026-11-25 from the EU lift's ppu_recomp.h against the
+# port sources of origin/main 6ada03e (every func_ name in installer/port/jsp, comments included). Add a name only after checking it in an
+# EU lift.
+func_0001CAB4
+func_0001F758
+func_000202DC
+func_00022AC0
+func_00024B00
+func_0002EE48
+func_0002FC54
+func_00030A14
+func_00030AAC
+func_00031968
+func_0003FFB8
+func_0004296C
+func_000E1A34
+func_0014047C
+func_0032D288
+func_003959C8
+func_0051BDC8
+func_005ED6C8

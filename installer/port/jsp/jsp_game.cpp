@@ -58,6 +58,7 @@
 
 #include "ps3emu/error_codes.h"
 #include "ppu_recomp.h"     /* ppu_context, vm_base */
+#include "jsp_region.h"
 #include "jsp_lod_lifetime.h"
 #include "jsp_overlay_api.h"   /* the port overlay (toolkit patch 2517): the Training readout */
 #include "jsp_train_readout.h"
@@ -400,7 +401,7 @@ void pc_text_put(int image_id, uint32_t ea, uint32_t size)
     if (lo < base) lo = ea;
     const uint32_t hi = ea + size;
     static int exit_text = -1;
-    if (exit_text < 0) { const char* e = std::getenv("EXIT_OPTION"); exit_text = (e && e[0] == '0') ? 0 : 1; }
+    if (exit_text < 0) { const char* e = std::getenv("EXIT_OPTION"); exit_text = (!jsp_game_is_us() || (e && e[0] == '0')) ? 0 : 1; }   /* Exit Game is US only (below) */
     for (uint32_t a = lo; a + 2 <= hi; a++) {
         const uint8_t* p = vm_base + a;
         if ((p[0] != 'P' && p[0] != 'U' && p[0] != 'o') || p[1] != 0) continue;
@@ -4816,7 +4817,14 @@ extern "C" void jsp_register_game_overrides(void)
     (void)h_data_check; (void)h_create_game_data; (void)h_content_permit;
     const char* pt = std::getenv("PC_TEXT");
     if (!pt || pt[0] != '0') {
-        g_spu_put_hook_img = pc_text_put;
+        g_spu_put_hook_img = pc_text_put;   /* found by the text itself (no guest address): every disc */
+    }
+    /* Everything below reads or writes guest state at US 1.00 addresses (scene step 0x0094DEC4, the menus' cursors, Training, the
+     * Impossible CPU, the HUD size and edge smoothing's fight test, Exit Game, the menu mouse and jump). An EU build installs none of it:
+     * the game runs as on the console, with the PC wording of the save texts (above). jsp_region.h. */
+    if (!jsp_game_is_us()) {
+        std::fprintf(stderr, "[game] EU build: Exit Game, Training, Impossible Mode, menu mouse and d-pad jump, HUD size, edge smoothing, sharpening and the FPS counter are " JSP_NOT_THIS_DISC "\n");
+        return;
     }
     const char* xo = std::getenv("EXIT_OPTION");
     if (!xo || xo[0] != '0') g_exit_filter_on = true;

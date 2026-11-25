@@ -29,6 +29,7 @@
 #include <windows.h>
 #endif
 #include "ppu_recomp.h"
+#include "jsp_region.h"
 
 extern "C" uint32_t jsp_main_menu_obj(void);   // jsp_game.cpp: the main menu object while it is up, else 0
 extern "C" int jsp_main_list_open(void);       // jsp_game.cpp: the main list is up (no submenu open)
@@ -175,7 +176,9 @@ static int g_mp_trans = 0, g_mp_trans_to = 0, g_mp_trans_row = 0;   /* page chan
 static unsigned long long g_mp_trans_t = 0;
 /* on by default since 2026-11-21 (the maintainer: cleaner than the game's chain of pop-up windows); MENU_PAGES=0 gives the
  * game's own main menu */
-bool mp_on() { static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); return !(e && e[0] == '0'); }(); return on; }
+/* US only for now (jsp_region.h): the pages rewrite guest memory at US 1.00 addresses and their lift hooks are in the US lift only, so an EU
+ * build keeps the game's own one-page menu (mp_on() false: the pad filter, the texture patch and the row count leave the menu alone). */
+bool mp_on() { static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); return jsp_game_is_us() && !(e && e[0] == '0'); }(); return on; }
 int mp_page_now() { return g_mp_page; }
 bool mp_busy() { return g_mp_trans != 0 || g_ps_wait != 0; }
 /* The top page's "Port Settings" row is there only when the screen it opens is in the build (feat_port_settings.cpp,

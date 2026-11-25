@@ -43,6 +43,7 @@ extern "C" unsigned jsp_net_notice_gen(void) { return 0; }
 
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
+#include "jsp_region.h"
 #include "jsp_hook_chain.h"
 #include "jsp_overlay_api.h"
 #include "jsp_net_session.h"
@@ -143,6 +144,15 @@ void note_off(jpno::Refusal r) { g_refusal_src.store(jsp_online_source()); g_ref
 RendezvousNotice g_rdv;
 void decide_env()
 {
+    // US only for now (jsp_region.h): the session's frame hooks, the fight tick hash and the snapshot ranges sit at US 1.00 addresses. An EU
+    // build refuses a rollback start here, before anything reads the other switches, the same way resolve_env refuses one (JSP_ROLLBACK=0,
+    // JSP_NET_REFUSED=1). The game's own online is left as it is. A US build never takes this branch: its decision is unchanged.
+    if (!jsp_game_is_us() && jpno::flag_on(std::getenv(jpno::kKeyOn))) {
+        _putenv_s(jpno::kKeyOn, "0");
+        _putenv_s(jpno::kKeyRefused, "1");
+        std::fprintf(stderr, "[net] env decision: REFUSED\n[net] REFUSED: rollback netcode is " JSP_NOT_THIS_DISC "\n");
+        return;
+    }
     std::string why; jpno::Refusal code = jpno::Refusal::None;
     const jpno::Boot r = jpno::resolve_env([](const char* k) { return std::getenv(k); },
                                            [](const char* k, const char* v) { _putenv_s(k, v ? v : ""); },   // "" removes the variable on Windows

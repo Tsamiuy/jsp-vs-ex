@@ -748,7 +748,7 @@ namespace JStarsLauncher
             statsBox.CheckedChanged += delegate { SaveIfReady(); };
             p.Controls.Add(statsBox);
             // FPS_COUNTER for the game: frames per second, small, in the bottom-left corner. Same row, so the window keeps its size.
-            fpsBox = new CheckBox { Text = "FPS counter (bottom left)", Location = P(300, y), AutoSize = true, Checked = false };
+            fpsBox = new CheckBox { Text = "FPS counter (bottom left, US disc)", Location = P(300, y), AutoSize = true, Checked = false };
             fpsBox.CheckedChanged += delegate { SaveIfReady(); };
             p.Controls.Add(fpsBox);
             y += 32;
@@ -767,7 +767,7 @@ namespace JStarsLauncher
             menuBox.CheckedChanged += delegate { SaveIfReady(); };
             p.Controls.Add(menuBox);
             p.Controls.Add(new Label {
-                Text = "Off = the game's own Main Menu, and no 3v3.",
+                Text = "Off = the game's own Main Menu, and no 3v3. US disc only for now (not on the EU disc yet).",
                 Location = P(250, y + 2), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
 
@@ -793,7 +793,7 @@ namespace JStarsLauncher
             p.Controls.Add(hudBar); p.Controls.Add(hudLabel);
             y += 46;
             p.Controls.Add(new Label {
-                Text = "Shrinks the health bars and other fight HUD, from 50% to 100% (the original size).",
+                Text = "Shrinks the health bars and other fight HUD, from 50% to 100% (the original size). US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
 
@@ -810,7 +810,7 @@ namespace JStarsLauncher
             p.Controls.Add(fxFullBox);
             y += 30;
             p.Controls.Add(new Label {
-                Text = "In fights only. The HUD, text and menus stay sharp.",
+                Text = "In fights only. The HUD, text and menus stay sharp. US disc only for now (not on the EU disc yet).",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
             // ANISO for the game: sharper textures on floors and far ground. SHARPEN: a sharpen pass on the fight picture.
@@ -829,7 +829,7 @@ namespace JStarsLauncher
             p.Controls.Add(sharpBox);
             y += 30;
             p.Controls.Add(new Label {
-                Text = "Texture filtering keeps floors and far ground sharp at flat angles. Sharpening is for fights only.",
+                Text = "Texture filtering keeps floors and far ground sharp at flat angles. Sharpening is for fights only (US disc only for now).",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             return p;
         }
@@ -845,7 +845,8 @@ namespace JStarsLauncher
             p.Controls.Add(unlockBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Next start only: backs up your save first; cannot be undone except by restoring the backup.",
+                Text = "Next start only: backs up your save first; cannot be undone except by restoring the backup.\r\n" +
+                       "US disc only for now: not available on the EU disc yet (the game leaves the save as it is).",
                 Location = P(34, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             y += 34;
             p.Controls.Add(new Label {

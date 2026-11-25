@@ -20,6 +20,11 @@
 #include <tlhelp32.h>
 #endif
 #include "ppu_recomp.h"
+#include "jsp_region.h"
+// US only for now (jsp_region.h): 3v3 Free Battle sits on hooks, guest addresses and lifted functions of the US 1.00 code, so an EU build
+// compiles none of this file. Its callers (jsp_game.cpp, the other feat_*.cpp) reach it through weak symbols, which an EU build
+// leaves null: the feature is simply absent; its lift hooks are in the US lift only (firstrun.py, lift_game_hooks.json).
+#if JSP_US_CODE
 // from the rest of the port (to become the game file's small C API)
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" void ps3_indirect_call_to(ppu_context* ctx, uint32_t target);
@@ -3999,3 +4004,4 @@ float six_ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay) { re
 
 extern "C" void jsp_six_noop(ppu_context*) {}   /* the other side of hooks that only need one */
 
+#endif  // JSP_US_CODE

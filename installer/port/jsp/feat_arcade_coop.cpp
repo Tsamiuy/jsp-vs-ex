@@ -29,6 +29,11 @@
 #include <windows.h>
 #endif
 #include "ppu_recomp.h"
+#include "jsp_region.h"
+// US only for now (jsp_region.h): Arcade for 2 Players sits on hooks, guest addresses and lifted functions of the US 1.00 code, so an EU build
+// compiles none of this file. Its callers (jsp_game.cpp, the other feat_*.cpp) reach it through weak symbols, which an EU build
+// leaves null: the feature is simply absent; its lift hooks are in the US lift only (firstrun.py, lift_game_hooks.json).
+#if JSP_US_CODE
 
 extern "C" int jsp_ac_main_menu_open(void);   // jsp_game.cpp
 extern "C" int jsp_ac_on_charsel(void);       // jsp_game.cpp: Character Select is up
@@ -259,3 +264,4 @@ void arc_coop_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     if (!said) { said = true; jsp_set_two_players(1); }
     unit_takeover();
 }
+#endif  // JSP_US_CODE

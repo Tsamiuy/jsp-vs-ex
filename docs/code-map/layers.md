@@ -103,6 +103,7 @@ Startup and registration
 |---|---|
 | `main.cpp` | Entry point: guest memory reservation, ELF load, VFS / hdd0 / flash mapping, title id from PARAM.SFO, registration order, the frame-clock thread (vblank, flip, present, FIFO drain), `ppu_run` |
 | `stubs.cpp` | `ps3_load_prx_modules()` (`:46-58`) calls every `jsp_register_*` in a fixed order, which is also the hook chaining order |
+| `jsp_region.h` | Which disc the exe is lifted from: `JSP_US_CODE` (compile time, from `JSP_GAME_REGION`) and `jsp_game_is_us()` (run time). The US-only features (fixed US 1.00 addresses) are compiled out or not installed on the EU disc and log `JSP_NOT_THIS_DISC` |
 | `jsp_hook_chain.h` | `install_with()`: chains several wrappers on one guest address through `ppu_register_function` (the toolkit keeps one function per address) |
 | `jsp_hle.cpp` | HLE overrides (UCS2toUTF8, cellNetCtlGetState, BGM status, cellAudioGetPortConfig, cellGameDataCheck; `:320-328`), the thread-dump and screenshot-at-flip diagnostic threads, function tracing |
 | `jsp_jobqueue.cpp` | cellSpursJq Port2 job-queue HLE (8 NIDs, `:94-103`) |

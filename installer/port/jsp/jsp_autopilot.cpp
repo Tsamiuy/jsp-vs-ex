@@ -20,6 +20,7 @@
 #include <windows.h>        /* GetTickCount64 */
 
 #include "ppu_recomp.h"     /* vm_read32, vm_write32 */
+#include "jsp_region.h"
 
 extern "C" int (*g_ppu_icall_hook)(uint32_t target, uint64_t* gpr);                                  /* 0500 */
 extern "C" void (*g_cellpad_filter)(uint32_t port_no, uint16_t* buttons, uint16_t* lx, uint16_t* ly); /* 6501 */
@@ -202,6 +203,7 @@ extern "C" void jsp_register_autopilot_overrides(void)
      * movie, which Cross skips), so the attract demo starts by itself. menu_row -2 marks it. */
     if (const char* e = std::getenv("AUTO_MENU")) { g.menu_row = (std::strcmp(e, "title") == 0) ? -2 : std::atoi(e); g.on = true; }
     if (!g.on) return;
+    if (!jsp_game_is_us()) { g.on = false; std::fprintf(stderr, "[auto] AUTO_FIGHT / AUTO_MENU (US 1.00 addresses): " JSP_NOT_THIS_DISC "\n"); return; }
     if (g_ppu_icall_hook || g_cellpad_filter) { g.on = false; return; }
     g.t0 = GetTickCount64();
     g_ppu_icall_hook = icall;

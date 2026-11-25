@@ -756,7 +756,7 @@ namespace JStarsLauncher
             p.Controls.Add(hudBar); p.Controls.Add(hudLabel);
             y += 46;
             p.Controls.Add(new Label {
-                Text = "Shrinks the health bars and other fight HUD, from 50% to 100% (the original size).",
+                Text = "Shrinks the health bars and other fight HUD, from 50% to 100% (the original size). US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
 
@@ -773,11 +773,11 @@ namespace JStarsLauncher
             p.Controls.Add(fxFullBox);
             y += 30;
             p.Controls.Add(new Label {
-                Text = "In fights only. The HUD, text and menus stay sharp.",
+                Text = "In fights only. The HUD, text and menus stay sharp. US disc only for now (not on the EU disc yet).",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
             // FPS_COUNTER for the game: frames per second, small, in the bottom-left corner.
-            fpsBox = new CheckBox { Text = "FPS counter (bottom left)", Location = P(16, y), AutoSize = true, Checked = false };
+            fpsBox = new CheckBox { Text = "FPS counter (bottom left, US disc)", Location = P(16, y), AutoSize = true, Checked = false };
             fpsBox.CheckedChanged += delegate { SaveIfReady(); };
             p.Controls.Add(fpsBox);
             // v19: the fight HUD size, edge smoothing, full-size effects and FPS counter live in the J-Stars game code,
