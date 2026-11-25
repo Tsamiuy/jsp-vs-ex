@@ -16,8 +16,9 @@ Two passes (--region both, the default; jsp_region.h):
       fails here as it fails in a real EU build (2026-11-25: 92 errors in five files of 6ada03e); the other names are poisoned (#pragma GCC
       poison), so a source that declares a US-only function itself (a link error in the real build) fails too. The scaffold and SPU
       files run once.
-  Every port file that tests JSP_US_CODE must include jsp_region.h itself (checked first, by text): the passes run with -w, and an undefined
-  JSP_US_CODE would read as 0 and drop the US code without a word.
+  Every port file that tests JSP_US_CODE (#if, #elif, #ifdef, #ifndef) must include jsp_region.h itself, "" or <> (checked first, by text):
+  the passes run with -w, and an undefined JSP_US_CODE would read as 0 and drop the US code without a word. A file that gets jsp_region.h
+  only through another header fails this check on purpose: the include stays visible where the macro is used.
   LIMITS of the EU pass: it only sees lifted functions called BY NAME. A US address used as a number is not caught: calls through
   ps3_indirect_call_to or function_table / ppu_register_function / jsp_hook_chain at a US address, and vm_read*/vm_write* of US data
   addresses; those stay behind jsp_game_is_us() at run time and are reviewed by hand. Nor does a name on eu_lift_funcs.txt mean the same
@@ -61,8 +62,8 @@ def main():
                if ln.strip() and not ln.startswith("#")}
     # a file that tests JSP_US_CODE without jsp_region.h would compile its US code out silently under -w (an undefined macro is 0)
     no_inc = [p.name for p in sorted(port.glob("*")) if p.suffix in (".cpp", ".h", ".inc") and p.name != "jsp_region.h"
-              and re.search(r"^\s*#\s*(el)?if\b.*\bJSP_US_CODE\b", t := p.read_text(encoding="utf-8", errors="replace"), re.M)
-              and not re.search(r'^\s*#\s*include\s+"jsp_region\.h"', t, re.M)]
+              and re.search(r"^\s*#\s*(el)?if(n?def)?\b.*\bJSP_US_CODE\b", t := p.read_text(encoding="utf-8", errors="replace"), re.M)
+              and not re.search(r'^\s*#\s*include\s*["<]jsp_region\.h[">]', t, re.M)]
     for n in no_inc:
         print(f"FAIL {n}: tests JSP_US_CODE but does not include jsp_region.h")
     passes = [r for r in ("US", "EU") if a.region in (r, "both")]

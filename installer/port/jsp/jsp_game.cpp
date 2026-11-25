@@ -4839,7 +4839,9 @@ extern "C" void jsp_register_game_overrides(void)
             const bool set = o.key && jsp_setting_get(o.key, v, sizeof v) != 0;   /* no key: no switch, always on */
             /* AA_MODE is a word (off, fxaa, fxaa2, smaa): atof gives 0 for every one, so a word other than "off" counts as asked */
             const bool word = set && (v[0] < '0' || v[0] > '9') && v[0] != '-' && v[0] != '.';
-            const bool asked = o.on_by_default ? !(set && v[0] == '0')
+            /* switched off: 0, off or false in any case (no shared helper parses these; the features themselves test v[0] == '0') */
+            const bool off_word = set && (!std::strcmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "false") || v[0] == '0');
+            const bool asked = o.on_by_default ? !off_word
                                                : set && v[0] && (word ? std::strcmp(v, "off") != 0 : (float)std::atof(v) != o.neutral);
             if (asked) std::fprintf(stderr, "[game] %s%s%s%s: " JSP_NOT_THIS_DISC "\n", o.what, o.key ? " (" : "", o.key ? o.key : "", o.key ? ")" : "");
         }

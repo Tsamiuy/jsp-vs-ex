@@ -732,7 +732,11 @@ namespace JStarsLauncher
             modelDetailBox.SelectedIndex = 0;
             modelDetailBox.SelectedIndexChanged += delegate { SaveIfReady(); };
             p.Controls.Add(modelDetailBox);
-            y += 36;
+            y += 28;
+            p.Controls.Add(new Label {
+                Text = "Characters and stage models keep their detailed version further from the camera. US disc only for now.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
             p.Controls.Add(new Label { Text = "Object draw distance", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
             y += 22;
             objectDistBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(360) };
