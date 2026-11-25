@@ -52,7 +52,7 @@ J-Stars Victory VS-EX is an unofficial fan port of J-Stars Victory VS+ (PS3) to 
 
 ## Status
 
-> **Pre-release (<!-- version -->0.6.1<!-- /version -->), work in progress.** The default build is the v19 tree, built on ps3recomp v0.19.0 (installer switch `--tree current`).
+> **Pre-release (<!-- version -->0.7.0<!-- /version -->), work in progress.** The default build is the v19 tree, built on ps3recomp v0.19.0 (installer switch `--tree current`).
 
 | What | Result | Measured on |
 |---|---|---|
@@ -87,7 +87,7 @@ Linux and Steam Deck (Proton) are not supported yet. Every detail is in [docs/IN
 
 **Steps**
 
-1. Download `jsp-setup.exe` from the <!-- version -->[0.6.1 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.6.1)<!-- /version -->. A portable zip (<!-- version -->`jsp-0.6.1-portable.zip`<!-- /version -->) is there too. You now have the file.
+1. Download `jsp-setup.exe` from the <!-- version -->[0.7.0 pre-release](https://github.com/Tsamiuy/jsp-vs-ex/releases/tag/v0.7.0)<!-- /version -->. A portable zip (<!-- version -->`jsp-0.7.0-portable.zip`<!-- /version -->) is there too. You now have the file.
 2. Run `jsp-setup.exe`. The setup wizard opens. Windows may warn that the file is not code-signed. To check the download first, compare its SHA-256 with the release page: `SHA256SUMS.txt` for 0.3.0 and earlier, `SHA256SUMS` from 0.4.0 ([how](docs/INSTALL.md#check-your-download)).
 3. Point the wizard at your disc folder and at `EBOOT.elf`. It checks both and names the problem if one is wrong.
 4. Let setup finish. It builds the game on your PC, which takes a while. You see the finish page.
