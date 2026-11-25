@@ -22,7 +22,7 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 ## 2. Display and controls  🔧
 
 - ✅ Higher internal resolution (720p, 1440p, 4K), resizable window and borderless fullscreen ([details](FEATURES.md#resolution), [more](FEATURES.md#window-fullscreen))
-- ✅ Graphics options: edge smoothing, shadow quality and distance, model detail, object draw distance ([details](FEATURES.md#graphics-options))
+- ✅ Graphics options: edge smoothing, sharpening, texture filtering, shadow quality and distance, model detail, object draw distance ([details](FEATURES.md#graphics-options))
 - ✅ Smoother busy scenes on slower PCs: two-thread drawing on by default, frames shown without waiting for the monitor's vblank, and a faster 2 Players split screen ([details](FEATURES.md#two-thread-drawing), [more](FEATURES.md#present-no-vblank-wait), [and](FEATURES.md#split-screen-speed))
 - ✅ Keyboard, keyboard and mouse, or controller, each with its own bindings; a keyboard or a second controller as player 2 ([details](FEATURES.md#input-modes), [more](FEATURES.md#second-player))
 - 🔧 PlayStation pads (DualSense, DualSense Edge, DualShock 4; up to four, USB or Bluetooth) read directly; hands-on tests with real pads are pending ([details](FEATURES.md#dualsense))
@@ -38,9 +38,10 @@ The ✅ items were first checked on the earlier port on the ps3recomp v0.15 tool
 
 - ✅ **Two-page Main Menu** (on by default): the top page has Battle Modes, J-Customize, J-Point Shop, Gallery and Options; Battle Modes opens a second page with the game's battle rows plus Training Mode and Impossible Mode ([details](FEATURES.md#main-menu-pages))
 - ✅ **Training Mode** in Free Battle: a standing dummy, no KO with health refill, unlimited time ([details](FEATURES.md#training-mode))
-- 🔧 Training options: Unlimited Stamina, Free Camera and Hide HUD are in; infinite support and unlimited Victory Burst are planned ([details](FEATURES.md#training-options))
-- 📋 Two local players in Training ([details](FEATURES.md#training-2p))
-- 📋 Arcade for two players on one PC ([details](FEATURES.md#arcade-2p))
+- 🔧 Training options: a two-window menu with CPU Level and Behavior, Unlimited Stamina, Support cooldown off, Infinite Victory Burst, position resets and saved positions, Free Camera and Hide HUD ([details](FEATURES.md#training-options))
+- 🔧 Two local players in Training: the partner slots stay free and Player 1 can close Player 2's pause ([details](FEATURES.md#training-2p))
+- 🔧 Arcade for two players on one PC: a window asks 1 Player or 2 Players, Player 2 picks the partner and plays it in split screen ([details](FEATURES.md#arcade-2p))
+- 🔧 **Model Viewer on the 1 Player Character Select:** the Gallery's viewer stands where the grid was; Left and Right go through the fighters ([details](FEATURES.md#model-viewer))
 - 🔧 KO count, 1 to 5, as a match option: Free Battle has it (L1 / R1 on the Stage Select); the other modes are planned ([details](FEATURES.md#ko-count))
 - ✅ **Impossible mode** in Free Battle: a computer opponent that guards and Just Guards whenever it can, as a 2 against 1 fight (opt-in, chosen in a window when Free Battle's Character Select opens) ([details](FEATURES.md#impossible-ai))
 - ✅ **3v3 Free Battle:** a window on Free Battle's list asks for 2 vs 2 or 3 vs 3 (three fighters per team, six in the fight; with the two-page Main Menu, on by default; Free Battle only, not tried online) ([details](FEATURES.md#free-battle-3v3))

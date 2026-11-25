@@ -125,10 +125,10 @@ Nothing goes online unless you turn online play on in the Online settings (Port 
 | Keyboard, mouse or controller, with a launcher to rebind keys | [Features: Input](docs/FEATURES.md#input-modes) |
 | A two-page Main Menu (Battle Modes, J-Customize, J-Point Shop, Gallery, Options), on by default | [Features: Main Menu](docs/FEATURES.md#main-menu-pages) |
 | 3v3 Free Battle (three fighters per team, six in the fight), on by default | [Features: 3v3](docs/FEATURES.md#free-battle-3v3) |
-| Training Mode in Free Battle | [Features: Training](docs/FEATURES.md#training-mode) |
+| Training Mode in Free Battle, with a menu for CPU behaviour, position resets and more | [Features: Training](docs/FEATURES.md#training-mode) |
 | The game's own Online Battle over a self-hosted re-psn server (experimental, opt-in, newer tree) | [docs/ONLINE.md](docs/ONLINE.md) (quick start) |
 | Coming soon: online matches with rollback netcode, spectating and lobbies | [Roadmap, section 4](docs/ROADMAP.md) |
-| Coming soon: more match options (1v1, and 3v3 in other modes) and Training options | [Roadmap, section 3](docs/ROADMAP.md) |
+| Coming soon: more match options (1v1, and 3v3 in other modes) | [Roadmap, section 3](docs/ROADMAP.md) |
 
 <p align="center"><img src="assets/divider-glow.png" width="900" alt=""></p>
 
@@ -138,7 +138,7 @@ Nothing goes online unless you turn online play on in the Online settings (Port 
 - **PlayStation pads:** DualSense, DualSense Edge and DualShock 4 (v1 and v2), up to four, are read directly over USB or Bluetooth, each as its own player next to Xbox-style pads. This is marked "in progress", because it was only checked against the documented report layout, not on real pads yet. They have no rumble or lightbar.
 - **Other pads:** a pad that only works through DirectInput is not handled by the code. Use the keyboard.
 - **Player 2:** the keyboard or a second controller.
-- **Display:** the picture is 16:9 today. The window, a resolution scale, borderless fullscreen (F11) and graphics options (edge smoothing, shadows, model detail, object draw distance) are in the settings window.
+- **Display:** the picture is 16:9 today. The window, a resolution scale, borderless fullscreen (F11) and graphics options (edge smoothing, sharpening, texture filtering, shadows, model detail, object draw distance) are in the settings window.
 - **Wide monitors:** fullscreen stretches the picture to a monitor of another shape. Wide screens without stretching are planned.
 
 See [Features: Input](docs/FEATURES.md#input-modes), [PlayStation pads](docs/FEATURES.md#dualsense) and [Features: Wide screens](docs/FEATURES.md#wide-screens). Saves, updating and uninstalling: [docs/INSTALL.md](docs/INSTALL.md#saves).
