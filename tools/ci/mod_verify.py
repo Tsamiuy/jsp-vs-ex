@@ -61,9 +61,30 @@ SOURCE_EXT = {".cpp", ".h", ".c", ".cc", ".hpp", ".inc", ".patch", ".diff"}
 SOURCE_NAMES = {"cmakelists.txt"}
 SOURCE_DIRS = {"port", "installer", "third_party", "tools"}
 
-SUPPORTED = {"cpk-entry": 1, "roster": 2}                  # supported_interfaces()
+SUPPORTED = {"cpk-entry": 1, "roster": 2, "loose-file": 1}                  # supported_interfaces()
 ARCHIVE_FOLDERS = {"battle", "character", "game", "map", "progress", "sound"}   # archive_of()
-COSMETIC_PREFIXES = ("game/logo/", "movie/", "sound/")     # is_cosmetic_path()
+COSMETIC_PREFIXES = ("game/logo/", "movie/")               # is_cosmetic_path(): these, and songs sound/<LANG>/BGM_* (D40)
+
+
+def _is_cosmetic(entry):
+    if entry.startswith(COSMETIC_PREFIXES):
+        return True
+    m = re.fullmatch(r"sound/([^/]+)/(BGM_[^/]*)", entry)
+    return bool(m)
+
+
+def _loose_name_ok(path):
+    """loose_name_ok() of jsp_mods_core.h: the names the game builds for the added fighters 19, 20, 21 (matched without regard to case)."""
+    p = path.lower().split("/")
+    ids = "(?:019|020|021)"
+    if len(p) == 3 and p[0] == "sound" and re.fullmatch(r"[a-z]{2,3}", p[1]):
+        return bool(re.fullmatch(r"(?:cv|pv)_%s_[0-9][0-9]_st_%s\.(?:acb|awb)" % (ids, re.escape(p[1])), p[2]))
+    if len(p) >= 5 and p[:4] == ["progress", "game", "loading_game", "tips"]:
+        if len(p) == 5:
+            return bool(re.fullmatch(r"loading_game_tips_chara_%s_000_all_[mv]\.pak" % ids, p[4]))
+        if len(p) == 6 and re.fullmatch(r"[a-z]{2,3}", p[4]):
+            return bool(re.fullmatch(r"loading_game_tips_(?:title|mes)_chara_%s_000_%s_[mv]\.pak" % (ids, re.escape(p[4])), p[5]))
+    return False
 ROSTER_TITLE = "BLUS31519"
 ROSTER_IDS = {19, 20, 21}
 ROSTER_GRID = 56
@@ -615,7 +636,14 @@ def check_manifest(text, folder_id, files):
                     errs.append("entry %s: alias %s is in another archive (not supported)" % (e, a))
                 if "sha256" in o:
                     errs.append("entry %s: an alias takes no \"sha256\"" % e)
+                if "derived" in o:
+                    errs.append("entry %s: an alias takes no \"derived\" (it ships no bytes)" % e)
             else:
+                if "derived" in o:
+                    if not isinstance(o["derived"], bool):
+                        errs.append("entry %s: \"derived\" must be true or false" % e)
+                    elif o["derived"]:
+                        info["derived"] = True
                 h = o.get("sha256")
                 if not isinstance(f, str) or not valid_rel_path(f):
                     errs.append("entry %s: bad \"file\" path" % e)
@@ -629,6 +657,9 @@ def check_manifest(text, folder_id, files):
                     errs.append("entry %s: the SHA-256 of %s does not match the file" % (e, f))
         if ov and "cpk-entry" not in ifaces:
             errs.append("overrides need interface \"cpk-entry\"")
+    loose_paths = set()
+    if "loose" in j:
+        errs.extend(_check_loose(j["loose"], ifaces, title_ids, files, loose_paths, info))
     gr = j.get("groups")
     if "groups" in j:
         if not isinstance(gr, list):
@@ -642,8 +673,10 @@ def check_manifest(text, folder_id, files):
                 for x in g:
                     if not isinstance(x, str):
                         errs.append("a group holds a non-string")
-                    elif x not in entries:
+                    elif x not in entries and x not in loose_paths:
                         errs.append("group entry %s has no override in this mod" % x)
+                    elif (x in loose_paths) != (g[0] in loose_paths):
+                        errs.append("group entry %s: a group is either cpk entries or loose files, not both" % x)
                     elif x in grouped:
                         errs.append("entry %s is in two groups" % x)
                     else:
@@ -658,9 +691,72 @@ def check_manifest(text, folder_id, files):
         elif not all(isinstance(x, str) for x in ce):
             errs.append("\"conflicts_ok\" holds a non-string")
     # The class, as the port derives it: gameplay unless the manifest has no roster, no gameplay flag, and every entry is cosmetic.
+    info.setdefault("derived", False)
     info["gameplay"] = bool(has_roster or gameplay_flag or set(ifaces) - {"cpk-entry"} or
-                            any(not e.startswith(COSMETIC_PREFIXES) for e in entries))
+                            any(not _is_cosmetic(e) for e in entries))
     return errs, info
+
+
+def _check_loose(lo, ifaces, title_ids, files, paths, info):
+    if "loose-file" not in ifaces:
+        return ["\"loose\" needs interface \"loose-file\""]
+    errs = []
+    if ROSTER_TITLE not in title_ids:
+        errs.append("a loose-file mod needs game.title_ids to name %s and runs only on that build" % ROSTER_TITLE)
+    if not isinstance(lo, list) or not 1 <= len(lo) <= 64:
+        return errs + ["\"loose\" must be an array of 1 to 64 files"]
+    seen = set()
+    for o in lo:
+        if not isinstance(o, dict):
+            errs.append("a loose file is not an object")
+            continue
+        for k in o:
+            if k not in ("path", "file", "alias", "sha256", "derived"):
+                errs.append("loose file: unknown key \"%s\"" % k)
+        pth = o.get("path")
+        if not isinstance(pth, str) or not valid_rel_path(pth):
+            errs.append("a loose file has no valid \"path\"")
+            continue
+        if pth.split("/", 1)[0] not in ARCHIVE_FOLDERS or "/" not in pth:
+            errs.append("loose %s: its first folder names no archive folder of the game" % pth)
+        elif not _loose_name_ok(pth):
+            errs.append("loose %s: not a name the game builds for the added fighters 19, 20, 21 (voice banks CV_/PV_, loading tips)" % pth)
+        if pth.lower() in seen:
+            errs.append("loose %s is listed twice" % pth)
+        seen.add(pth.lower())
+        paths.add(pth)
+        a, f = o.get("alias"), o.get("file")
+        if ("alias" in o) == ("file" in o):
+            errs.append("loose %s: give exactly one of \"alias\" and \"file\"" % pth)
+        elif "alias" in o:
+            if not isinstance(a, str) or not valid_rel_path(a) or a.split("/", 1)[0] not in ARCHIVE_FOLDERS or "/" not in a:
+                errs.append("loose %s: bad \"alias\"" % pth)
+            if "sha256" in o:
+                errs.append("loose %s: an alias takes no \"sha256\"" % pth)
+            if "derived" in o:
+                errs.append("loose %s: an alias takes no \"derived\" (it ships no bytes)" % pth)
+        else:
+            h = o.get("sha256")
+            if not isinstance(f, str) or not valid_rel_path(f):
+                errs.append("loose %s: bad \"file\" path" % pth)
+            elif not isinstance(h, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", h):
+                errs.append("loose %s: \"file\" needs a 64-digit hex \"sha256\"" % pth)
+            elif f not in files:
+                errs.append("loose %s: the file %s is not in the mod" % (pth, f))
+            elif files[f][0] == 0:
+                errs.append("loose %s: the file %s is empty" % (pth, f))
+            elif files[f][1] != h.lower():
+                errs.append("loose %s: the SHA-256 of %s does not match the file" % (pth, f))
+            if "derived" in o:
+                if not isinstance(o["derived"], bool):
+                    errs.append("loose %s: \"derived\" must be true or false" % pth)
+                elif o["derived"]:
+                    info["derived"] = True
+    for pth in sorted(paths):   # an ACB carries its AWB's hash: the pair comes from one mod
+        for a, b in ((".acb", ".awb"), (".awb", ".acb")):
+            if pth.lower().endswith(a) and pth[:-4].lower() + b not in {x.lower() for x in paths}:
+                errs.append("loose %s: its pair %s is not in the same mod" % (pth, pth[:-4] + b))
+    return errs
 
 
 def _check_roster(r, ifaces, title_ids):
@@ -785,6 +881,8 @@ def check_zip(data, form=None):
                 add("Pasted mod.json", pasted == shipped, "" if pasted == shipped else "the pasted mod.json differs from the one in the zip")
             except (ValueError, RecursionError):
                 add("Pasted mod.json", False, "the pasted text is not valid JSON")
+            if info.get("derived"):
+                add("Derived content", True, "marked derived: it can be verified but is never put on the tested list")
             claims = form["class"].lower()
             if "cosmetic" in claims and "gameplay" not in claims and info["gameplay"]:
                 add("Kind of change", False, "the form says cosmetic, the manifest makes it gameplay")

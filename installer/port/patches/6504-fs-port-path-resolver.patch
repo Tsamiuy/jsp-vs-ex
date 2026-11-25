@@ -1,0 +1,391 @@
+Patch 6504: a title port may point a read-only cellFs open or a stat at another host file, and name the size a stat reports (g_ps3_fs_path_ops, NULL by default).
+
+New header include/ps3emu/fs_path_ops.h: a resolver, resolve(guest_path, host_path, cap, virtual_size). cellFsOpen (read-only: not
+O_WRONLY, O_RDWR, O_CREAT or O_TRUNC) and cellFsStat call it right after the guest path was translated to a host path, whether or not the
+translated file exists; the port may replace the host path in place, and for cellFsStat set the size to report (regular files). It never
+runs for writes or directory listings. With the pointer NULL: one atomic load per read-only open and per stat, nothing else changes.
+Use in J-Stars: the mods folder serves files the game opens by a name that is in no archive (voice banks and loading tips of an added
+fighter): the resolver answers with the mod's file, or with the archive a window of which is the file; the virtual-file view of patch 6502
+then serves the pinned bytes. Upstream candidate (general: "let a port answer a path with its own file"). In the J-Stars build
+sys_fs.c and libs/filesystem/cellFs.c are linked, but the cellFs imports dispatch to ppu_fs.cpp, so only it is hooked; the other two
+are not.
+Test: runtime/ppu/tests/test_fs_path_ops.cpp (tools/test_ppu_fs_path_ops.py; installer/tools/fs_vfile_test.sh runs it too): NULL by
+default, a read-only open redirected, the write, create and truncate opens never reach the resolver, the stat size override (regular
+files only), EISDIR for a resolved directory. The J-Stars glue is tested by installer/tools/mods_overlay_test.sh (with the toolkit).
+
+diff --git a/include/ps3emu/fs_path_ops.h b/include/ps3emu/fs_path_ops.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/include/ps3emu/fs_path_ops.h
+@@ -0,0 +1,46 @@
++/*
++ * ps3recomp - port path resolver for cellFs (runtime/ppu/ppu_fs.cpp).
++ *
++ * A title port may answer a guest path with a host path of its own, for a file the
++ * game opens read-only by a name that is in no archive and not (or not only) in the
++ * game tree: cellFsOpen and cellFsStat call resolve() right after the guest path has
++ * been translated to a host path. The port may replace that host path (in place) and,
++ * for cellFsStat, the size the guest sees. Use: a port that serves files a mod keeps in
++ * its own folder under the names the game asks for; paired with ps3emu/fs_vfile.h when
++ * the bytes must come from the port's own open file or a window of another file.
++ *
++ * g_ps3_fs_path_ops is NULL by default, and then nothing changes: one atomic load per
++ * read-only cellFsOpen and per cellFsStat.
++ *
++ * Contract:
++ *  - resolve(guest_path, host_path, cap, virtual_size): host_path holds the translated
++ *    host path on entry (a NUL-terminated string in a buffer of cap bytes). Return 0 to
++ *    leave it, or 1 after writing the replacement into host_path (it must fit cap).
++ *    virtual_size is NULL for cellFsOpen; for cellFsStat it points at UINT64_MAX on
++ *    entry, and the port may set the size to report (it is applied to regular files only).
++ *    It must not call back into cellFs. Called for read-only opens (not O_WRONLY, O_RDWR,
++ *    O_CREAT or O_TRUNC) and for stats by path, never for writes or directory listings.
++ *  - May be called from any guest thread.
++ */
++#ifndef PS3EMU_FS_PATH_OPS_H
++#define PS3EMU_FS_PATH_OPS_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct ps3_fs_path_ops {
++    int (*resolve)(const char* guest_path, char* host_path, size_t cap, uint64_t* virtual_size);
++} ps3_fs_path_ops;
++
++/* Defined in runtime/ppu/ppu_fs.cpp. NULL = no resolver. */
++extern const ps3_fs_path_ops* volatile g_ps3_fs_path_ops;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_FS_PATH_OPS_H */
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 1111111..2222222 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -121,6 +121,7 @@
+ #include "ps3emu/log_first.h"
+ #include "ps3emu/ps3_env_once.h"   /* ps3_env_once: each switch looked up once */
+ #include "ps3emu/fs_vfile.h"       /* patch 6502: g_ps3_fs_vfile_ops */
++#include "ps3emu/fs_path_ops.h"    /* patch 6504: g_ps3_fs_path_ops */
+ 
+ /* Host root that the PS3 mount points map into (dir containing PS3_GAME). */
+ extern "C" const char* ppu_vfs_root = ".";
+@@ -175,6 +176,13 @@
+  * translators. (extern "C" is ill-formed at block scope.) */
+ extern "C" void ps3_vfs_ps3game_fallback(char* path, size_t cap);
+ 
++/* Patch 6504: the port path resolver (ps3emu/fs_path_ops.h). NULL by default. */
++extern "C" { const ps3_fs_path_ops* volatile g_ps3_fs_path_ops = nullptr; }
++static const ps3_fs_path_ops* fs_path_provider(void)
++{
++    return __atomic_load_n(&g_ps3_fs_path_ops, __ATOMIC_ACQUIRE);
++}
++
+ /* Translate a guest path to a host path under ppu_vfs_root. Known PS3 mount
+  * prefixes are stripped; the rest is appended to the root. */
+ static void host_path(char* out, size_t cap, const char* guest)
+@@ -340,6 +348,9 @@
+     uint32_t flags  = (uint32_t)ctx->gpr[4];
+     uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
+     host_path(hpath, sizeof hpath, gpath);
++    /* Patch 6504: a read-only open may be pointed at another host file by the port's resolver (ps3emu/fs_path_ops.h). */
++    if ((flags & 0x3) == CELL_FS_O_RDONLY && !(flags & (CELL_FS_O_TRUNC | CELL_FS_O_CREAT)))
++        if (const ps3_fs_path_ops* pops = fs_path_provider()) pops->resolve(gpath, hpath, sizeof hpath, nullptr);
+ 
+     /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
+      * file and that is opened in its place. */
+@@ -813,11 +824,14 @@
+     guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
+     uint32_t sb = (uint32_t)ctx->gpr[4];
+     host_path(hpath, sizeof hpath, gpath);
++    uint64_t pops_size = UINT64_MAX;   /* patch 6504: the port resolver may also name the size to report */
++    if (const ps3_fs_path_ops* pops = fs_path_provider()) pops->resolve(gpath, hpath, sizeof hpath, &pops_size);
+     fs_stat64_t st;
+     if (FS_STAT64(hpath, &st) != 0) {
+         if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> ENOENT\n", gpath);
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
+     }
++    if (pops_size != UINT64_MAX && !(st.st_mode & S_IFDIR)) st.st_size = (decltype(st.st_size))pops_size;
+     if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> OK (size=%lld)\n", gpath, (long long)st.st_size);
+     uint32_t mode = (st.st_mode & S_IFDIR) ? (CELL_FS_S_IFDIR | 0x1FF)
+                                            : (CELL_FS_S_IFREG | 0x1B6);
+diff --git a/runtime/ppu/tests/test_fs_path_ops.cpp b/runtime/ppu/tests/test_fs_path_ops.cpp
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/runtime/ppu/tests/test_fs_path_ops.cpp
+@@ -0,0 +1,181 @@
++/*
++ * Test of patch 6504 (include/ps3emu/fs_path_ops.h, runtime/ppu/ppu_fs.cpp): the port path resolver for cellFsOpen and cellFsStat.
++ * With g_ps3_fs_path_ops NULL nothing changes. With a resolver: a read-only open is pointed at the host file it names, a stat reports
++ * the size it names (regular files only), the resolver is never called for a write, create or truncate open, a resolved directory
++ * still answers EISDIR on open, and an unresolved missing path is still ENOENT.
++ *   tools/test_ppu_fs_path_ops.py [--exe-out PATH]
++ *   test_fs_path_ops [DIR]      (DIR: scratch directory; default /tmp, or the temp dir on Windows)
++ */
++#include "../../platform/ps3_dev_flash.c"
++#include "ppu_fs.cpp"
++#include <string>
++#include <initializer_list>
++#ifdef _WIN32
++#  include <windows.h>
++#endif
++
++/* ---- link stubs: nothing on the paths this test drives calls them ---- */
++extern "C" {
++uint8_t* vm_base = nullptr;
++uint32_t ppu_vm_size = 0;
++void vm_write32(uint64_t a, uint32_t v) { uint32_t be = __builtin_bswap32(v); memcpy(vm_base + a, &be, 4); }
++void vm_write64(uint64_t a, uint64_t v) { uint64_t be = __builtin_bswap64(v); memcpy(vm_base + a, &be, 8); }
++void ppu_guest_caller(char* out, size_t n) { if (n) out[0] = 0; }
++void ps3_vfs_ps3game_fallback(char* path, size_t cap) { (void)path; (void)cap; }
++void ydkj_host_bt(const char* tag) { (void)tag; }
++void ps3_hle_register_ctx(uint32_t, const char*, void (*)(ppu_context*)) {}
++}
++ps3_guest_caller_fn g_ps3_guest_caller = nullptr;
++const char* edat_resolve(const char* host_path, char* buf, size_t cap) { (void)buf; (void)cap; return host_path; }
++
++static uint32_t rd32(uint32_t a) { uint32_t v; memcpy(&v, vm_base + a, 4); return __builtin_bswap32(v); }
++static uint64_t rd64(uint32_t a) { uint64_t v; memcpy(&v, vm_base + a, 8); return __builtin_bswap64(v); }
++
++static int fails = 0;
++#define CHECK(c, ...) do { const bool ok_ = (c); printf(ok_ ? "[PASS] " : "[FAIL] "); printf(__VA_ARGS__); \
++                           printf("\n"); if (!ok_) fails++; } while (0)
++
++
++
++enum : uint32_t { PATH = 0x100, FDP = 0x500, NP = 0x508, POSP = 0x510, STATB = 0x600, BUF = 0x1000 };
++/* ---- guest calls ---- */
++static ppu_context mk(uint64_t a = 0, uint64_t b = 0, uint64_t c = 0, uint64_t d = 0)
++{
++    ppu_context ctx; memset(&ctx, 0, sizeof ctx);
++    ctx.gpr[3] = a; ctx.gpr[4] = b; ctx.gpr[5] = c; ctx.gpr[6] = d;
++    return ctx;
++}
++static uint32_t rc_of(ppu_context& ctx) { return (uint32_t)ctx.gpr[3]; }
++static uint32_t open_guest(const char* guest, uint32_t flags, uint32_t* fd)
++{
++    strcpy((char*)vm_base + PATH, guest);
++    ppu_context ctx = mk(PATH, flags, FDP);
++    cellFsOpen(&ctx);
++    if (rc_of(ctx) == 0 && fd) *fd = rd32(FDP);
++    return rc_of(ctx);
++}
++/* -> bytes read (or ~0 on an error code); the bytes land at BUF */
++static uint64_t read_guest(uint32_t fd, uint64_t n)
++{
++    memset(vm_base + BUF, 0xEE, (size_t)n + 16);
++    ppu_context ctx = mk(fd, BUF, n, NP);
++    cellFsRead(&ctx);
++    return rc_of(ctx) == 0 ? rd64(NP) : ~0ull;
++}
++static uint64_t fstat_size(uint32_t fd)
++{
++    ppu_context ctx = mk(fd, STATB);
++    cellFsFstat(&ctx);
++    return rc_of(ctx) == 0 ? rd64(STATB + 0x24) : ~0ull;
++}
++static void close_guest(uint32_t fd) { ppu_context ctx = mk(fd); cellFsClose(&ctx); }
++/* ---- the resolver: "*redirect.bin" -> the other host file, size 777 on a stat; "*dir.bin" -> the scratch directory ---- */
++static std::string g_other, g_dir;
++static int g_calls = 0, g_calls_open = 0, g_calls_stat = 0;
++static int t_resolve(const char* guest, char* host_path, size_t cap, uint64_t* vsize)
++{
++    g_calls++; (vsize ? g_calls_stat : g_calls_open)++;
++    const size_t n = strlen(guest);
++    auto ends = [&](const char* k) { const size_t m = strlen(k); return n >= m && strcmp(guest + n - m, k) == 0; };
++    const std::string* to = ends("redirect.bin") ? &g_other : ends("dir.bin") ? &g_dir : nullptr;
++    if (!to || to->size() + 1 > cap) return 0;
++    memcpy(host_path, to->c_str(), to->size() + 1);
++    if (vsize) *vsize = 777;
++    return 1;
++}
++static const ps3_fs_path_ops POPS = { t_resolve };
++static uint32_t stat_guest(const char* guest, uint64_t* size, uint32_t* mode)
++{
++    strcpy((char*)vm_base + PATH, guest);
++    ppu_context ctx = mk(PATH, STATB);
++    cellFsStat(&ctx);
++    if (rc_of(ctx) == 0) { if (size) *size = rd64(STATB + 0x24); if (mode) *mode = rd32(STATB); }
++    return rc_of(ctx);
++}
++
++int main(int argc, char** argv)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    static uint8_t mem[0x40000];
++    vm_base = mem; ppu_vm_size = sizeof mem;
++    const char* dir = argc > 1 ? argv[1] : NULL;
++#ifdef _WIN32
++    char tmp[MAX_PATH];
++    if (!dir) { DWORD n = GetTempPathA(sizeof tmp, tmp); if (n && n < sizeof tmp) { tmp[n - 1] = 0; dir = tmp; } }
++#endif
++    if (!dir) dir = "/tmp";
++    ppu_vfs_root = dir;
++    g_dir = dir;
++
++    enum { HSIZE = 3000 };
++    static uint8_t bytes[HSIZE];
++    for (int i = 0; i < HSIZE; i++) bytes[i] = (uint8_t)('a' + (i * 5 + i / 11) % 26);
++    char plain[1100], other[1100], redir[1100];
++    snprintf(plain, sizeof plain, "%s/ps3recomp_pops_plain.bin", dir);
++    snprintf(other, sizeof other, "%s/ps3recomp_pops_other.bin", dir);
++    snprintf(redir, sizeof redir, "%s/ps3recomp_pops_redirect.bin", dir);   /* never created */
++    g_other = other;
++    for (const char* p : { plain, other }) {
++        FILE* f = fopen(p, "wb");
++        if (!f || fwrite(bytes, 1, HSIZE, f) != HSIZE) { printf("FAIL (could not write %s)\n", p); return 1; }
++        fclose(f);
++    }
++    const char* GP = "/dev_hdd1/ps3recomp_pops_plain.bin";
++    const char* GR = "/dev_hdd1/ps3recomp_pops_redirect.bin";
++    const char* GD = "/dev_hdd1/ps3recomp_pops_dir.bin";
++
++    {   /* no resolver: nothing changes */
++        uint32_t fd = 0; uint64_t sz = 0;
++        CHECK(g_ps3_fs_path_ops == nullptr, "g_ps3_fs_path_ops is NULL by default");
++        CHECK(open_guest(GP, 0, &fd) == 0 && fstat_size(fd) == HSIZE, "open without a resolver serves the host file");
++        close_guest(fd);
++        CHECK(stat_guest(GP, &sz, nullptr) == 0 && sz == HSIZE, "stat without a resolver = host size");
++        CHECK(open_guest(GR, 0, &fd) != 0, "an unresolved missing path is not found");
++        CHECK(stat_guest(GR, nullptr, nullptr) != 0, "stat of a missing path fails");
++    }
++
++    __atomic_store_n(&g_ps3_fs_path_ops, &POPS, __ATOMIC_RELEASE);
++    {   /* read-only open: pointed at the other file, whether or not the translated path exists */
++        uint32_t fd = 0;
++        CHECK(open_guest(GR, 0, &fd) == 0, "a read-only open of a path with no host file opens the resolved file (fd %u)", fd);
++        CHECK(g_calls_open == 1 && g_calls_stat == 0, "the resolver ran once, as an open (virtual_size NULL)");
++        const uint64_t n = read_guest(fd, 4096);
++        CHECK(n == HSIZE && memcmp(mem + BUF, bytes, HSIZE) == 0, "and the bytes are the resolved file's (%llu)", (unsigned long long)n);
++        close_guest(fd);
++        CHECK(open_guest(GP, 0, &fd) == 0 && g_calls == 2, "an unclaimed path is still asked (it answers 0) and keeps its host file");
++        close_guest(fd);
++    }
++    {   /* write, create and truncate opens never reach the resolver */
++        uint32_t fd = 0;
++        const int before = g_calls;
++        CHECK(open_guest(GR, CELL_FS_O_WRONLY, &fd) != 0, "O_WRONLY on the redirect path is not redirected");
++        CHECK(open_guest(GR, CELL_FS_O_RDWR, &fd) != 0, "O_RDWR is not redirected");
++        CHECK(open_guest(GR, CELL_FS_O_RDONLY | CELL_FS_O_TRUNC, &fd) != 0, "O_RDONLY|O_TRUNC is not redirected");
++        const uint32_t rc = open_guest(GR, CELL_FS_O_WRONLY | CELL_FS_O_CREAT, &fd);
++        CHECK(g_calls == before, "none of these called the resolver (%d calls)", g_calls - before);
++        if (rc == 0) close_guest(fd);
++        remove(redir);
++    }
++    {   /* stat: the resolved file's stat with the size the resolver names */
++        uint64_t sz = 0; uint32_t mode = 0;
++        const int s0 = g_calls_stat;
++        CHECK(stat_guest(GR, &sz, &mode) == 0 && sz == 777, "stat reports the size the resolver names (%llu)", (unsigned long long)sz);
++        CHECK(g_calls_stat == s0 + 1 && (mode & 0170000) == CELL_FS_S_IFREG, "asked with a size pointer; a regular file");
++        uint64_t sp = 0;
++        CHECK(stat_guest(GP, &sp, nullptr) == 0 && sp == HSIZE, "an unclaimed path keeps its host size");
++    }
++    {   /* a resolved directory: EISDIR on open, no size override on stat */
++        uint32_t fd = 0; uint64_t sz = 123; uint32_t mode = 0;
++        CHECK(open_guest(GD, 0, &fd) == (uint32_t)CELL_FS_EISDIR, "a read-only open resolved to a directory answers EISDIR");
++        CHECK(stat_guest(GD, &sz, &mode) == 0 && (mode & 0170000) == CELL_FS_S_IFDIR && sz != 777, "stat of a resolved directory is a directory and is not resized");
++    }
++    __atomic_store_n(&g_ps3_fs_path_ops, (const ps3_fs_path_ops*)nullptr, __ATOMIC_RELEASE);
++    {
++        uint32_t fd = 0; const int before = g_calls;
++        CHECK(open_guest(GR, 0, &fd) != 0 && g_calls == before, "after clearing the pointer the resolver is not called and the open fails again");
++    }
++    remove(plain);
++    remove(other);
++    printf("%s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
++    return fails ? 1 : 0;
++}
+diff --git a/tools/test_ppu_fs_path_ops.py b/tools/test_ppu_fs_path_ops.py
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/tools/test_ppu_fs_path_ops.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++"""Port path resolver for cellFs (include/ps3emu/fs_path_ops.h, runtime/ppu/ppu_fs.cpp), patch 6504.
++
++With g_ps3_fs_path_ops NULL nothing changes. With a resolver set: a read-only cellFsOpen is pointed at the host file it names,
++cellFsStat reports the size it names (regular files only), write, create and truncate opens never call it, a resolved directory
++answers EISDIR on open. This builds runtime/ppu/tests/test_fs_path_ops.cpp (which includes ppu_fs.cpp) against a ppu_recomp.h made
++from the lifter's own HEADER_PREAMBLE and runs it.
++
++It needs a host C++ compiler (under CI=1 a missing one fails instead of skipping).
++
++Usage:
++    python3 tools/test_ppu_fs_path_ops.py [--exe-out PATH] [--build-only]
++"""
++
++import argparse
++import importlib.util
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++
++TOOLS = os.path.dirname(os.path.abspath(__file__))
++ROOT = os.path.dirname(TOOLS)
++FIXTURE = os.path.join(ROOT, "runtime", "ppu", "tests", "test_fs_path_ops.cpp")
++INCLUDE_DIRS = ["include", "runtime/ppu", "runtime/memory", "runtime", "libs", "."]
++
++
++def _cxx():
++    return (shutil.which(os.environ.get("CXX", "c++")) or shutil.which("g++")
++            or shutil.which("clang++"))
++
++
++def _stub_header():
++    spec = importlib.util.spec_from_file_location(
++        "ppu_lifter", os.path.join(TOOLS, "ppu_lifter.py"))
++    lifter = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(lifter)
++    return lifter.HEADER_PREAMBLE
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--exe-out", help="keep the built test program at this path")
++    ap.add_argument("--build-only", action="store_true",
++                    help="build (for another machine, e.g. a Windows target) and stop")
++    args = ap.parse_args()
++
++    cxx = _cxx()
++    if cxx is None:
++        if os.environ.get("CI"):
++            print("FAIL: no C++ compiler found")
++            return 1
++        print("skip test_ppu_fs_path_ops: no C++ compiler")
++        return 0
++    with tempfile.TemporaryDirectory() as td:
++        with open(os.path.join(td, "ppu_recomp.h"), "w") as fh:
++            fh.write(_stub_header())
++        exe = args.exe_out or os.path.join(td, "test_fs_path_ops")
++        cmd = [cxx, "-std=gnu++17", "-w", "-I" + td]
++        cmd += ["-I" + os.path.join(ROOT, d) for d in INCLUDE_DIRS]
++        cmd += ["-o", exe, FIXTURE]
++        if "mingw" in os.path.basename(cxx):
++            cmd += ["-static"]
++        r = subprocess.run(cmd, capture_output=True, text=True)
++        if r.returncode != 0:
++            print("FAIL: fixture did not build")
++            print((r.stdout + r.stderr)[-4000:])
++            return 1
++        if args.build_only:
++            print(f"built {exe}")
++            return 0
++        r = subprocess.run([exe, td], capture_output=True, text=True)
++        sys.stdout.write(r.stdout)
++        sys.stderr.write(r.stderr)
++        return r.returncode
++
++
++if __name__ == "__main__":
++    sys.exit(main())
