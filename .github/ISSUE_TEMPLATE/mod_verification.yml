@@ -54,7 +54,7 @@ body:
     attributes:
       label: Kind of change
       options:
-        - Cosmetic only (logos, movies, sound)
+        - Cosmetic only (logos, movies, songs)
         - Gameplay
         - Gameplay and cosmetic
     validations:

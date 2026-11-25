@@ -78,8 +78,10 @@ Every gameplay option in a match is the same for all players; ranked uses one fi
 - 📋 **Colour palettes** for characters, made on your PC from your own game's textures (for example Super Saiyan Blue
   for Goku and Vegeta, Kurama mode for Naruto); packs made by other people stay outside this repository
   ([details](FEATURES.md#colour-palettes))
-- 📋 **Modding:** a mods folder for textures, HUDs, music and data, and export tools for models and scenes that run on
-  your PC from your own copy ([details](FEATURES.md#modding))
+- 🔧 **Modding:** the mods folder and its loader are built (file overrides, and on the US disc added fighters with
+  their voice banks and loading tips; standard in [MODS.md](MODS.md)); planned: textures, HUDs, music and balance,
+  online mod sync, and export tools for models and scenes that run on your PC from your own copy
+  ([details](FEATURES.md#modding))
 
 ## Platforms
 
