@@ -82,3 +82,5 @@ body:
           required: true
         - label: The mod does not edit the port's source
           required: true
+        - label: Everything in this mod is my own work, or I have permission to share it, and none of it comes from the game files
+          required: true

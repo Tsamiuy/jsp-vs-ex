@@ -22,4 +22,4 @@ Open pull requests or issues that touch the same files, or "none" after checking
 
 ## Tested mods list
 
-Only for a pull request that adds an entry to `mods/tested.json`: link the verification issue, and say that a maintainer played the mod (release and region).
+Only for a pull request that adds an entry to `mods/tested.json`: link the verification issue, and say that a maintainer played the mod (release and region), and that the mod is its author's own work (`content` is `own-work`).

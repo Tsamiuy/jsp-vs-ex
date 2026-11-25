@@ -4,6 +4,7 @@
 Run: python3 -I tools/ci/test_mod_verify.py
 """
 import hashlib
+import tempfile
 import warnings
 import importlib.util
 import io
@@ -76,8 +77,8 @@ def body(mid="tiny-logo", link="https://example.invalid/m.zip", man=None, cls="C
     return ("### Mod id\n\n%s\n\n### Mod name\n\nTiny logo\n\n### Mod version\n\n1.0\n\n### Author\n\nsomeone\n\n"
             "### Download link\n\n%s\n\n### mod.json\n\n```json\n%s\n```\n\n### Kind of change\n\n%s\n\n"
             "### What the mod changes\n\nthe intro logo\n\n### Game version and region tested\n\nUS BLUS31519\n\n"
-            "### Confirmation\n\n- [%s] no game files\n- [%s] port source not edited\n"
-            % (mid, link, json.dumps(man, indent=2), cls, ticks, ticks))
+            "### Confirmation\n\n- [%s] no game files\n- [%s] port source not edited\n- [%s] own work\n"
+            % (mid, link, json.dumps(man, indent=2), cls, ticks, ticks, ticks))
 
 
 # ---- form parsing
@@ -258,6 +259,7 @@ c = mv.render(mv.parse_form(body(man=manifest(overrides=ov))), rows, fls, digest
 check("comment note", mv.NOTE in c)
 check("comment hash", digest in c)
 check("comment files", "`files/a.bin`, 10 B" in c and "`mod.json`" in c)
+check("comment link and download hash", "Link checked: `https://example.invalid/m.zip`" in c and "SHA-256 " + hashlib.sha256(Z).hexdigest() in c)
 check("comment table", "| Manifest | pass |" in c and c.startswith("## Mod check: all automated checks passed"))
 rows, fls, digest, _ = run(b"nope")
 c = mv.render(mv.parse_form(body()), rows, fls, digest)
@@ -275,19 +277,111 @@ c = mv.render(mv.parse_form(body()), rows, fls, digest)
 check("comment file list capped", "and 101 more" in c and len(c) < mv.MAX_COMMENT)
 
 # ---- main(): ISSUE_BODY through env, an out file, no other input
-import tempfile
 with tempfile.TemporaryDirectory() as d:
     out = pathlib.Path(d) / "c.md"
     rc = mv.main(["--out", str(out)], fetcher=lambda u: Z, env={"ISSUE_BODY": body(man=manifest(overrides=ov))})
     check("main writes comment", rc == 0 and mv.NOTE in out.read_text(encoding="utf-8"))
     check("main no body", mv.main(["--out", str(out)], env={}) == 2)
 
+# ---- round 2: manifest parity with the port
+for key in ("overrides", "groups", "conflicts_ok"):
+    check("manifest null " + key, mf(dict(manifest(), **{key: None}))[0])
+check("manifest alias null with file", mf(manifest(overrides=[{"entry": "game/a", "alias": None, "file": "files/a.bin", "sha256": sha(good_file)}]))[0])
+check("manifest file null with alias", mf(manifest(overrides=[{"entry": "game/a", "alias": "game/b", "file": None}]))[0])
+check("manifest alias sha null", mf(manifest(overrides=[{"entry": "game/a", "alias": "game/b", "sha256": None}]))[0])
+check("manifest surrogate", mv.check_manifest(json.dumps(manifest()).replace("Tiny logo", "\\ud800"), "tiny-logo", {})[0])
+check("manifest escaped backslash before u is not a surrogate", not mv.check_manifest(json.dumps(manifest(title="\\ud800")), "tiny-logo", {})[0])
+check("manifest real utf-8 title ok", not mv.check_manifest(json.dumps(manifest(title="\u00e9"), ensure_ascii=False), "tiny-logo", {})[0])
+deep = "[" * 40 + "]" * 40
+check("manifest too deep", mv.check_manifest(json.dumps(manifest())[:-1] + ', "x": ' + deep + "}", "tiny-logo", {})[0])
+check("manifest very deep (recursion)", mv.check_manifest(json.dumps(manifest())[:-1] + ', "x": ' + "[" * 5000 + "]" * 5000 + "}", "tiny-logo", {})[0])
+d32 = "[" * 32 + "]" * 32
+check("manifest depth 32 ok", not mv.check_manifest(json.dumps(manifest())[:-1] + ', "x": ' + d32 + "}", "tiny-logo", {})[0])
+check("manifest version 40 bytes ok", not mf(manifest(version="a" * 40))[0])
+check("manifest version 21 two-byte chars", mf(manifest(version="\u00e9" * 21))[0])
+check("manifest version 41", mf(manifest(version="a" * 41))[0])
+R = {"roster": 1}
+ra = lambda fighters, **kw: mf(manifest(interfaces=R, roster={"fighters": fighters}, **kw))[0]
+check("roster repeated id", ra([{"id": 19}, {"id": 19}]))
+check("roster after stock id ok", not ra([{"id": 19, "after": 32}]))
+check("roster after unknown id", ra([{"id": 19, "after": 100}]))
+check("roster after earlier fighter ok", not ra([{"id": 19}, {"id": 20, "after": 19}]))
+check("roster after later fighter", ra([{"id": 20, "after": 19}, {"id": 19}]))
+check("alias in another archive", mf(manifest(overrides=[{"entry": "game/a", "alias": "battle/b"}]))[0])
+check("alias same archive ok", not mf(manifest(overrides=[{"entry": "game/a", "alias": "game/b"}]))[0])
+check("alias in no archive", mf(manifest(overrides=[{"entry": "game/a", "alias": "zzz/b"}]))[0])
+check("empty override file", mf(manifest(overrides=[{"entry": "game/a", "file": "files/e", "sha256": sha(b"")}]), files={"files/e": (0, sha(b""))})[0])
+check("roster interface alone is gameplay", mf(manifest(interfaces={"cpk-entry": 1, "roster": 1}, overrides=ov))[1]["gameplay"] is True)
+check("bom accepted", all(r[1] for r in mv.check_zip(make_zip({"mod.json": b"\xef\xbb\xbf" + json.dumps(manifest()).encode(), "a": b"1"}))[0]))
+
+# ---- round 2: zip
+Zm = lambda **kw: make_zip({"mod.json": M, "files/a": b"1", **kw})
+r = mv.check_zip(make_zip(E, prefix="other/"), mv.parse_form(body()))[0]
+check("top folder must be the mod id", any(x[0] == "Layout" and not x[1] for x in r))
+r = mv.check_zip(make_zip(E, prefix="tiny-logo/"), mv.parse_form(body()))[0]
+check("top folder equal to the id ok", all(x[1] for x in r if x[0] == "Layout"))
+r = mv.check_zip(make_zip(E, prefix="other/"))[0]
+check("local mode top folder must be the manifest id", any(x[0] == "Manifest" and not x[1] for x in r))
+nulzip = make_zip({"mod.json": M, "files/aXb": b"1"}).replace(b"files/aXb", b"files/a\x00b")
+check("NUL in a name", any("NUL" in t for _, t in problems(nulzip)), str(problems(nulzip)))
+def noflag(data):
+    b = bytearray(data)
+    for sig, off in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        i = b.find(sig)
+        while i != -1:
+            fl = struct.unpack_from("<H", b, i + off)[0]
+            struct.pack_into("<H", b, i + off, fl & ~0x800)
+            i = b.find(sig, i + 4)
+    return bytes(b)
+check("non-ASCII name with the UTF-8 flag ok", not problems(make_zip({"mod.json": M, "files/\u00e9.txt": b"1"})))
+check("non-ASCII name without the flag", any("non-ASCII" in t for _, t in problems(noflag(make_zip({"mod.json": M, "files/\u00e9.txt": b"1"})))))
+check("file is also a folder", any("also a folder" in t for _, t in problems(make_zip({"mod.json": M, "files": b"1", "files/a": b"2"}))))
+check("casefold clash", any("case" in t for _, t in problems(make_zip({"mod.json": M, "stra\u00dfe": b"1", "STRASSE": b"2"}))))
+for ext in (".asi", ".js", ".hta", ".wsf", ".cpl", ".reg", ".pif", ".vbe", ".jse", ".sys", ".ocx", ".msix", ".appx", ".zip", ".7z", ".rar"):
+    check("type " + ext, mv.refused_type("files/a" + ext))
+for magic in (b"MZ\x90", b"\x7fELF", b"#!/bin/sh", b"PK\x03\x04zz"):
+    sc = mv.scan_zip(make_zip({"mod.json": M, "files/blob.dat": magic}))
+    check("sniff %r" % magic, "files/blob.dat" in sc.sniffed)
+    r = mv.check_zip(make_zip({"mod.json": M, "files/blob.dat": magic}))[0]
+    check("sniff row %r" % magic, any(x[0] == "File types" and not x[1] for x in r))
+check("sniff plain data ok", not mv.scan_zip(make_zip({"mod.json": M, "files/blob.dat": b"CPK \x00"})).sniffed)
+for bad in ("https://[::1", "https://exa mple.com/\udcff", "https://" + "a" * 300 + ".com/"):
+    try:
+        mv.check_url(bad)
+        check("check_url bad " + bad[:12], False)
+    except mv.Refused:
+        pass
+try:
+    socket.getaddrinfo = lambda *a, **k: (_ for _ in ()).throw(UnicodeError("idna"))
+    mv.check_url("https://example.test/")
+    check("check_url unicode error", False)
+except mv.Refused:
+    pass
+finally:
+    socket.getaddrinfo = real
+def boom(url):
+    raise RuntimeError("x")
+with tempfile.TemporaryDirectory() as d:
+    out = pathlib.Path(d) / "c.md"
+    mv.main(["--out", str(out)], fetcher=boom, env={"ISSUE_BODY": body()})
+    check("a comment is always written", "problems found" in out.read_text(encoding="utf-8") and mv.NOTE in out.read_text(encoding="utf-8"))
+    zp = pathlib.Path(d) / "m.zip"
+    zp.write_bytes(Zm())
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = mv.main(["--zip", str(zp)])
+    check("local mode", rc == 0 and hashlib.sha256(zp.read_bytes()).hexdigest() in buf.getvalue() and "Canonical mod hash" in buf.getvalue(), buf.getvalue()[:300])
+    check("local mode missing file", mv.main(["--zip", str(zp) + "x"]) == 2)
+
 # ---- the tested list validator
 H = "a" * 64
-ent = {"id": "tiny-logo", "name": "Tiny logo", "version": "1.0", "sha256": H, "tested_on": "0.6.1", "notes": ""}
+ent = {"id": "tiny-logo", "name": "Tiny logo", "version": "1.0", "sha256": H, "tested_on": "0.6.1", "content": "own-work", "notes": ""}
 check("tested empty ok", not tm.check({"schema": 1, "mods": []}))
 check("tested one ok", not tm.check({"schema": 1, "mods": [ent]}))
 check("tested repo file ok", not tm.check(json.loads((HERE.parent.parent / "mods" / "tested.json").read_text(encoding="utf-8"))))
+check("tested content other", tm.check({"schema": 1, "mods": [dict(ent, content="game-derived")]}))
+check("tested content missing", tm.check({"schema": 1, "mods": [{k: v for k, v in ent.items() if k != "content"}]}))
 check("tested bad schema", tm.check({"schema": 2, "mods": []}))
 check("tested bad hash", tm.check({"schema": 1, "mods": [dict(ent, sha256="A" * 64)]}))
 check("tested bad release", tm.check({"schema": 1, "mods": [dict(ent, tested_on="v1")]}))

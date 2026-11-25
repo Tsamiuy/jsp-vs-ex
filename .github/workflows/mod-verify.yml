@@ -2,27 +2,32 @@ name: mod-verify
 
 # Automated checks for a mod verification issue (.github/ISSUE_TEMPLATE/mod_verification.yml).
 # It starts only when a maintainer adds the label `mod-check` to such an issue: never when the issue is opened or edited.
-# The mod's zip is downloaded and read as data by tools/ci/mod_verify.py (Python standard library): nothing in it is run,
-# imported or built, and it is not unpacked to disk, uploaded or cached. The script comes from the default branch.
-# No secrets are used. The only token is the automatic one of this run, with the permissions below.
+# Two jobs, each with the least permission it needs:
+#   check:   downloads the mod's zip and reads it as data with tools/ci/mod_verify.py (Python standard library). Nothing in it is
+#            run, imported or built, and it is not unpacked to disk, uploaded or cached. It can only read contents, and it hands
+#            on one thing: the text of the comment (base64, no mod file).
+#   comment: posts that text as one comment. It runs no mod code and checks out nothing.
+# The script comes from the default branch. No secrets are used. The only token is the automatic one of this run.
 
 on:
   issues:
     types: [labeled]
 
-permissions:
-  contents: read    # to read tools/ci/mod_verify.py from the default branch
-  issues: write     # posts one result comment on the issue
+permissions: {}
 
 concurrency:
   group: mod-verify-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
-  verify:
+  check:
     if: github.event.label.name == 'mod-check' && contains(github.event.issue.labels.*.name, 'mod-verification')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read    # to read tools/ci/mod_verify.py from the default branch
+    outputs:
+      comment: ${{ steps.run.outputs.comment }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -30,14 +35,27 @@ jobs:
           sparse-checkout: tools/ci/mod_verify.py
           sparse-checkout-cone-mode: false
 
-      - name: Check the mod and write the comment
+      - name: Check the mod and write the comment text
+        id: run
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
-        run: python3 -I tools/ci/mod_verify.py --out "$RUNNER_TEMP/mod-check.md"
+        run: |
+          python3 -I tools/ci/mod_verify.py --out "$RUNNER_TEMP/mod-check.md"
+          echo "comment=$(base64 -w0 "$RUNNER_TEMP/mod-check.md")" >> "$GITHUB_OUTPUT"
 
+  comment:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write     # posts one result comment on the issue
+    steps:
       - name: Post the result comment
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-        run: gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/mod-check.md"
+          COMMENT_B64: ${{ needs.check.outputs.comment }}
+        run: |
+          printf '%s' "$COMMENT_B64" | base64 -d > "$RUNNER_TEMP/comment.md"
+          gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/comment.md"

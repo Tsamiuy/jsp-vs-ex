@@ -13,6 +13,7 @@ The canonical mod hash is specified in docs/MODS.md ("Canonical mod hash"); cano
 """
 import argparse
 import hashlib
+import http.client
 import io
 import ipaddress
 import json
@@ -34,13 +35,18 @@ MAX_ENTRIES = 2000                    # entries in the archive
 MAX_FILE = 300 * 1024 * 1024          # one file
 MAX_MANIFEST = 256 * 1024             # mod.json
 MAX_REDIRECTS = 5
+MAX_JSON_DEPTH = 32                   # parse_manifest: value(depth) fails above 32
+READ_BLOCK = 64 * 1024                # download reads: the deadline is checked after each
 TIMEOUT = 30                          # seconds for each connect or read
 DEADLINE = 300                        # seconds for the whole download
 MAX_LISTED = 200                      # files named in the comment
 MAX_COMMENT = 60000                   # GitHub's limit is 65536
 
 REFUSED_EXT = {".exe", ".dll", ".bat", ".cmd", ".ps1", ".py", ".sh", ".so",
-               ".msi", ".com", ".scr", ".vbs", ".jar", ".dylib", ".lnk", ".pyc"}
+               ".msi", ".com", ".scr", ".vbs", ".jar", ".dylib", ".lnk", ".pyc",
+               ".asi", ".js", ".hta", ".wsf", ".cpl", ".reg", ".pif", ".vbe", ".jse", ".sys", ".ocx", ".msix", ".appx",
+               ".zip", ".7z", ".rar"}   # the last three: a nested archive hides its files from the checks
+SNIFF = ((b"MZ", "a Windows program"), (b"\x7fELF", "a Linux program"), (b"#!", "a script"), (b"PK\x03\x04", "a nested zip"))
 SOURCE_EXT = {".cpp", ".h", ".c", ".cc", ".hpp", ".inc", ".patch", ".diff"}
 SOURCE_NAMES = {"cmakelists.txt"}
 SOURCE_DIRS = {"port", "installer", "third_party", "tools"}
@@ -66,7 +72,7 @@ FORM_FIELDS = [   # (key, label) in the order of mod_verification.yml
     ("game", "Game version and region tested"),
     ("rights", "Confirmation"),
 ]
-RIGHTS_BOXES = 2
+RIGHTS_BOXES = 3
 
 
 # ---- the issue form -------------------------------------------------------------------------------------------------------
@@ -114,6 +120,15 @@ class Refused(Exception):
 
 def check_url(url):
     """HTTPS only, no credentials, port 443, a host that resolves to public addresses only."""
+    try:
+        return _check_url(url)
+    except Refused:
+        raise
+    except (ValueError, UnicodeError, OSError):   # a bad address, a name that cannot be encoded, a resolver error
+        raise Refused("the link cannot be used")
+
+
+def _check_url(url):
     u = urllib.parse.urlsplit(url.strip())
     if u.scheme != "https":
         raise Refused("the link is not HTTPS")
@@ -130,7 +145,7 @@ def check_url(url):
         raise Refused("the link has no host")
     try:
         infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except OSError:
+    except (OSError, UnicodeError):
         raise Refused("the host name does not resolve")
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
@@ -164,7 +179,7 @@ def fetch(url, max_bytes=MAX_DOWNLOAD, timeout=TIMEOUT, deadline=DEADLINE):
                 raise Refused("the download is larger than %d MB" % (max_bytes >> 20))
             chunks, total = [], 0
             while True:
-                block = r.read(1 << 20)
+                block = r.read(READ_BLOCK)
                 if not block:
                     break
                 total += len(block)
@@ -176,6 +191,8 @@ def fetch(url, max_bytes=MAX_DOWNLOAD, timeout=TIMEOUT, deadline=DEADLINE):
             return b"".join(chunks)
     except Refused:
         raise
+    except http.client.HTTPException as e:
+        raise Refused("the server's answer was malformed (%s)" % type(e).__name__)
     except urllib.error.HTTPError as e:
         raise Refused("the server answered HTTP %d" % e.code)
     except (urllib.error.URLError, OSError, ValueError) as e:
@@ -227,6 +244,7 @@ class Scan:
         self.problems = []      # (check name, text)
         self.root = ""          # "" or "folder/"
         self.manifest_bytes = None
+        self.sniffed = {}       # path -> what its first bytes say it is (a program, a script, a zip)
 
 
 def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=MAX_FILE):
@@ -248,6 +266,12 @@ def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=
     names = []
     for i in infos:
         n = i.filename
+        if "\0" in i.orig_filename or "\0" in n:
+            s.problems.append(("Paths", "a name with a NUL byte"))
+            continue
+        if not n.isascii() and not i.flag_bits & 0x800:
+            s.problems.append(("Paths", "a non-ASCII name that is not marked UTF-8: %s" % n))
+            continue
         isdir = n.endswith("/")
         raw = n.rstrip("/")
         mode = i.external_attr >> 16
@@ -277,9 +301,16 @@ def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=
         if raw in seen:
             s.problems.append(("Paths", "the same path twice: %s" % raw))
         seen.add(raw)
-        if raw.lower() in lowseen and lowseen[raw.lower()] != raw:
-            s.problems.append(("Paths", "two paths that differ only in case: %s, %s" % (lowseen[raw.lower()], raw)))
-        lowseen[raw.lower()] = raw
+        key = raw.casefold()
+        if key in lowseen and lowseen[key] != raw:
+            s.problems.append(("Paths", "two paths that differ only in case: %s, %s" % (lowseen[key], raw)))
+        lowseen[key] = raw
+    for key, raw in lowseen.items():     # a file whose path is also a folder of another file
+        parts = key.split("/")
+        for k in range(1, len(parts)):
+            if "/".join(parts[:k]) in lowseen:
+                s.problems.append(("Paths", "a file is also a folder: %s" % lowseen["/".join(parts[:k])]))
+                break
     # The mod root: the folder that holds mod.json, either the archive root or the one top-level folder.
     top = {raw.split("/", 1)[0] for raw, _ in names}
     if "mod.json" in seen:
@@ -306,6 +337,10 @@ def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=
                     block = f.read(1 << 20)
                     if not block:
                         break
+                    if got == 0:
+                        for magic, what in SNIFF:
+                            if block.startswith(magic):
+                                s.sniffed[rel] = what
                     got += len(block)
                     total += len(block)
                     if got > max_file or total > max_unpacked:
@@ -342,6 +377,12 @@ def canonical_hash(files):
 
 # ---- the manifest ------------------------------------------------------------------------------------------------------
 
+def _archive_of(entry):
+    """archive_of() in jsp_mods_core.h: the archive folder of an entry, or '' when it names none."""
+    f, sep, _ = entry.partition("/")
+    return f if sep and f in ARCHIVE_FOLDERS else ""
+
+
 def valid_id(s):
     return isinstance(s, str) and re.fullmatch(r"[a-z0-9-]{1,40}", s) is not None
 
@@ -359,14 +400,36 @@ def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
 
 
+def _surrogate_escape(text):
+    """True when the raw JSON text has a \\uD800-\\uDFFF escape (the port's parser refuses them). Pairs of backslashes are skipped."""
+    for m in re.finditer(r"\\(?:u([0-9a-fA-F]{4})|.)", text, re.S):
+        if m.group(1) and 0xD800 <= int(m.group(1), 16) <= 0xDFFF:
+            return True
+    return False
+
+
+def _too_deep(v, depth=0):
+    """The port's parser refuses a value at depth above MAX_JSON_DEPTH (the top value is depth 0)."""
+    if depth > MAX_JSON_DEPTH:
+        return True
+    kids = v.values() if isinstance(v, dict) else v if isinstance(v, list) else ()
+    return any(_too_deep(k, depth + 1) for k in kids)
+
+
 def check_manifest(text, folder_id, files):
     """Manifest schema 1, as parse_manifest() in jsp_mods_core.h. Returns (errors, info) with info =
     {id, version, title, gameplay (derived class)}. `files` is {relative path: (size, sha256)} of the archive."""
     errs = []
+    if _surrogate_escape(text):
+        return ["mod.json has a surrogate \\u escape, which the port does not support"], None
     try:
         j = json.loads(text, object_pairs_hook=_pairs, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+    except RecursionError:
+        return ["mod.json is nested deeper than %d levels" % MAX_JSON_DEPTH], None
     except ValueError as e:
         return ["mod.json is not valid JSON (%s)" % str(e)[:80]], None
+    if _too_deep(j):
+        return ["mod.json is nested deeper than %d levels" % MAX_JSON_DEPTH], None
     if not isinstance(j, dict):
         return ["mod.json is not an object"], None
     info = {"id": j.get("id"), "version": j.get("version"), "title": j.get("title"), "gameplay": True}
@@ -380,8 +443,8 @@ def check_manifest(text, folder_id, files):
     elif folder_id and mid != folder_id:
         errs.append("\"id\" is not the id in the form")
     ver = j.get("version")
-    if not isinstance(ver, str) or not 1 <= len(ver) <= 40:
-        errs.append("\"version\" must be a string of 1-40 characters")
+    if not isinstance(ver, str) or not 1 <= len(ver.encode("utf-8")) <= 40:
+        errs.append("\"version\" must be a string of 1-40 bytes")
     elif any(ord(c) <= 0x20 or ord(c) == 0x7F for c in ver):
         errs.append("\"version\" may not contain spaces or control characters")
     if "title" in j and not isinstance(j["title"], str):
@@ -421,7 +484,7 @@ def check_manifest(text, folder_id, files):
             gameplay_flag = j["gameplay"]
     entries = []
     ov = j.get("overrides")
-    if ov is not None:
+    if "overrides" in j:
         if not isinstance(ov, list):
             errs.append("\"overrides\" must be an array")
             ov = []
@@ -441,11 +504,13 @@ def check_manifest(text, folder_id, files):
             seen.add(e)
             entries.append(e)
             a, f = o.get("alias"), o.get("file")
-            if (a is None) == (f is None):
+            if ("alias" in o) == ("file" in o):
                 errs.append("entry %s: give exactly one of \"alias\" and \"file\"" % e)
-            elif a is not None:
+            elif "alias" in o:
                 if not isinstance(a, str) or not valid_rel_path(a):
                     errs.append("entry %s: bad \"alias\"" % e)
+                elif _archive_of(a) != _archive_of(e):
+                    errs.append("entry %s: alias %s is in another archive (not supported)" % (e, a))
                 if "sha256" in o:
                     errs.append("entry %s: an alias takes no \"sha256\"" % e)
             else:
@@ -456,12 +521,14 @@ def check_manifest(text, folder_id, files):
                     errs.append("entry %s: \"file\" needs a 64-digit hex \"sha256\"" % e)
                 elif f not in files:
                     errs.append("entry %s: the file %s is not in the mod" % (e, f))
+                elif files[f][0] == 0:
+                    errs.append("entry %s: the replacement file %s is empty" % (e, f))
                 elif files[f][1] != h.lower():
                     errs.append("entry %s: the SHA-256 of %s does not match the file" % (e, f))
         if ov and "cpk-entry" not in ifaces:
             errs.append("overrides need interface \"cpk-entry\"")
     gr = j.get("groups")
-    if gr is not None:
+    if "groups" in j:
         if not isinstance(gr, list):
             errs.append("\"groups\" must be an array of arrays")
         else:
@@ -483,13 +550,14 @@ def check_manifest(text, folder_id, files):
     if has_roster:
         errs.extend(_check_roster(j["roster"], ifaces, title_ids))
     ce = j.get("conflicts_ok")
-    if ce is not None:
+    if "conflicts_ok" in j:
         if not isinstance(ce, list):
             errs.append("\"conflicts_ok\" must be an array of ids")
         elif not all(isinstance(x, str) for x in ce):
             errs.append("\"conflicts_ok\" holds a non-string")
     # The class, as the port derives it: gameplay unless the manifest has no roster, no gameplay flag, and every entry is cosmetic.
-    info["gameplay"] = bool(has_roster or gameplay_flag or any(not e.startswith(COSMETIC_PREFIXES) for e in entries))
+    info["gameplay"] = bool(has_roster or gameplay_flag or set(ifaces) - {"cpk-entry"} or
+                            any(not e.startswith(COSMETIC_PREFIXES) for e in entries))
     return errs, info
 
 
@@ -507,6 +575,7 @@ def _check_roster(r, ifaces, title_ids):
     fl = r.get("fighters")
     if not isinstance(fl, list) or not fl or len(fl) > ROSTER_GRID:
         return errs + ["roster.fighters must be a non-empty array"]
+    have = set(STOCK_ROSTER)    # the stock list, then this mod's fighters in order (an earlier mod's are not known here)
     for o in fl:
         if not isinstance(o, dict):
             errs.append("a roster fighter is not an object")
@@ -516,12 +585,18 @@ def _check_roster(r, ifaces, title_ids):
                 errs.append("roster fighter: unknown key \"%s\"" % k)
         if not _is_int(o.get("id")) or o["id"] not in ROSTER_IDS:
             errs.append("roster fighter \"id\" must be 19, 20 or 21")
+        if "id" in o and _is_int(o["id"]) and o["id"] in have:
+            errs.append("roster: fighter id %d is already in the character list" % o["id"])
         if "after" in o and (not _is_int(o["after"]) or not 0 <= o["after"] <= 255):
             errs.append("roster fighter \"after\" must be an integer 0..255")
+        elif "after" in o and o["after"] not in have:
+            errs.append("roster: fighter goes after id %d, which is not a stock id or an earlier fighter of this mod" % o["after"])
         if "logo_as" in o and (not _is_int(o["logo_as"]) or not 0 <= o["logo_as"] < 200 or o["logo_as"] not in STOCK_ROSTER):
             errs.append("roster fighter \"logo_as\" must be a stock fighter id (on the stock list, below 200)")
         if "owned" in o and not isinstance(o["owned"], bool):
             errs.append("roster fighter \"owned\" must be true or false")
+        if _is_int(o.get("id")):
+            have.add(o["id"])
     return errs
 
 
@@ -541,7 +616,7 @@ def human(n):
 
 
 def run_checks(form, fetcher=fetch):
-    """Returns (rows [(name, ok, detail)], files {path: (size, sha)}, hash or None, info)."""
+    """Returns (rows [(name, ok, detail)], files {path: (size, sha)}, hash or None, info). The download's SHA-256 is in its row."""
     rows = []
 
     def add(name, ok, detail=""):
@@ -550,46 +625,61 @@ def run_checks(form, fetcher=fetch):
     add("Form", all(form[k] for k in ("mod_id", "mod_name", "version", "author", "link", "manifest", "class", "game")) and
         valid_id(form["mod_id"]),
         "" if form["mod_id"] and valid_id(form["mod_id"]) else "a field is empty or the mod id is not [a-z0-9-], 1-40 characters")
-    add("Rights", rights_confirmed(form["rights"]), "" if rights_confirmed(form["rights"]) else "both boxes must be ticked")
-    files, digest, info = {}, None, None
+    add("Rights", rights_confirmed(form["rights"]), "" if rights_confirmed(form["rights"]) else "all boxes must be ticked")
     try:
         data = fetcher(form["link"])
     except Refused as e:
         add("Download", False, str(e))
-        return rows, files, digest, info
-    add("Download", True, "%s" % human(len(data)))
+        return rows, {}, None, None
+    add("Download", True, "%s, SHA-256 %s" % (human(len(data)), hashlib.sha256(data).hexdigest()))
+    more, files, digest, info = check_zip(data, form)
+    return rows + more, files, digest, info
+
+
+def check_zip(data, form=None):
+    """The checks on the zip's bytes. form None = local mode: nothing is compared with an issue form."""
+    rows = []
+
+    def add(name, ok, detail=""):
+        rows.append((name, ok, detail))
+        return ok
     s = scan_zip(data)
     by = {}
     for name, text in s.problems:
         by.setdefault(name, []).append(text)
+    if form and s.root and s.root.rstrip("/") != form["mod_id"]:
+        by.setdefault("Layout", []).append("the top-level folder is not named like the mod id (the port opens <id>/mod.json)")
     for name in ("Archive", "Layout", "Paths"):
         add(name, name not in by, "; ".join(by.get(name, [])[:3]) + (" (and more)" if len(by.get(name, [])) > 3 else ""))
-    if s.problems and any(n in by for n in ("Archive", "Layout", "Paths")) and not s.files:
-        return rows, files, digest, info
+    if any(n in by for n in ("Archive", "Layout", "Paths")) and not s.files:
+        return rows, {}, None, None
     files = s.files
     bad = []
     for p in sorted(files):
         why = refused_type(p)
+        if not why and p in s.sniffed:
+            why = "its content is %s" % s.sniffed[p]
         if why:
             bad.append("%s: %s" % (p, why))
     add("File types", not bad, "; ".join(bad[:3]) + (" (and %d more)" % (len(bad) - 3) if len(bad) > 3 else ""))
     info = None
     if "mod.json" in files and s.manifest_bytes is not None and "Manifest" not in by:
         try:
-            text = s.manifest_bytes.decode("utf-8")
-            errs, info = check_manifest(text, form["mod_id"], files)
+            text = s.manifest_bytes.decode("utf-8-sig")
+            errs, info = check_manifest(text, form["mod_id"] if form else "", files)
         except UnicodeDecodeError:
             errs, info = ["mod.json is not UTF-8"], None
+        if info and not form and s.root and s.root.rstrip("/") != info["id"]:
+            errs.append("the top-level folder is not named like the mod id (the port opens <id>/mod.json)")
         add("Manifest", not errs, "; ".join(errs[:4]) + (" (and %d more)" % (len(errs) - 4) if len(errs) > 4 else ""))
-        # The form's text must be the shipped manifest's id, version.
-        if info:
+        if info and form:
             same = info["id"] == form["mod_id"] and info["version"] == form["version"]
             add("Form matches mod.json", same, "" if same else "the id or version differs from mod.json in the zip")
             try:
                 pasted = json.loads(form["manifest"], object_pairs_hook=_pairs)
                 shipped = json.loads(text, object_pairs_hook=_pairs)
                 add("Pasted mod.json", pasted == shipped, "" if pasted == shipped else "the pasted mod.json differs from the one in the zip")
-            except ValueError:
+            except (ValueError, RecursionError):
                 add("Pasted mod.json", False, "the pasted text is not valid JSON")
             claims = form["class"].lower()
             if "cosmetic" in claims and "gameplay" not in claims and info["gameplay"]:
@@ -608,8 +698,11 @@ NOTE = "Automated checks only; a maintainer still plays it before it is added to
 def render(form, rows, files, digest):
     ok = all(r[1] for r in rows)
     out = ["## Mod check: %s" % ("all automated checks passed" if ok else "problems found"), ""]
-    out.append("Mod %s, version %s, author %s." % (code(form["mod_id"], 60), code(form["version"], 40), code(form["author"], 60)))
-    out += ["", "| Check | Result | Detail |", "| --- | --- | --- |"]
+    if form:
+        out.append("Mod %s, version %s, author %s." % (code(form["mod_id"], 60), code(form["version"], 40), code(form["author"], 60)))
+        out.append("Link checked: %s" % code(form["link"], 300))
+        out.append("")
+    out += ["| Check | Result | Detail |", "| --- | --- | --- |"]
     for name, good, detail in rows:
         out.append("| %s | %s | %s |" % (name, "pass" if good else "FAIL", code(detail, 300) if detail else ""))
     out.append("")
@@ -632,19 +725,40 @@ def render(form, rows, files, digest):
 
 def main(argv=None, fetcher=fetch, env=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True, help="where to write the comment")
+    ap.add_argument("--out", help="where to write the comment (default: standard output with --zip)")
+    ap.add_argument("--zip", help="local mode: check this zip file, no issue and no download; prints the canonical hash and the file's SHA-256")
     a = ap.parse_args(argv)
     env = os.environ if env is None else env
-    body = env.get("ISSUE_BODY")
-    if body is None:
-        print("mod_verify: ISSUE_BODY is not set", file=sys.stderr)
-        return 2
-    form = parse_form(body)
-    rows, files, digest, _ = run_checks(form, fetcher)
-    text = render(form, rows, files, digest)
-    with open(a.out, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
-    print("mod_verify: %d check(s), %d failed" % (len(rows), sum(1 for r in rows if not r[1])))
+    if a.zip:
+        try:
+            with open(a.zip, "rb") as f:
+                data = f.read(MAX_DOWNLOAD + 1)
+        except OSError as e:
+            print("mod_verify: cannot read %s: %s" % (a.zip, e), file=sys.stderr)
+            return 2
+        if len(data) > MAX_DOWNLOAD:
+            print("mod_verify: the file is over %d MB" % (MAX_DOWNLOAD >> 20), file=sys.stderr)
+            return 2
+        rows, files, digest, _ = check_zip(data)
+        text = "Zip SHA-256: `%s`\n\n" % hashlib.sha256(data).hexdigest() + render(None, rows, files, digest)
+    else:
+        body = env.get("ISSUE_BODY")
+        if body is None or not a.out:
+            print("mod_verify: ISSUE_BODY and --out are needed (or use --zip FILE)", file=sys.stderr)
+            return 2
+        form = parse_form(body)
+        try:
+            rows, files, digest, _ = run_checks(form, fetcher)
+        except Exception as e:   # a comment is always posted: say the checks did not finish
+            rows, files, digest = [("Checks", False, "the checks stopped early (%s)" % type(e).__name__)], {}, None
+        text = render(form, rows, files, digest)
+        rows_failed = sum(1 for r in rows if not r[1])
+        print("mod_verify: %d check(s), %d failed" % (len(rows), rows_failed))
+    if a.out:
+        with open(a.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    else:
+        sys.stdout.write(text)
     return 0
 
 

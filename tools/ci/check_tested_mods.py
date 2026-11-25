@@ -3,12 +3,13 @@
 
     python3 tools/ci/check_tested_mods.py [FILE]
 
-Schema 1: {"schema": 1, "mods": [{"id", "name", "version", "sha256", "tested_on", "notes"}]}
+Schema 1: {"schema": 1, "mods": [{"id", "name", "version", "sha256", "tested_on", "content", "notes"}]}
   id         the mod id, [a-z0-9-], 1-40 characters
   name       the mod's title, a non-empty string
   version    the mod's version, 1-40 characters, no spaces
   sha256     the canonical mod hash (docs/MODS.md), 64 lowercase hex digits
   tested_on  the port release it was played on, X.Y.Z
+  content    exactly "own-work": the list never holds a mod with game-derived or third-party content
   notes      a string, may be empty
 An id and version appear once; a hash appears once. Entries are sorted by id, then version.
 """
@@ -17,7 +18,7 @@ import pathlib
 import re
 import sys
 
-KEYS = {"id", "name", "version", "sha256", "tested_on", "notes"}
+KEYS = {"id", "name", "version", "sha256", "tested_on", "content", "notes"}
 
 
 def check(doc):
@@ -43,6 +44,8 @@ def check(doc):
             continue
         if not re.fullmatch(r"[a-z0-9-]{1,40}", m["id"]):
             errs.append(where + ": bad id")
+        if m["content"] != "own-work":
+            errs.append(where + ": content must be \"own-work\"")
         if not m["name"].strip():
             errs.append(where + ": empty name")
         if not 1 <= len(m["version"]) <= 40 or re.search(r"[\x00-\x20\x7f]", m["version"]):
