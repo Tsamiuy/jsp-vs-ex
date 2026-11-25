@@ -186,23 +186,28 @@ static unsigned long long g_mp_trans_t = 0;
 /* The text language (jsp_menu_lang.h): PS3_LANG, else the Windows UI language, else English. The feature runs only for a language with all of its
  * text and row-label pictures, on a disc whose label textures are the US ones (g_mp_off, set in mp_tex_upload); else the game's own menu, with
  * one log line. */
-static std::atomic<bool> g_mp_off{false};
+static std::atomic<bool> g_mp_off{false}; static bool g_mp_us_seen = false;
+static int g_mp_disc = -1;   /* 1 a US disc, 0 another, -1 not known: the title id, set by jsp_mp_init before the menu exists */
+extern "C" void jsp_mp_init(const char* title_id) { g_mp_disc = jml::disc_us(title_id); }   /* main.cpp, next to jsp_mods_init */
 static const std::string& mp_lang()
 {
-    static const std::string l = [] { int w = 0;
+    static const std::string l = [] { int w = 0; const char* loc = nullptr;
 #ifdef _WIN32
         w = (int)(GetUserDefaultUILanguage() & 0x3FF);
+#else
+        loc = std::getenv("LC_ALL"); if (!loc || !loc[0]) loc = std::getenv("LC_MESSAGES"); if (!loc || !loc[0]) loc = std::getenv("LANG");
 #endif
-        return jml::pick(std::getenv("PS3_LANG"), w); }();
+        return jml::shown(jml::pick(std::getenv("PS3_LANG"), w, loc), g_mp_disc); }();
     return l;
 }
+extern "C" const char* jsp_mp_lang(void) { return mp_lang().c_str(); }   /* the language the disc shows, for the port's pop-up texts (jsp_game.cpp) */
 /* US only for now (jsp_region.h): the pages rewrite guest memory at US 1.00 addresses and their lift hooks are in the US lift only, so an EU
  * build keeps the game's own one-page menu (mp_on() false: the pad filter, the texture patch and the row count leave the menu alone). */
 bool mp_on()
 {
     static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); if (e && e[0] == '0') return false;
         if (!jsp_game_is_us()) return false;   /* EU build: jsp_game.cpp logs it with the other US-only features */
-        const std::string why = jml::gate(mp_lang(), true);
+        std::string why = jml::gate_disc(g_mp_disc); if (why.empty()) why = jml::gate(mp_lang(), true);
         if (!why.empty()) { std::printf("[mpages] off: %s\n", why.c_str()); std::fflush(stdout); return false; }
         return true; }();
     return on && !g_mp_off.load();
@@ -296,14 +301,15 @@ void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
         /* Not a US label: on another disc (an EU disc in Spanish, a tester's screenshot) no row label ever matches, and the rows stay the
          * game's own text next to our help lines. Nine label-sized textures and not one match: this disc's textures are not the US ones, and
          * the feature turns itself off (the game's own one-page menu). ASSUMPTION: the count 9 (one menu has 9 rows); not run on an EU disc. */
-        static int seen = 0; static bool ever = false;
-        for (int k = 0; k < 9 && !ever; k++) for (int q = 0; q < 2; q++) if (g_mp_lab[k][q].addr) ever = true;
-        if (lab && !ever && ++seen >= 9 && !g_mp_off.exchange(true))
+        static int seen = 0;
+        const uint32_t mo = jsp_main_menu_obj();   /* only uploads of a main-menu visit count, and all 18 (9 rows, a white and a black one) */
+        if (lab && !g_mp_us_seen && mo >= 0x10000u && mo < 0x30000000u && vm_read32(mo) == 0x0087D600u && ++seen >= 18 && !g_mp_off.exchange(true))
             { std::printf("[mpages] off: %s\n", jml::gate(mp_lang(), false).c_str()); std::fflush(stdout); }
         return; }
     /* the port's own picture coming back (the bytes of another row, written here): not that row's texture */
     for (int k = 0; k < 9; k++) for (int q = 0; q < 2; q++) { const MpTex& t = lab ? g_mp_lab[k][q] : g_mp_art[k][q]; if (t.addr == off && &t != hit) return; }
     if (hit->addr == off && hit->fwrote == f) return;   /* what the port wrote, or the page wants it as loaded */
+    if (lab) g_mp_us_seen = true;   /* a US label was seen: the backstop never fires after this */
     hit->addr = off; hit->bytes = lab ? kMpLabBytes : kMpArtBytes; hit->prefix = w * h; hit->forig = f; hit->fwrote = f;
     hit->orig.assign(vm_base + off, vm_base + off + hit->bytes);
     { static int n = 0; if (n++ < 60) { std::printf("[mpages] %s %d/%d at %08X\n", what, id, sub, off); std::fflush(stdout); } }
@@ -333,6 +339,22 @@ static void mp_list_fix(uint32_t menu)
     else if (cur >= n) { int back = 0; for (int r = 0; r < (int)n; r++) if (mp_real_row(g_mp_page, r) == (int)cur) back = r; cur = (uint32_t)back; }
     vm_write32(L, n); vm_write32(L + 4, cur); vm_write32(L + 8, n); vm_write32(L + 12, 0); vm_write32(L + 16, n - 1);
     vm_write32(0x00956550u, cur);
+}
+/* The late switch-off (the texture backstop in mp_tex_upload) comes after the menu was set up with 5-7 rows, hidden panes and our help line.
+ * On the next guest-thread call (the highlight hook, the help binder) the list goes back to the game's 9 rows with the cursor on the real
+ * row, and the port's page state is cleared; the panes (mp_layout_frame) and the help pointer (mp_help) are put back where they are known. */
+static bool g_mp_restored = false;
+static void mp_off_restore(uint32_t menu)
+{
+    if (!g_mp_off.load() || g_mp_restored || menu < 0x10000u || menu >= 0x30000000u || vm_read32(menu) != 0x0087D600u) return;
+    const uint32_t L = menu + 0x40u; uint32_t w[5] = { vm_read32(L), vm_read32(L + 4), vm_read32(L + 8), vm_read32(L + 12), vm_read32(L + 16) };
+    const int n = g_mp_page == 0 ? (mp_ps_row() ? 6 : 5) : 7;
+    jml::restore_list(w, w[1] < (uint32_t)n ? mp_real_row(g_mp_page, (int)w[1]) : (int)w[1]);
+    for (int i = 0; i < 5; i++) vm_write32(L + 4u * (uint32_t)i, w[i]);
+    vm_write32(0x00956550u, w[1]);
+    g_mp_page = 0; g_mp_pin = -1; g_mp_back = -1; g_mp_away = false; g_mp_entry = 0; g_mp_trans = 0; g_ps_wait = 0;
+    g_mp_restored = true;
+    std::printf("[mpages] switched off after the menu was up: the game's 9-row list is back (cursor %u)\n", w[1]); std::fflush(stdout);
 }
 /* a page change: with the list's own slide (state 4 = fl_out) when the highlight part is known, else at once */
 static void mp_change_page(int page, int row, uint32_t menu)
@@ -472,6 +494,7 @@ static void mp_preview_log(uint32_t menu)
 /* func_001E3BE0 (the row highlight, per frame): held on the screen row while the cursor is on a real row */
 extern "C" void jsp_mp_hilite_enter(ppu_context* ctx)
 {
+    if (g_mp_off.load()) { mp_off_restore(jsp_main_menu_obj()); return; }
     if (!mp_on()) return;
     const uint32_t part = (uint32_t)ctx->gpr[3];
     if (part < 0x10000u || part >= 0x30000000u) return;
@@ -484,9 +507,11 @@ extern "C" void jsp_mp_hilite_enter(ppu_context* ctx)
     }
 }
 /* the bullets of rows the page does not have: hidden (layout calc leave, the main list layout) */
+static bool g_mp_restored_panes = false;   /* after a late switch-off (g_mp_off): the hidden panes were shown again */
 static void mp_layout_frame(uint32_t lay)
 {
-    if (!mp_on() || !jsp_main_list_open() || lay < 0x10000u || lay >= 0x30000000u) return;
+    const bool was_off = g_mp_off.load();   /* switched off after the menu was set up: show every row's panes again, once */
+    if ((was_off && g_mp_restored_panes) || (!was_off && !mp_on()) || !jsp_main_list_open() || lay < 0x10000u || lay >= 0x30000000u) return;
     const uint32_t list = vm_read32(lay + 0x14); if (list < 0x10000u || list >= 0x30000000u) return;
     const uint32_t arr = vm_read32(list + 0x08), cnt = vm_read32(list + 0x0C); if (cnt < 9u || cnt > 200u) return;
     static const uint32_t h0 = mpf_name_hash("i_main_menu_pl_0000");
@@ -496,7 +521,8 @@ static void mp_layout_frame(uint32_t lay)
         if (r == 0) { std::snprintf(a, 40, "i_main_menu_pl_0000"); std::snprintf(c, 40, "i_main_menu_fire_0000"); }
         else { std::snprintf(a, 40, "i_main_menu_pl_%03d", r - 1); std::snprintf(c, 40, "i_main_menu_fire_%03d", r - 1); }
         hp[r] = mpf_name_hash(a); hf[r] = mpf_name_hash(c); } }
-    const int n = mp_rows();
+    const int n = was_off ? 9 : mp_rows();
+    if (was_off) g_mp_restored_panes = true;
     for (uint32_t i = 0; i < cnt; i++) { const uint32_t pn = vm_read32(arr + i * 4); if (pn < 0x10000u || pn >= 0x30000000u) continue;
         const uint32_t h = vm_read32(pn + 0x108);
         for (int r = 0; r < 9; r++) if (h == hp[r] || h == hf[r]) vm_write32(pn + 0x100, r < n ? (vm_read32(pn + 0x100) | 1u) : (vm_read32(pn + 0x100) & ~1u)); }   /* rows of the page shown again (the maintainer 2026-11-19: no grey bullet behind Training Mode / Impossible until the cursor moved) */
@@ -505,7 +531,8 @@ static void mp_layout_frame(uint32_t lay)
  * which lie in one block at fixed distances from row 0's (a test run); the new rows get strings of ours. */
 void mp_help(ppu_context* ctx)
 {
-    if (!mp_on() || !jsp_main_list_open()) return;
+    const bool was_off = g_mp_off.load();
+    if ((!was_off && !mp_on()) || !jsp_main_list_open()) return;
     const uint32_t box = (uint32_t)ctx->gpr[3], pn = (uint32_t)ctx->gpr[4];
     static const uint32_t hpane = mpf_name_hash("_f_l_cl00");
     if (box < 0x10000u || box >= 0x30000000u || pn < 0x10000u || pn >= 0x30000000u || vm_read32(pn + 0x108) != hpane) return;
@@ -519,6 +546,7 @@ void mp_help(ppu_context* ctx)
         for (int r = 0; r < 9 && ok; r++) ok = vm_read16(b0 + off[r] - 2u) == 0 && vm_read16(b0 + off[r]) != 0;
         if (ok && b0 != base) { base = b0; std::printf("[mpages] help strings at %08X\n", base); std::fflush(stdout); }
     }
+    if (was_off) { if (cur < 9u && base) vm_write32(box + 0x58, base + off[cur]); mp_off_restore(menu); return; }   /* switched off late: the game's own line again */
     if (!g_psbar_str) psbar_fill(mpf_game_new(ctx, kPsbarBytes));
     if (!own[0]) { static const jml::Id ids[4] = { jml::MENU_HELP_BATTLE, jml::MENU_HELP_TRAINING, jml::MENU_HELP_IMPOSSIBLE, jml::MENU_HELP_PORT_SETTINGS };
         for (int k = 0; k < 4; k++) { const std::vector<uint8_t> u = jml::encode_utf16(jml::text(ids[k], mp_lang()));   /* UTF-16LE, as the game's strings */
