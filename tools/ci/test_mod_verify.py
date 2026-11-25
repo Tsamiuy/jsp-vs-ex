@@ -196,6 +196,21 @@ check("manifest id mismatch", mf(manifest(), folder="other")[0])
 check("manifest no version", mf({k: v for k, v in manifest().items() if k != "version"})[0])
 check("manifest version space", mf(manifest(version="1 0"))[0])
 check("manifest unknown interface", mf(manifest(interfaces={"magic": 1}))[0])
+roster = {"fighters": [{"id": 19, "after": 3}]}
+check("manifest roster 2 ok", not mf(manifest(interfaces={"roster": 2}, roster=roster))[0])
+check("manifest roster 3 newer", mf(manifest(interfaces={"roster": 3}, roster=roster))[0])
+RC = lambda iv, card: mf(manifest(interfaces={"roster": iv}, roster={"fighters": [{"id": 19, "card_as": card}]}))[0]
+check("card_as with roster 2", not RC(2, 18) and not RC(2, 211))
+check("card_as with roster 1 is an unknown key", any("unknown key" in e for e in RC(1, 18)))
+check("card_as must be a stock id", RC(2, 19) and RC(2, 208) and RC(2, 42) and RC(2, -1) and RC(2, "18") and RC(2, True))
+check("card_as is not in the class: roster mod stays gameplay", mf(manifest(interfaces={"roster": 2}, roster={"fighters": [{"id": 19, "card_as": 18}]}))[1]["gameplay"] is True)
+# drift check: the Python copy of the port's tables must equal jsp_mods_core.h
+import re as _re, pathlib as _pl
+_core = (_pl.Path(__file__).resolve().parents[2] / "installer/port/jsp/jsp_mods_core.h").read_text()
+_si = _re.search(r"supported_interfaces\(\)\s*\{(.*?)return k;", _core, _re.S).group(1)
+check("SUPPORTED equals supported_interfaces() of jsp_mods_core.h", {n: int(v) for n, v in _re.findall(r'\{\s*"([a-z0-9-]+)"\s*,\s*(\d+)\s*\}', _si)} == mv.SUPPORTED)
+_st = _re.search(r"kStockRoster\[\d+\]\s*=\s*\{(.*?)\};", _core, _re.S).group(1)
+check("STOCK_ROSTER equals kStockRoster of jsp_mods_core.h", tuple(int(x) for x in _re.findall(r"[0-9]+", _st)) == mv.STOCK_ROSTER)
 check("manifest newer interface", mf(manifest(interfaces={"cpk-entry": 2}))[0])
 check("manifest no interfaces", mf({k: v for k, v in manifest().items() if k != "interfaces"})[0])
 check("manifest overrides need cpk-entry", mf(manifest(interfaces={"roster": 1}, overrides=ov))[0])

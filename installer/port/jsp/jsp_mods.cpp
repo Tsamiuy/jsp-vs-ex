@@ -631,6 +631,19 @@ extern "C" int jsp_mods_roster_fighters(int* id, int* logo_as, int* owned, int c
     return n;
 }
 
+/* ENHANCEMENT (roster card_as, jsp_roster.cpp). The added ids that borrow a stock card: id[i] shows card_as[i]'s texture. Returns the count. */
+extern "C" int jsp_mods_roster_cards(int* id, int* card_as, int cap)
+{
+    int n = 0;
+    for (const RosterFighter& f : g_roster) {
+        if (f.card_as < 0) continue;
+        if (n >= cap) break;
+        id[n] = f.id; card_as[n] = f.card_as;
+        ++n;
+    }
+    return n;
+}
+
 /* The final character list (stock ids plus the added ones, no terminator); returns its length, or 0 when it does not fit cap. */
 extern "C" int jsp_mods_roster_list(uint32_t* out, int cap)
 {

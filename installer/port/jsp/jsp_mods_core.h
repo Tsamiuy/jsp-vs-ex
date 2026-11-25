@@ -29,6 +29,10 @@
 //      its fighters are part of the digest.
 //      A fight with an added fighter is untested and no model, voice or card art is served for one: a mod must not offer a fighter whose full
 //      data is not in place ("owned" defaults to true, so the card is selectable). The list-repoint approach was first shown by a community mod.
+//      "card_as" (interface "roster" 2; version 1 mods are still accepted, without this key) (ENHANCEMENT, cosmetic): the id of a stock fighter whose select card this fighter shows. The game looks a card texture up by
+//      the name "_rgb8_256_chara_ico_NNN.png"; the guest side (jsp_roster.cpp) rewrites NNN of exactly the added id's name to the donor's for
+//      the length of the lookup. No archive changes, so the donor must have a full card in the same set (a stock-list id, see roster_card_ok).
+//      It is not in the digest: a peer that does not redirect plays the same fight.
 // ASSUMPTION: CRI does not check an entry's FileSize against the header's EnabledPackedSize/EnabledDataSize (2x the sum of the FileSize
 // values on the US disc; the header row is left as it is, so a smaller replacement leaves them unchanged). The first in-game run of a
 // smaller replacement tests it.
@@ -362,7 +366,7 @@ struct Interface { std::string name; int version; };
 // What this build supports. Round 1: cpk-entry 1 only ("balance" joins with its applier, step R8).
 inline const std::vector<Interface>& supported_interfaces()
 {
-    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 1 } };
+    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 2 } };
     return k;
 }
 struct OverrideSpec { std::string entry, alias, file, sha256; };
@@ -370,7 +374,8 @@ struct OverrideSpec { std::string entry, alias, file, sha256; };
 // the third also holds the supports 200..231 as id-136, jsp_unlock.cpp); after: the id it goes behind in the list (-1 = before the first
 // support, id >= 200); logo_as: a stock fighter id whose intro series logo this fighter shows (the switch @0x00127A94 is run with that id
 // in place of the added one; -1 = none); owned: whether the fighter is marked owned in the save (default true).
-struct RosterFighter { int id = -1, after = -1, logo_as = -1; bool owned = true; };
+// card_as: a stock-list id whose select-card texture name this fighter's lookup is redirected to (-1 = none: the stock 64x55 placeholder shows).
+struct RosterFighter { int id = -1, after = -1, logo_as = -1; bool owned = true; int card_as = -1; };
 constexpr int kRosterIdMax = 63;
 // The list capacity: 56 ids. The select grid is 4 cells a row, 16 rows (64 cells) in the static select object; the owned ids take a cell each,
 // every other id a locked card, plus one random card, rounded up to an even row count (2 rows a page), so the grid itself holds 60 ids. The
@@ -388,6 +393,82 @@ inline bool roster_logo_ok(int id)
 {
     if (id < 0 || id >= 200) return false;
     return std::find(std::begin(kStockRoster), std::end(kStockRoster), (uint32_t)id) != std::end(kStockRoster);
+}
+// card_as donor: an id on the stock list (a stock fighter, or a support that is on it). ASSUMPTION: every id on the stock list has a full
+// 256x220 card in the shared card set (checked for 018 and 211 in the shared set's texture table; the 019, 020, 021 and 208 entries are 64x55
+// stubs and none of them is on the stock list).
+inline bool roster_card_ok(int id)
+{
+    if (id < 0) return false;
+    return std::find(std::begin(kStockRoster), std::end(kStockRoster), (uint32_t)id) != std::end(kStockRoster);
+}
+// The card texture name the game looks up (format "_rgb8_256_chara_ico_%03d.png"). card_name_id: the id when `name` is exactly that
+// name with three digits, else -1. card_name_for: the name with the id replaced (3 digits).
+constexpr const char* kCardPrefix = "_rgb8_256_chara_ico_";
+constexpr const char* kCardSuffix = ".png";
+inline int card_name_id(const std::string& name)
+{
+    const size_t pl = std::strlen(kCardPrefix), sl = std::strlen(kCardSuffix);
+    if (name.size() != pl + 3 + sl || name.compare(0, pl, kCardPrefix) != 0 || name.compare(pl + 3, sl, kCardSuffix) != 0) return -1;
+    int v = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        const char c = name[pl + i];
+        if (c < '0' || c > '9') return -1;
+        v = v * 10 + (c - '0');
+    }
+    return v;
+}
+inline std::string card_name_for(int id)
+{
+    char b[16];
+    std::snprintf(b, sizeof b, "%03d", id < 0 ? 0 : id % 1000);
+    return std::string(kCardPrefix) + b + kCardSuffix;
+}
+// The donor for an added id from the applied fighters; -1 = no redirect.
+inline int card_donor_for(const std::vector<RosterFighter>& add, int id)
+{
+    for (const RosterFighter& f : add) if (f.id == id && f.card_as >= 0) return f.card_as;
+    return -1;
+}
+// The guest-side rewrite as pure code over byte accessors (jsp_roster.cpp passes vm_read8 and vm_write8; the host test a fake memory).
+// card_redirect_enter(rd, wr, p, ids, donors, n, st): `p` is the name pointer of the lookup. When the string at p is exactly
+// "_rgb8_256_chara_ico_NNN.png" (3 digits, then the terminator) and NNN is one of the n added ids, the digits become the donor's and
+// st remembers where and what; returns true then. The string is read one byte at a time up to the first difference, so a short or foreign
+// buffer is never read past its end. card_redirect_leave puts the digits back.
+struct CardRedirect { uint32_t at = 0; uint8_t old[3] = {}; };
+template <class R, class W>
+inline bool card_redirect_enter(R rd, W wr, uint32_t p, const int* ids, const int* donors, int n, CardRedirect& st)
+{
+    st.at = 0;
+    if (n <= 0) return false;
+    const size_t pl = std::strlen(kCardPrefix), sl = std::strlen(kCardSuffix);
+    for (size_t i = 0; i < pl; ++i) if (rd(p + (uint32_t)i) != (uint8_t)kCardPrefix[i]) return false;
+    int id = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint8_t d = rd(p + (uint32_t)(pl + i));
+        if (d < '0' || d > '9') return false;
+        id = id * 10 + (d - '0');
+    }
+    for (size_t i = 0; i <= sl; ++i) if (rd(p + (uint32_t)(pl + 3 + i)) != (uint8_t)kCardSuffix[i]) return false;   // the suffix, then the NUL (kCardSuffix[sl])
+    for (int i = 0; i < n; ++i) {
+        if (ids[i] != id || donors[i] < 0 || donors[i] > 999) continue;
+        for (uint32_t k = 0; k < 3; ++k) st.old[k] = rd(p + (uint32_t)pl + k);
+        const int d = donors[i];
+        wr(p + (uint32_t)pl, (uint8_t)('0' + (d / 100) % 10));
+        wr(p + (uint32_t)pl + 1, (uint8_t)('0' + (d / 10) % 10));
+        wr(p + (uint32_t)pl + 2, (uint8_t)('0' + d % 10));
+        st.at = p;
+        return true;
+    }
+    return false;
+}
+template <class W>
+inline void card_redirect_leave(W wr, CardRedirect& st)
+{
+    if (!st.at) return;
+    const uint32_t pl = (uint32_t)std::strlen(kCardPrefix);
+    for (uint32_t k = 0; k < 3; ++k) wr(st.at + pl + k, st.old[k]);
+    st.at = 0;
 }
 struct Manifest {
     int schema = 0;
@@ -520,13 +601,15 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
             return false;
         }
         if (v->type != Json::Obj) { err = "mod.json: \"roster\" must be an object"; return false; }
+        // roster 2 adds "card_as"; a mod that declares roster 1 keeps the version 1 keys (an older port refuses card_as as unknown, so a mod using it declares 2)
+        const bool roster_v2 = std::find_if(m.interfaces.begin(), m.interfaces.end(), [](const Interface& i) { return i.name == "roster" && i.version >= 2; }) != m.interfaces.end();
         for (const std::string& k : v->keys) if (k != "fighters") { err = "mod.json: roster: unknown key \"" + k + "\""; return false; }
         const Json* fl = v->get("fighters");
         if (!fl || fl->type != Json::Arr || fl->arr.empty() || fl->arr.size() > kRosterGrid) { err = "mod.json: roster.fighters must be a non-empty array"; return false; }
         for (const Json& o : fl->arr) {
             if (o.type != Json::Obj) { err = "mod.json: a roster fighter is not an object"; return false; }
             for (const std::string& k : o.keys)
-                if (k != "id" && k != "after" && k != "logo_as" && k != "owned") { err = "mod.json: roster fighter: unknown key \"" + k + "\""; return false; }
+                if (k != "id" && k != "after" && k != "logo_as" && k != "owned" && !(k == "card_as" && roster_v2)) { err = "mod.json: roster fighter: unknown key \"" + k + "\""; return false; }
             RosterFighter f;
             const Json* x = o.get("id");
             if (!x || x->type != Json::Int || x->i < 0 || x->i > kRosterIdMax || !roster_id_ok(int(x->i))) {
@@ -545,6 +628,10 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
             if ((x = o.get("owned"))) {
                 if (x->type != Json::Bool) { err = "mod.json: roster fighter \"owned\" must be true or false"; return false; }
                 f.owned = x->b;
+            }
+            if ((x = o.get("card_as"))) {
+                if (x->type != Json::Int || !roster_card_ok(int(x->i))) { err = "mod.json: roster fighter \"card_as\" must be a stock fighter id (on the stock list; the card's own art has to exist in the game)"; return false; }
+                f.card_as = int(x->i);
             }
             m.roster.push_back(f);
         }
@@ -827,6 +914,7 @@ inline bool check_roster(const Manifest& m, std::set<int>& ids, std::string& err
     for (const RosterFighter& f : m.roster) {
         if (t.count(f.id)) { err = fmt("roster: fighter id %d is already in the character list (stock, or added by an earlier mod)", f.id); return false; }
         if (f.after >= 0 && !t.count(f.after)) { err = fmt("roster: fighter %d goes after id %d, which is not in the list at that point", f.id, f.after); return false; }
+        if (f.card_as >= 0 && !roster_card_ok(f.card_as)) { err = fmt("roster: fighter %d card_as %d is not a stock-list id with a full card", f.id, f.card_as); return false; }
         t.insert(f.id);
     }
     if (t.size() > cap) { err = fmt("roster: %llu ids would not fit the select lists (room for %llu)", (unsigned long long)t.size(), (unsigned long long)cap); return false; }
@@ -1156,7 +1244,8 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
             std::string ids;
             for (const RosterFighter& f : st.m.roster) {
                 set.roster.push_back(f);
-                ids += fmt("%s%d(after %d%s%s)", ids.empty() ? "" : ", ", f.id, f.after, f.logo_as >= 0 ? fmt(", logo as %d", f.logo_as).c_str() : "", f.owned ? ", owned" : "");
+                ids += fmt("%s%d(after %d%s%s%s)", ids.empty() ? "" : ", ", f.id, f.after, f.logo_as >= 0 ? fmt(", logo as %d", f.logo_as).c_str() : "", f.owned ? ", owned" : "",
+                           f.card_as >= 0 ? fmt(", card as %d", f.card_as).c_str() : "");
             }
             log.push_back(fmt("[mods] %s: roster adds %llu fighter(s): %s", st.id.c_str(), (unsigned long long)st.m.roster.size(), ids.c_str()));
         }
