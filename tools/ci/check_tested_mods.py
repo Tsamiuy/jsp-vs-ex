@@ -21,6 +21,15 @@ import sys
 KEYS = {"id", "name", "version", "sha256", "tested_on", "content", "notes"}
 
 
+def _pairs(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError('the key "%s" appears twice' % k)
+        d[k] = v
+    return d
+
+
 def check(doc):
     errs = []
     if not isinstance(doc, dict) or doc.get("schema") != 1 or isinstance(doc.get("schema"), bool):
@@ -69,14 +78,15 @@ def check(doc):
 def main(argv):
     path = pathlib.Path(argv[1]) if len(argv) > 1 else pathlib.Path(__file__).resolve().parents[2] / "mods" / "tested.json"
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        doc = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs)
+    except (OSError, ValueError, RecursionError) as e:
         print("check_tested_mods: %s: %s" % (path, e))
         return 1
     errs = check(doc)
     for e in errs:
         print("check_tested_mods: " + e)
-    print("check_tested_mods: %d problem(s), %d mod(s)" % (len(errs), len(doc.get("mods", [])) if isinstance(doc, dict) else 0))
+    n = len(doc["mods"]) if isinstance(doc, dict) and isinstance(doc.get("mods"), list) else 0
+    print("check_tested_mods: %d problem(s), %d mod(s)" % (len(errs), n))
     return 1 if errs else 0
 
 

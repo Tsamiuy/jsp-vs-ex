@@ -20,9 +20,12 @@ import json
 import os
 import re
 import socket
+import ssl
 import stat
 import sys
+import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -45,8 +48,13 @@ MAX_COMMENT = 60000                   # GitHub's limit is 65536
 REFUSED_EXT = {".exe", ".dll", ".bat", ".cmd", ".ps1", ".py", ".sh", ".so",
                ".msi", ".com", ".scr", ".vbs", ".jar", ".dylib", ".lnk", ".pyc",
                ".asi", ".js", ".hta", ".wsf", ".cpl", ".reg", ".pif", ".vbe", ".jse", ".sys", ".ocx", ".msix", ".appx",
-               ".zip", ".7z", ".rar"}   # the last three: a nested archive hides its files from the checks
-SNIFF = ((b"\x7fELF", "a Linux program"), (b"#!", "a script"), (b"PK\x03\x04", "a nested zip"))
+               ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".xz", ".bz2", ".cab", ".iso", ".apk", ".lua", ".php", ".pl", ".rb",
+               ".wasm", ".html", ".htm", ".url", ".dmg", ".app"}   # the last three: a nested archive hides its files from the checks
+SNIFF = ((b"\x7fELF", "a Linux program"), (b"#!", "a script"), (b"PK\x03\x04", "a nested zip"), (b"PK\x05\x06", "a nested zip"),
+         (b"\xfe\xed\xfa\xce", "a macOS program"), (b"\xfe\xed\xfa\xcf", "a macOS program"), (b"\xce\xfa\xed\xfe", "a macOS program"),
+         (b"\xcf\xfa\xed\xfe", "a macOS program"), (b"\xca\xfe\xba\xbe", "a macOS or Java program"), (b"\xbe\xba\xfe\xca", "a macOS program"),
+         (b"\x1f\x8b", "a gzip archive"), (b"\xfd7zXZ\x00", "an xz archive"), (b"7z\xbc\xaf\x27\x1c", "a 7z archive"),
+         (b"Rar!\x1a\x07", "a RAR archive"), (b"MSCF", "a cabinet archive"), (b"\x00asm", "a WebAssembly module"))
 SOURCE_EXT = {".cpp", ".h", ".c", ".cc", ".hpp", ".inc", ".patch", ".diff"}
 SOURCE_NAMES = {"cmakelists.txt"}
 SOURCE_DIRS = {"port", "installer", "third_party", "tools"}
@@ -89,10 +97,10 @@ def parse_form(body):
             text = "\n".join(buf).strip()
             out[cur] = "" if text == "_No response_" else text
     for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        m = re.fullmatch(r"### (.+?)\s*", line)
-        if m and m.group(1) in labels and labels[m.group(1)] not in seen:
+        label = line[4:].strip() if line.startswith("### ") else None
+        if label in labels and labels[label] not in seen:
             flush()
-            cur = labels[m.group(1)]
+            cur = labels[label]
             seen.add(cur)
             buf = []
         else:
@@ -103,12 +111,17 @@ def parse_form(body):
 
 
 def strip_fence(text):
-    m = re.fullmatch(r"```[A-Za-z]*\n(.*?)\n?```", text.strip(), re.S)
-    return m.group(1) if m else text.strip()
+    t = text.strip()      # no regex: a fence is "```" + letters + newline ... "```"
+    first, nl, rest = t.partition("\n")
+    info = first[3:]
+    if t.startswith("```") and nl and rest.endswith("```") and (info.isascii() and info.isalpha() or not info):
+        inner = rest[:-3]
+        return inner[:-1] if inner.endswith("\n") else inner
+    return t
 
 
 def rights_confirmed(text):
-    boxes = re.findall(r"^\s*- \[([ xX])\] ", text, re.M)
+    boxes = [l.lstrip()[3:4] for l in text.split("\n") if l.lstrip().startswith("- [") and l.lstrip()[4:6] == "] "]
     return len(boxes) >= RIGHTS_BOXES and all(b in "xX" for b in boxes)
 
 
@@ -118,85 +131,155 @@ class Refused(Exception):
     pass
 
 
-def check_url(url):
-    """HTTPS only, no credentials, port 443, a host that resolves to public addresses only."""
+def resolve_public(url, resolver=None):
+    """check_url() and the address it checked: (url, parts, ip). The caller connects to exactly this ip, so the name is
+    not resolved a second time (no DNS rebinding between the check and the connection)."""
+    resolver = resolver or socket.getaddrinfo
+    url = url.strip()
     try:
-        return _check_url(url)
+        u = urllib.parse.urlsplit(url)
+        if u.scheme != "https":
+            raise Refused("the link is not HTTPS")
+        if u.username or u.password:
+            raise Refused("the link has a user name or password")
+        try:
+            port = u.port
+        except ValueError:
+            raise Refused("the link has a bad port")
+        if port not in (None, 443):
+            raise Refused("the link uses a port other than 443")
+        host = u.hostname
+        if not host:
+            raise Refused("the link has no host")
+        try:
+            infos = resolver(host, 443, proto=socket.IPPROTO_TCP)
+        except (OSError, UnicodeError):
+            raise Refused("the host name does not resolve")
+        ips = [ipaddress.ip_address(i[4][0]) for i in infos]
+        if not ips:
+            raise Refused("the host name does not resolve")
+        if not all(ip.is_global for ip in ips):
+            raise Refused("the host resolves to a private or local address")
+        return url, u, str(ips[0])
     except Refused:
         raise
-    except (ValueError, UnicodeError, OSError):   # a bad address, a name that cannot be encoded, a resolver error
+    except (ValueError, UnicodeError, OSError):
         raise Refused("the link cannot be used")
 
 
-def _check_url(url):
-    u = urllib.parse.urlsplit(url.strip())
-    if u.scheme != "https":
-        raise Refused("the link is not HTTPS")
-    if u.username or u.password:
-        raise Refused("the link has a user name or password")
-    try:
-        port = u.port
-    except ValueError:
-        raise Refused("the link has a bad port")
-    if port not in (None, 443):
-        raise Refused("the link uses a port other than 443")
-    host = u.hostname
-    if not host:
-        raise Refused("the link has no host")
-    try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    except (OSError, UnicodeError):
-        raise Refused("the host name does not resolve")
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if not ip.is_global:
-            raise Refused("the host resolves to a private or local address")
-    return url.strip()
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS to a given address: the socket goes to `ip`, the TLS server name and the certificate check use the host name."""
+
+    def __init__(self, host, ip, timeout, context=None, connect=None):
+        super().__init__(host, 443, timeout=timeout, context=context or ssl.create_default_context())
+        self._ip = ip
+        self._connect = connect or socket.create_connection
+
+    def connect(self):
+        sock = self._connect((self._ip, 443), self.timeout)
+        try:
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        except BaseException:
+            sock.close()
+            raise
 
 
-class _HttpsOnly(urllib.request.HTTPRedirectHandler):
-    max_redirections = MAX_REDIRECTS
+def _kill(conn):
+    """From the watchdog thread: make a blocked read fail now."""
+    sock = getattr(conn, "sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass
+        try:
+            sock.close()
+        except (OSError, AttributeError):
+            pass
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        check_url(urllib.parse.urljoin(req.full_url, newurl))   # raises Refused on http:, private hosts, ...
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-
-def fetch(url, max_bytes=MAX_DOWNLOAD, timeout=TIMEOUT, deadline=DEADLINE):
+def fetch(url, max_bytes=MAX_DOWNLOAD, timeout=TIMEOUT, deadline=DEADLINE, resolver=None, conn_factory=None, clock=time.monotonic):
     """Download url and return its bytes. Raises Refused with a short reason. No cookies, no proxy, no credentials.
-    ASSUMPTION: a host that changes its address between the check and the connection (DNS rebinding) is not caught;
-    the runner holds no secret and the response is never shown, only hashed and listed."""
-    check_url(url)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _HttpsOnly())
-    req = urllib.request.Request(url, headers={"User-Agent": "jsp-mod-verify"})
-    end = time.monotonic() + deadline
+    Each hop (the link and every redirect) is resolved once, checked, and connected to by that address.
+    The whole download has a hard limit: every read waits at most min(timeout, time left), no time left ends it, and a
+    watchdog closes the connection at the deadline. conn_factory(host, ip, timeout) is for tests."""
+    factory = conn_factory or PinnedHTTPSConnection
+    end = clock() + deadline
+    current = [None]
+    expired = [False]
+
+    def expire():
+        expired[0] = True
+        if current[0] is not None:
+            _kill(current[0])
+    watchdog = threading.Timer(deadline, expire)
+    watchdog.daemon = True
+    watchdog.start()
+
+    def left():
+        r = end - clock()
+        if r <= 0 or expired[0]:
+            raise Refused("the download took longer than %d s" % deadline)
+        return r
     try:
-        with opener.open(req, timeout=timeout) as r:
-            if urllib.parse.urlsplit(r.geturl()).scheme != "https":
-                raise Refused("the link redirects to a non-HTTPS address")
-            length = r.headers.get("Content-Length")
-            if length and length.isdigit() and int(length) > max_bytes:
-                raise Refused("the download is larger than %d MB" % (max_bytes >> 20))
-            chunks, total = [], 0
-            while True:
-                block = r.read(READ_BLOCK)
-                if not block:
-                    break
-                total += len(block)
-                if total > max_bytes:
+        for _hop in range(MAX_REDIRECTS + 1):
+            url, u, ip = resolve_public(url, resolver)
+            conn = factory(u.hostname, ip, min(timeout, left()))
+            current[0] = conn
+            try:
+                path = (u.path or "/") + ("?" + u.query if u.query else "")
+                conn.request("GET", path, headers={"User-Agent": "jsp-mod-verify", "Accept-Encoding": "identity"})
+                if conn.sock is not None:
+                    conn.sock.settimeout(min(timeout, left()))
+                r = conn.getresponse()
+                if r.status in (301, 302, 303, 307, 308):
+                    loc = r.getheader("Location")
+                    if not loc:
+                        raise Refused("a redirect without a place to go")
+                    url = urllib.parse.urljoin(url, loc)
+                    continue
+                if r.status != 200:
+                    raise Refused("the server answered HTTP %d" % r.status)
+                length = r.getheader("Content-Length")
+                if length and length.isdigit() and int(length) > max_bytes:
                     raise Refused("the download is larger than %d MB" % (max_bytes >> 20))
-                if time.monotonic() > end:
-                    raise Refused("the download took longer than %d s" % deadline)
-                chunks.append(block)
-            return b"".join(chunks)
+                chunks, total = [], 0
+                while True:
+                    if conn.sock is not None:
+                        conn.sock.settimeout(min(timeout, left()))
+                    else:
+                        left()
+                    block = r.read1(READ_BLOCK)
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > max_bytes:
+                        raise Refused("the download is larger than %d MB" % (max_bytes >> 20))
+                    chunks.append(block)
+                left()
+                return b"".join(chunks)
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                current[0] = None
+        raise Refused("too many redirects")
     except Refused:
         raise
     except http.client.HTTPException as e:
         raise Refused("the server's answer was malformed (%s)" % type(e).__name__)
-    except urllib.error.HTTPError as e:
-        raise Refused("the server answered HTTP %d" % e.code)
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (OSError, ValueError) as e:
+        if expired[0]:
+            raise Refused("the download took longer than %d s" % deadline)
         raise Refused("the download failed (%s)" % type(e).__name__)
+    finally:
+        watchdog.cancel()
+
+
+def check_url(url):
+    """HTTPS only, no credentials, port 443, a host that resolves to public addresses only (kept for the tests and callers)."""
+    return resolve_public(url)[0]
 
 
 # ---- the archive -------------------------------------------------------------------------------------------------------
@@ -314,7 +397,7 @@ def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=
         if raw in seen:
             s.problems.append(("Paths", "the same path twice: %s" % raw))
         seen.add(raw)
-        key = raw.casefold()
+        key = unicodedata.normalize("NFC", unicodedata.normalize("NFC", raw).casefold())
         if key in lowseen and lowseen[key] != raw:
             s.problems.append(("Paths", "two paths that differ only in case: %s, %s" % (lowseen[key], raw)))
         lowseen[key] = raw

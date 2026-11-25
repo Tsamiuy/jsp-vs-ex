@@ -380,6 +380,172 @@ with tempfile.TemporaryDirectory() as d:
     check("local mode", rc == 0 and hashlib.sha256(zp.read_bytes()).hexdigest() in buf.getvalue() and "Canonical mod hash" in buf.getvalue(), buf.getvalue()[:300])
     check("local mode missing file", mv.main(["--zip", str(zp) + "x"]) == 2)
 
+# ---- round 3: the pinned, time-limited download (a fake connection; no network)
+import ssl
+
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class FakeSock:
+    def __init__(self):
+        self.timeouts = []
+
+    def settimeout(self, t):
+        self.timeouts.append(t)
+
+
+class FakeResp:
+    def __init__(self, status, body=b"", headers=None, clock=None, step=0.0, chunk=None):
+        self.status, self.body, self.headers, self.clock, self.step = status, body, headers or {}, clock, step
+        self.chunk = chunk or len(body) or 1
+        self.reads = 0
+
+    def getheader(self, name):
+        return self.headers.get(name)
+
+    def read1(self, n):
+        self.reads += 1
+        if self.clock:
+            self.clock.t += self.step
+        out, self.body = self.body[:min(n, self.chunk)], self.body[min(n, self.chunk):]
+        return out
+
+
+class FakeNet:
+    """host -> list of responses; records (host, ip) of each connection and each socket's timeouts."""
+
+    def __init__(self, responses):
+        self.responses, self.conns, self.socks = responses, [], []
+
+    def factory(self, host, ip, timeout):
+        net = self
+        sock = FakeSock()
+        net.socks.append(sock)
+        net.conns.append((host, ip, timeout))
+
+        class C:
+            def __init__(self):
+                self.sock = sock
+
+            def request(self, method, path, headers=None):
+                self.path = path
+
+            def getresponse(self):
+                return net.responses[host].pop(0)
+
+            def close(self):
+                pass
+        return C()
+
+
+def resolver_for(table, calls):
+    def r(host, port, **kw):
+        calls.append(host)
+        ips = table[host]
+        ip = ips[0] if len(calls) == 1 or len(ips) == 1 else ips[1]     # a second answer for the same name is a rebinding try
+        return [(2, 1, 6, "", (ip, 443))]
+    return r
+
+
+calls = []
+net = FakeNet({"a.test": [FakeResp(200, b"zip-bytes")]})
+got = mv.fetch("https://a.test/p.zip?x=1", resolver=resolver_for({"a.test": ["93.184.216.34", "127.0.0.1"]}, calls), conn_factory=net.factory)
+check("fetch body", got == b"zip-bytes")
+check("fetch connects to the checked address, resolves once", net.conns[0][:2] == ("a.test", "93.184.216.34") and calls == ["a.test"], str((net.conns, calls)))
+calls = []
+net = FakeNet({"a.test": [FakeResp(302, headers={"Location": "https://b.test/q"})], "b.test": [FakeResp(200, b"ok")]})
+got = mv.fetch("https://a.test/p", resolver=resolver_for({"a.test": ["93.184.216.34"], "b.test": ["93.184.216.35"]}, calls), conn_factory=net.factory)
+check("fetch redirect pins each hop", got == b"ok" and [c[:2] for c in net.conns] == [("a.test", "93.184.216.34"), ("b.test", "93.184.216.35")] and calls == ["a.test", "b.test"])
+
+
+def fetch_err(responses, table, **kw):
+    net = FakeNet(responses)
+    try:
+        mv.fetch("https://a.test/p", resolver=resolver_for(table, []), conn_factory=net.factory, **kw)
+    except mv.Refused as e:
+        return str(e)
+    return None
+
+
+T = {"a.test": ["93.184.216.34"], "b.test": ["93.184.216.35"], "loc.test": ["127.0.0.1"]}
+check("fetch redirect to http", fetch_err({"a.test": [FakeResp(302, headers={"Location": "http://b.test/"})]}, T) == "the link is not HTTPS")
+check("fetch redirect to a private host", "private" in (fetch_err({"a.test": [FakeResp(302, headers={"Location": "https://loc.test/"})]}, T) or ""))
+check("fetch redirect loop", "redirects" in (fetch_err({"a.test": [FakeResp(302, headers={"Location": "https://a.test/"}) for _ in range(9)]}, T) or ""))
+check("fetch HTTP error", "HTTP 404" in (fetch_err({"a.test": [FakeResp(404)]}, T) or ""))
+check("fetch content-length cap", "larger" in (fetch_err({"a.test": [FakeResp(200, b"x", {"Content-Length": "999999999"})]}, T) or ""))
+check("fetch streamed size cap", "larger" in (fetch_err({"a.test": [FakeResp(200, b"x" * 5000, chunk=100)]}, T, max_bytes=1000) or ""))
+# the time limit: every read is capped by the time left, and no time left ends the download
+clk = Clock()
+net = FakeNet({"a.test": [FakeResp(200, b"x" * 1000, clock=clk, step=100.0, chunk=1)]})
+try:
+    mv.fetch("https://a.test/p", resolver=resolver_for(T, []), conn_factory=net.factory, deadline=300, timeout=30, clock=clk)
+    check("slow reader ends", False)
+except mv.Refused as e:
+    check("slow reader ends with the time message", "took longer" in str(e), str(e))
+check("slow reader: few reads", net.socks[0].timeouts and len(net.socks[0].timeouts) <= 5, str(net.socks[0].timeouts))
+check("slow reader: every read capped by the time left and by 30 s", all(0 < t <= 30 for t in net.socks[0].timeouts) and net.socks[0].timeouts[-1] <= 100,
+      str(net.socks[0].timeouts))
+clk = Clock()
+net = FakeNet({"a.test": [FakeResp(200, b"abc", clock=clk, step=0.0)]})
+clk.t = 0.0
+check("fast download ok with a clock", mv.fetch("https://a.test/p", resolver=resolver_for(T, []), conn_factory=net.factory, deadline=300, clock=clk) == b"abc")
+# the real connection class: the socket goes to the checked address, the TLS name and certificate check use the host name
+seen = {}
+
+
+class Ctx:
+    def wrap_socket(self, sock, server_hostname=None):
+        seen["name"] = server_hostname
+        return "tls:" + sock
+
+
+def fake_connect(addr, timeout):
+    seen["addr"], seen["timeout"] = addr, timeout
+    return "raw"
+
+
+c = mv.PinnedHTTPSConnection("files.example.test", "93.184.216.34", 12, context=Ctx(), connect=fake_connect)
+c.connect()
+check("pinned connection uses the checked address", seen["addr"] == ("93.184.216.34", 443) and seen["timeout"] == 12)
+check("pinned connection: TLS name is the host", seen["name"] == "files.example.test" and c.sock == "tls:raw")
+d = mv.PinnedHTTPSConnection("files.example.test", "93.184.216.34", 12)
+check("pinned connection checks the certificate and the name", d._context.verify_mode == ssl.CERT_REQUIRED and d._context.check_hostname)
+
+# ---- round 3: more types, magics, names, regex-free parsing
+for ext in (".tar", ".gz", ".tgz", ".xz", ".bz2", ".cab", ".iso", ".apk", ".lua", ".php", ".pl", ".rb", ".wasm", ".html", ".htm", ".url", ".jar", ".dmg", ".app"):
+    check("type " + ext, mv.refused_type("files/a" + ext))
+for magic in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+              b"\x1f\x8b\x08", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00", b"MSCF\x00", b"\x00asm\x01", b"PK\x05\x06"):
+    check("sniff %r" % magic, mv.sniff(magic + bytes(8)) != "")
+check("sniff plain data still ok", mv.sniff(b"CPK \x00\x01") == "" and mv.sniff(b"") == "")
+import unicodedata
+nfc, nfd = unicodedata.normalize("NFC", "caf\u00e9"), unicodedata.normalize("NFD", "caf\u00e9")
+check("NFC and NFD clash", any("case" in t for _, t in problems(make_zip({"mod.json": M, "files/" + nfc: b"1", "files/" + nfd: b"2"}))))
+import time as _time
+t0 = _time.time()
+mv.parse_form("### Mod id" + " " * 200000 + "x\n" + "### Mod id\t" * 1 + "\n" * 5)
+mv.strip_fence("```" + "a" * 200000 + "\n" + "`" * 100000)
+mv.rights_confirmed("\n" * 100000 + " " * 100000)
+check("form parsing is linear on hostile input", _time.time() - t0 < 2, str(_time.time() - t0))
+check("fence plain", mv.strip_fence("```json\n{}\n```") == "{}" and mv.strip_fence("```\n{}```") == "{}" and mv.strip_fence(" {} ") == "{}" and mv.strip_fence("```json{}```") == "```json{}```")
+check("rights boxes", mv.rights_confirmed("- [x] a\n  - [X] b\n- [x] c") and not mv.rights_confirmed("- [x] a\n- [ ] b\n- [x] c") and not mv.rights_confirmed("- [x] a\n- [x] b"))
+
+# ---- round 3: the tested list takes only the right types
+for bad in (None, {}, "x", 5, [None], ["x"], [[]]):
+    check("tested mods %r" % (bad,), tm.check({"schema": 1, "mods": bad}))
+check("tested top-level list", tm.check([]) and tm.check(None) and tm.check("x"))
+with tempfile.TemporaryDirectory() as d:
+    for text in ('{"schema": 1, "mods": null}', "[]", "null", '{"schema": 1, "mods": [], "mods": []}', "{"):
+        f = pathlib.Path(d) / "t.json"
+        f.write_text(text, encoding="utf-8")
+        check("tested file %s" % text, tm.main(["x", str(f)]) == 1)
+
 # ---- the tested list validator
 H = "a" * 64
 ent = {"id": "tiny-logo", "name": "Tiny logo", "version": "1.0", "sha256": H, "tested_on": "0.6.1", "content": "own-work", "notes": ""}
