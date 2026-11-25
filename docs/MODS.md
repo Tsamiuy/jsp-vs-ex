@@ -1,8 +1,8 @@
 # Mods
 
-A mod is a folder in the port's mods folder with a `mod.json` and the files it names. The mods folder's list (`mods.txt`) says which mods load, in order. The rules for `mod.json` (schema 1) are in `installer/port/jsp/jsp_mods_core.h` (`parse_manifest`): an id of `[a-z0-9-]` that equals the folder name, a version, `interfaces` (`cpk-entry` 1, `roster` 1), and overrides of entries of the game's archives, each by a file with its SHA-256 or by an alias. A mod that breaks any rule is refused whole; the other mods still load.
+A mod is a folder in the port's mods folder with a `mod.json` and the files it names. The mods folder's list (`mods.txt`) says which mods load, in order. The rules for `mod.json` (schema 1) are in `installer/port/jsp/jsp_mods_core.h` (`parse_manifest`): an id of `[a-z0-9-]` that equals the folder name, a version, `interfaces` (`cpk-entry` 1, `roster` 1 or 2, `loose-file` 1), and overrides of entries of the game's archives, each by a file with its SHA-256 or by an alias. A mod that breaks any rule is refused whole; the other mods still load.
 
-A mod that only changes logos, movies or sound is cosmetic. Every other mod is gameplay, and online play compares the gameplay mods of both players (see [ONLINE.md](ONLINE.md)).
+A mod that only changes logos, movies or songs (`sound/<LANG>/BGM_*`) is cosmetic; other sound files (voices, effects) are gameplay. Every other mod is gameplay, and online play compares the gameplay mods of both players (see [ONLINE.md](ONLINE.md)).
 
 ## Getting a mod verified
 
@@ -45,3 +45,93 @@ The port does not compute the hash yet; today only `tools/ci/mod_verify.py` does
 Order of entries, compression, timestamps, folder entries and the name of the top-level folder do not matter. Changing a byte of any file, a file name or adding or removing a file changes the hash.
 
 Known answer: a mod whose files are `mod.json` containing `{}` and `game/logo/a.bin` containing `a` gives `ce2c86505349b1c37a35fc28a64aa9a5ddc4acac8b6a7e51962ab93e7f22a1ac`. The reference code is `canonical_hash()` in `tools/ci/mod_verify.py`; the port's code, when it is written, must give the same answer, and `tools/ci/test_mod_verify.py` holds the test.
+
+## Fields beyond overrides
+
+The port's framework also knows these fields, in the order they were added. The rules are pure code in `installer/port/jsp/jsp_mods_core.h` (host test
+`installer/tools/mods_overlay_test.sh`); the guest side of each is named below. Any violation refuses the whole mod; the other mods still
+load. Mods that change the fight are gameplay and are part of the mod-set digest that online play compares; cosmetic ones are not.
+
+## roster: more fighters on the character select
+
+Interface `roster` 1 (2 with `card_as`; a version 1 mod is still accepted, without that field), US 1.00 disc only (`game.title_ids` must name BLUS31519). `roster.fighters` is a list of objects:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | 19, 20 or 21, the three ids the game leaves unused (required) |
+| `after` | the id it goes behind in the list (default: before the first support) |
+| `logo_as` | a stock fighter id whose intro series logo this fighter shows |
+| `owned` | whether the fighter is marked owned in the save (default true) |
+| `card_as` (needs `roster` 2) | a stock-list id whose select card this fighter shows (default: none, the game's small placeholder card) |
+
+The fighters are part of the digest, except `card_as`.
+
+### card_as: the select card
+
+The game looks a card up by texture name, `_rgb8_256_chara_ico_NNN.png`, in one shared card set. An added id has only a 64x55 stub of
+its own in that set. With `card_as` the port rewrites the three digits of exactly that added id's name to the donor's for the length
+of the lookup and puts them back. No archive is changed and nothing ships with the mod.
+
+- The donor must be on the stock list (a stock fighter, or a support on it), not an added id and not the fighter itself.
+- The redirect is an entry hook on the name lookup `func_0051BDC8` (`lift_game_hooks.json`, `jsp_card_as_enter` and `_leave` in
+  `jsp_roster.cpp`). It only exists in a lift made with that hook list: a lift made before it does not redirect (no error); the first run
+  hashes the hook list into the lift step, so the lift is made again.
+- `card_as` is cosmetic: it is not in the digest, so a peer that does not redirect still plays the same fight. A card is not a model:
+  the fighter's fight data, model and voice are still not served by this field.
+
+### Limits
+
+The hook sees lookups by name only. The game also stores precomputed name hashes (including for ids 19 to 21), so a screen that looks a card up by
+hash skips it: only the character select grid is meant, other screens are unverified.
+
+### Open (needs a game run)
+
+- That the select grid's cards come through this lookup, and that the donor's card shows for the added id (only read from the lift).
+- That every stock-list id has a full card in the shared set (checked for 018 and 211).
+- That the donor's card is in the set on every screen that shows the grid: a per-id card pak (`chara_256_ico_%03d_ALL_m.pak`, loader without a static caller) might mean it is not on some screen.
+
+## loose-file: files the game opens by a name that is in no archive
+
+Interface `loose-file` 1, US 1.00 disc only. `loose` is a list of files the game asks for by a path that no CPK has a row for: the
+voice banks and loading tips of an added fighter (ids 19, 20, 21). The mods folder serves them.
+
+```json
+"interfaces": { "roster": 1, "loose-file": 1 },
+"loose": [
+  { "path": "sound/JP/CV_019_00_ST_JP.acb", "file": "files/CV_019_00_ST_JP.acb", "sha256": "..." },
+  { "path": "sound/JP/CV_019_00_ST_JP.awb", "file": "files/CV_019_00_ST_JP.awb", "sha256": "..." },
+  { "path": "progress/game/loading_game/tips/loading_game_tips_chara_019_000_ALL_m.pak",
+    "alias": "progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak" }
+]
+```
+
+- `path` is relative to `data/PS3` (the same names as a CPK entry) and starts in one of the six archive folders. Only the names the game
+  builds for the added ids are accepted: `sound/<LANG>/(CV|PV)_0<id>_<dd>_ST_<LANG>.(acb|awb)` and the tip packs under
+  `progress/game/loading_game/tips/` (`..._chara_0<id>_000_ALL_(m|v).pak`, and `<LANG>/..._(title|mes)_chara_0<id>_000_<LANG>_(m|v).pak`).
+- A path that has a row in its archive is refused: a CPK hit wins before any loose lookup, so use `cpk-entry` there.
+- The source is `file` (a file of the mod, checked against its `sha256`) or `alias` (an uncompressed row of a CPK in the player's own copy,
+  so no game data ships). `derived: true` on a `file` marks bytes taken from the game or a third party: a verifier may check such a mod
+  but never lists it as tested.
+- An `.acb` and its `.awb` come from one mod (the ACB carries the AWB's hash); `groups` may also list loose paths (a group is all cpk
+  entries or all loose files).
+- The later mod wins a path (a `[mods] conflict loose ...` line; `conflicts_ok` silences it); a group that loses a member is dropped whole.
+- A loose file is gameplay: its lower-case path and the sha256 of the bytes served are in the digest (voices count as gameplay).
+- A copy at the same path in the game folder (an old installer's leftovers) loses to the mods-folder copy; this is logged once.
+- Served by the toolkit's path resolver (patch 6504, `ps3emu/fs_path_ops.h`): a read-only open or a stat of the path is answered with
+  the mod's file (or the disc copy of the archive an alias names), and the virtual-file view (patch 6502) serves the bytes that were hashed for a `file` source (the mod's open handle). An `alias` window is read from a fresh open of the disc archive; its hash is checked once per path when the game first opens it, and a mismatch refuses online play (a change of the archive after that is not seen, as for the CPK copies).
+
+Songs are the only sound files that are cosmetic: `sound/<LANG>/BGM_*` in `cpk-entry`. Any other sound override is gameplay.
+
+### Open (needs a game run)
+
+- The path form CRI uses when a name is in no CPK (bare relative, or under `data/PS3`): `loose_rel_from_guest` takes both, the first run
+  reads the `[fs] open` lines. If the game opens through another path function than `cellFsOpen`, nothing is served.
+- That the game accepts a voice bank or tip served this way, and that a view's size via `cellFsFstat` is what CRI uses.
+- Directory listings do not show a mod-only loose file (only open and stat by path are answered).
+- The cue-sheet name table has no names for ids 19 to 21 (static reading): a bank may load and still not play.
+
+## derived: bytes from the game or a third party
+
+A `file` source of a `cpk-entry` override or a `loose` entry may carry `"derived": true` (an alias takes none: it ships no bytes). It is
+bookkeeping only: not in the digest, logged as `[mods] <id>: marked derived`, and `jmods::manifest_derived` tells a verifier to check the
+mod but never put it on the tested list. A port that does not know the key ignores it on an override.

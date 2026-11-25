@@ -298,7 +298,9 @@ static void test_helpers()
     CHECK(dup && bad);
     CHECK(jmods::parse_mods_list("", log).empty() && jmods::parse_mods_list("# only\n\n", log).empty());
 
-    CHECK(jmods::is_cosmetic_path("game/logo/logo_US_v.pak") && jmods::is_cosmetic_path("sound/bgm/x.acb") && jmods::is_cosmetic_path("movie/a.usm"));
+    CHECK(jmods::is_cosmetic_path("game/logo/logo_US_v.pak") && jmods::is_cosmetic_path("sound/JP/BGM_JP.acb") && jmods::is_cosmetic_path("movie/a.usm"));
+    CHECK(!jmods::is_cosmetic_path("sound/bgm/x.acb") && !jmods::is_cosmetic_path("sound/JP/CV_001_00_ST_JP.acb") && !jmods::is_cosmetic_path("sound/BGM_x.acb") &&
+          !jmods::is_cosmetic_path("sound/JP/sub/BGM_x.acb") && !jmods::is_cosmetic_path("sound//BGM_x.acb") && !jmods::is_cosmetic_path("sound/JP/SE_001.acb"));   // songs only (D40)
     CHECK(!jmods::is_cosmetic_path("game/resident/game_resident_ALL_m.pak") && !jmods::is_cosmetic_path("character/model/character_model_000_m.pak"));
     CHECK(!jmods::is_cosmetic_path("progress/title_chara/x.pak") && !jmods::is_cosmetic_path("battle/x.pak") && !jmods::is_cosmetic_path("gamelogo/x"));
     CHECK(jmods::archive_of("battle/a/b.pak") == "partition_op_battle_ps3.cpk" && jmods::archive_of("patch/x").empty() && jmods::archive_of("x").empty());
@@ -741,6 +743,16 @@ static void test_glue(MemIo& io, const SynthCpk& chara)
     CHECK(cos.digest_kind == DigestKind::None && !cos.plans.empty() && game_online_allowed(cos.digest_kind));
 }
 
+static std::string loose_mod(const std::string& id, const std::string& loose, const std::string& ifs = "\"loose-file\": 1", const std::string& extra = "")
+{
+    return "{ \"schema\": 1, \"id\": \"" + id + "\", \"version\": \"1.0.0\", \"title\": \"t\", \"game\": { \"title_ids\": [\"BLUS31519\"] },\n"
+           "  \"interfaces\": { " + ifs + " }, " + extra + "\"loose\": [ " + loose + " ] }\n";
+}
+static std::string lf(const std::string& path, const std::string& file, const Bytes& b, const std::string& more = "")
+{
+    return "{ \"path\": \"" + path + "\", \"file\": \"" + file + "\", \"sha256\": \"" + sha_hex(b) + "\"" + more + " }";
+}
+static std::string la(const std::string& path, const std::string& alias) { return "{ \"path\": \"" + path + "\", \"alias\": \"" + alias + "\" }"; }
 #ifdef MODS_GLUE_FILES
 // ---------------------------------------------------------------------------------------------------- the glue on real files (POSIX branch)
 #include "jsp_mods.cpp"
@@ -748,6 +760,7 @@ static void test_glue(MemIo& io, const SynthCpk& chara)
 #include <sys/stat.h>
 #include <unistd.h>
 extern "C" { const ps3_fs_vfile_ops* volatile g_ps3_fs_vfile_ops = nullptr; }
+extern "C" { const ps3_fs_path_ops* volatile g_ps3_fs_path_ops = nullptr; }
 static int g_online_refusals = 0;
 extern "C" void jsp_online_refuse_for_mods(void) { ++g_online_refusals; }
 
@@ -975,6 +988,119 @@ static void test_glue_files(MemIo& io, const SynthCpk& game, const SynthCpk& cha
     std::string rm = "rm -rf '" + root + "'";
     CHECK(std::system(rm.c_str()) == 0);
 }
+
+// ENHANCEMENT (loose-file): jsp_mods.cpp's resolver and views on real files: the mod's file and an alias window, the guest path forms, a game-folder copy.
+static void test_glue_loose()
+{
+    const char* tmp = std::getenv("TMPDIR");
+    std::string root = std::string(tmp && *tmp ? tmp : "/tmp") + "/jsp_mods_loose.XXXXXX";
+    if (!mkdtemp(root.data())) { CHECK(false); return; }
+    const std::string disc = root + "/disc", arch = disc + "/PS3_GAME/USRDIR/data/PS3/", mods = root + "/mods";
+    const SynthCpk snd = make_cpk({ { "sound/JP/CV_018_00_ST_JP.acb", 3000 }, { "sound/JP/CV_018_00_ST_JP.awb", 5000 } }, false, 3000, 5);
+    const SynthCpk prog = make_cpk({ { "progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak", 2500 } }, true, 3100, 9);
+    put_file(arch + "partition_op_sound_ps3.cpk", snd.file);
+    put_file(arch + "partition_op_progress_ps3.cpk", prog.file);
+    const Bytes cva = noise(1500, 71), cvb = noise(2600, 72);
+    put_file(mods + "/vo/f/CV_019_00_ST_JP.acb", cva);
+    put_file(mods + "/vo/f/CV_019_00_ST_JP.awb", cvb);
+    const std::string TIPS = "progress/game/loading_game/tips/", tip = TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", tipv = TIPS + "loading_game_tips_chara_019_000_ALL_v.pak", donor = TIPS + "loading_game_tips_chara_018_000_ALL_m.pak";
+    put_text(mods + "/vo/mod.json", loose_mod("vo", lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb) + ", " + la(tip, donor) + ", " + la(tipv, donor)));
+    put_text(root + "/mods.txt", "vo\n");
+    put_text(root + "/eboot.elf", "x");
+    setenv("JSP_MODS_DIR", mods.c_str(), 1);
+    setenv("JSP_MODS_LIST", (root + "/mods.txt").c_str(), 1);
+    unsetenv("JSP_MODS");
+    const int refusals0 = g_online_refusals;
+    std::string log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
+    CHECK(has(log, "[mods] serving 4 loose file(s) through the path resolver") && has(log, "[mods] vo 1.0.0: gameplay") && g_ps3_fs_path_ops == &k_path_ops && g_ps3_fs_vfile_ops == &k_ops);
+    CHECK(g_online_refusals == refusals0 + 1);   // a gameplay set: the game's own online is off (as for any gameplay mod)
+    const ps3_fs_path_ops* po = g_ps3_fs_path_ops;
+    const ps3_fs_vfile_ops* vo = g_ps3_fs_vfile_ops;
+    const auto resolve = [&](const std::string& guest, std::string& host, uint64_t* vs) { char b[1100]; std::snprintf(b, sizeof b, "%s", host.c_str()); const int r = po->resolve(guest.c_str(), b, sizeof b, vs); host = b; return r; };
+    // the mod's own file: three guest path forms, a stat size, the pinned bytes through a view
+    for (const std::string& g : { std::string("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.acb"), std::string("/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/data/PS3/sound/jp/cv_019_00_st_jp.acb"),
+                                  std::string("sound/JP/CV_019_00_ST_JP.acb") }) {
+        std::string host = arch + "sound/JP/CV_019_00_ST_JP.acb";
+        uint64_t vs = UINT64_MAX;
+        CHECK(resolve(g, host, &vs) == 1 && host == mods + "/vo/f/CV_019_00_ST_JP.acb" && vs == cva.size());
+    }
+    {
+        std::string host = arch + "sound/JP/CV_019_00_ST_JP.awb";
+        CHECK(resolve("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.awb", host, nullptr) == 1);
+        FILE* f = std::fopen(host.c_str(), "rb");
+        ps3_fs_vfile* vf = vo->open("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.awb", host.c_str());
+        CHECK(f && vf && vo->size(vf) == cvb.size());
+        Bytes got(cvb.size());
+        CHECK(vf && vo->read(vf, f, 0, got.data(), got.size()) == cvb.size() && got == cvb);
+        Bytes mid(100);
+        CHECK(vf && vo->read(vf, f, 1000, mid.data(), mid.size()) == 100 && std::equal(mid.begin(), mid.end(), cvb.begin() + 1000));
+        CHECK(vf && vo->read(vf, f, cvb.size() - 10, got.data(), 50) == 10);   // never past the end
+        if (vf) vo->close(vf);
+        if (f) std::fclose(f);
+    }
+    // the alias: the disc copy of the archive is the host, the view is the donor row's window
+    {
+        std::string host = arch + tip;
+        uint64_t vs = UINT64_MAX;
+        const Bytes& want = prog.data.at(donor);
+        CHECK(resolve("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/" + tip, host, &vs) == 1 && host == arch + "partition_op_progress_ps3.cpk" && vs == want.size());
+        FILE* f = std::fopen(host.c_str(), "rb");
+        ps3_fs_vfile* vf = vo->open(("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/" + tip).c_str(), host.c_str());
+        CHECK(f && vf && vo->size(vf) == want.size());
+        Bytes got(want.size());
+        CHECK(vf && vo->read(vf, f, 0, got.data(), got.size()) == want.size() && got == want);
+        if (vf) vo->close(vf);
+        if (f) std::fclose(f);
+        // opened from some other copy of the archive: not served (the fd reads its own FILE)
+        put_file(root + "/other.cpk", prog.file);
+        log = capture([&] { CHECK(vo->open(("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/" + tip).c_str(), (root + "/other.cpk").c_str()) == nullptr); });
+        CHECK(has(log, "not the planned copy: not served"));
+    }
+    {   // an alias window that differs from the plan is not served, once per path, and the set stops running as listed
+        const std::string g = "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/" + tipv;
+        std::string host = arch + tipv;
+        CHECK(resolve(g, host, nullptr) == 1);
+        Bytes bad = prog.file;
+        bad[prog.offset.at(donor) + 5] ^= 0x55;
+        put_file(arch + "partition_op_progress_ps3.cpk", bad);
+        const int before = g_kind.load();
+        log = capture([&] { CHECK(vo->open(g.c_str(), host.c_str()) == nullptr); });
+        CHECK(has(log, "the archive window differs from the planned bytes") && g_kind.load() == (int)DigestKind::Refused && jsp_mods_copy_mismatch() == 1);
+        CHECK(vo->open(g.c_str(), host.c_str()) == nullptr);   // the result is kept
+        put_file(arch + "partition_op_progress_ps3.cpk", prog.file);
+        g_kind.store(before); g_copy_mismatch.store(0);
+    }
+    // paths that are not loose files are left alone: another name, a CPK itself, a non-game path
+    for (const char* g : { "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_018_00_ST_JP.acb", "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/partition_op_sound_ps3.cpk",
+                           "/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/x.dat", "", "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_020_00_ST_JP.acb" }) {
+        std::string host = "/keep/me";
+        uint64_t vs = UINT64_MAX;
+        CHECK(resolve(g, host, &vs) == 0 && host == "/keep/me" && vs == UINT64_MAX);
+        CHECK(vo->open(g, "/keep/me") == nullptr);
+    }
+    // a copy in the game folder: the mod's copy wins, with one warning
+    put_file(arch + "sound/JP/PV_019_00_ST_JP.acb", noise(10, 1));   // not a mod path: no warning
+    put_file(arch + "sound/JP/CV_019_00_ST_JP.acb", noise(77, 2));   // old installer leftovers
+    {
+        std::string host = arch + "sound/JP/CV_019_00_ST_JP.acb";
+        log = capture([&] { CHECK(resolve("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.acb", host, nullptr) == 1); });
+        CHECK(host == mods + "/vo/f/CV_019_00_ST_JP.acb" && has(log, "loose sound/JP/CV_019_00_ST_JP.acb: a game-folder copy exists (not from the mods folder), the mod's copy is served"));
+        host = arch + "sound/JP/CV_019_00_ST_JP.acb";
+        log = capture([&] { CHECK(resolve("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.acb", host, nullptr) == 1); });
+        CHECK(!has(log, "game-folder copy"));   // once
+    }
+    {   // a host buffer too small for the answer: left alone
+        char tiny[8] = "/x";
+        const int before = g_kind.load();
+        log = capture([&] { CHECK(po->resolve("sound/JP/CV_019_00_ST_JP.acb", tiny, sizeof tiny, nullptr) == 0 && std::strcmp(tiny, "/x") == 0); });
+        CHECK(has(log, "the set no longer runs as listed") && g_kind.load() == (int)DigestKind::Refused);   // not just a log line
+        g_kind.store(before); g_copy_mismatch.store(0);
+    }
+    std::string rm = "rm -rf '" + root + "'";
+    CHECK(std::system(rm.c_str()) == 0);
+    unsetenv("JSP_MODS_DIR");
+    unsetenv("JSP_MODS_LIST");
+}
 #endif
 
 // R6: the in-place layout, edge cases (after the GMOD R6 refutation review). The only in-game proof is the same-size case.
@@ -1180,7 +1306,7 @@ static void test_roster(MemIo& io)
         { "{ \"id\": 19, \"owned\": 1 }", "\"roster\": 1", "\"owned\" must be true or false" },
         { "{ \"id\": 19, \"afer\": 40 }", "\"roster\": 1", "unknown key" },
         { "{ \"id\": 19 }", "\"cpk-entry\": 1", "needs interface \"roster\"" },
-        { "{ \"id\": 19 }", "\"roster\": 2", "newer than this build supports" },
+        { "{ \"id\": 19 }", "\"roster\": 3", "newer than this build supports" },
     };
     for (const Bad& b : bad) {
         add_mod(io, "bad", roster_mod("bad", b.fighters, b.ifs));
@@ -1246,6 +1372,276 @@ static void test_roster(MemIo& io)
     CHECK(mix.digest_kind == jmods::DigestKind::Value && mix.digest == d1);
 }
 
+// ---------------------------------------------------------------------------------------------------- roster card_as (ENHANCEMENT)
+static void test_card_as(MemIo& io)
+{
+    {   // card_as needs interface roster 2; roster 1 mods still load, without it
+        add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"after\": 40 }"));
+        CHECK(mod(jmods::load_mod_set(io, "v1\n", opts()), "v1")->loaded);
+        add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"card_as\": 18 }"));
+        jmods::ModSet r1 = jmods::load_mod_set(io, "v1\n", opts());
+        CHECK(!mod(r1, "v1")->loaded && has_log(r1, "unknown key \"card_as\""));
+        add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"card_as\": 18 }", "\"roster\": 2"));
+        CHECK(mod(jmods::load_mod_set(io, "v1\n", opts()), "v1")->loaded);
+    }
+    // parse: card_as is kept, logged, and does not change the digest (the card is cosmetic)
+    const auto card_set = [&](const char* fighters) { add_mod(io, "ca", roster_mod("ca", fighters, "\"roster\": 2")); return jmods::load_mod_set(io, "ca\n", opts()); };   // one id: the digest names it
+    jmods::ModSet a = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 18 }");
+    jmods::ModSet b = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 7 }");
+    jmods::ModSet n = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39 }");
+    CHECK(mod(a, "ca") && mod(a, "ca")->loaded && a.roster.size() == 1 && a.roster[0].card_as == 18);
+    CHECK(n.roster.size() == 1 && n.roster[0].card_as == -1);
+    CHECK(has_log(a, "[mods] ca: roster adds 1 fighter(s): 19(after 40, logo as 39, owned, card as 18)"));
+    CHECK(a.digest_kind == jmods::DigestKind::Value && a.digest == n.digest && a.digest == b.digest);   // not in the digest
+    CHECK(jmods::build_roster_list(a.roster) == jmods::build_roster_list(n.roster));
+    CHECK(jmods::card_donor_for(a.roster, 19) == 18 && jmods::card_donor_for(a.roster, 20) == -1 && jmods::card_donor_for(n.roster, 19) == -1);
+    {   // a donor that is a support on the stock list is accepted; a changed gameplay field still changes the digest
+        jmods::ModSet c = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 211 }");
+        CHECK(mod(c, "ca")->loaded && c.roster[0].card_as == 211 && c.digest == n.digest);
+        CHECK(card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 38, \"card_as\": 18 }").digest != a.digest);
+    }
+    // refusals: the donor must be a stock-list id (a full card), never the added ids, a stub, an unknown or a non-number
+    static const struct { const char* fighters; const char* why; } bad[] = {
+        { "{ \"id\": 19, \"card_as\": 19 }", "\"card_as\" must be a stock fighter id" },    // itself: no card of its own
+        { "{ \"id\": 19, \"card_as\": 20 }", "\"card_as\" must be a stock fighter id" },    // another added id
+        { "{ \"id\": 19, \"card_as\": 21 }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": 208 }", "\"card_as\" must be a stock fighter id" },   // a 64x55 stub in the card set
+        { "{ \"id\": 19, \"card_as\": 42 }", "\"card_as\" must be a stock fighter id" },    // not on the stock list
+        { "{ \"id\": 19, \"card_as\": 300 }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": -1 }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": \"18\" }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": true }", "\"card_as\" must be a stock fighter id" },
+    };
+    for (const auto& c : bad) {
+        add_mod(io, "badc", roster_mod("badc", c.fighters, "\"roster\": 2"));
+        jmods::ModSet r = jmods::load_mod_set(io, "badc\n", opts());
+        const bool ok = mod(r, "badc") && !mod(r, "badc")->loaded && r.roster.empty() && has_log(r, c.why);
+        CHECK(ok);
+        if (!ok) std::printf("  card_as refusal case: %s\n", c.fighters);
+    }
+    {   // check_roster itself (a Manifest built by hand, not parsed) refuses a bad donor too
+        jmods::Manifest m;
+        jmods::RosterFighter f; f.id = 19; f.card_as = 20; m.roster.push_back(f);
+        std::set<int> ids = jmods::stock_roster_ids();
+        std::string err;
+        CHECK(!jmods::check_roster(m, ids, err) && err.find("card_as 20 is not a stock-list id") != std::string::npos && ids == jmods::stock_roster_ids());
+        m.roster[0].card_as = 18;
+        CHECK(jmods::check_roster(m, ids, err) && ids.count(19));
+    }
+    // the name the game looks up: only the exact card name parses, three digits
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_019.png") == 19 && jmods::card_name_id("_rgb8_256_chara_ico_000.png") == 0);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_211.png") == 211);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_19.png") == -1 && jmods::card_name_id("_rgb8_256_chara_ico_0019.png") == -1);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_019.pn") == -1 && jmods::card_name_id("_rgb8_256_chara_ico_019.png ") == -1);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_01a.png") == -1 && jmods::card_name_id("_rgb8_256_chara_ic0_019.png") == -1);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_019_ALL.png") == -1 && jmods::card_name_id("") == -1);
+    CHECK(jmods::card_name_for(18) == "_rgb8_256_chara_ico_018.png" && jmods::card_name_for(211) == "_rgb8_256_chara_ico_211.png");
+    CHECK(jmods::card_name_id(jmods::card_name_for(7)) == 7);
+    {   // the guest-side rewrite on a fake memory: only the exact added id's name changes, and only for the length of the lookup
+        struct Mem {
+            std::map<uint32_t, uint8_t> b; bool oob = false;   // oob: a read outside what was written
+            uint8_t rd(uint32_t a) { auto it = b.find(a); if (it == b.end()) { oob = true; return 0; } return it->second; }
+            void wr(uint32_t a, uint8_t v) { if (!b.count(a)) oob = true; b[a] = v; }
+            void put(uint32_t a, const std::string& t) { b.clear(); for (size_t i = 0; i <= t.size(); ++i) b[a + (uint32_t)i] = i < t.size() ? (uint8_t)t[i] : 0; }
+            std::string get(uint32_t a) { std::string t; while (b.count(a + (uint32_t)t.size()) && b[a + (uint32_t)t.size()]) t += (char)b[a + (uint32_t)t.size()]; return t; }
+        } mem;
+        const int ids[2] = { 19, 21 }, donors[2] = { 18, 211 };
+        const auto rd = [&](uint32_t a) { return mem.rd(a); };
+        const auto wr = [&](uint32_t a, uint8_t v) { mem.wr(a, v); };
+        jmods::CardRedirect st;
+        const uint32_t p = 0xD0000070u;
+        mem.put(p, "_rgb8_256_chara_ico_019.png");
+        CHECK(jmods::card_redirect_enter(rd, wr, p, ids, donors, 2, st) && mem.get(p) == "_rgb8_256_chara_ico_018.png" && st.at == p);
+        jmods::card_redirect_leave(wr, st);
+        CHECK(mem.get(p) == "_rgb8_256_chara_ico_019.png" && st.at == 0 && !mem.oob);
+        mem.put(p, "_rgb8_256_chara_ico_021.png");
+        CHECK(jmods::card_redirect_enter(rd, wr, p, ids, donors, 2, st) && mem.get(p) == "_rgb8_256_chara_ico_211.png");
+        jmods::card_redirect_leave(wr, st);
+        CHECK(mem.get(p) == "_rgb8_256_chara_ico_021.png" && !mem.oob);
+        for (const char* other : { "_rgb8_256_chara_ico_020.png", "_rgb8_256_chara_ico_018.png", "_rgb8_256_chara_ico_300.png", "_rgb8_256_chara_ico_019.png.x",
+                                   "_rgb8_256_chara_ico_19.png", "_rgb8_256_chara_ico_01", "x", "", "_rgb8_256_chara_ico_019.srd", "_rgb8_256_chara_ic_019.png" }) {
+            mem.put(p, other);
+            const std::string before = mem.get(p);
+            CHECK(!jmods::card_redirect_enter(rd, wr, p, ids, donors, 2, st) && mem.get(p) == before && st.at == 0);
+            jmods::card_redirect_leave(wr, st);   // nothing to put back
+            CHECK(mem.get(p) == before && !mem.oob);   // never read past the string's own end
+        }
+        mem.put(p, "_rgb8_256_chara_ico_019.png");
+        CHECK(!jmods::card_redirect_enter(rd, wr, p, ids, donors, 0, st) && mem.get(p) == "_rgb8_256_chara_ico_019.png");   // no mod: untouched
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------- loose files (ENHANCEMENT)
+static void test_loose()
+{
+    // names the game builds for the added ids, and only those
+    for (const char* ok : { "sound/JP/CV_019_00_ST_JP.acb", "sound/JP/PV_021_01_ST_JP.awb", "sound/jp/cv_020_00_st_jp.acb", "sound/EN/CV_019_00_ST_EN.acb",
+                            "progress/game/loading_game/tips/loading_game_tips_chara_019_000_ALL_m.pak", "progress/game/loading_game/tips/loading_game_tips_chara_021_000_ALL_v.pak",
+                            "progress/game/loading_game/tips/US/loading_game_tips_title_chara_019_000_US_m.pak", "progress/game/loading_game/tips/NS/loading_game_tips_mes_chara_020_000_NS_v.pak" })
+        CHECK(jmods::loose_name_ok(ok));
+    for (const char* bad : { "sound/JP/CV_018_00_ST_JP.acb", "sound/JP/CV_022_00_ST_JP.acb", "sound/JP/CV_019_00_ST_US.acb", "sound/JP/CV_019_0_ST_JP.acb", "sound/JP/BGM_JP.acb",
+                             "sound/JP/CV_019_00_ST_JP.hca", "sound/JP/CV_019_00_ST_JP.acb.x", "sound/CV_019_00_ST_JP.acb", "sound/J/CV_019_00_ST_J.acb", "sound/JP/x/CV_019_00_ST_JP.acb",
+                             "progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak", "progress/game/loading_game/tips/loading_game_tips_chara_019_001_ALL_m.pak",
+                             "progress/game/loading_game/tips/loading_game_tips_chara_019_000_US_m.pak", "progress/game/loading_game/tips/US/loading_game_tips_title_chara_019_000_FR_m.pak",
+                             "progress/game/loading_game/tips/US/loading_game_tips_chara_019_000_US_m.pak", "progress/game/loading_game/tips/US/loading_game_tips_title_chara_019_000_US_x.pak",
+                             "progress/game/loading_game/loading_game_tips_chara_019_000_ALL_m.pak", "game/logo/x.pak", "", "sound" })
+        CHECK(!jmods::loose_name_ok(bad));
+    // the guest path forms
+    CHECK(jmods::loose_rel_from_guest("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.acb") == "sound/JP/CV_019_00_ST_JP.acb");
+    CHECK(jmods::loose_rel_from_guest("/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/data/PS3/sound/JP/CV_019_00_ST_JP.awb") == "sound/JP/CV_019_00_ST_JP.awb");
+    CHECK(jmods::loose_rel_from_guest("/app_home/PS3_GAME/USRDIR/DATA/PS3/progress/game/x.pak") == "progress/game/x.pak");
+    CHECK(jmods::loose_rel_from_guest("sound/JP/CV_019_00_ST_JP.acb") == "sound/JP/CV_019_00_ST_JP.acb");
+    CHECK(jmods::loose_rel_from_guest("/sound/JP/a") == "sound/JP/a" && jmods::loose_rel_from_guest("data\\PS3\\sound\\JP\\a") == "sound/JP/a");
+    CHECK(jmods::loose_rel_from_guest("game/logo/logo_US_v.pak") == "game/logo/logo_US_v.pak");   // an archive folder: looked up, then no loose entry
+    CHECK(jmods::loose_rel_from_guest("/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/other.dat").empty() && jmods::loose_rel_from_guest("").empty());
+    CHECK(jmods::loose_rel_from_guest("/dev_bdvd/PS3_GAME/PARAM.SFO").empty());
+
+    // synthetic archives with rows of the two kinds (a voice row at an allowed name, and a donor tip)
+    MemIo io;
+    const SynthCpk snd = make_cpk({ { "sound/JP/CV_018_00_ST_JP.acb", 3000 }, { "sound/JP/CV_018_00_ST_JP.awb", 5000 }, { "sound/JP/CV_021_00_ST_JP.acb", 2100 } }, false, 3000, 5);
+    const SynthCpk prog = make_cpk({ { "progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak", 2500 },
+                                     { "progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_v.pak", 4100 } }, true, 3100, 9);
+    io.archives["partition_op_sound_ps3.cpk"] = snd.file;
+    io.archives["partition_op_progress_ps3.cpk"] = prog.file;
+    const Bytes cva = noise(1500, 71), cvb = noise(2600, 72), pva = noise(900, 73), pvb = noise(1100, 74);
+    io.mods["vo/f/CV_019_00_ST_JP.acb"] = cva; io.mods["vo/f/CV_019_00_ST_JP.awb"] = cvb;
+    io.mods["vo/f/PV_019_00_ST_JP.acb"] = pva; io.mods["vo/f/PV_019_00_ST_JP.awb"] = pvb;
+    const std::string TIPS = "progress/game/loading_game/tips/";
+    const std::string full = lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb) + ", " +
+                             lf("sound/JP/PV_019_00_ST_JP.acb", "f/PV_019_00_ST_JP.acb", pva) + ", " + lf("sound/JP/PV_019_00_ST_JP.awb", "f/PV_019_00_ST_JP.awb", pvb) + ", " +
+                             la(TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", TIPS + "loading_game_tips_chara_018_000_ALL_m.pak") + ", " +
+                             la(TIPS + "loading_game_tips_chara_019_000_ALL_v.pak", TIPS + "loading_game_tips_chara_018_000_ALL_v.pak");
+    add_mod(io, "vo", loose_mod("vo", full));
+    jmods::ModSet s = jmods::load_mod_set(io, "vo\n", opts());
+    CHECK(mod(s, "vo") && mod(s, "vo")->loaded && mod(s, "vo")->applied && mod(s, "vo")->gameplay && s.loose.size() == 6);
+    CHECK(s.digest_kind == jmods::DigestKind::Value);   // voices and tips are gameplay
+    {
+        const auto v = s.loose.find("sound/jp/cv_019_00_st_jp.acb");
+        CHECK(v != s.loose.end() && v->second.file == "vo/f/CV_019_00_ST_JP.acb" && v->second.len == cva.size() && v->second.archive.empty() && v->second.content == jpsm::sha256(cva.data(), cva.size()));
+        const auto t = s.loose.find(jmods::lower(TIPS + "loading_game_tips_chara_019_000_ALL_m.pak"));
+        CHECK(t != s.loose.end() && t->second.file.empty() && t->second.archive == "partition_op_progress_ps3.cpk" && t->second.len == prog.data.at("progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak").size());
+        CHECK(t != s.loose.end() && t->second.src == prog.offset.at("progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak"));
+    }
+    CHECK(has_log(s, "[mods] loose sound/JP/CV_019_00_ST_JP.acb <- vo f/CV_019_00_ST_JP.acb (1500 B)") && has_log(s, "<- alias progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak"));
+    CHECK(s.plans.empty());   // no CPK is changed
+    const jpsm::Digest d1 = s.digest;
+    CHECK(jmods::load_mod_set(io, "vo\n", opts()).digest == d1);
+    {   // the digest follows the bytes served and the path; "derived" is bookkeeping and stays out of it
+        Bytes cva2 = cva; cva2[0] ^= 1;
+        io.mods["vo/f/CV_019_00_ST_JP.acb"] = cva2;
+        add_mod(io, "vo", loose_mod("vo", full));
+        CHECK(mod(jmods::load_mod_set(io, "vo\n", opts()), "vo")->reason.find("does not match its sha256") != std::string::npos);
+        add_mod(io, "vo", loose_mod("vo", lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva2) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb)));
+        const jmods::ModSet c = jmods::load_mod_set(io, "vo\n", opts());
+        CHECK(c.digest_kind == jmods::DigestKind::Value && c.digest != d1);
+        io.mods["vo/f/CV_019_00_ST_JP.acb"] = cva;
+        const std::string pair = lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva, ", \"derived\": true") + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb);
+        add_mod(io, "vo", loose_mod("vo", pair));
+        const jmods::ModSet e = jmods::load_mod_set(io, "vo\n", opts());
+        add_mod(io, "vo", loose_mod("vo", lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb)));
+        CHECK(jmods::load_mod_set(io, "vo\n", opts()).digest == e.digest && mod(e, "vo")->m.loose[0].derived && !mod(e, "vo")->m.loose[1].derived);
+    }
+    add_mod(io, "vo", loose_mod("vo", full));
+
+    {   // derived on a cpk-entry override and on a loose file: parsed, logged, out of the digest, an alias takes none
+        const Bytes ob = noise(500, 91);
+        io.mods["dv/f/o.pak"] = ob;
+        const auto dv = [&](const std::string& more) {
+            add_mod(io, "dv", "{ \"schema\": 1, \"id\": \"dv\", \"version\": \"1\", \"title\": \"t\", \"game\": { \"title_ids\": [\"BLUS31519\"] }, \"interfaces\": { \"cpk-entry\": 1 },\n"
+                    "\"overrides\": [ { \"entry\": \"progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak\", \"file\": \"f/o.pak\", \"sha256\": \"" + sha_hex(ob) + "\"" + more + " } ] }");
+            return jmods::load_mod_set(io, "dv\n", opts());
+        };
+        const jmods::ModSet plain = dv(""), der = dv(", \"derived\": true");
+        CHECK(mod(der, "dv")->loaded && jmods::manifest_derived(mod(der, "dv")->m) && !jmods::manifest_derived(mod(plain, "dv")->m));
+        CHECK(has_log(der, "[mods] dv: marked derived") && !has_log(plain, "marked derived") && der.digest == plain.digest);
+        CHECK(!mod(dv(", \"derived\": 1"), "dv")->loaded && has_log(dv(", \"derived\": 1"), "\"derived\" must be true or false"));
+        CHECK(jmods::manifest_derived(mod(jmods::load_mod_set(io, "vo\n", opts()), "vo")->m) == false);
+    }
+    // refusals
+    const std::string acb = lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva), awb = lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb);
+    const std::string tip = TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", donor = TIPS + "loading_game_tips_chara_018_000_ALL_m.pak";
+    static const std::string e19 = "\"sound/JP/CV_019_00_ST_JP.acb\"";
+    struct Bad { std::string loose, ifs, why; };
+    const std::vector<Bad> bad = {
+        { acb, "\"loose-file\": 1", "its pair sound/JP/CV_019_00_ST_JP.awb is not in the same mod" },
+        { awb, "\"loose-file\": 1", "its pair sound/JP/CV_019_00_ST_JP.acb is not in the same mod" },
+        { acb + ", " + awb, "\"cpk-entry\": 1", "\"loose\" needs interface \"loose-file\"" },
+        { acb + ", " + awb, "\"loose-file\": 2", "newer than this build supports" },
+        { lf("sound/JP/CV_021_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/JP/CV_021_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb), "\"loose-file\": 1", "has a row in partition_op_sound_ps3.cpk (sound/JP/CV_021_00_ST_JP.acb): use overrides (cpk-entry)" },
+        { lf("sound/jp/cv_021_00_st_jp.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/jp/cv_021_00_st_jp.awb", "f/CV_019_00_ST_JP.awb", cvb), "\"loose-file\": 1", "has a row in partition_op_sound_ps3.cpk" },   // case does not hide a row
+        { lf("sound/JP/CV_018_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "not a name the game builds for the added fighters" },
+        { lf("sound/JP/BGM_JP.acb", "f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "not a name the game builds" },
+        { lf("movie/x.usm", "f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "names no archive folder" },
+        { lf("data/x.acb", "f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "names no archive folder" },
+        { lf("../sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "no valid \"path\"" },
+        { lf("sound\\\\JP\\\\CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "no valid \"path\"" },
+        { lf("sound/JP/CV_019_00_ST_JP.acb", "../f/CV_019_00_ST_JP.acb", cva), "\"loose-file\": 1", "bad \"file\" path" },
+        { "{ \"path\": \"sound/JP/CV_019_00_ST_JP.acb\", \"file\": \"f/CV_019_00_ST_JP.acb\" }", "\"loose-file\": 1", "needs a 64-digit \"sha256\"" },
+        { "{ \"path\": \"sound/JP/CV_019_00_ST_JP.acb\" }", "\"loose-file\": 1", "give exactly one of" },
+        { "{ \"path\": \"sound/JP/CV_019_00_ST_JP.acb\", \"alias\": \"a/b\", \"file\": \"f\" }", "\"loose-file\": 1", "give exactly one of" },
+        { la("sound/JP/CV_019_00_ST_JP.acb", "sound/JP/CV_018_00_ST_JP.acb") + ", " + la("sound/jp/cv_019_00_st_jp.acb", "sound/JP/CV_018_00_ST_JP.acb"), "\"loose-file\": 1", "is listed twice" },
+        { "{ \"path\": \"sound/JP/CV_019_00_ST_JP.acb\", \"alias\": \"sound/JP/CV_018_00_ST_JP.acb\", \"sha256\": \"" + sha_hex(cva) + "\" }", "\"loose-file\": 1", "takes no \"sha256\"" },
+        { "{ \"path\": \"sound/JP/CV_019_00_ST_JP.acb\", \"alias\": \"sound/JP/CV_018_00_ST_JP.acb\", \"derived\": true }", "\"loose-file\": 1", "takes no \"derived\"" },
+        { la("sound/JP/CV_019_00_ST_JP.acb", "sound/JP/CV_099_00_ST_JP.acb") + ", " + la("sound/JP/CV_019_00_ST_JP.awb", "sound/JP/CV_018_00_ST_JP.awb"), "\"loose-file\": 1", "alias sound/JP/CV_099_00_ST_JP.acb is not in partition_op_sound_ps3.cpk" },
+        { la("sound/JP/CV_019_00_ST_JP.acb", "sound/jp/cv_018_00_st_jp.acb") + ", " + la("sound/JP/CV_019_00_ST_JP.awb", "sound/JP/CV_018_00_ST_JP.awb"), "\"loose-file\": 1", "(did you mean sound/JP/CV_018_00_ST_JP.acb?)" },
+        { la("sound/JP/CV_019_00_ST_JP.acb", "data/x") + ", " + la("sound/JP/CV_019_00_ST_JP.awb", "sound/JP/CV_018_00_ST_JP.awb"), "\"loose-file\": 1", "bad \"alias\"" },
+        { "{ \"path\": \"sound/JP/CV_019_00_ST_JP.acb\", \"file\": \"f/CV_019_00_ST_JP.acb\", \"sha256\": \"" + sha_hex(cva) + "\", \"x\": 1 }", "\"loose-file\": 1", "unknown key \"x\"" },
+        { lf("sound/JP/CV_019_00_ST_JP.acb", "f/missing.acb", cva) + ", " + awb, "\"loose-file\": 1", "file f/missing.acb is missing" },
+        { lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.awb", cva) + ", " + awb, "\"loose-file\": 1", "does not match its sha256" },
+    };
+    io.mods["bad/f/CV_019_00_ST_JP.acb"] = cva; io.mods["bad/f/CV_019_00_ST_JP.awb"] = cvb;
+    for (const Bad& b : bad) {
+        add_mod(io, "bad", loose_mod("bad", b.loose, b.ifs));
+        const jmods::ModSet r = jmods::load_mod_set(io, "bad\n", opts());
+        const bool ok = mod(r, "bad") && !mod(r, "bad")->loaded && r.loose.empty() && has_log(r, b.why);
+        CHECK(ok);
+        if (!ok) std::printf("  loose refusal case: %s | %s\n", b.loose.substr(0, 80).c_str(), b.why.c_str());
+    }
+    {   // another build: the mod runs only on BLUS31519
+        add_mod(io, "vo", loose_mod("vo", full));
+        jmods::Options o = opts(); o.title_id = "BLES02136";
+        const jmods::ModSet r = jmods::load_mod_set(io, "vo\n", o);
+        CHECK(!mod(r, "vo")->loaded && r.loose.empty());
+        add_mod(io, "vo2", "{ \"schema\": 1, \"id\": \"vo2\", \"version\": \"1\", \"title\": \"t\", \"game\": { \"title_ids\": [\"BLES02136\"] }, \"interfaces\": { \"loose-file\": 1 }, \"loose\": [ " + acb + ", " + awb + " ] }");
+        CHECK(!mod(jmods::load_mod_set(io, "vo2\n", opts()), "vo2")->loaded);
+    }
+    {   // a refused loose mod makes the set refuse online (it is gameplay)
+        add_mod(io, "bad", loose_mod("bad", acb));
+        const jmods::ModSet r = jmods::load_mod_set(io, "bad\n", opts());
+        CHECK(r.digest_kind == jmods::DigestKind::Refused);
+    }
+
+    // conflicts: the later mod wins a path; a group (or an .acb/.awb pair) that loses a member is dropped whole
+    const Bytes alt = noise(777, 75), alt2 = noise(555, 76);
+    io.mods["b/x.acb"] = alt; io.mods["b/x.awb"] = alt2;
+    const std::string bpair = lf("sound/JP/CV_019_00_ST_JP.acb", "x.acb", alt) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "x.awb", alt2);
+    add_mod(io, "vo", loose_mod("vo", full));
+    add_mod(io, "b", loose_mod("b", bpair));
+    const jmods::ModSet c = jmods::load_mod_set(io, "vo\nb\n", opts());
+    CHECK(has_log(c, "[mods] conflict loose sound/JP/CV_019_00_ST_JP.acb: vo overridden by b"));
+    CHECK(c.loose.at("sound/jp/cv_019_00_st_jp.acb").mod_id == "b" && c.loose.at("sound/jp/cv_019_00_st_jp.awb").mod_id == "b" && c.loose.at("sound/jp/pv_019_00_st_jp.acb").mod_id == "vo" && c.loose.size() == 6);
+    const jmods::ModSet c2 = jmods::load_mod_set(io, "b\nvo\n", opts());
+    CHECK(c2.loose.at("sound/jp/cv_019_00_st_jp.acb").mod_id == "vo" && c2.digest != c.digest);   // load order is in the set
+    {   // an explicit loose group: the later mod serves one member, so the whole group of the earlier mod is dropped
+        io.mods["g/t1"] = noise(300, 81);
+        const std::string gm = TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", gv = TIPS + "loading_game_tips_chara_019_000_ALL_v.pak";
+        add_mod(io, "ga", loose_mod("ga", lf(gm, "t1", io.mods["g/t1"]) + ", " + lf(gv, "t1", io.mods["g/t1"]), "\"loose-file\": 1", "\"groups\": [[\"" + gm + "\", \"" + gv + "\"]], "));
+        io.mods["ga/t1"] = io.mods["g/t1"];
+        const Bytes one = noise(310, 82);
+        io.mods["gb/t"] = one;
+        add_mod(io, "gb", loose_mod("gb", lf(gv, "t", one)));
+        const jmods::ModSet g = jmods::load_mod_set(io, "ga\ngb\n", opts());
+        CHECK(has_log(g, "[mods] ga: loose group of 2 dropped") && g.loose.size() == 1 && g.loose.begin()->second.mod_id == "gb");
+        CHECK(has_log(g, "[mods] conflict loose " + gv + ": ga overridden by gb"));
+        add_mod(io, "gb", loose_mod("gb", lf(gv, "t", one), "\"loose-file\": 1", "\"conflicts_ok\": [\"ga\"], "));
+        CHECK(!has_log(jmods::load_mod_set(io, "ga\ngb\n", opts()), "[mods] conflict loose"));
+        // a group of a cpk entry and a loose file is refused
+        add_mod(io, "gx", loose_mod("gx", lf(gm, "t1", io.mods["g/t1"]), "\"loose-file\": 1, \"cpk-entry\": 1", "\"groups\": [[\"" + gm + "\", \"sound/JP/x\"]], "));
+        io.mods["gx/t1"] = io.mods["g/t1"];
+        CHECK(has_log(jmods::load_mod_set(io, "gx\n", opts()), "group entry sound/JP/x has no override in this mod"));
+    }
+}
+
 int main()
 {
     MemIo io;
@@ -1266,8 +1662,11 @@ int main()
     test_conflicts_and_digest(io, game);
     test_glue(io, chara);
     test_roster(io);
+    test_card_as(io);
+    test_loose();
 #ifdef MODS_GLUE_FILES
     test_glue_files(io, game, chara);
+    test_glue_loose();
 #endif
 
     std::printf("%s: %d passed, %d failed\n", g_fail ? "FAIL" : "PASS", g_pass, g_fail);

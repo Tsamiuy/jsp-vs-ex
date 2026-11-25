@@ -22,10 +22,16 @@
  * session that has not sent its settings-handshake Hello (it checks before polling the rendezvous and again before the Hello); a session
  * already past its Hello is not ended. A copy that differed is checked again when its size has changed since (an install being written).
  * On Windows the archive name is matched without regard to case.
+ * Loose files (interface "loose-file", ENHANCEMENT): paths the game opens that are in no CPK. The toolkit's path resolver (patch 6504,
+ * ps3emu/fs_path_ops.h) answers a read-only open or a stat of such a path with the mod's file (or the disc copy of the CPK an alias
+ * names) even when the game folder holds a file of its own at that path (logged); the virtual-file view (6502) then serves the pinned
+ * bytes that were hashed for a mod file (its open handle); an alias's window is read from a fresh open of the disc archive and checked once
+ * against the planned hash when it is first opened (a later change of the archive is not seen, as for the CPK copies).
  * Logs: "[mods] ..." lines on stderr (play_stderr.txt).
  */
 #include "jsp_mods_glue.h"
 #include "ps3emu/fs_vfile.h"
+#include "ps3emu/fs_path_ops.h"
 
 #include <algorithm>
 #include <atomic>
@@ -34,6 +40,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -306,7 +313,14 @@ struct Served {
     mutable std::atomic<uint64_t> short_reads{ 0 };   // logged at 1, 10, 100, ... (one line, with the count)
 };
 struct Verified { std::string why; bool logged = false; uint64_t size = UINT64_MAX; };   // why: "" = serves, else why the stock file is read; size: the copy's size then (UINT64_MAX: unknown)
+struct LooseEntry {
+    LooseServed s;
+    std::string host;   // what the resolver answers with: the mod's file, or the disc copy of the archive an alias names
+};
 struct State {
+    std::map<std::string, LooseEntry> loose;   // by lower-case path relative to data/PS3
+    std::set<std::string> loose_logged;        // under mu: one log line per path and event
+    std::map<std::string, bool> loose_window;  // under mu: an alias's archive window matched the planned hash (checked once per path)
     ModsRoot root;
     bool root_ok = false;
     std::map<std::string, ModFile> files;   // "<id>/<path>" -> the open file (a failed open is kept with ok = false)
@@ -384,7 +398,47 @@ private:
 };
 
 // ---- the cellFs provider (ps3emu/fs_vfile.h) ----------------------------------------------------------------------------------------
-struct View { const Served* s; std::string guest; };
+struct View { const Served* s; std::string guest; const LooseEntry* l = nullptr; };
+
+// ---- loose files: the path resolver (patch 6504) and the views (6502) ---------------------------------------------------------------
+const LooseEntry* loose_entry(const char* guest)
+{
+    State* st = g_st;
+    if (!st || st->loose.empty() || !guest) return nullptr;
+    const std::string rel = loose_rel_from_guest(guest);
+    if (rel.empty()) return nullptr;
+    const auto it = st->loose.find(lower(rel));
+    return it == st->loose.end() ? nullptr : &it->second;
+}
+bool loose_log_once(const std::string& key)
+{
+    std::lock_guard<std::mutex> lk(g_st->mu);
+    return g_st->loose_logged.insert(key).second;
+}
+int p_resolve(const char* guest, char* host, size_t cap, uint64_t* vsize)
+{
+    const LooseEntry* e = loose_entry(guest);
+    if (!e) return 0;
+    if (e->host.size() + 1 > cap) {   // the game would read the game-folder path (or nothing) under a digest that says modded
+        if (loose_log_once("cap " + e->s.path)) logl("[mods] loose " + e->s.path + ": the host path is too long for the open: not served, the set no longer runs as listed (online refused)");
+        g_kind.store((int)DigestKind::Refused);
+        g_copy_mismatch.store(1);
+        return 0;
+    }
+    if (host[0]) {   // a copy in the game folder (an old installer's leftovers) loses to the mod's
+        if (FILE* f = std::fopen(host, "rb")) {
+            std::fclose(f);
+            if (loose_log_once("copy " + e->s.path))
+                logl("[mods] loose " + e->s.path + ": a game-folder copy exists (not from the mods folder), the mod's copy is served");
+        }
+    }
+    std::memcpy(host, e->host.c_str(), e->host.size() + 1);
+    if (vsize) *vsize = e->s.len;
+    if (loose_log_once("serve " + e->s.path))
+        logl(fmt("[mods] loose %s (%s): served, %llu B%s", e->s.path.c_str(), e->s.mod_id.c_str(), (unsigned long long)e->s.len, e->s.file.empty() ? " (alias)" : ""));
+    return 1;
+}
+const ps3_fs_path_ops k_path_ops = { p_resolve };
 
 // "" when the copy at host_path is the planned one. Called once per host path (the result is kept).
 std::string check_copy(const Served& s, const char* host_path, uint64_t* size_out = nullptr)
@@ -403,6 +457,45 @@ ps3_fs_vfile* v_open(const char* guest_path, const char* host_path)
 {
     State* st = g_st;
     if (!st || !host_path) return nullptr;
+    if (const LooseEntry* e = loose_entry(guest_path)) {   // a loose file: the bytes come from the pinned handle, or the window of the archive
+        if (e->s.file.empty() && path_key(host_path, g_fold_case) != path_key(e->host.c_str(), g_fold_case)) {   // read through the fd's own FILE: it must be the planned copy
+            if (loose_log_once("host " + e->s.path)) logl("[mods] loose " + e->s.path + ": opened from " + host_path + ", not the planned copy: not served");
+            return nullptr;
+        }
+        if (!e->s.file.empty() && st->files.find(e->s.file) == st->files.end()) return nullptr;
+        if (e->s.file.empty()) {   // an alias reads a fresh open of the archive: check its window once against the planned hash, like the CPK copies
+            bool ok;
+            {
+                std::lock_guard<std::mutex> lk(st->mu);
+                auto it = st->loose_window.find(e->s.path);
+                if (it == st->loose_window.end()) {
+                    bool good = false;
+                    if (FILE* f = std::fopen(host_path, "rb")) {
+                        jpsm::Sha256 h;
+                        std::vector<uint8_t> buf(1 << 16);
+                        good = true;
+                        for (uint64_t o = 0; o < e->s.len && good;) {
+                            const size_t k = size_t(std::min<uint64_t>(buf.size(), e->s.len - o));
+                            good = file_read(f, e->s.src + o, buf.data(), k) == k;
+                            if (good) h.update(buf.data(), k);
+                            o += k;
+                        }
+                        good = good && h.finish() == e->s.content;
+                        std::fclose(f);
+                    }
+                    it = st->loose_window.emplace(e->s.path, good).first;
+                    if (!good) {
+                        logl("[mods] loose " + e->s.path + ": the archive window differs from the planned bytes: not served, the set no longer runs as listed (online refused)");
+                        g_kind.store((int)DigestKind::Refused);
+                        g_copy_mismatch.store(1);
+                    }
+                }
+                ok = it->second;
+            }
+            if (!ok) return nullptr;
+        }
+        return reinterpret_cast<ps3_fs_vfile*>(new View{ nullptr, guest_path ? guest_path : "", e });
+    }
     const auto it = st->served.find(archive_key(host_path, g_fold_case));
     if (it == st->served.end()) return nullptr;
     const Served& s = it->second;
@@ -440,10 +533,24 @@ ps3_fs_vfile* v_open(const char* guest_path, const char* host_path)
     if (!why.empty()) return nullptr;
     return reinterpret_cast<ps3_fs_vfile*>(new View{ &it->second, guest_path ? guest_path : "" });
 }
-uint64_t v_size(ps3_fs_vfile* vf) { return reinterpret_cast<View*>(vf)->s->plan.virt_size; }
+uint64_t v_size(ps3_fs_vfile* vf)
+{
+    const View* v = reinterpret_cast<View*>(vf);
+    return v->l ? v->l->s.len : v->s->plan.virt_size;
+}
 size_t v_read(ps3_fs_vfile* vf, FILE* host, uint64_t pos, void* dst, size_t n)
 {
     const View* v = reinterpret_cast<View*>(vf);
+    if (v->l) {
+        const LooseServed& ls = v->l->s;
+        if (pos >= ls.len) return 0;
+        n = size_t(std::min<uint64_t>(n, ls.len - pos));
+        if (!ls.file.empty()) {
+            const auto f = g_st->files.find(ls.file);
+            return f == g_st->files.end() ? 0 : ModsRoot::read(f->second, pos, dst, n);
+        }
+        return file_read(host, ls.src + pos, dst, n);   // the caller holds host's stream lock
+    }
     const Served& s = *v->s;
     State* st = g_st;
     ServeIo io([host](uint64_t off, void* d, size_t k) { return file_read(host, off, d, k); },   // the caller holds host's stream lock
@@ -545,6 +652,7 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
     std::map<std::string, bool> used;
     for (const auto& kv : st->set.plans)
         for (const Segment& sg : kv.second.segs) if (sg.kind == Segment::ModFile) used[sg.rel] = true;
+    for (const auto& kv : st->set.loose) if (!kv.second.file.empty()) used[kv.second.file] = true;
     for (auto& kv : st->files) if (!used.count(kv.first)) ModsRoot::close(kv.second);
     for (const auto& kv : st->set.plans) {
         Served& s = st->served[archive_key(kv.first.c_str(), g_fold_case)];
@@ -586,9 +694,25 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
              "online and rollback are off, local play reads that copy stock");
         st->set.digest_kind = kind;
     }
+    for (const auto& kv : st->set.loose) {   // what the resolver answers with: the mod's own file, or the disc copy of the archive an alias is in
+        LooseEntry e;
+        e.s = kv.second;
+        e.host = kv.second.file.empty() ? disc_dir + kv.second.archive : c.dir + "/" + kv.second.file;
+        if (e.host.size() + 1 > 1100) {   // the toolkit's host path buffer (ppu_fs.cpp cellFsOpen): the open could not be pointed here
+            logl("[mods] loose " + kv.second.path + ": its host path is longer than the open's buffer (1100): the set cannot run as listed (online refused)");
+            if (st->set.digest_kind != DigestKind::Refused) st->set.digest_kind = DigestKind::Refused;
+            continue;
+        }
+        st->loose.emplace(kv.first, std::move(e));
+    }
     g_kind.store((int)st->set.digest_kind);
     g_roster = st->set.roster;
     g_st = st;
+    if (!st->loose.empty()) {
+        __atomic_store_n(&g_ps3_fs_vfile_ops, &k_ops, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_ps3_fs_path_ops, &k_path_ops, __ATOMIC_RELEASE);
+        logl(fmt("[mods] serving %llu loose file(s) through the path resolver", (unsigned long long)st->loose.size()));
+    }
     if (!st->served.empty()) {
         __atomic_store_n(&g_ps3_fs_vfile_ops, &k_ops, __ATOMIC_RELEASE);
         std::string names;
@@ -626,6 +750,19 @@ extern "C" int jsp_mods_roster_fighters(int* id, int* logo_as, int* owned, int c
     for (const RosterFighter& f : g_roster) {
         if (n >= cap) break;
         id[n] = f.id; logo_as[n] = f.logo_as; owned[n] = f.owned ? 1 : 0;
+        ++n;
+    }
+    return n;
+}
+
+/* ENHANCEMENT (roster card_as, jsp_roster.cpp). The added ids that borrow a stock card: id[i] shows card_as[i]'s texture. Returns the count. */
+extern "C" int jsp_mods_roster_cards(int* id, int* card_as, int cap)
+{
+    int n = 0;
+    for (const RosterFighter& f : g_roster) {
+        if (f.card_as < 0) continue;
+        if (n >= cap) break;
+        id[n] = f.id; card_as[n] = f.card_as;
         ++n;
     }
     return n;

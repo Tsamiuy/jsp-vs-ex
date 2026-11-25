@@ -196,6 +196,21 @@ check("manifest id mismatch", mf(manifest(), folder="other")[0])
 check("manifest no version", mf({k: v for k, v in manifest().items() if k != "version"})[0])
 check("manifest version space", mf(manifest(version="1 0"))[0])
 check("manifest unknown interface", mf(manifest(interfaces={"magic": 1}))[0])
+roster = {"fighters": [{"id": 19, "after": 3}]}
+check("manifest roster 2 ok", not mf(manifest(interfaces={"roster": 2}, roster=roster))[0])
+check("manifest roster 3 newer", mf(manifest(interfaces={"roster": 3}, roster=roster))[0])
+RC = lambda iv, card: mf(manifest(interfaces={"roster": iv}, roster={"fighters": [{"id": 19, "card_as": card}]}))[0]
+check("card_as with roster 2", not RC(2, 18) and not RC(2, 211))
+check("card_as with roster 1 is an unknown key", any("unknown key" in e for e in RC(1, 18)))
+check("card_as must be a stock id", RC(2, 19) and RC(2, 208) and RC(2, 42) and RC(2, -1) and RC(2, "18") and RC(2, True))
+check("card_as is not in the class: roster mod stays gameplay", mf(manifest(interfaces={"roster": 2}, roster={"fighters": [{"id": 19, "card_as": 18}]}))[1]["gameplay"] is True)
+# drift check: the Python copy of the port's tables must equal jsp_mods_core.h
+import re as _re, pathlib as _pl
+_core = (_pl.Path(__file__).resolve().parents[2] / "installer/port/jsp/jsp_mods_core.h").read_text()
+_si = _re.search(r"supported_interfaces\(\)\s*\{(.*?)return k;", _core, _re.S).group(1)
+check("SUPPORTED equals supported_interfaces() of jsp_mods_core.h", {n: int(v) for n, v in _re.findall(r'\{\s*"([a-z0-9-]+)"\s*,\s*(\d+)\s*\}', _si)} == mv.SUPPORTED)
+_st = _re.search(r"kStockRoster\[\d+\]\s*=\s*\{(.*?)\};", _core, _re.S).group(1)
+check("STOCK_ROSTER equals kStockRoster of jsp_mods_core.h", tuple(int(x) for x in _re.findall(r"[0-9]+", _st)) == mv.STOCK_ROSTER)
 check("manifest newer interface", mf(manifest(interfaces={"cpk-entry": 2}))[0])
 check("manifest no interfaces", mf({k: v for k, v in manifest().items() if k != "interfaces"})[0])
 check("manifest overrides need cpk-entry", mf(manifest(interfaces={"roster": 1}, overrides=ov))[0])
@@ -632,6 +647,40 @@ check("tested extra key", tm.check({"schema": 1, "mods": [dict(ent, extra="x")]}
 check("tested duplicate", tm.check({"schema": 1, "mods": [ent, dict(ent, sha256="b" * 64)]}))
 check("tested duplicate hash", tm.check({"schema": 1, "mods": [ent, dict(ent, id="zz")]}))
 check("tested unsorted", tm.check({"schema": 1, "mods": [dict(ent, id="zz"), dict(ent, sha256="c" * 64)]}))
+
+# ---- loose files, derived, songs-only cosmetic (the Python copy of jsp_mods_core.h rules)
+LB = [b"acb-bytes", b"awb-bytes"]
+lfl = dict(fl); lfl.update({"files/a.acb": (len(LB[0]), sha(LB[0])), "files/a.awb": (len(LB[1]), sha(LB[1]))})
+VA, VW = "sound/JP/CV_019_00_ST_JP.acb", "sound/JP/CV_019_00_ST_JP.awb"
+loose = [{"path": VA, "file": "files/a.acb", "sha256": sha(LB[0])}, {"path": VW, "file": "files/a.awb", "sha256": sha(LB[1])}]
+LM = lambda lo, ifs={"loose-file": 1}, **kw: mf({k: v for k, v in manifest(interfaces=ifs, loose=lo, **kw).items() if k != "overrides"}, files=lfl)
+check("loose ok and gameplay", not LM(loose)[0] and LM(loose)[1]["gameplay"] is True and LM(loose)[1]["derived"] is False, str(LM(loose)[0]))
+check("loose needs interface", any("needs interface" in e for e in LM(loose, {"cpk-entry": 1})[0]))
+check("loose-file 2 newer", LM(loose, {"loose-file": 2})[0])
+check("loose wrong title", LM(loose, game={"title_ids": ["BLES02136"]})[0])
+check("loose lone acb", any("pair" in e for e in LM(loose[:1])[0]))
+check("loose name rules", LM([dict(loose[0], path="sound/JP/CV_018_00_ST_JP.acb"), dict(loose[1], path="sound/JP/CV_018_00_ST_JP.awb")])[0])
+check("loose twice (case)", LM(loose + [dict(loose[0], path=VA.lower())])[0])
+check("loose hash mismatch", LM([dict(loose[0], sha256="0" * 64), loose[1]])[0])
+check("loose file missing", LM([dict(loose[0], file="files/none.acb"), loose[1]])[0])
+check("loose alias ok", not LM([{"path": "progress/game/loading_game/tips/loading_game_tips_chara_019_000_ALL_m.pak", "alias": "progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak"}])[0])
+check("loose alias with sha256 or derived", LM([{"path": "progress/game/loading_game/tips/loading_game_tips_chara_019_000_ALL_m.pak", "alias": "progress/game/x", "derived": True}])[0])
+check("loose unknown key", LM([dict(loose[0], x=1), loose[1]])[0])
+dl = LM([dict(loose[0], derived=True), loose[1]])
+check("loose derived flag", not dl[0] and dl[1]["derived"] is True)
+check("loose derived must be a bool", LM([dict(loose[0], derived=1), loose[1]])[0])
+check("override derived flag", mf(manifest(overrides=[dict(ov[0], derived=True)]))[1]["derived"] is True and mf(manifest(overrides=ov))[1]["derived"] is False)
+check("override derived must be a bool", mf(manifest(overrides=[dict(ov[0], derived="yes")]))[0])
+check("group of loose paths", not LM(loose, groups=[[VA, VW]])[0] and LM(loose, groups=[[VA, "game/logo/a.bin"]])[0])
+check("songs only are cosmetic", mv._is_cosmetic("sound/JP/BGM_JP.acb") and mv._is_cosmetic("movie/a.usm") and mv._is_cosmetic("game/logo/a.pak"))
+check("other sound is gameplay", not any(mv._is_cosmetic(x) for x in ("sound/bgm/x.acb", "sound/JP/CV_001_00_ST_JP.acb", "sound/BGM_x.acb", "sound/JP/sub/BGM_x.acb", "sound//BGM_x.acb", "sound/JP/SE_001.acb")))
+check("sound override is gameplay", mf(manifest(overrides=[{"entry": "sound/JP/SE_001.acb", "alias": "sound/JP/SE_002.acb"}]))[1]["gameplay"] is True)
+for ok in ("sound/JP/CV_019_00_ST_JP.acb", "sound/jp/cv_020_00_st_jp.acb", "progress/game/loading_game/tips/loading_game_tips_chara_021_000_ALL_v.pak",
+           "progress/game/loading_game/tips/US/loading_game_tips_title_chara_019_000_US_m.pak"):
+    check("loose name ok " + ok, mv._loose_name_ok(ok))
+for bad in ("sound/JP/CV_018_00_ST_JP.acb", "sound/JP/CV_019_00_ST_US.acb", "sound/JP/BGM_JP.acb", "sound/JP/CV_019_0_ST_JP.acb",
+            "progress/game/loading_game/tips/loading_game_tips_chara_019_001_ALL_m.pak", "progress/game/loading_game/tips/US/loading_game_tips_title_chara_019_000_FR_m.pak"):
+    check("loose name bad " + bad, not mv._loose_name_ok(bad))
 
 print("test_mod_verify: %d failure(s)" % failed)
 sys.exit(1 if failed else 0)
