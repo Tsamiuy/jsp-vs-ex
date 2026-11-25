@@ -453,6 +453,9 @@ namespace JStarsLauncher
         CheckBox fxFullBox;
         CheckBox statsBox;
         CheckBox fpsBox;
+        ComboBox anisoBox, sharpBox;         // ANISO and SHARPEN for the game (toolkit patches 2520, 2519)
+        static readonly string[] AnisoIds = { "1", "2", "4", "8", "16" };
+        static readonly string[] SharpIds = { "0", "25", "50", "75", "100" };
         CheckBox pipeBox;   // PIPE for the game: two-thread drawing (toolkit patches 2912, 7907), on by default
         CheckBox menuBox;   // MENU_PAGES for the game: the two-page Main Menu (and 3v3 with it), on by default; only the off choice is written
         CheckBox unlockBox;                  // ENHANCEMENT (opt-in): one start with everything unlocked; never saved to the settings file
@@ -808,6 +811,25 @@ namespace JStarsLauncher
             y += 30;
             p.Controls.Add(new Label {
                 Text = "In fights only. The HUD, text and menus stay sharp.",
+                Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
+            // ANISO for the game: sharper textures on floors and far ground. SHARPEN: a sharpen pass on the fight picture.
+            p.Controls.Add(new Label { Text = "Texture filtering", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            p.Controls.Add(new Label { Text = "Sharpening", Location = P(250, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
+            y += 22;
+            anisoBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(16, y), Width = S(220) };
+            anisoBox.Items.AddRange(new object[] { "The game's own", "Anisotropic 2x", "Anisotropic 4x", "Anisotropic 8x", "Anisotropic 16x" });
+            anisoBox.SelectedIndex = 4;
+            anisoBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(anisoBox);
+            sharpBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = P(250, y), Width = S(160) };
+            sharpBox.Items.AddRange(new object[] { "Off", "Light", "Medium", "Strong", "Strongest" });
+            sharpBox.SelectedIndex = 2;
+            sharpBox.SelectedIndexChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(sharpBox);
+            y += 30;
+            p.Controls.Add(new Label {
+                Text = "Texture filtering keeps floors and far ground sharp at flat angles. Sharpening is for fights only.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             return p;
         }
@@ -1740,7 +1762,7 @@ namespace JStarsLauncher
                     int eq = t.IndexOf('=');
                     if (t.Length == 0 || t.StartsWith("#") || eq <= 0) continue;
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
-                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "PIPE" || k == "PIPE_SEEN" || k == "MENU_PAGES" ||
+                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "ANISO" || k == "SHARPEN" || k == "PIPE" || k == "PIPE_SEEN" || k == "MENU_PAGES" ||
                         k == "SHADOW_SCALE" || k == "SHADOW_RANGE" || k == "MODEL_DETAIL" || k == "OBJECT_DISTANCE" ||
                         k == "INPUT_MODE" || k == "MOUSE_SENS" || k.StartsWith("PAD_KEY_") || k.StartsWith("KB_KEY_") ||
                         k.StartsWith("KBM_KEY_") || k.StartsWith("PAD_BTN_"))
@@ -1772,6 +1794,11 @@ namespace JStarsLauncher
             fxFullBox.Checked = !(cur.TryGetValue("FX_FULL", out s) && s == "0");
             statsBox.Checked = cur.TryGetValue("TITLE_STATS", out s) ? s == "1" : !installed;
             fpsBox.Checked = cur.TryGetValue("FPS_COUNTER", out s) && s == "1";
+            int an = cur.TryGetValue("ANISO", out s) ? Array.IndexOf(AnisoIds, s.Trim()) : 4;
+            anisoBox.SelectedIndex = an < 0 ? 4 : an;
+            int shp = 2;   // SHARPEN: the nearest step to a hand-written value
+            if (cur.TryGetValue("SHARPEN", out s)) { int v; if (int.TryParse(s.Trim(), out v)) shp = Math.Max(0, Math.Min(4, (v + 12) / 25)); }
+            sharpBox.SelectedIndex = shp;
             // Two-thread drawing is on by default (toolkit patch 7907). A file written before that has PIPE=0 for everyone who never touched the box:
             // PIPE counts only when the same file carries PIPE_SEEN=2 (written by this window from now on), otherwise the box shows the default (on).
             pipeBox.Checked = !(cur.TryGetValue("PIPE_SEEN", out s) && s == "2" && cur.TryGetValue("PIPE", out s) && s != "1");
@@ -1833,6 +1860,8 @@ namespace JStarsLauncher
             lines.Add("FX_FULL=" + (fxFullBox.Checked ? "1" : "0"));
             lines.Add("TITLE_STATS=" + (statsBox.Checked ? "1" : "0"));
             lines.Add("FPS_COUNTER=" + (fpsBox.Checked ? "1" : "0"));
+            lines.Add("ANISO=" + AnisoIds[anisoBox.SelectedIndex]);
+            lines.Add("SHARPEN=" + SharpIds[sharpBox.SelectedIndex]);
             lines.Add("PIPE_SEEN=2");   // marks PIPE below as a choice made with the on-by-default window
             lines.Add("PIPE=" + (pipeBox.Checked ? "1" : "0"));
             if (!menuBox.Checked) lines.Add("MENU_PAGES=0");   // on is the default: nothing is written for it

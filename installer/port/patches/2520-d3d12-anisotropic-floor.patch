@@ -1,0 +1,31 @@
+Patch 2520: least anisotropic filtering for linear samplers (ANISO=<2..16>).
+
+The game asks for anisotropy 1 on almost all of its samplers, so floors and far ground blur at flat angles. ANISO is
+the least anisotropy for every sampler that filters linearly both ways; point-sampled units (fonts, lookups) are left
+alone. Unset or 1: the game's own value. Read once, at the first sampler: a change applies at the next start.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 60b33001..3bc202be 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3077,10 +3077,18 @@ static void rsx_sampler_desc(const u32 k[4], D3D12_SAMPLER_DESC* s)
+     const int mip_lin = minf == 5 || minf == 6 || minf == 7;
+     const int mag_lin = magf == 2 || magf == 4;
+     static const u8 aniso[8] = { 1, 2, 4, 6, 8, 10, 12, 16 };
++    /* 2520 (asked for by the maintainer, 2026-11-24): ANISO=<2..16> is the least anisotropy for every sampler that
++     * filters linearly both ways (the game asks for 1 on almost all of them, so floors and far ground blur at flat
++     * angles). Point-sampled units (fonts, lookups) are left alone. Unset or 1: the game's own value. */
++    static int force = -1;
++    if (force < 0) { const char* e = getenv("ANISO"); force = e ? atoi(e) : 1; if (force < 1) force = 1; if (force > 16) force = 16;
++                     if (force > 1) fprintf(stderr, "[ANISO] anisotropic filtering at least %dx%c", force, 10); }
++    u32 an = aniso[(ctrl0 >> 4) & 7u];
++    if ((u32)force > an && min_lin && mag_lin) an = (u32)force;
+     memset(s, 0, sizeof *s);
+-    if (aniso[(ctrl0 >> 4) & 7u] > 1 && min_lin && mag_lin) {
++    if (an > 1 && min_lin && mag_lin) {
+         s->Filter = D3D12_FILTER_ANISOTROPIC;
+-        s->MaxAnisotropy = aniso[(ctrl0 >> 4) & 7u];
++        s->MaxAnisotropy = an;
+     } else {
+         s->Filter = (D3D12_FILTER)((min_lin << 4) | (mag_lin << 2) | mip_lin);
+         s->MaxAnisotropy = 1;
