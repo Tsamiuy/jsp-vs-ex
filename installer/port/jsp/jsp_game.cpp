@@ -607,6 +607,7 @@ volatile bool g_training_mode = false;
  * called in the last moment and the object still has that vtable. */
 struct SeenScreen { volatile uint32_t obj; volatile unsigned long long ms; };
 SeenScreen g_seen_main, g_seen_charsel, g_seen_panel, g_seen_stage, g_seen_stage_time;
+volatile uint32_t g_panel_objs[2] = { 0, 0 }; volatile unsigned long long g_panel_ms[2] = { 0, 0 };   /* the settings panels seen (two on the 2 Players Character Select) */
 
 bool screen_up(const SeenScreen& sc, uint32_t vtable)
 {
@@ -623,6 +624,13 @@ void screens_note(uint32_t target, uint32_t r3)
     case 0x0019AA74u: sc = &g_seen_charsel; break;     /* character select, vtable 0x0087C3D0 */
     case 0x0019E2E8u:                                  /* its panels: the settings panel, vtable 0x0087C4A0 */
         if (vm_read32(r3) != 0x0087C4A0u) return;
+        {   /* the 2 Players screen has a panel for each player: both are remembered, and the one that is open (+0x2C = 2) is "the" panel */
+            const unsigned long long now = GetTickCount64();
+            int at = g_panel_objs[0] == r3 ? 0 : g_panel_objs[1] == r3 ? 1 : (g_panel_ms[0] <= g_panel_ms[1] ? 0 : 1);
+            g_panel_objs[at] = r3; g_panel_ms[at] = now;
+            const uint32_t cur = g_seen_panel.obj;
+            if (cur && cur != r3 && now - g_seen_panel.ms < 300 && vm_read32(cur) == 0x0087C4A0u && vm_read32(cur + 0x2C) == 2u && vm_read32(r3 + 0x2C) != 2u) return;
+        }
         sc = &g_seen_panel; break;
     case 0x0026EF94u: sc = &g_seen_stage; break;       /* stage select, vtable 0x0087FCF8 */
     case 0x00279F0Cu: sc = &g_seen_stage_time; break;  /* its time limit box, vtable 0x00880018 */
@@ -3031,6 +3039,14 @@ bool panel_up() { return screen_up(g_seen_panel, 0x0087C4A0u); }
 uint32_t panel_open() { return panel_up() ? vm_read32(g_seen_panel.obj + 0x2C) : 0; }
 uint32_t panel_row() { return vm_read32(g_seen_panel.obj + 0x9C); }
 uint32_t panel_level() { return vm_read32(g_seen_panel.obj + 0x48); }
+/* "the" panel is the first of the panels in memory: taken as Player 1's (Guess: the game makes Player 1's first; seen
+ * right for Player 1 on the 2 Players screen in a scripted run; Player 2's own window was not tried) */
+bool panel_first()
+{
+    const uint32_t o = g_seen_panel.obj; const unsigned long long now = GetTickCount64();
+    for (int i = 0; i < 2; i++) if (g_panel_objs[i] && g_panel_objs[i] != o && now - g_panel_ms[i] < 300 && g_panel_objs[i] < o) return false;
+    return true;
+}
 
 /* Training's slot locks: the CPU partners (slots 1 and 3) do not take part and
  * show the game's own padlock, as the opponent's slots do in Arcade (ar1
@@ -3269,6 +3285,13 @@ void impossible_charsel(uint16_t* b, uint16_t* lx)
 /* The orange-red stars of an Impossible CPU (toolkit 2920 tints only the yellow pixels of these rectangles, so the tint
  * follows the screens' slides and fades): the five lit stars of its slot on Character Select, the slot window's five
  * when it is open on that slot, and its row on the VS loading screen (1280x720 places). */
+/* The 2 Players Character Select has a grid on each side, and its four fighter boxes sit 286 px further right and
+ * 1 px lower than on the 1 Player screen (measured: a slot's stars at x 717 / y 240 and 503 against 431 /
+ * 239 and 502). It is that screen when a slot is Player 2's (setup record +0x14 = 1); Arcade with 2 Players keeps the
+ * 1 Player screen (its partner slot stays 2 there). */
+bool charsel_two_layout() { for (int k = 0; k < 6; k++) if (vm_read32(setup_field(k, 0x14)) == 1u) return true; return false; }
+const short k_cs2_dx = 286, k_cs2_dy = 1;
+
 int impossible_tint_rects(short (*r)[4], float (*rgb)[3], int max)
 {
     if (training_active()) return 0;
@@ -3288,14 +3311,17 @@ int impossible_tint_rects(short (*r)[4], float (*rgb)[3], int max)
     }
     static const short k_slot_star1[4][2] = { { 0, 0 }, { 429, 237 }, { 212, 413 }, { 429, 500 } };
     int n = 0;
+    const bool two = charsel_two_layout();   /* the 2 Players screen: the boxes stand further right (before this, the stars stayed yellow there) */
+    const short dx = two ? k_cs2_dx : 0, dy = two ? k_cs2_dy : 0;
     for (int k = 1; k < 4 && n < max; k++) {
         if (!g_imp_slot[k]) continue;
-        r[n][0] = (short)(k_slot_star1[k][0] - 2); r[n][1] = (short)(k_slot_star1[k][1] - 1); r[n][2] = 5 * 30 + 2; r[n][3] = 24;
+        r[n][0] = (short)(k_slot_star1[k][0] - 2 + dx); r[n][1] = (short)(k_slot_star1[k][1] - 1 + dy); r[n][2] = 5 * 30 + 2; r[n][3] = 24;
         rgb[n][0] = 1.0f; rgb[n][1] = 0.36f; rgb[n][2] = 0.30f; n++;
     }
     const uint32_t cursor = charsel_cursor();
-    if (n < max && panel_open() == 2 && cursor >= 1 && cursor < 4 && g_imp_slot[cursor] && panel_level() == 4) {
-        r[n][0] = 790; r[n][1] = 279; r[n][2] = 5 * 40 + 2; r[n][3] = 39;
+    if (n < max && panel_open() == 2 && cursor >= 1 && cursor < 4 && g_imp_slot[cursor] && panel_level() == 4 && (!two || panel_first())) {
+        /* the settings window's five stars; on the 2 Players screen Player 1's window stands on the left, over its grid (measured) */
+        r[n][0] = (short)(790 + (two ? -635 : 0)); r[n][1] = (short)(279 + (two ? 0 : 0)); r[n][2] = 5 * 40 + 2; r[n][3] = 39;
         rgb[n][0] = 1.0f; rgb[n][1] = 0.36f; rgb[n][2] = 0.30f; n++;
     }
     return n;
