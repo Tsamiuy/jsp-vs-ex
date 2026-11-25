@@ -83,6 +83,7 @@
     {"addr": "0x002F1148", "end": "0x002F1208", "enter": "jsp_vsc_part_dtor_enter", "leave": "jsp_six_noop"},
     {"addr": "0x002F107C", "end": "0x002F1148", "enter": "jsp_vsc_part_dtor_enter", "leave": "jsp_six_noop"},
     {"addr": "0x0032D288", "end": "0x0032D2F4", "enter": "jsp_vsc_remove_enter", "leave": "jsp_vsc_remove_leave"},
-    {"addr": "0x00333FCC", "end": "0x00333FE0", "enter": "jsp_vsc_setpic_enter", "leave": "jsp_six_noop"}
+    {"addr": "0x00333FCC", "end": "0x00333FE0", "enter": "jsp_vsc_setpic_enter", "leave": "jsp_six_noop"},
+    {"addr": "0x0051BDC8", "end": "0x0051C030", "enter": "jsp_card_as_enter", "leave": "jsp_card_as_leave"}
   ]
 }

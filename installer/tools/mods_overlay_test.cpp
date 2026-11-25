@@ -1246,6 +1246,96 @@ static void test_roster(MemIo& io)
     CHECK(mix.digest_kind == jmods::DigestKind::Value && mix.digest == d1);
 }
 
+// ---------------------------------------------------------------------------------------------------- roster card_as (ENHANCEMENT)
+static void test_card_as(MemIo& io)
+{
+    // parse: card_as is kept, logged, and does not change the digest (the card is cosmetic)
+    const auto card_set = [&](const char* fighters) { add_mod(io, "ca", roster_mod("ca", fighters)); return jmods::load_mod_set(io, "ca\n", opts()); };   // one id: the digest names it
+    jmods::ModSet a = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 18 }");
+    jmods::ModSet b = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 7 }");
+    jmods::ModSet n = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39 }");
+    CHECK(mod(a, "ca") && mod(a, "ca")->loaded && a.roster.size() == 1 && a.roster[0].card_as == 18);
+    CHECK(n.roster.size() == 1 && n.roster[0].card_as == -1);
+    CHECK(has_log(a, "[mods] ca: roster adds 1 fighter(s): 19(after 40, logo as 39, owned, card as 18)"));
+    CHECK(a.digest_kind == jmods::DigestKind::Value && a.digest == n.digest && a.digest == b.digest);   // not in the digest
+    CHECK(jmods::build_roster_list(a.roster) == jmods::build_roster_list(n.roster));
+    CHECK(jmods::card_donor_for(a.roster, 19) == 18 && jmods::card_donor_for(a.roster, 20) == -1 && jmods::card_donor_for(n.roster, 19) == -1);
+    {   // a donor that is a support on the stock list is accepted; a changed gameplay field still changes the digest
+        jmods::ModSet c = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 211 }");
+        CHECK(mod(c, "ca")->loaded && c.roster[0].card_as == 211 && c.digest == n.digest);
+        CHECK(card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 38, \"card_as\": 18 }").digest != a.digest);
+    }
+    // refusals: the donor must be a stock-list id (a full card), never the added ids, a stub, an unknown or a non-number
+    static const struct { const char* fighters; const char* why; } bad[] = {
+        { "{ \"id\": 19, \"card_as\": 19 }", "\"card_as\" must be a stock fighter id" },    // itself: no card of its own
+        { "{ \"id\": 19, \"card_as\": 20 }", "\"card_as\" must be a stock fighter id" },    // another added id
+        { "{ \"id\": 19, \"card_as\": 21 }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": 208 }", "\"card_as\" must be a stock fighter id" },   // a 64x55 stub in the card set
+        { "{ \"id\": 19, \"card_as\": 42 }", "\"card_as\" must be a stock fighter id" },    // not on the stock list
+        { "{ \"id\": 19, \"card_as\": 300 }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": -1 }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": \"18\" }", "\"card_as\" must be a stock fighter id" },
+        { "{ \"id\": 19, \"card_as\": true }", "\"card_as\" must be a stock fighter id" },
+    };
+    for (const auto& c : bad) {
+        add_mod(io, "badc", roster_mod("badc", c.fighters));
+        jmods::ModSet r = jmods::load_mod_set(io, "badc\n", opts());
+        const bool ok = mod(r, "badc") && !mod(r, "badc")->loaded && r.roster.empty() && has_log(r, c.why);
+        CHECK(ok);
+        if (!ok) std::printf("  card_as refusal case: %s\n", c.fighters);
+    }
+    {   // check_roster itself (a Manifest built by hand, not parsed) refuses a bad donor too
+        jmods::Manifest m;
+        jmods::RosterFighter f; f.id = 19; f.card_as = 20; m.roster.push_back(f);
+        std::set<int> ids = jmods::stock_roster_ids();
+        std::string err;
+        CHECK(!jmods::check_roster(m, ids, err) && err.find("card_as 20 is not a stock-list id") != std::string::npos && ids == jmods::stock_roster_ids());
+        m.roster[0].card_as = 18;
+        CHECK(jmods::check_roster(m, ids, err) && ids.count(19));
+    }
+    // the name the game looks up: only the exact card name parses, three digits
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_019.png") == 19 && jmods::card_name_id("_rgb8_256_chara_ico_000.png") == 0);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_211.png") == 211);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_19.png") == -1 && jmods::card_name_id("_rgb8_256_chara_ico_0019.png") == -1);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_019.pn") == -1 && jmods::card_name_id("_rgb8_256_chara_ico_019.png ") == -1);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_01a.png") == -1 && jmods::card_name_id("_rgb8_256_chara_ic0_019.png") == -1);
+    CHECK(jmods::card_name_id("_rgb8_256_chara_ico_019_ALL.png") == -1 && jmods::card_name_id("") == -1);
+    CHECK(jmods::card_name_for(18) == "_rgb8_256_chara_ico_018.png" && jmods::card_name_for(211) == "_rgb8_256_chara_ico_211.png");
+    CHECK(jmods::card_name_id(jmods::card_name_for(7)) == 7);
+    {   // the guest-side rewrite on a fake memory: only the exact added id's name changes, and only for the length of the lookup
+        struct Mem {
+            std::map<uint32_t, uint8_t> b; bool oob = false;   // oob: a read outside what was written
+            uint8_t rd(uint32_t a) { auto it = b.find(a); if (it == b.end()) { oob = true; return 0; } return it->second; }
+            void wr(uint32_t a, uint8_t v) { if (!b.count(a)) oob = true; b[a] = v; }
+            void put(uint32_t a, const std::string& t) { for (size_t i = 0; i <= t.size(); ++i) b[a + (uint32_t)i] = i < t.size() ? (uint8_t)t[i] : 0; }
+            std::string get(uint32_t a) { std::string t; while (b.count(a + (uint32_t)t.size()) && b[a + (uint32_t)t.size()]) t += (char)b[a + (uint32_t)t.size()]; return t; }
+        } mem;
+        const int ids[2] = { 19, 21 }, donors[2] = { 18, 211 };
+        const auto rd = [&](uint32_t a) { return mem.rd(a); };
+        const auto wr = [&](uint32_t a, uint8_t v) { mem.wr(a, v); };
+        jmods::CardRedirect st;
+        const uint32_t p = 0xD0000070u;
+        mem.put(p, "_rgb8_256_chara_ico_019.png");
+        CHECK(jmods::card_redirect_enter(rd, wr, p, ids, donors, 2, st) && mem.get(p) == "_rgb8_256_chara_ico_018.png" && st.at == p);
+        jmods::card_redirect_leave(wr, st);
+        CHECK(mem.get(p) == "_rgb8_256_chara_ico_019.png" && st.at == 0 && !mem.oob);
+        mem.put(p, "_rgb8_256_chara_ico_021.png");
+        CHECK(jmods::card_redirect_enter(rd, wr, p, ids, donors, 2, st) && mem.get(p) == "_rgb8_256_chara_ico_211.png");
+        jmods::card_redirect_leave(wr, st);
+        CHECK(mem.get(p) == "_rgb8_256_chara_ico_021.png" && !mem.oob);
+        for (const char* other : { "_rgb8_256_chara_ico_020.png", "_rgb8_256_chara_ico_018.png", "_rgb8_256_chara_ico_300.png", "_rgb8_256_chara_ico_019.png.x",
+                                   "_rgb8_256_chara_ico_19.png", "_rgb8_256_chara_ico_01", "x", "", "_rgb8_256_chara_ico_019.srd", "_rgb8_256_chara_ic_019.png" }) {
+            mem.put(p, other);
+            const std::string before = mem.get(p);
+            CHECK(!jmods::card_redirect_enter(rd, wr, p, ids, donors, 2, st) && mem.get(p) == before && st.at == 0);
+            jmods::card_redirect_leave(wr, st);   // nothing to put back
+            CHECK(mem.get(p) == before && !mem.oob);   // never read past the string's own end
+        }
+        mem.put(p, "_rgb8_256_chara_ico_019.png");
+        CHECK(!jmods::card_redirect_enter(rd, wr, p, ids, donors, 0, st) && mem.get(p) == "_rgb8_256_chara_ico_019.png");   // no mod: untouched
+    }
+}
+
 int main()
 {
     MemIo io;
@@ -1266,6 +1356,7 @@ int main()
     test_conflicts_and_digest(io, game);
     test_glue(io, chara);
     test_roster(io);
+    test_card_as(io);
 #ifdef MODS_GLUE_FILES
     test_glue_files(io, game, chara);
 #endif

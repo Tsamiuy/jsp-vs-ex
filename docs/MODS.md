@@ -1,6 +1,6 @@
 # Mods
 
-A mod is a folder in the port's mods folder with a `mod.json` and the files it names. The mods folder's list (`mods.txt`) says which mods load, in order. The rules for `mod.json` (schema 1) are in `installer/port/jsp/jsp_mods_core.h` (`parse_manifest`): an id of `[a-z0-9-]` that equals the folder name, a version, `interfaces` (`cpk-entry` 1, `roster` 1), and overrides of entries of the game's archives, each by a file with its SHA-256 or by an alias. A mod that breaks any rule is refused whole; the other mods still load.
+A mod is a folder in the port's mods folder with a `mod.json` and the files it names. The mods folder's list (`mods.txt`) says which mods load, in order. The rules for `mod.json` (schema 1) are in `installer/port/jsp/jsp_mods_core.h` (`parse_manifest`): an id of `[a-z0-9-]` that equals the folder name, a version, `interfaces` (`cpk-entry` 1, `roster` 1 or 2), and overrides of entries of the game's archives, each by a file with its SHA-256 or by an alias. A mod that breaks any rule is refused whole; the other mods still load.
 
 A mod that only changes logos, movies or sound is cosmetic. Every other mod is gameplay, and online play compares the gameplay mods of both players (see [ONLINE.md](ONLINE.md)).
 
@@ -45,3 +45,41 @@ The port does not compute the hash yet; today only `tools/ci/mod_verify.py` does
 Order of entries, compression, timestamps, folder entries and the name of the top-level folder do not matter. Changing a byte of any file, a file name or adding or removing a file changes the hash.
 
 Known answer: a mod whose files are `mod.json` containing `{}` and `game/logo/a.bin` containing `a` gives `ce2c86505349b1c37a35fc28a64aa9a5ddc4acac8b6a7e51962ab93e7f22a1ac`. The reference code is `canonical_hash()` in `tools/ci/mod_verify.py`; the port's code, when it is written, must give the same answer, and `tools/ci/test_mod_verify.py` holds the test.
+
+## Fields beyond overrides
+
+The port's framework also knows these fields, in the order they were added. The rules are pure code in `installer/port/jsp/jsp_mods_core.h` (host test
+`installer/tools/mods_overlay_test.sh`); the guest side of each is named below. Any violation refuses the whole mod; the other mods still
+load. Mods that change the fight are gameplay and are part of the mod-set digest that online play compares; cosmetic ones are not.
+
+## roster: more fighters on the character select
+
+Interface `roster` 1, US 1.00 disc only (`game.title_ids` must name BLUS31519). `roster.fighters` is a list of objects:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | 19, 20 or 21, the three ids the game leaves unused (required) |
+| `after` | the id it goes behind in the list (default: before the first support) |
+| `logo_as` | a stock fighter id whose intro series logo this fighter shows |
+| `owned` | whether the fighter is marked owned in the save (default true) |
+| `card_as` | a stock-list id whose select card this fighter shows (default: none, the game's small placeholder card) |
+
+The fighters are part of the digest, except `card_as`.
+
+### card_as: the select card
+
+The game looks a card up by texture name, `_rgb8_256_chara_ico_NNN.png`, in one shared card set. An added id has only a 64x55 stub of
+its own in that set. With `card_as` the port rewrites the three digits of exactly that added id's name to the donor's for the length
+of the lookup and puts them back. No archive is changed and nothing ships with the mod.
+
+- The donor must be on the stock list (a stock fighter, or a support on it), not an added id and not the fighter itself.
+- The redirect is an entry hook on the name lookup `func_0051BDC8` (`lift_game_hooks.json`, `jsp_card_as_enter` and `_leave` in
+  `jsp_roster.cpp`). It only exists in a lift made with that hook list: a lift made before it does not redirect (no error); the first run
+  hashes the hook list into the lift step, so the lift is made again.
+- `card_as` is cosmetic: it is not in the digest, so a peer that does not redirect still plays the same fight. A card is not a model:
+  the fighter's fight data, model and voice are still not served by this field.
+
+### Open (needs a game run)
+
+- That the select grid's cards come through this lookup, and that the donor's card shows for the added id (only read from the lift).
+- That every stock-list id has a full card in the shared set (checked for 018 and 211).

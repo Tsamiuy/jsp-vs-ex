@@ -20,6 +20,14 @@
 // logo switch relies on, the free area). If one fails, or the copy is found damaged later, the TOC entries go back to the stock array first,
 // nothing further is registered, a hook that is already in place falls back to calling straight through (one flag gates them all), and the
 // mod set is reported as not run as listed (online refused, jsp_mods_roster_failed).
+//   * The select card is a texture looked up BY NAME in the shared card set: the face setters (func_001980C8, func_00197E68) format
+//     "_rgb8_256_chara_ico_%03d.png" and call func_0051C0D8(set, name), a tail stub that sets r4 = 2 and jumps to the name lookup
+//     func_0051BDC8(set, kind, name) @0x0051BDC8 (r3 set, r4 kind, r5 name; the texture or 0 in r3). An added id has only a 64x55 stub
+//     of its own in that set, so "card_as" (jsp_mods_core.h) redirects the name: the lookup's entry hook (lift_game_hooks.json,
+//     jsp_card_as_enter) rewrites the three digits of exactly an added id's name to the donor's in the caller's name buffer, and
+//     jsp_card_as_leave puts them back. The hook is on func_0051BDC8 and not on func_0051C0D8 itself because that stub tail-calls
+//     (the lifter refuses a hook around a tail call) and it has about a hundred direct callers, which a table hook would not see.
+//     Nothing else is touched: no archive, no other name.
 // ASSUMPTION: the free areas below are never used by the game or the runtime: no pointer in the image refers to them and the runtime
 // allocators keep elsewhere (checked by reading the image and the allocator ranges, not by a memory trace).
 // A fight with an added fighter is untested: nothing here serves model, voice or card data.
@@ -31,9 +39,11 @@
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
 #include "jsp_hook_chain.h"
+#include "jsp_mods_core.h"   // pure rules (the card name redirect)
 
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
 extern "C" int jsp_mods_roster_fighters(int* id, int* logo_as, int* owned, int cap);   /* jsp_mods.cpp: the applied mods' fighters */
+extern "C" int jsp_mods_roster_cards(int* id, int* card_as, int cap);                   /* the added ids that borrow a stock card */
 extern "C" int jsp_mods_roster_list(uint32_t* out, int cap);                            /* the final list, no terminator; 0 = does not fit */
 extern "C" int jsp_mods_roster_stock(uint32_t* out, int cap);                           /* the stock list, no terminator */
 extern "C" void jsp_mods_roster_failed(const char* why);                                /* the set no longer runs as listed */
@@ -60,9 +70,13 @@ constexpr uint32_t kSaveMgr = 0x0095B90Cu;
 constexpr uint32_t kOwnedOffset = 0x29A9Cu;          // three big-endian words: ids 0..63 are fighters; ids 64 and up would hit the support bits (supports 200+ are stored as id - 136 in the third word)
 constexpr int kOwnedWords = 3;
 
+constexpr uint32_t kNameLookup = 0x0051BDC8u;        // func_0051BDC8(set, kind, name): the entry the card hook is on (lift_game_hooks.json)
+constexpr uint32_t kCardKind = 2;                    // r4 of func_0051C0D8's tail call: the textures of a set
+
 struct Added { int id, logo_as, owned; };
 Added g_added[8];
 int g_added_n = 0;
+int g_card_n = 0;               // set only once the roster is in place (g_live); 0 = the hook returns at once
 uint32_t g_copy = 0;            // where the list copy lives
 uint32_t g_want[kMaxIds + 1];   // the copy as it was written, terminator included
 int g_want_n = 0;
@@ -157,7 +171,31 @@ void save_update_wrap(ppu_context* c)
     owned_after_update(c);
 }
 
+// What the entry hook changed on this thread, for the leave hook (func_0051BDC8 does not recurse and does not switch fibers).
+thread_local jmods::CardRedirect t_card;
+int g_card_ids[8], g_card_donors[8];
+
 }  // namespace
+
+// func_0051BDC8 entry (lift_game_hooks.json): an added id's card name gets its donor's digits for the length of the lookup (the pure rule
+// is jmods::card_redirect_enter in jsp_mods_core.h).
+extern "C" void jsp_card_as_enter(ppu_context* c)
+{
+    t_card.at = 0;
+    if (g_card_n <= 0 || !g_live || (uint32_t)c->gpr[4] != kCardKind) return;
+    const uint32_t p = (uint32_t)c->gpr[5];
+    if (p < 0x10000u || p >= 0xE0000000u) return;   // the guest's stacks are at 0xD0000000
+    static bool said = false;
+    if (jmods::card_redirect_enter([](uint32_t a) { return (uint8_t)vm_read8(a); }, [](uint32_t a, uint8_t v) { vm_write8(a, v); },
+                                   p, g_card_ids, g_card_donors, g_card_n, t_card) && !said) {
+        said = true;
+        std::fprintf(stderr, "[roster] card_as: first redirected card lookup (lr %08X)\n", (uint32_t)c->lr);
+    }
+}
+extern "C" void jsp_card_as_leave(ppu_context*)
+{
+    jmods::card_redirect_leave([](uint32_t a, uint8_t v) { vm_write8(a, v); }, t_card);
+}
 
 // The unlock cheat's wrapper calls this itself when it owns the save-update hook (one registration either way).
 extern "C" void jsp_roster_after_save_update(ppu_context* c) { owned_after_update(c); }
@@ -205,6 +243,12 @@ extern "C" void jsp_register_roster_overrides(void)
     if (save_hook_ours && !jsp_hook_chain::install<fn_t>(kSaveUpdate, save_update_wrap, &g_orig_update)) {
         give_up("cannot hook the save update: the owned bits cannot be set");
         return;
+    }
+    {   // the card redirect: it needs the lifted entry hook, which only a lift made with lift_game_hooks.json has
+        const int nc = jsp_mods_roster_cards(g_card_ids, g_card_donors, 8);
+        if (nc > 0 && !has_function(kNameLookup)) { give_up("the card name lookup func_0051BDC8 is not in the lift"); return; }
+        g_card_n = nc;
+        if (nc > 0) std::fprintf(stderr, "[roster] card_as: %d added id(s) borrow a stock card through the func_0051BDC8 entry hook\n", nc);
     }
     std::fprintf(stderr, "[roster] %d ids at 0x%08X (stock %d), %d added fighter(s), logo hook %d, save hook %s\n", n, where, ns, g_added_n,
                  want_logo ? 1 : 0, save_hook_ours ? "own" : "shared with the unlock cheat");
