@@ -16,7 +16,7 @@
 //      original file. A replacement is written IN PLACE over its entry's own 2048-aligned slot: the archive keeps its size and layout
 //      (GMOD R6: the game reacts to the archive's size or end layout; an archive that grew left the boot black even with unchanged
 //      bytes). A replacement larger than its slot is refused for now (the appended layout is not proven in a game).
-//   6. Class: an entry is cosmetic only under the allow-list (game/logo/, movie/, and songs: sound/<LANG>/BGM_*; D40, PM 2026-11-24: voices and
+//   6. Class: an entry is cosmetic only under the allow-list (game/logo/, movie/, and songs: sound/<LANG>/BGM_*; 2026-11-24: voices and
 //      other sound files are gameplay); every other path is gameplay. The manifest's
 //      "gameplay": true can raise a mod's class, never lower it.
 //   7. Digest: SHA-256 over "jsp-modset 1\n", the EBOOT id, and for each applied gameplay mod in load order "id version\n" plus
@@ -167,7 +167,7 @@ inline bool is_cosmetic_path(const std::string& entry)
     static const char* const allow[] = { "game/logo/", "movie/" };
     for (const char* a : allow)
         if (entry.compare(0, strlen(a), a) == 0) return true;
-    // Songs only (D40, PM 2026-11-24): sound/<LANG>/BGM_*. Voices, effects and every other sound file are gameplay.
+    // Songs only (2026-11-24): sound/<LANG>/BGM_*. Voices, effects and every other sound file are gameplay.
     if (entry.compare(0, 6, "sound/") == 0) {
         const size_t s = entry.find('/', 6);
         if (s != std::string::npos && s > 6 && entry.find('/', s + 1) == std::string::npos && entry.compare(s + 1, 4, "BGM_") == 0) return true;
@@ -576,7 +576,7 @@ struct Manifest {
 };
 
 // True when any "file" source of the manifest (a cpk-entry override or a loose file) is marked derived: such a mod can be verified but is never
-// put on the tested list (PM 2026-11-24). Bookkeeping only: not in the digest.
+// put on the tested list (2026-11-24). Bookkeeping only: not in the digest.
 inline bool manifest_derived(const Manifest& m)
 {
     for (const OverrideSpec& o : m.overrides) if (o.derived) return true;
