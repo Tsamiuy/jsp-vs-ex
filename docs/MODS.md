@@ -54,7 +54,7 @@ load. Mods that change the fight are gameplay and are part of the mod-set digest
 
 ## roster: more fighters on the character select
 
-Interface `roster` 1, US 1.00 disc only (`game.title_ids` must name BLUS31519). `roster.fighters` is a list of objects:
+Interface `roster` 1 (2 with `card_as`; a version 1 mod is still accepted, without that field), US 1.00 disc only (`game.title_ids` must name BLUS31519). `roster.fighters` is a list of objects:
 
 | Field | Meaning |
 | --- | --- |
@@ -62,7 +62,7 @@ Interface `roster` 1, US 1.00 disc only (`game.title_ids` must name BLUS31519). 
 | `after` | the id it goes behind in the list (default: before the first support) |
 | `logo_as` | a stock fighter id whose intro series logo this fighter shows |
 | `owned` | whether the fighter is marked owned in the save (default true) |
-| `card_as` | a stock-list id whose select card this fighter shows (default: none, the game's small placeholder card) |
+| `card_as` (needs `roster` 2) | a stock-list id whose select card this fighter shows (default: none, the game's small placeholder card) |
 
 The fighters are part of the digest, except `card_as`.
 

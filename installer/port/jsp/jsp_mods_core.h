@@ -29,7 +29,7 @@
 //      its fighters are part of the digest.
 //      A fight with an added fighter is untested and no model, voice or card art is served for one: a mod must not offer a fighter whose full
 //      data is not in place ("owned" defaults to true, so the card is selectable). The list-repoint approach was first shown by a community mod.
-//      "card_as" (ENHANCEMENT, cosmetic): the id of a stock fighter whose select card this fighter shows. The game looks a card texture up by
+//      "card_as" (interface "roster" 2; version 1 mods are still accepted, without this key) (ENHANCEMENT, cosmetic): the id of a stock fighter whose select card this fighter shows. The game looks a card texture up by
 //      the name "_rgb8_256_chara_ico_NNN.png"; the guest side (jsp_roster.cpp) rewrites NNN of exactly the added id's name to the donor's for
 //      the length of the lookup. No archive changes, so the donor must have a full card in the same set (a stock-list id, see roster_card_ok).
 //      It is not in the digest: a peer that does not redirect plays the same fight.
@@ -366,7 +366,7 @@ struct Interface { std::string name; int version; };
 // What this build supports. Round 1: cpk-entry 1 only ("balance" joins with its applier, step R8).
 inline const std::vector<Interface>& supported_interfaces()
 {
-    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 1 } };
+    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 2 } };
     return k;
 }
 struct OverrideSpec { std::string entry, alias, file, sha256; };
@@ -601,13 +601,15 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
             return false;
         }
         if (v->type != Json::Obj) { err = "mod.json: \"roster\" must be an object"; return false; }
+        // roster 2 adds "card_as"; a mod that declares roster 1 keeps the version 1 keys (an older port refuses card_as as unknown, so a mod using it declares 2)
+        const bool roster_v2 = std::find_if(m.interfaces.begin(), m.interfaces.end(), [](const Interface& i) { return i.name == "roster" && i.version >= 2; }) != m.interfaces.end();
         for (const std::string& k : v->keys) if (k != "fighters") { err = "mod.json: roster: unknown key \"" + k + "\""; return false; }
         const Json* fl = v->get("fighters");
         if (!fl || fl->type != Json::Arr || fl->arr.empty() || fl->arr.size() > kRosterGrid) { err = "mod.json: roster.fighters must be a non-empty array"; return false; }
         for (const Json& o : fl->arr) {
             if (o.type != Json::Obj) { err = "mod.json: a roster fighter is not an object"; return false; }
             for (const std::string& k : o.keys)
-                if (k != "id" && k != "after" && k != "logo_as" && k != "owned" && k != "card_as") { err = "mod.json: roster fighter: unknown key \"" + k + "\""; return false; }
+                if (k != "id" && k != "after" && k != "logo_as" && k != "owned" && !(k == "card_as" && roster_v2)) { err = "mod.json: roster fighter: unknown key \"" + k + "\""; return false; }
             RosterFighter f;
             const Json* x = o.get("id");
             if (!x || x->type != Json::Int || x->i < 0 || x->i > kRosterIdMax || !roster_id_ok(int(x->i))) {

@@ -1180,7 +1180,7 @@ static void test_roster(MemIo& io)
         { "{ \"id\": 19, \"owned\": 1 }", "\"roster\": 1", "\"owned\" must be true or false" },
         { "{ \"id\": 19, \"afer\": 40 }", "\"roster\": 1", "unknown key" },
         { "{ \"id\": 19 }", "\"cpk-entry\": 1", "needs interface \"roster\"" },
-        { "{ \"id\": 19 }", "\"roster\": 2", "newer than this build supports" },
+        { "{ \"id\": 19 }", "\"roster\": 3", "newer than this build supports" },
     };
     for (const Bad& b : bad) {
         add_mod(io, "bad", roster_mod("bad", b.fighters, b.ifs));
@@ -1249,8 +1249,17 @@ static void test_roster(MemIo& io)
 // ---------------------------------------------------------------------------------------------------- roster card_as (ENHANCEMENT)
 static void test_card_as(MemIo& io)
 {
+    {   // card_as needs interface roster 2; roster 1 mods still load, without it
+        add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"after\": 40 }"));
+        CHECK(mod(jmods::load_mod_set(io, "v1\n", opts()), "v1")->loaded);
+        add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"card_as\": 18 }"));
+        jmods::ModSet r1 = jmods::load_mod_set(io, "v1\n", opts());
+        CHECK(!mod(r1, "v1")->loaded && has_log(r1, "unknown key \"card_as\""));
+        add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"card_as\": 18 }", "\"roster\": 2"));
+        CHECK(mod(jmods::load_mod_set(io, "v1\n", opts()), "v1")->loaded);
+    }
     // parse: card_as is kept, logged, and does not change the digest (the card is cosmetic)
-    const auto card_set = [&](const char* fighters) { add_mod(io, "ca", roster_mod("ca", fighters)); return jmods::load_mod_set(io, "ca\n", opts()); };   // one id: the digest names it
+    const auto card_set = [&](const char* fighters) { add_mod(io, "ca", roster_mod("ca", fighters, "\"roster\": 2")); return jmods::load_mod_set(io, "ca\n", opts()); };   // one id: the digest names it
     jmods::ModSet a = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 18 }");
     jmods::ModSet b = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39, \"card_as\": 7 }");
     jmods::ModSet n = card_set("{ \"id\": 19, \"after\": 40, \"logo_as\": 39 }");
@@ -1278,7 +1287,7 @@ static void test_card_as(MemIo& io)
         { "{ \"id\": 19, \"card_as\": true }", "\"card_as\" must be a stock fighter id" },
     };
     for (const auto& c : bad) {
-        add_mod(io, "badc", roster_mod("badc", c.fighters));
+        add_mod(io, "badc", roster_mod("badc", c.fighters, "\"roster\": 2"));
         jmods::ModSet r = jmods::load_mod_set(io, "badc\n", opts());
         const bool ok = mod(r, "badc") && !mod(r, "badc")->loaded && r.roster.empty() && has_log(r, c.why);
         CHECK(ok);
