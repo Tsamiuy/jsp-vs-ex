@@ -108,7 +108,7 @@ Play first, host if it works for you.
   starts `re-psn-app.exe` with `ui --browser` (so it always opens in your web browser) and does not wait for it. If the folder is there but `re-psn-app.exe` or `re-psn-host.exe` is missing, the button is
   greyed out and the tab says to reinstall with the option ticked.
 - **The game does not need it.** The game connects to a re-psn server without the app, and the app sends nothing until you
-  act in it. The launcher passes it only `ui --browser`; the address you use in the game still goes in the Online setup.
+  act in it. The launcher passes it only `ui --browser`; the address you use in the game still goes in the Online settings (the Online tab's re-psn Server box, or Port Settings > Online in the game).
 
 Before you use it:
 
