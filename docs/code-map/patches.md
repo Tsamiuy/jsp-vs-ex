@@ -1,6 +1,6 @@
 # Toolkit patch map
 
-Every patch in `installer/port/patches/` on `main` (141), with the toolkit files it touches, its area, the environment switches it
+Every patch in `installer/port/patches/` on `main` (150), with the toolkit files it touches, its area, the environment switches it
 reads and the glue that calls into it. What each patch does, in one line, is in
 [`installer/port/patches/INDEX.md`](../../installer/port/patches/INDEX.md); the patch file's own header has the details.
 Conventions: [README.md](README.md#how-to-read-it).
@@ -25,9 +25,9 @@ The first digit is the group, the last three digits the line: x001-x499 fix, x50
 | 0 | build | runtime core: 0004 HLE TOC slot, 0005 cellFiber, 0006 lv2 event wait, 0500 indirect-call hook | 4 |
 | 1 | SPURS | 1002-1004 job guard and JOBCRT context | 3 |
 | 2 | GCM/D3D12 | 2001-2070 renderer fixes, 2500-2518 display options and port UI hooks, 2900-2990 performance experiments and diagnostics | 95 |
-| 3 | audio | 3001, 3004 cellAudio; 3002, 3003 cellVdec (video decode); 3900 audio diagnostic | 5 |
+| 3 | audio | 3001, 3004 cellAudio; 3002, 3003 cellVdec (video decode); 3005 tick-locked cellAudio and 3006 guest clock shift (both for rollback matches); 3900 audio diagnostic | 7 |
 | 6 | runtime/HLE/pad | 6001-6019 fixes (PPU, HLE, fs, pad scripting, GCM timing, lv2 usleep, lifter hooks, NP); 6500-6503 input and fs features | 19 |
-| 7 | (not declared in the index header) | 7904-7918, all on the experiment line: rollback support (census, gates, views, canonical pad), multi-pad (7908, 7909), sys_net probe (7905), Matching2 (7906), re-psn client (7918), two-thread drawing on by default (7907) | 15 |
+| 7 | (not declared in the index header) | 7904-7923, 7927, 7928, all on the experiment line: rollback support (census, gates, views, canonical pad, skipped re-run draws 7919, layout generation 7920, lwmutex census cache 7921, pad peek 7922, thread context 7923, lost-flip write-off 7927), multi-pad (7908, 7909), sys_net probe (7905), Matching2 (7906), re-psn client (7918), sys_net abort for the game's own online (7928), two-thread drawing on by default (7907) | 22 |
 
 ```mermaid
 flowchart LR
@@ -38,10 +38,10 @@ flowchart LR
     P20["2001-2070 fix"]
     P25["2500-2518 feature"]
     P29["2900-2990 experiment"]
-    P3["3001-3004 fix<br/>3900 experiment"]
+    P3["3001-3006 fix<br/>3900 experiment"]
     P60["6001-6019 fix"]
     P65["6500-6503 feature"]
-    P79["7904-7918 experiment"]
+    P79["7904-7923, 7927, 7928 experiment"]
   end
   PPU["PPU, HLE, lifter"] --- P0 & P60 & P79
   THR["threads, lv2 sync, fibers"] --- P0 & P60 & P79
@@ -49,10 +49,11 @@ flowchart LR
   RSX["RSX, GCM, D3D12 renderer"] --- P20 & P29 & P60
   UI["display options and port UI hooks"] --- P25
   AUD["audio and video decode"] --- P3
+  CLK["guest clock (rollback)"] --- P3
   FS["file system, mods"] --- P60 & P65
   IN["input"] --- P60 & P65 & P79
   NET["NP, Matching2, sys_net, re-psn"] --- P60 & P79
-  RB["rollback support"] --- P79
+  RB["rollback support"] --- P3 & P79
 ```
 
 ## Hooks the glue uses
@@ -69,13 +70,17 @@ flowchart LR
   G60["6001, 6002, 6004 views"] --> hle["jsp_hle.cpp"]
   G6016["6016 image load hook"] --> main["main.cpp"]
   G79s["7910-7917 census, gates, views"] --> snap["jsp_snapshot.cpp"]
-  G7915["7915 canonical pad, vblank count"] --> step["jsp_stepper.cpp"]
+  G7920["7920, 7921 layout generation, lwmutex census cache"] --> snap
+  G7915["7915 canonical pad, pad info, vblank count"] --> step["jsp_stepper.cpp"]
+  G79st["7919 skip re-run draws, 7922 pad peek, 7927 lost-flip write-off"] --> step
+  G3005["3005 audio tick lock, 3006 guest clock and usleep hook"] --> ng
+  G7923["7923 thread context"] --> ng
   G7905["7905 net probe"] --> probe["jsp_net_probe.cpp"]
   G7918["7918 psnr client"] --> repsn["jsp_net_repsn*.h"]
 ```
 
 Most renderer patches have no glue symbol: they are steered by environment switches, which reach the game from the settings file
-through the launcher, from `jsp_settings.cpp` (`_putenv_s` for live settings), or from defaults in `main.cpp:630-635`
+through the launcher, from `jsp_settings.cpp` (`_putenv_s` for live settings), or from defaults in `main.cpp:642-647`
 (`AUDIO_NBLOCK=16` for 3001, `VDEC_ALPHA=255` for 3002).
 
 ## Every patch on `main`
@@ -88,11 +93,11 @@ use; "-" means the patch is self-contained or only switched by an environment va
 | 0004 | fix | runtime/ppu/ppu_hle.cpp | hle |  | - |
 | 0005 | fix | libs/spurs/cellFiber.c | threads (fiber) |  | - |
 | 0006 | fix | runtime/syscalls/sys_event.c | threads (lv2 sync) | EVQ_SUBMS_WAIT | - |
-| 0500 | feature | runtime/ppu/ppu_loader.cpp | ppu |  | g_ppu_icall_hook: jsp_game.cpp:93, jsp_autopilot.cpp:24, jsp_training.cpp:9 |
+| 0500 | feature | runtime/ppu/ppu_loader.cpp | ppu |  | g_ppu_icall_hook: jsp_game.cpp:98, jsp_autopilot.cpp:24, jsp_training.cpp:9 |
 | 1002 | fix | libs/spurs/cellSpurs.c | spurs |  | - |
 | 1003 | fix | runtime/spu/spurs_job.c | spurs | SPURS_CTX_PAD | - |
 | 1004 | fix | libs/spurs/cellSpurs.c | spurs | SPURS_GUARD_EVENT | - |
-| 2001 | fix | libs/video/cellGcmSys.c | gcm |  | cellGcm_default_context_ea / cellGcm_context_slot_ea: main.cpp:500-501, jsp_snapshot.cpp:76-77 |
+| 2001 | fix | libs/video/cellGcmSys.c | gcm |  | cellGcm_default_context_ea / cellGcm_context_slot_ea: main.cpp:502-503, jsp_snapshot.cpp:77-78 |
 | 2002 | fix | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | VP_NO_MIDFLUSH | - |
 | 2003 | fix | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | VP_MIDFLUSH_WAIT | - |
 | 2005 | fix | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | FP_PAR_COMPILE, FP_THREADS, FP_OFF, FP_CONSTBUF ... | - |
@@ -159,18 +164,18 @@ use; "-" means the patch is self-contained or only switched by an environment va
 | 2504 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | - |
 | 2505 | feature | libs/video/rsx_fp_decompiler.c | rsx (d3d12) | SHADOW_BIAS | - |
 | 2506 | feature | libs/video/rsx_fp_decompiler.c | rsx (d3d12) | SHADOW_BIAS, SHADOW_RPDB | - |
-| 2507 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | g_tex_patch_hook: jsp_game.cpp:75; feat_menu_pages.cpp:241 |
-| 2508 | feature | libs/misc/cellOskDialog.c, libs/system/cellSysutil.c, libs/video/rsx_d3d12_backend.c | sysutil/osk (ui) | OSK_DIALOG | cellOskDialog_overlay_active/_key/_confirm_open/_confirm_poll/_choice_open, rsx_d3d12_request_close: jsp_game.cpp:84-89, feat_3v3.cpp:29-32 |
-| 2509 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | g_rsx_copy_rects, g_rsx_stamp, g_rsx_stamp2, g_rsx_cutout (+ declares g_rsx_ui_scale, g_rsx_aa_mode): jsp_game.cpp:80-81, 90-92, 1825 |
-| 2510 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | UI_SCALE_DBG | g_rsx_ui_scale: jsp_game.cpp:80 |
-| 2511 | feature | libs/video/rsx_d3d12_backend.c, libs/video/third_party_smaa/AreaTex.h, libs/video/third_party_smaa/SMAA.hlsl, libs/video/third_party_smaa/SMAA_hlsl.inc, libs/video/third_party_smaa/SearchTex.h | rsx (d3d12) |  | g_rsx_aa_mode: jsp_game.cpp:81 |
+| 2507 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | g_tex_patch_hook: jsp_game.cpp:80; feat_menu_pages.cpp:241 |
+| 2508 | feature | libs/misc/cellOskDialog.c, libs/system/cellSysutil.c, libs/video/rsx_d3d12_backend.c | sysutil/osk (ui) | OSK_DIALOG | cellOskDialog_overlay_active/_key/_confirm_open/_confirm_poll/_choice_open, rsx_d3d12_request_close: jsp_game.cpp:89-94, feat_3v3.cpp:29-32 |
+| 2509 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | g_rsx_copy_rects, g_rsx_stamp, g_rsx_stamp2, g_rsx_cutout (+ declares g_rsx_ui_scale, g_rsx_aa_mode): jsp_game.cpp:85-86, 95-97, 1848 |
+| 2510 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | UI_SCALE_DBG | g_rsx_ui_scale: jsp_game.cpp:85 |
+| 2511 | feature | libs/video/rsx_d3d12_backend.c, libs/video/third_party_smaa/AreaTex.h, libs/video/third_party_smaa/SMAA.hlsl, libs/video/third_party_smaa/SMAA_hlsl.inc, libs/video/third_party_smaa/SearchTex.h | rsx (d3d12) |  | g_rsx_aa_mode: jsp_game.cpp:86 |
 | 2512 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | FX_NOBLUR, FX_FULL, FX_FULL_TARGETS | - |
 | 2513 | feature | libs/video/rsx_fp_decompiler.c | rsx (d3d12) | SHADOW_RPDB, SHADOW_SOFT, SHADOW_SCALE | - |
 | 2514 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | SHADOW_DEPTH_DIRECT | - |
 | 2515 | feature | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | SHADOW_TAP_SCALE | - |
-| 2516 | feature | libs/video/jsp_menu_label.h, libs/video/rsx_d3d12_backend.c | rsx (d3d12) | JSP_MENU_TRAINING_LABEL, JSP_MENU_LABEL_DIR, JSP_MENU_LABEL_DUMP | jsp_menu_label_set: jsp_overlay_api.h:41, jsp_port_menu.cpp:1208; art from installer/tools/menu_label_art.py |
-| 2517 | feature | libs/video/jsp_overlay.h, libs/video/rsx_d3d12_backend.c | rsx (d3d12) | JSP_MENU_LABEL_DIR | jsp_overlay_begin/_end/_close/_active/_text\*/_fill_rect: jsp_overlay_api.h:26-36, jsp_port_menu.cpp:923-1021, jsp_net_game.cpp:255-267, 587 |
-| 2518 | feature | libs/video/jsp_menu_label.h, libs/video/rsx_d3d12_backend.c | rsx (d3d12) | JSP_MENU_LABEL_MASK, JSP_MENU_TRAINING_LABEL | jsp_menu_label_panel: jsp_overlay_api.h:39, jsp_port_menu.cpp:699 |
+| 2516 | feature | libs/video/jsp_menu_label.h, libs/video/rsx_d3d12_backend.c | rsx (d3d12) | JSP_MENU_TRAINING_LABEL, JSP_MENU_LABEL_DIR, JSP_MENU_LABEL_DUMP | jsp_menu_label_set: jsp_overlay_api.h:41, jsp_port_menu.cpp:1212; art from installer/tools/menu_label_art.py |
+| 2517 | feature | libs/video/jsp_overlay.h, libs/video/rsx_d3d12_backend.c | rsx (d3d12) | JSP_MENU_LABEL_DIR | jsp_overlay_begin/_end/_close/_active/_text\*/_fill_rect: jsp_overlay_api.h:26-36, jsp_port_menu.cpp:924-1022, jsp_net_game.cpp:350-367, 1539 |
+| 2518 | feature | libs/video/jsp_menu_label.h, libs/video/rsx_d3d12_backend.c | rsx (d3d12) | JSP_MENU_LABEL_MASK, JSP_MENU_TRAINING_LABEL | jsp_menu_label_panel: jsp_overlay_api.h:39, jsp_port_menu.cpp:700 |
 | 2900 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | - |
 | 2905 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | HITCH | - |
 | 2906 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | GPU_TIME | - |
@@ -184,48 +189,57 @@ use; "-" means the patch is self-contained or only switched by an environment va
 | 2915 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | D3D12_VSYNC | - |
 | 2918 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | - |
 | 2919 | experiment | libs/video/cellGcmSys.c | gcm | GCM2D_RUN | - |
-| 2920 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | g_rsx_tint_rects: jsp_game.cpp:76 |
+| 2920 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | g_rsx_tint_rects: jsp_game.cpp:81 |
 | 2933 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) | VPULL_GATHER | - |
 | 2990 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) |  | - |
-| 3001 | fix | libs/audio/cellAudio.c | audio | AUDIO_NBLOCK | AUDIO_NBLOCK=16 default set by main.cpp:630,635 (env, not a symbol) |
-| 3002 | fix | libs/codec/cellVdec.c | video decode | VDEC_ALPHA | VDEC_ALPHA=255 default set by main.cpp:633 (env) |
+| 3001 | fix | libs/audio/cellAudio.c | audio | AUDIO_NBLOCK | AUDIO_NBLOCK=16 default set by main.cpp:642,647 (env, not a symbol) |
+| 3002 | fix | libs/codec/cellVdec.c | video decode | VDEC_ALPHA | VDEC_ALPHA=255 default set by main.cpp:645 (env) |
 | 3003 | fix | libs/codec/cellVdec.c | video decode | VDEC_DEFER | - |
 | 3004 | fix | libs/audio/audio_wasapi_recover.h, libs/audio/cellAudio.c, libs/audio/tests/test_audio_device_recover.c | audio |  | - |
+| 3005 | fix | libs/audio/cellAudio.c | audio (rollback: tick-locked mix) |  | g_ps3_audio_lock_target, g_ps3_audio_lock_done, g_ps3_audio_lock_mute, ps3_audio_lock_idle/_rewind/_set_target: jsp_net_game.cpp:454-458 (off only with the gated test switch JSP_AUDIO_TICKLOCK=0) |
+| 3006 | fix | runtime/syscalls/sys_timer.c, runtime/ppu/ppu_sysprx.cpp | threads (rollback: guest clock shift, usleep hook) |  | g_ps3_guest_tb_shift, ppu_timebase_real_now, g_ps3_usleep_hook: jsp_net_game.cpp:488, 495, 527 |
 | 3900 | experiment | libs/audio/cellAudio.c | audio | AUDIO_SILENCE | - |
 | 6001 | fix | runtime/ppu/ppu_loader.cpp | ppu |  | ppu_resv_ctx_at: jsp_hle.cpp:130 |
 | 6002 | fix | runtime/ppu/ppu_hle.cpp | hle |  | g_hle_inflight, g_hle_last: jsp_hle.cpp:131-132 |
 | 6003 | fix | libs/input/cellPad.c | input |  | PAD_SCRIPT (env) |
-| 6004 | fix | runtime/ppu/ppu_fs.cpp | fs |  | g_ppu_fs_last_read_ms: jsp_game.cpp:69, jsp_hle.cpp:101 |
+| 6004 | fix | runtime/ppu/ppu_fs.cpp | fs |  | g_ppu_fs_last_read_ms: jsp_game.cpp:71, jsp_hle.cpp:101 |
 | 6005 | fix | libs/video/cellGcmSys.c | gcm (diagnostic) | FRAME_TL | - |
 | 6006 | fix | runtime/ppu/ppu_fs.cpp | fs | FS_STREAM_LOCK | - |
 | 6007 | fix | libs/input/cellPad.c, runtime/ppu/ppu_fs.cpp | input |  | PAD_SCRIPT (env) |
 | 6008 | fix | libs/input/cellPad.c, libs/system/cellSaveData.c | input |  | PAD_SCRIPT (env) |
 | 6009 | fix | runtime/syscalls/sys_timer.c | threads (lv2 sync) | USLEEP_SPIN, USLEEP_AFTER_US, USLEEP_REAL_US, USLEEP_GAP_US | - |
 | 6010 | fix | libs/video/cellGcmSys.c | gcm | GCM_OVERRUN_HOLD_MS | - |
-| 6011 | fix | libs/video/cellGcmSys.c | gcm |  | cellGcm_flip_ready: main.cpp:132, jsp_stepper.cpp:34 |
+| 6011 | fix | libs/video/cellGcmSys.c | gcm |  | cellGcm_flip_ready: main.cpp:132, jsp_stepper.cpp:39 |
 | 6014 | fix | tools/ppu_lifter.py | build (lifter hooks) |  | the 114 `jsp_*_enter` / `jsp_*_leave` bodies named in `lift_game_hooks.json` and `lift_lod_hooks.json`: 93 in feat_3v3.cpp, 14 in jsp_game.cpp, 7 in feat_menu_pages.cpp (`g_trampoline_fn` comes from the base toolkit, not from this patch) |
 | 6016 | fix | runtime/ppu/ppu_loader.cpp | ppu |  | g_ppu_image_load_hook: main.cpp:82 (bound to jsp_lod_bind_loaded_image) |
 | 6018 | fix | libs/network/sceNpBasic.c, libs/network/sceNpBasic.h, libs/network/tests/test_np_basic_dialogs.c | net (np) dialogs |  | - (host test installer/tools/np_dialogs_test.sh) |
 | 6019 | fix | libs/network/np_psnr.c, libs/network/sceNp.c, libs/network/sceNpBasic.c, libs/network/sceNpMatching2.c, libs/network/sceNpSignaling.c, libs/network/tests/test_np_identity_log.c, runtime/syscalls/evt_full_log.h, runtime/syscalls/sys_event.c, runtime/syscalls/tests/test_evt_full_log.c | net (np) log |  | none (tested by installer/tools/np_log_test.sh) |
-| 6500 | feature | libs/input/cellPad.c | input | INPUT_MODE, MOUSE_SENS, PAD_NO_KEYBOARD, PAD_KEYS_SPLIT ... | g_pad_arrows_dpad, g_pad_mouse_look, g_pad_mouse_menus, g_pad_menu_jump, g_pad_menu_layout: jsp_game.cpp:77-83; INPUT_MODE in jsp_settings.h:107 |
-| 6501 | feature | libs/input/cellPad.c, runtime/spu/spu_channels.c, runtime/spu/spu_dma.h | input + spu hook |  | g_cellpad_filter, g_cellpad_rstick_filter, g_cellpad_want_p2, g_spu_put_hook_img: jsp_game.cpp:70-73, jsp_autopilot.cpp:25, jsp_fight_hash.cpp:134, jsp_port_menu.cpp:79 |
+| 6500 | feature | libs/input/cellPad.c | input | INPUT_MODE, MOUSE_SENS, PAD_NO_KEYBOARD, PAD_KEYS_SPLIT ... | g_pad_arrows_dpad, g_pad_mouse_look, g_pad_mouse_menus, g_pad_menu_jump, g_pad_menu_layout: jsp_game.cpp:82-88; INPUT_MODE in jsp_settings.h:107 |
+| 6501 | feature | libs/input/cellPad.c, runtime/spu/spu_channels.c, runtime/spu/spu_dma.h | input + spu hook |  | g_cellpad_filter, g_cellpad_rstick_filter, g_cellpad_want_p2, g_spu_put_hook_img: jsp_game.cpp:75-78, jsp_autopilot.cpp:25, jsp_fight_hash.cpp:136, jsp_port_menu.cpp:80 |
 | 6502 | feature | include/ps3emu/fs_vfile.h, runtime/ppu/ppu_fs.cpp, runtime/ppu/tests/test_fs_vfile.cpp, tools/test_ppu_fs_vfile.py | fs |  | g_ps3_fs_vfile_ops: jsp_mods.cpp:593 |
 | 6503 | feature | CMakeLists.txt, libs/input/cellPad.c | input (DualSense HID) + build | PAD_NO_DUALSENSE | - |
-| 7904 | experiment | libs/video/rsx_d3d12_backend.c, libs/video/rsx_d3d12_backend.h | rollback: rsx state readback |  | rsx_d3d12_pipe_effective_state: jsp_session_startup.cpp:6, jsp_net_game.cpp:66 |
+| 7904 | experiment | libs/video/rsx_d3d12_backend.c, libs/video/rsx_d3d12_backend.h | rollback: rsx state readback |  | rsx_d3d12_pipe_effective_state: jsp_session_startup.cpp:6, jsp_net_game.cpp:82 |
 | 7905 | experiment | libs/network/sysNet_probe.h, libs/network/sysNet_probe.inc, libs/network/sysNet.c, libs/input/cellPad.c | net (sys_net probe) + input | PS3_NET_PROBE_ARM_SCRIPT, PS3_NET_PROBE_DURATION_MS, PS3_NET_PROBE_BUDGET | ps3_net_probe_init/_poll/_index/_output_failed/_script_report, g_cellpad_script_report_index/_observer: jsp_net_probe.cpp:44-104 |
 | 7906 | experiment | libs/network/np_psnr.h, libs/network/np_psnr.c, libs/network/sceNpMatching2.c, libs/network/tests/test_np_matching2.c | net (np matching2) |  | none (tested by installer/tools/matching2_context_test.py) |
 | 7907 | experiment | libs/video/rsx_d3d12_backend.c | rsx (d3d12) default | PIPE (2912's two-thread drawing, now on unless `PIPE=0`) | setting default (settings_test.cpp) |
-| 7908 | experiment | libs/input/cellPad.c, libs/input/pad_join.h | input (multi-pad join) | PAD_JOIN, PAD_PAD_P2 | g_pad_join_notify, pad_join_request: jsp_port_menu.cpp:76-77, set at :1189 |
+| 7908 | experiment | libs/input/cellPad.c, libs/input/pad_join.h | input (multi-pad join) | PAD_JOIN, PAD_PAD_P2 | g_pad_join_notify, pad_join_request: jsp_port_menu.cpp:77-78, set at :1193 |
 | 7909 | experiment | libs/input/cellPad.c, libs/input/pad_hid.h, libs/input/pad_join.h | input (PlayStation HID) | PAD_NO_PLAYSTATION, PAD_NO_DUALSENSE | none (tested by installer/tools/pad_join_test.c) |
-| 7910 | experiment | libs/video/cellGcmSys.c | rollback: gcm view |  | cellGcm_io_mapping: jsp_snapshot.cpp:78 |
-| 7911 | experiment | libs/spurs/cellFiber.c, runtime/ppu/ppu_hle.cpp, runtime/ppu/ppu_loader.cpp, runtime/ppu/ppu_sysprx.cpp, runtime/syscalls/sys_event.c, runtime/syscalls/sys_ppu_thread.c, runtime/syscalls/sys_semaphore.c, runtime/syscalls/sys_snapshot_census.c | rollback: sync census (threads/hle) |  | ps3_lwmutex_census, ps3_hle_thread_census, g_ps3_hle_mark_on, ps3_syscall_census: jsp_snapshot.cpp:82-89 |
-| 7912 | experiment | libs/spurs/cellFiber.c, runtime/syscalls/sys_snapshot_census.c | rollback: fiber/hle marker |  | g_ps3_hle_mark_fiber_swaps: jsp_snapshot.cpp:88 |
-| 7913 | experiment | libs/spurs/cellFiber.c, libs/spurs/cellSpurs.c, libs/spurs/cellSpursJq.c, libs/video/cellGcmSys.c, runtime/spu/spu_workload.c | rollback: spurs/fiber/flip census |  | ps3_spurs_census, ps3_fiber_census, cellGcm_flip_census: jsp_snapshot.cpp:85-87 |
-| 7914 | experiment | libs/spurs/cellFiber.c, libs/video/cellGcmSys.c, runtime/ppu/ppu_sysprx.cpp, runtime/spu/spu_workload.c, runtime/syscalls/sys_snapshot_census.c | rollback: snapshot gate |  | g_ps3_gate_line, ps3_lwm_census_invalidate, ps3_gate_arm, ps3_gate_arm_transit, ps3_gate_bump_counts: jsp_snapshot.cpp:93-97 |
-| 7915 | experiment | libs/input/cellPad.c, libs/video/cellGcmSys.c | rollback: input + gcm vblank |  | g_cellpad_canon_hook: jsp_stepper.cpp:10,42; cellGcm_vblank_delivered: jsp_stepper.cpp:35; g_cellpad_info_hook declared only (jsp_stepper.cpp:17 "nothing installs it yet") |
-| 7916 | experiment | runtime/syscalls/sys_ppu_thread.c | rollback: ppu thread view |  | ps3_ppu_thread_view, ps3_ppu_thread_regs: jsp_snapshot.cpp:514-515 |
-| 7917 | experiment | libs/video/cellGcmSys.c, libs/video/rsx_commands.c, libs/video/rsx_draw_engine.c, libs/video/rsx_tiling.c | rollback: gcm/rsx guest writes |  | ps3_gcm_walker_view, ps3_rsx_guest_write_hook: jsp_snapshot.cpp:496, 507 |
+| 7910 | experiment | libs/video/cellGcmSys.c | rollback: gcm view |  | cellGcm_io_mapping: jsp_snapshot.cpp:79 |
+| 7911 | experiment | libs/spurs/cellFiber.c, runtime/ppu/ppu_hle.cpp, runtime/ppu/ppu_loader.cpp, runtime/ppu/ppu_sysprx.cpp, runtime/syscalls/sys_event.c, runtime/syscalls/sys_ppu_thread.c, runtime/syscalls/sys_semaphore.c, runtime/syscalls/sys_snapshot_census.c | rollback: sync census (threads/hle) |  | ps3_lwmutex_census, ps3_hle_thread_census, g_ps3_hle_mark_on, ps3_syscall_census: jsp_snapshot.cpp:83-90 |
+| 7912 | experiment | libs/spurs/cellFiber.c, runtime/syscalls/sys_snapshot_census.c | rollback: fiber/hle marker |  | g_ps3_hle_mark_fiber_swaps: jsp_snapshot.cpp:89 |
+| 7913 | experiment | libs/spurs/cellFiber.c, libs/spurs/cellSpurs.c, libs/spurs/cellSpursJq.c, libs/video/cellGcmSys.c, runtime/spu/spu_workload.c | rollback: spurs/fiber/flip census |  | ps3_spurs_census, ps3_fiber_census, cellGcm_flip_census: jsp_snapshot.cpp:86-88 |
+| 7914 | experiment | libs/spurs/cellFiber.c, libs/video/cellGcmSys.c, runtime/ppu/ppu_sysprx.cpp, runtime/spu/spu_workload.c, runtime/syscalls/sys_snapshot_census.c | rollback: snapshot gate |  | g_ps3_gate_line, ps3_lwm_census_invalidate, ps3_gate_arm, ps3_gate_arm_transit, ps3_gate_bump_counts: jsp_snapshot.cpp:94-99 |
+| 7915 | experiment | libs/input/cellPad.c, libs/input/cellPad.h, libs/video/cellGcmSys.c | rollback: input + gcm vblank |  | g_cellpad_canon_hook: jsp_stepper.cpp:627, 639; cellGcm_vblank_delivered: jsp_stepper.cpp:40, 255; g_cellpad_info_hook: jsp_stepper.cpp:641 (installed while a rollback session runs, removed at :647) |
+| 7916 | experiment | runtime/syscalls/sys_ppu_thread.c | rollback: ppu thread view |  | ps3_ppu_thread_view, ps3_ppu_thread_regs: jsp_snapshot.cpp:685-686 |
+| 7917 | experiment | libs/video/cellGcmSys.c, libs/video/rsx_commands.c, libs/video/rsx_draw_engine.c, libs/video/rsx_tiling.c | rollback: gcm/rsx guest writes |  | ps3_gcm_walker_view, ps3_rsx_guest_write_hook: jsp_snapshot.cpp:667, 678 |
 | 7918 | experiment | libs/network/psnr/README.md, libs/network/psnr/psnr.c, libs/network/psnr/psnr.h | net (re-psn client) |  | psnr_\* client API: jsp_net_repsn_client.h:24,60-61,66,94 |
+| 7919 | experiment | libs/video/rsx_commands.c | rollback: re-run frames drawn by nobody |  | g_rsx_skip_draws: jsp_stepper.cpp:171, set at :177 (JSP_STEP_SKIP_DRAWS=1, a rollback default in jsp_net_online.h:235) |
+| 7920 | experiment | runtime/memory/vm.h, runtime/spu/spu_dma.h, runtime/ppu/ppu_sysprx.cpp | rollback: vm layout generation |  | g_vm_layout_gen: jsp_snapshot.cpp:1474 (JSP_SNAPSHOT_LAYOUT_GEN=1, a rollback default in jsp_net_online.h:215) |
+| 7921 | experiment | runtime/ppu/ppu_sysprx.cpp | rollback: lwmutex census page cache |  | g_lwm_rd_hits, g_lwm_rd_vq, g_lwm_rd_uncacheable, g_lwm_rd_vq_ns, g_lwm_rd_invalidates: jsp_snapshot.cpp:96 (census profile counters) |
+| 7922 | experiment | libs/input/cellPad.c | rollback: fresh local pad read |  | ps3_pad_peek_record: jsp_stepper.cpp:95, called at :146 (on unless JSP_PAD_PEEK=0, :97) |
+| 7923 | experiment | runtime/syscalls/sys_ppu_thread.c | rollback: helper thread registers |  | ps3_ppu_thread_ctx: jsp_net_game.cpp:654 (regs_save / regs_restore) |
+| 7927 | experiment | libs/video/cellGcmSys.c | rollback: lost flip write-off | GCM_TEST_LOSE_FLIP | cellGcm_flip_write_off_lost: jsp_stepper.cpp:44, called at :523 (the rule in jsp_stall_rule.h) |
+| 7928 | experiment | libs/network/sysNet.c, libs/network/sysNet.h, libs/network/tests/test_sys_net.c | net (sys_net abort, per-thread errno) |  | none (the game's own `sys_net_abort_socket` import; tested by installer/tools/sys_net_test.sh) |
 
 ## Tests that name a patch
 
@@ -235,11 +249,12 @@ use; "-" means the patch is self-contained or only switched by an environment va
   `tools/ci/repo_checks.py` (the SMAA files are allowed).
 - 6018: `np_dialogs_test.sh`; 6019: `np_log_test.sh`, `support_bundle_test.py`; 6502: `fs_vfile_test.sh`; 7904:
   `pipe_state_test.py`; 7906: `matching2_context_test.py`; 7907, 7908: `settings_test.cpp`; 7908, 7909: `pad_join_test.c`;
-  7918: `net_repsn_client_test.cpp`, `net_repsn_test.sh`.
+  7918: `net_repsn_client_test.cpp`, `net_repsn_test.sh`; 7928: `sys_net_test.sh` (the toolkit's own `test_sys_net.c`, a `posix` and a
+  `windows` row). No test names 3005, 3006 or 7919-7927; their glue is covered by the rule headers' tests
+  ([build-and-test.md](build-and-test.md#31-the-list-toolscihost-teststxt)).
 
 ## Notes
 
-- 7915 declares `g_cellpad_info_hook`, but nothing installs it on `main` (`jsp/jsp_stepper.cpp:17`).
+- 7915's `g_cellpad_info_hook` is installed by the stepper while a rollback session runs (`jsp/jsp_stepper.cpp:641`, removed at `:647`).
 - Upstream candidates (`upstream.tsv`): 2028, 2041-2044, 2049-2051, 2053, 2066, 3004, 6005, 6502; the rest are J-Stars only.
-- The rollback pull requests in review add 3005, 3006, 7919-7923, 7927 and 7924 and change 7915; see
-  [netcode.md](netcode.md#8-in-review).
+- In review, not on `main`: 7924, with Online Battle with rollback; see [netcode.md](netcode.md#8-in-review).
