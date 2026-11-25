@@ -159,7 +159,7 @@ def unrle(d, out_bytes):
     return bytes(o)
 
 def alphabet():
-    return "".join(chr(c) for c in range(33, 127) if chr(c) not in '"\\?')[:85]
+    return "".join(chr(c) for c in range(33, 127) if chr(c) not in '"\\?@')[:85]
 
 def b85(d):
     A = alphabet(); out = []

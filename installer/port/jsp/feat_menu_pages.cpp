@@ -196,17 +196,18 @@ static unsigned long long g_mp_trans_t = 0;
  * text and row-label pictures, on a disc whose label textures are the US ones (g_mp_off, set in mp_tex_upload); else the game's own menu, with
  * one log line. */
 static std::atomic<bool> g_mp_off{false}; static bool g_mp_us_seen = false;
-static int g_mp_disc = -1;   /* 1 a US disc, 0 another, -1 not known: the title id, set by jsp_mp_init before the menu exists */
-extern "C" void jsp_mp_init(const char* title_id) { g_mp_disc = jml::disc_us(title_id); }   /* main.cpp, next to jsp_mods_init */
+static int g_mp_disc = -1;   /* jml::Disc: 1 a US disc, 2 the EU disc, 0 another known one, -1 not known: the title id, set by jsp_mp_init before the menu exists */
+extern "C" void jsp_mp_init(const char* title_id) { g_mp_disc = jml::disc_kind(title_id); }   /* main.cpp, next to jsp_mods_init */
 static const std::string& mp_lang()
 {
-    static const std::string l = [] { int w = 0; const char* loc = nullptr;
+    static const std::string l = [] { int w = 0;
 #ifdef _WIN32
         w = (int)(GetUserDefaultUILanguage() & 0x3FF);
+        return jml::shown(jml::pick(std::getenv("PS3_LANG"), w), g_mp_disc);
 #else
-        loc = std::getenv("LC_ALL"); if (!loc || !loc[0]) loc = std::getenv("LC_MESSAGES"); if (!loc || !loc[0]) loc = std::getenv("LANG");
+        return jml::shown(jml::pick(std::getenv("PS3_LANG"), w, std::getenv("LC_ALL"), std::getenv("LC_MESSAGES"), std::getenv("LANG")), g_mp_disc);
 #endif
-        return jml::shown(jml::pick(std::getenv("PS3_LANG"), w, loc), g_mp_disc); }();
+        }();
     return l;
 }
 extern "C" const char* jsp_mp_lang(void) { return mp_lang().c_str(); }   /* the language the disc shows, for the port's pop-up texts (jsp_game.cpp) */
@@ -250,7 +251,7 @@ bool mp_on()
 {
     static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); if (e && e[0] == '0') return false;
         if (!jsp_game_is_us()) return false;   /* EU build: jsp_game.cpp logs it with the other US-only features */
-        mp_register_sets(); std::string why = jml::gate_disc(g_mp_disc); if (why.empty()) why = jml::gate(mp_lang(), true);
+        mp_register_sets(); std::string why = jml::gate_disc(g_mp_disc); if (why.empty()) why = jml::gate(mp_lang(), g_mp_disc, true);
         if (!why.empty()) { std::printf("[mpages] off: %s\n", why.c_str()); std::fflush(stdout); return false; }
         return true; }();
     return on && !g_mp_off.load();
@@ -262,10 +263,7 @@ bool mp_busy() { return g_mp_trans != 0 || g_ps_wait != 0; }
 static bool mp_ps_row() { static const bool on = [] { const char* e = std::getenv("PORTSET_ROW"); return jsp_ps_open != nullptr && !(e && e[0] == '0'); }(); return on; }
 int mp_rows() { return g_mp_page == 0 ? (mp_ps_row() ? 6 : 5) : 7; }   /* page 0: Port Settings above Options since 2026-11-19 */
 /* label id: 0 J-Adventure, 1 Victory Road, 2 Free Battle, 3 Online, 4 J-Customize, 5 J-Point Shop, 6 Gallery, 7 Options,
- * 8 Arcade (added last, so its pictures come after the others); FNV-1a of the first w*h bytes, white / black */
-static const uint32_t k_mp_lab_fnv[9][2] = { { 0xF4B325B5u, 0x3F2447E9u }, { 0x3279759Au, 0x818DE97Fu }, { 0x9AD8290Fu, 0x43F7E08Eu },
-    { 0x6C080904u, 0x17F0DF08u }, { 0xF7AC5B9Fu, 0xABEFBBDEu }, { 0xB51E68F3u, 0x1094E6D6u }, { 0x4EF0C670u, 0x8409F6A1u },
-    { 0x4D537C25u, 0xB2D58678u }, { 0xFDC7E81Fu, 0x167EE758u } };   /* Arcade: the white one is the SECOND of its pair (the maintainer 2026-11-19: J-Point Shop on Arcade's row had the colours swapped) */
+ * 8 Arcade (added last, so its pictures come after the others); the hashes of each disc and language are jml::hashes() (jsp_menu_lang.h) */
 static const int k_mp_row_lab[9] = { 0, 1, 8, 2, 3, 4, 5, 6, 7 };   /* screen row -> the label id whose pictures it draws */
 /* preview art by screen row (a test run): the image each row shows, FNV of the first w*h bytes; rows 5 and
  * 6 have two textures each (the second is the US one, main_img_004/005_HOKUBEI; row 5's shows the J-Stars logo) */
@@ -327,7 +325,7 @@ void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
     if (ttl || mrk) {   /* the "Main Menu" title / watermark (FNV of the whole picture, a test run) */
         MpTex& t = ttl ? g_mp_title : g_mp_mark; const uint32_t f2 = mp_fnv(vm_base + off, w * h);
         std::lock_guard<std::mutex> lk2(g_mp_tex_mx);
-        if (f2 != (ttl ? 0x31EB9C37u : 0x4D99F9AAu)) return;
+        if (!(ttl ? jml::is_title(g_mp_disc, mp_lang(), f2) : jml::is_mark(g_mp_disc, mp_lang(), f2))) return;
         t.addr = off; t.bytes = w * h; t.prefix = w * h; t.forig = f2; t.fwrote = f2; t.orig.assign(vm_base + off, vm_base + off + t.bytes);
         { static int n = 0; if (n++ < 8) { std::printf("[mpages] %s at %08X\n", ttl ? "title" : "watermark", off); std::fflush(stdout); } }
         mp_write_page(g_mp_page); return; }
@@ -338,16 +336,17 @@ void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
       const uint64_t key = ((uint64_t)off << 32) ^ f ^ ((uint64_t)vm_read32(0x00956550u) << 60);
       if (lg && n < 600 && seen.insert(key).second) { n++; std::printf("[mpup] %s %08X fnv %08X page %d cursor %u\n", lab ? "label" : "art", off, f, g_mp_page, vm_read32(0x00956550u)); std::fflush(stdout); } }
     MpTex* hit = nullptr; const char* what = ""; int id = -1, sub = -1;
-    if (lab) for (int k = 0; k < 9 && !hit; k++) for (int st = 0; st < 2; st++) if (k_mp_lab_fnv[k][st] == f) { hit = &g_mp_lab[k][st]; what = st ? "label black" : "label white"; id = k; sub = st; break; }
+    if (lab) { int k = 0, st = 0; if (jml::find_label(g_mp_disc, mp_lang(), f, &k, &st)) { hit = &g_mp_lab[k][st]; what = st ? "label black" : "label white"; id = k; sub = st; } }
     if (art) for (int r = 0; r < 9 && !hit; r++) for (int v = 0; v < 2; v++) if (k_mp_art_fnv[r][v] && k_mp_art_fnv[r][v] == f) { hit = &g_mp_art[r][v]; what = "art"; id = r; sub = v; break; }
     if (!hit) {
-        /* Not a US label: on another disc (an EU disc in Spanish, a tester's screenshot) no row label ever matches, and the rows stay the
-         * game's own text next to our help lines. Nine label-sized textures and not one match: this disc's textures are not the US ones, and
-         * the feature turns itself off (the game's own one-page menu). ASSUMPTION: the count 9 (one menu has 9 rows); not run on an EU disc. */
+        /* Not a label of this disc and language: the hashes are per disc and language (jml::hashes), so this is a disc or pack the tables do not
+         * know (a title id that was not readable and a language the disc does not show, a patched pack). 18 label-sized textures (9 rows, a
+         * normal and a highlighted one each) of one main-menu visit and not one match: the feature turns itself off (the game's own one-page
+         * menu, restored by mp_off_restore). ASSUMPTION: the count 18 (one menu has 9 rows); the other discs' tables are not yet confirmed by a run. */
         static int seen = 0;
-        const uint32_t mo = jsp_main_menu_obj();   /* only uploads of a main-menu visit count, and all 18 (9 rows, a white and a black one) */
+        const uint32_t mo = jsp_main_menu_obj();   /* only uploads of a main-menu visit count, and all 18 */
         if (lab && !g_mp_us_seen && mo >= 0x10000u && mo < 0x30000000u && vm_read32(mo) == 0x0087D600u && ++seen >= 18 && !g_mp_off.exchange(true))
-            { std::printf("[mpages] off: %s\n", jml::gate(mp_lang(), false).c_str()); std::fflush(stdout); }
+            { std::printf("[mpages] off: %s\n", jml::gate(mp_lang(), g_mp_disc, false).c_str()); std::fflush(stdout); }
         return; }
     /* the port's own picture coming back (the bytes of another row, written here): not that row's texture */
     for (int k = 0; k < 9; k++) for (int q = 0; q < 2; q++) { const MpTex& t = lab ? g_mp_lab[k][q] : g_mp_art[k][q]; if (t.addr == off && &t != hit) return; }

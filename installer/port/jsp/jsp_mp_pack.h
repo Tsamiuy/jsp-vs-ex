@@ -3,7 +3,7 @@
 // watermark; 269440 bytes) is cut into 16-byte blocks and run-length coded, and the result is written as base 85 text in a string literal (~1.25 chars/byte).
 //   RLE op byte b: b < 0x80: the next (b + 1) blocks are literal; b >= 0x80: the next ONE block repeats (b & 0x7F) + 1 times.
 //   Stream: u32 little-endian length of the RLE bytes, then the RLE bytes, as base 85: 4 bytes (big endian) -> 5 digits, the last group of n bytes -> n + 1 digits.
-//   Alphabet: the 85 printable ASCII characters from '!' on, without '"', '\\' and '?' (a string literal needs no escape, no trigraph).
+//   Alphabet: the 85 printable ASCII characters from '!' on, without '"', '\\', '?' and '@' (a string literal needs no escape, no trigraph; no '@' so that the repo's e-mail check never reads the text as an address).
 // Header only; installer/tools/menu_lang_test.cpp tests it (round trip, a golden vector made by the Python tool, malformed input).
 #ifndef JSP_MP_PACK_H
 #define JSP_MP_PACK_H
@@ -16,7 +16,7 @@
 namespace jmp {
 inline const std::string& alphabet()
 {
-    static const std::string a = [] { std::string s; for (int c = 33; c < 127 && s.size() < 85; c++) if (c != '"' && c != '\\' && c != '?') s += (char)c; return s; }();
+    static const std::string a = [] { std::string s; for (int c = 33; c < 127 && s.size() < 85; c++) if (c != '"' && c != '\\' && c != '?' && c != '@') s += (char)c; return s; }();
     return a;
 }
 inline std::vector<uint8_t> rle(const std::vector<uint8_t>& blob)   // blob size must be a multiple of 16
