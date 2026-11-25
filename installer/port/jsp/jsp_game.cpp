@@ -126,6 +126,10 @@ __attribute__((weak)) int train_menu_on(void);                   /* 1: the new m
 __attribute__((weak)) int train_menu_hide(const float* box);     /* 1: this HUD draw is the game's own pause panel, under our windows: not drawn */
 __attribute__((weak)) int train_menu_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);   /* 1: the menu took the pad read */
 extern "C" __attribute__((weak)) int jsp_ps_active(void);        /* feat_port_settings.cpp (may be absent): its screen is up */
+/* feat_arcade_coop.cpp (Arcade for 2 Players: a 1 Player / 2 Players window, Player 2 plays the partner in split screen); weak: absent = Arcade as before */
+__attribute__((weak)) void arc_coop_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
+__attribute__((weak)) void arc_coop_icall(uint32_t target, uint64_t* gpr);   /* a test switch of that file */
+int mp_page_now();   /* feat_menu_pages.cpp: 0 the top page, 1 Battle Modes */
 
 namespace {
 
@@ -2752,6 +2756,7 @@ int training_icall(uint32_t target, uint64_t* gpr)
 {
     if (six_icall) six_icall(target, gpr);   /* feat_3v3.cpp */
     if (train_opt_icall) train_opt_icall(target, gpr);   /* feat_training_opts.cpp */
+    if (arc_coop_icall) arc_coop_icall(target, gpr);   /* feat_arcade_coop.cpp */
     if (target == 0x003959C8u) {
         if (!JSP_LOD_ENTRY_HOOKS_VERIFIED || !jsp_lod_hooks_active()) lod_select_hook((uint32_t)gpr[3]);
         return 0; // the verified entry wrapper applies it exactly once
@@ -4244,6 +4249,7 @@ void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
     if (!(jsp_ps_active && jsp_ps_active())) {   /* the feature files (not while the Port Settings screen is up) */
         if (train_menu_pad && train_menu_pad(port, b, lx, ly)) return;   /* the Training pause menu is up (feat_training_menu.cpp) */
+        if (arc_coop_pad) arc_coop_pad(port, b, lx, ly);   /* feat_arcade_coop.cpp */
         if (train_opt_pad) train_opt_pad(port, b, lx, ly);   /* feat_training_opts.cpp */
     }
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
@@ -4544,6 +4550,14 @@ extern "C" int jsp_on_charsel(void) { return on_charsel() ? 1 : 0; }
 extern "C" int jsp_on_stagesel(void) { return on_stagesel() ? 1 : 0; }
 extern "C" int jsp_training_active(void) { return training_active() ? 1 : 0; }
 extern "C" int jsp_training_fight_scene(void) { return training_fight_scene() ? 1 : 0; }
+/* for feat_arcade_coop.cpp */
+extern "C" int jsp_ac_main_menu_open(void) { return main_menu_open() ? 1 : 0; }
+extern "C" int jsp_ac_on_charsel(void) { return on_charsel() ? 1 : 0; }
+extern "C" int jsp_ac_on_stagesel(void) { return on_stagesel() ? 1 : 0; }
+extern "C" int jsp_ac_charsel_slot(void) { return on_charsel() ? (int)charsel_cursor() : -1; }   /* Character Select's slot cursor (setup slot numbers: 1 = Player 1's partner) */
+extern "C" int jsp_ac_main_list_open(void) { return main_list_open() ? 1 : 0; }
+extern "C" int jsp_ac_menu_page(void) { return mp_on() ? mp_page_now() : 1; }   /* 1 = the game's rows (Battle Modes page or the old menu) */
+extern "C" void jsp_set_two_players(int on) { if (g_two_players != (on != 0)) { std::printf("[pad] %s (feature)\n", on ? "2 Players: player 2's pad counts" : "1 Player: player 2's pad off"); std::fflush(stdout); } g_two_players = on != 0; }
 /* for feat_training_opts.cpp and feat_training_menu.cpp */
 /* 1 = the game runs for rollback play: the feature files (Training options and menu, Arcade for 2 Players, the Model Viewer) write the
  * game's memory and press buttons from the host's clock, so they do nothing then. */
