@@ -796,7 +796,8 @@ float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
 }
 
 /* AA_MODE=off|fxaa|fxaa2|smaa (launcher): edge smoothing, in fights only, on the scene as it is
- * copied into the HUD's target: menus and the HUD are left alone. Same fight test as ui_scale. */
+ * copied into the HUD's target: menus and the HUD are left alone. Same fight test as ui_scale.
+ * SHARPEN adds the sharpen pass on the same copy (below). */
 int aa_mode(uint32_t rt_off)
 {
     static int m = -1;
@@ -807,9 +808,13 @@ int aa_mode(uint32_t rt_off)
         const bool set = jsp_setting_get("AA_MODE", e, sizeof e) != 0;
         m = !set ? 0 : !std::strcmp(e, "fxaa") ? 1 : !std::strcmp(e, "fxaa2") ? 2 : !std::strcmp(e, "smaa") ? 3 : 0;
     }
-    if (!m || !hud_target(rt_off)) return 0;
+    /* ENHANCEMENT: SHARPEN=<1..100> (settings: Sharpening): toolkit 2519 sharpens the same scene copy after the smoothing; asked for
+     * with +16 on the answer. Read once: the pass keeps the strength it was first built with (a change applies at the next start). */
+    static int sh = -1;
+    if (sh < 0) { const char* e = std::getenv("SHARPEN"); sh = (e && std::atoi(e) > 0) ? 16 : 0; }
+    if ((!m && !sh) || !hud_target(rt_off)) return 0;
     const uint32_t st = vm_read32(0x0094DEC4u);
-    return st == 0x13 || st == 0x14 || fight_hud_up() ? m : 0;
+    return st == 0x13 || st == 0x14 || fight_hud_up() ? (m | sh) : 0;
 }
 
 /* Point-and-click: move the main menu's cursor straight to the entry next to
