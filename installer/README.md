@@ -51,6 +51,7 @@ Online Battle (experimental), which is off unless you turn it on and give a re-p
 | `installer/tools/version_line_test.sh`, `version_line_test.cpp` | Host test (g++ only) of `installer/port/jsp/jsp_version_line.h`: which version the main-menu line shows (`release.txt` of a release build, or the test switch `JSP_PORT_VERSION`), the off switch and the text. `assemble_payload.py --release X.Y.Z` (passed by `release.yml`) writes `release.txt` after checking it equals `installer/VERSION` |
 | `installer/tools/assemble_portable.py` | Packs the same payload as `jsp-<version>-portable.zip` with `run.cmd` and a short readme |
 | `installer/tools/fetch_toolchain.py`, `toolchain.json` | Downloads llvm-mingw, CMake, Ninja, their licence texts and the FFmpeg source (its libavcodec/libavutil headers only go into the payload, for the opening-movie decoder) on the machine that builds the installer, checks the pinned SHA-256 of each, unpacks them into a cache. Nothing downloaded is committed |
+| `installer/tools/stage_repsn_app.py`, `repsn_app_bundle_test.py` | ENHANCEMENT: stages the optional re-psn desktop app (the `re-psn-app` entry of `toolchain.json`, fetched and hash-checked by `fetch_toolchain.py`) to `build/installer/re-psn-app/` for the unticked `repsnapp` task; refuses anything but the release's one folder with its six files, stages five (not the window program) plus a generated `THIRD-PARTY-LICENSES.txt`, and refuses any output inside the payload. The test needs no network. See [Optional: the re-psn desktop app](#optional-the-re-psn-desktop-app) |
 | `installer/tools/llvm-mingw.cmake` | CMake toolchain file for the bundled compiler |
 | `installer/licenses/LGPL-2.1.txt` | The one licence text kept in the tree (some MinGW-w64 headers are LGPL-2.1+); the others are fetched with pinned hashes |
 | `installer/tools/firstrun_selftest.py`, `portable_selftest.py`, `make_fixture.py` | Host checks of `firstrun.py` and the portable path, up to the compile; `make_fixture.py` writes a small fake disc folder (no game data) |
@@ -89,12 +90,14 @@ mkdir build\installer\fonts
 rem put FiraSans-HeavyItalic.ttf in build\installer\fonts
 rem unpack the embeddable Python into build\installer\toolchain-cache\python (python.exe directly inside)
 python installer\tools\fetch_toolchain.py
+python installer\tools\stage_repsn_app.py
 python installer\tools\installer_art.py
 python installer\tools\installer_music.py
 build\installer\toolchain-cache\trees\llvm-mingw\bin\x86_64-w64-mingw32-clang.exe -O2 -mwindows -s -o build\installer\jsp-launcher.exe installer\launcher\launcher.c
 python installer\tools\assemble_payload.py
 rem (--tree current is the default, today the v0.19.0 port in installer/port; the earlier v0.15 port is no longer built, see tag legacy-v15; --toolkit-repo and --no-fetch: see the script)
-ISCC.exe /DPayload=%CD%\build\installer\payload /O%CD%\build\installer\out %CD%\installer\jsp.iss
+ISCC.exe /DPayload=%CD%\build\installer\payload /DRepsnApp=%CD%\build\installer\re-psn-app /O%CD%\build\installer\out %CD%\installer\jsp.iss
+rem (leave out /DRepsnApp, and the stage step, for a setup without the optional re-psn desktop app task)
 python installer\tools\assemble_portable.py
 ```
 
@@ -128,6 +131,49 @@ The unchecked task "Unlock everything (cheat)" (`/TASKS="unlock,unlock\testsave"
 and nothing else: the launcher's Cheats tab then has its box ticked, and "Save in use" set to the separate test save (default) or the normal save. The unlock itself still
 happens only at Start Game, after a dated backup, and a normal save is asked about first. The test save is the folder `hdd0_gamedata_test` beside the normal `hdd0_gamedata`;
 the installed game data is shared. See [UNLOCK_ALL.md](../docs/notes/UNLOCK_ALL.md). The wizard and the launcher parts are not built or run on Linux; only the source checks run there.
+
+### Optional: the re-psn desktop app
+
+The unchecked task "re-psn desktop app (pre-release): play first, host if it works for you" (`/TASKS=repsnapp`) copies the
+[re-psn](https://github.com/undecuple/re-psn) desktop app into `{app}\re-psn-app-v0.9.0-windows-amd64\`: `re-psn-app.exe`,
+`re-psn-host.exe`, the app's `LICENSE`, `NOTICE.md` and `README.md`, and `THIRD-PARTY-LICENSES.txt` (the licence texts of the Go modules, added by this project), kept together. The release's `re-psn-window.exe` (the
+Rust/Tauri window program) is deliberately left out, because the licence texts of its crates are not in the v0.9.0 archive; the app
+opens your web browser instead, and a later pin adds the window back once re-psn ships a generated third-party licence file. The tasks page says,
+under the list:
+
+- pre-release, and the app is partial / in progress: play first, host if it works for you;
+- it is unsigned, so Windows SmartScreen may warn;
+- hosting from it on native Windows is not verified (re-psn tested it only under Wine);
+- there is no public server and no accounts: each host is a private server for friends;
+- the game connects without the app;
+- setup only copies it: nothing is started, nothing is added to [Run] or the Run key, and no firewall rule is added.
+
+How it gets into the setup: `toolchain.json` pins `re-psn-app-v0.9.0-windows-amd64.zip` from the public v0.9.0 release
+(`stage_only`, SHA-256 `6849472d54a7c5489625c0bfcf0a3bef63a47b702209dacae52588325aeb50c8`); `fetch_toolchain.py` downloads it at
+build time, checks that hash and the release's own `SHA256SUMS` (`sha256_list`), and unpacks it with its usual member checks.
+`python installer\tools\stage_repsn_app.py` then copies the one folder to `build\installer\re-psn-app\` only when the cache holds the
+manifest's hash and the folder holds exactly the release's six files (anything missing, extra or renamed is refused); it stages five of them, without `re-psn-window.exe`, and refuses an output
+inside the payload (and an existing output folder that is not one an earlier stage made: it is never deleted; a refused run removes only an earlier stage's folder, marked by `.jsp-stage-output`), so neither the payload nor the portable zip carries it. ISCC gets `/DRepsnApp=%CD%\build\installer\re-psn-app`;
+without it the task does not exist. The zip is never committed, and the player's install downloads nothing. Not in the portable zip.
+
+The tasks page's caveat label takes the task list's width, sizes its height from its own text (`AdjustHeight`) and is anchored
+left, right and bottom, so it stays whole and below the list when the wizard (resizable under `WizardStyle=modern`) is resized.
+
+Licences: the release archive carries no licence texts for the Go modules linked into the two Go programs (the only programs shipped), so
+`stage_repsn_app.py` adds `THIRD-PARTY-LICENSES.txt` to the staged folder. The table `installer/tools/repsn_app_licenses.json` has, for each of the
+17 modules linked into the Windows programs (taken from re-psn's `app/go.mod` and `go.sum` at the v0.9.0 tag and `go list -deps` for windows/amd64; test-only and Unix-only modules left out; the standard library at go1.27.4, which built the release exes), the version, licence, copyright line, the URL
+of its licence text at that exact version and the text's SHA-256. The texts are not committed: the stager downloads each into the toolchain cache at build
+time (the only download besides `fetch_toolchain.py`'s) and refuses and deletes any whose SHA-256 differs. For a later pin: update the table from that
+tag's `go.mod`, fetch each text at its version and set the SHA-256; `repsn_app_bundle_test.py` checks the module list against the expected one.
+`NOTICE.md` lists every module, version and copyright line.
+
+The settings window's Online tab then has an "Open the re-psn app" button (installed launcher only; it starts `re-psn-app.exe` with `ui
+--browser` and does not wait for it; host test `launcher_repsn_app_test.py`), see
+[docs/ONLINE.md](../docs/ONLINE.md#the-re-psn-desktop-app-optional).
+Known limit: v0.9.0 does not have the member-ID wrap fix (re-psn #248), which is on re-psn's main and not in a release yet.
+Host test: `installer/tools/repsn_app_bundle_test.py` (pin, hash and list checks with fixture zips, the staging rules, and source
+checks of `jsp.iss`, the workflow and the licence lines). Not run: ISCC with `/DRepsnApp`, the tasks page on screen (at the default
+size and resized), the app itself.
 
 ## Support bundle
 

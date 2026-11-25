@@ -167,6 +167,22 @@
    "stage_only": true,
    "license": "LGPL-2.1-or-later (headers only; the DLLs come from the player's RPCS3)",
    "about": "Only libavcodec/ and libavutil/ headers go into the payload (assemble_payload.py, which also writes libavutil/avconfig.h for x86-64 Windows), so the toolkit is built with PS3RECOMP_FFMPEG_RUNTIME for the opening movie. The majors (avcodec 63, avutil 61) must match the DLLs of the players' RPCS3 builds; firstrun's check M1 warns when they do not. GitHub's tag zip is not guaranteed byte-identical forever: a hash mismatch here most likely means GitHub re-packed it (check the tag, then refill the hash); it can also be a changed or damaged download."
+  },
+  {
+   "name": "re-psn-app",
+   "group": "re-psn-app",
+   "version": "0.9.0",
+   "pin": "confirmed",
+   "release_page": "https://github.com/undecuple/re-psn/releases/tag/v0.9.0",
+   "url": "https://github.com/undecuple/re-psn/releases/download/v{version}/re-psn-app-v{version}-windows-amd64.zip",
+   "sha256_list": "https://github.com/undecuple/re-psn/releases/download/v{version}/SHA256SUMS",
+   "sha256": "6849472d54a7c5489625c0bfcf0a3bef63a47b702209dacae52588325aeb50c8",
+   "archive": "zip",
+   "strip_top": false,
+   "stage_only": true,
+   "license": "MIT (re-psn); its Go modules (re-psn-app.exe, re-psn-host.exe): MIT (Bubble Tea, Lip Gloss, charmbracelet/x/term) and BSD-3-Clause (golang.org/x/sync, golang.org/x/sys, the Go standard library)",
+   "notice": "re-psn desktop app {version} (pre-release, MIT; Copyright (c) 2026 sp00nz and (c) 2026 undecuple): the optional, unticked installer task copies the release's folder re-psn-app-v{version}-windows-amd64 without re-psn-window.exe (its LICENSE and NOTICE.md included) and adds THIRD-PARTY-LICENSES.txt, the licence texts of the Go modules built into its two programs (installer/tools/repsn_app_licenses.json); nothing starts it but the player.",
+   "about": "ENHANCEMENT (optional installer task 'repsnapp', unticked): the re-psn desktop app from the public re-psn release. Fetched and hash-checked here at build time (the release's SHA256SUMS is cross-checked too); stage_repsn_app.py then checks that the zip holds exactly its six files and copies five of them (not re-psn-window.exe, the Rust/Tauri window program, whose crates' licence texts are not in the v0.9.0 archive; the app opens your web browser instead) to build/installer/re-psn-app, outside the payload, and jsp.iss installs it only when the task is ticked. The player's install downloads nothing."
   }
  ]
 }

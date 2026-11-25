@@ -2,7 +2,9 @@
 ; Layout (PARAM.SFO reader, per-user install, portable task) adapted by hand from the installer of undecuple's Killzone 2 PS3
 ; port (same MIT licence), without its update page, RPCS3 import, ISO reading, version check, crash report or any online
 ; piece: this installer and the program it installs contact no server and send nothing anywhere, unless the player
-; turns on Online Battle (experimental) and gives a re-psn server (installer/README.md).
+; turns on Online Battle (experimental) and gives a re-psn server (installer/README.md). The optional re-psn desktop app
+; (the unticked task "repsnapp", only in a setup compiled with /DRepsnApp) is only copied: setup never starts it, adds no
+; firewall rule and downloads nothing; only the player runs it.
 ;
 ; Per-user, no admin. It copies nothing of the game and downloads nothing. Wizard: welcome, "Use your RPCS3 install?" (optional: pre-fills
 ; the next pages from the player's RPCS3, read only; may offer to import the RPCS3 save after a shown dry run), your disc folder (PS3_GAME
@@ -11,7 +13,8 @@
 ; payload, so there is no build tools page and no Visual Studio is needed. After the files are copied, firstrun.py (bundled
 ; Python) builds this repository's port on the player's PC: lift, SPU jobs, compile.
 ;
-; Compile on Windows: ISCC /DPayload=<dir made by installer\tools\assemble_payload.py> [/DArt=<art dir>] installer\jsp.iss
+; Compile on Windows: ISCC /DPayload=<dir made by installer\tools\assemble_payload.py> [/DArt=<art dir>]
+;   [/DRepsnApp=<dir made by installer\tools\stage_repsn_app.py>] installer\jsp.iss
 ; The art comes from installer\tools\installer_art.py (build\installer\art, never committed). See installer\README.md.
 #ifndef Payload
   #error Pass /DPayload=<dir made by installer\tools\assemble_payload.py>
@@ -76,6 +79,12 @@ Source: "{#Music}\music-*.wav"; Flags: dontcopy
 ; has not copied anything yet). The compiler stores identical files once, so the Python is not in the setup twice.
 Source: "{#Payload}\toolchain\python\*"; Flags: dontcopy
 Source: "{#Payload}\tools\rpcs3_*.py"; Flags: dontcopy
+#ifdef RepsnApp
+; ENHANCEMENT (optional, unticked task "repsnapp"): the re-psn desktop app, the release's folder without its window program
+; (re-psn-app.exe, re-psn-host.exe, LICENSE, NOTICE.md, README.md; stage_repsn_app.py checks the zip, stages only these five and adds THIRD-PARTY-LICENSES.txt, the Go modules' licence texts). It comes from build\installer\re-psn-app, outside the payload,
+; so the line above never copies it. Nothing in [Run] starts it and no firewall rule is added.
+Source: "{#RepsnApp}\re-psn-app-v0.9.0-windows-amd64\*"; DestDir: "{app}\re-psn-app-v0.9.0-windows-amd64"; Tasks: repsnapp; Flags: ignoreversion
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "A shortcut on the desktop"; Flags: unchecked
@@ -88,6 +97,11 @@ Name: "portable"; Description: "&Portable: saves and settings in the install fol
 Name: "unlock"; Description: "&Unlock everything (cheat): all cards, characters, titles and more, when you press Start Game"; Flags: unchecked
 Name: "unlock\testsave"; Description: "Use a separate TEST save for the unlocked play (recommended; your normal save is not touched)"; Flags: exclusive
 Name: "unlock\normalsave"; Description: "Apply it to the normal save (the launcher asks, and copies the save to a dated backup first)"; Flags: exclusive unchecked
+#ifdef RepsnApp
+; ENHANCEMENT (opt-in, unchecked): the re-psn desktop app (pre-release) copied beside the game; only the player starts it. The
+; caveats are drawn under the task list (InitializeWizard). Silent installs: /TASKS=repsnapp.
+Name: "repsnapp"; Description: "re-psn desktop app (pre-release): play first, host if it works for you"; Flags: unchecked
+#endif
 
 [INI]
 Filename: "{app}\jsp-install.ini"; Section: "install"; Key: "portable"; String: "1"; Tasks: portable
@@ -151,6 +165,9 @@ var
   DiscId, DiscPath, EbootPath, FlashPath: String;
   SkipBuild: Boolean;
   BuildRc: Integer;
+#ifdef RepsnApp
+  RepsnNote: TNewStaticText;
+#endif
 
 { ---- PARAM.SFO (magic NUL P S F, key table start at 8, data table start at 12, entry count at
   16, 16-byte entries from 20: key offset u16, format u16, length u32, max length u32, data offset u32) ---- }
@@ -723,6 +740,29 @@ begin
   RpcsLabel.Top := RpcsButton.Top + RpcsButton.Height + ScaleY(10);
   RpcsLabel.Width := RpcsPage.SurfaceWidth;
   RpcsLabel.Height := RpcsPage.SurfaceHeight - RpcsLabel.Top;
+
+#ifdef RepsnApp
+  { ENHANCEMENT: the re-psn desktop app's caveats, under the task list on the tasks page. The label takes the list's width, its
+    height comes from its own text (AdjustHeight, so no caveat is cut off at any font scale), and the list gives up that much.
+    WizardStyle=modern makes the wizard resizable and TasksList is anchored on all four sides, so the label is anchored left,
+    right and bottom: when the window grows, the list grows and the label moves down with the page's bottom edge, never under it.
+    Anchors are set last, once the label's bounds are final. }
+  RepsnNote := TNewStaticText.Create(WizardForm);
+  RepsnNote.Parent := WizardForm.SelectTasksPage;
+  RepsnNote.AutoSize := False;
+  RepsnNote.WordWrap := True;
+  RepsnNote.Left := WizardForm.TasksList.Left;
+  RepsnNote.Width := WizardForm.TasksList.Width;
+  RepsnNote.Caption := 're-psn desktop app: pre-release, and the app is partial / in progress. Play first, host if it works for you. ' +
+    'It is unsigned, so Windows SmartScreen may warn. Hosting from it on native Windows is not verified (tested only under Wine). ' +
+    'There is no public server and no accounts: each host is a private server for friends. The game connects without the app. ' +
+    'It opens in your web browser. ' +
+    'Setup only copies it: nothing is started and no firewall rule is added.';
+  RepsnNote.AdjustHeight;
+  WizardForm.TasksList.Height := WizardForm.TasksList.Height - RepsnNote.Height - ScaleY(6);
+  RepsnNote.Top := WizardForm.TasksList.Top + WizardForm.TasksList.Height + ScaleY(6);
+  RepsnNote.Anchors := [akLeft, akRight, akBottom];
+#endif
 
   DiscPage := CreateInputDirPage(RpcsPage.ID, 'Your game disc',
     'Where is your copy of J-Stars Victory VS+?',

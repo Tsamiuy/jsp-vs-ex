@@ -94,6 +94,36 @@ name but says `enabled = 0`, and `play_settings.txt` has the rollback lines. The
   main menu show the build number (8 hex digits) to compare. See
   [ROLLBACK.md, Rollback over re-psn](ROLLBACK.md#rollback-over-re-psn-experimental).
 
+## The re-psn desktop app (optional)
+
+The [re-psn](https://github.com/undecuple/re-psn) desktop app is re-psn's own program for players and hosts: Play (save and
+check a server), Host (start and stop a server on this PC) or Both. The app opens in your web browser; its own window program comes in a later version.
+Play first, host if it works for you.
+
+- **Getting it:** tick "re-psn desktop app (pre-release): play first, host if it works for you" on the installer's tasks
+  page (unticked by default; silent installs: `/TASKS=repsnapp`). Setup copies the re-psn v0.9.0 app folder
+  `re-psn-app-v0.9.0-windows-amd64` into the install folder, with its own `LICENSE` and `NOTICE.md`. The portable zip does not
+  have it.
+- **Opening it:** the settings window's **Online** tab then has an **Open the re-psn app** button under the **Save online settings** row. It
+  starts `re-psn-app.exe` with `ui --browser` (so it always opens in your web browser) and does not wait for it. If the folder is there but `re-psn-app.exe` or `re-psn-host.exe` is missing, the button is
+  greyed out and the tab says to reinstall with the option ticked.
+- **The game does not need it.** The game connects to a re-psn server without the app, and the app sends nothing until you
+  act in it. The launcher passes it only `ui --browser`; the address you use in the game still goes in the Online settings (the Online tab's re-psn Server box, or Port Settings > Online in the game).
+
+Before you use it:
+
+- It is a pre-release, and the app is partial / in progress.
+- It is unsigned, so Windows SmartScreen may warn when it starts.
+- Hosting from it on native Windows is not verified: re-psn tested it only under Wine.
+- There is no public server and there are no accounts: each host is a private server for friends.
+- Setup and the launcher add no firewall rule and start nothing by themselves. If you host, open the ports yourself as in
+  [step 1](#1-one-player-hosts-a-server).
+- Known limit: v0.9.0 does not have the member-ID wrap fix (re-psn #248). The fix is on re-psn's main and not in a
+  release yet.
+
+Not tried yet: the button and the app have host tests only (where the launcher looks, what it starts); the setup with the box
+ticked has not been built, and the button has not been clicked on Windows or under Proton.
+
 ## Where the settings live
 
 The launcher writes plain text files, which you can also edit by hand while the game is closed:
