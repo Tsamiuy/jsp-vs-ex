@@ -16,9 +16,10 @@ ps3recomp v0.15.0 (`jstars/`) was removed from the tree in #173 (issue #152); it
 | `docs/` | Players and contributors, see [README.md](README.md). `docs/notes/` are the research notes, `docs/balance/` and `docs/character-details/` the balance notes, `docs/archive/jstars-notes/` the archive of the v0.15 work (patches, analysis tools, measurements) |
 | `docs/code-map/` | The code map for maintainers: layers and entry points, netcode, toolkit patches to glue, build and CI ([code-map/README.md](code-map/README.md)) |
 | `tools/` | CI checks (`tools/ci/`), the release tool (`release.py`), the fan site and the drawn art (`site/`: `site.py` builds the site, `repo_art.py` draws the banner, social preview, dividers and README buttons, `badges.py` writes the README's badge and button blocks, `check_site.py` checks the site; palette and button list in `data/`), the feature and contributor generators, and `boost/` (power-plan scripts: read `tools/boost/README.txt` first) |
+| `mods/` | `tested.json`, the list of mods a maintainer has played ([docs/MODS.md](MODS.md)) |
 | `assets/` | Banner, social preview and icon (our own generated art) |
 | `third_party/ps3recomp` | The ps3recomp toolkit as a submodule, pinned to the v0.19.0 commit; only the pointer is stored here |
-| `.github/workflows/` | `ci.yml` (checks on every pull request: `python3 tools/ci/repo_checks.py` before you push), `installer.yml`, `release.yml`, `prepare-release.yml`, `release-notify.yml`, `pages.yml`, `contributors.yml` |
+| `.github/workflows/` | `ci.yml` (checks on every pull request: `python3 tools/ci/repo_checks.py` before you push), `installer.yml`, `release.yml`, `prepare-release.yml`, `release-notify.yml`, `pages.yml`, `contributors.yml`, `mod-verify.yml` (checks a mod when a maintainer adds the label `mod-check` to a mod verification issue) |
 
 ## Branches
 

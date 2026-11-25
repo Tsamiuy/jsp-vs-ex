@@ -13,6 +13,7 @@ Where things are, by who needs them. All paths are relative to this folder.
 | [FEATURES.md](FEATURES.md) | What the port adds (generated from `features.tsv`) |
 | [ONLINE.md](ONLINE.md) | Online Battle quick start (experimental, opt-in) |
 | [ROLLBACK.md](ROLLBACK.md) | How rollback netcode works, and the experimental opt-in version in the build (with diagrams) |
+| [MODS.md](MODS.md) | How a mod is laid out, getting a mod verified, the tested list and the canonical mod hash |
 | [ROADMAP.md](ROADMAP.md) | What is planned |
 | [SCRIPTS.md](SCRIPTS.md) | The launcher, the `.cmd` scripts and the boost helper, and what they change on your PC |
 

@@ -1,0 +1,86 @@
+name: Mod verification
+description: Ask for a mod to be checked and added to the tested list
+labels: [mod-verification]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach game files, EBOOTs, ISOs, firmware, keys or screenshots of copyrighted game content. Share the mod by link only.
+        A maintainer adds the label `mod-check` to start the automated checks. They read the mod's zip and post one comment. They never run anything from it. After that a maintainer plays the mod before it can go on the tested list. How a mod is laid out: docs/MODS.md.
+  - type: input
+    id: mod_id
+    attributes:
+      label: Mod id
+      description: "The `id` in mod.json: lowercase letters, digits and `-`, up to 40 characters."
+    validations:
+      required: true
+  - type: input
+    id: mod_name
+    attributes:
+      label: Mod name
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mod version
+      description: "The `version` in mod.json."
+    validations:
+      required: true
+  - type: input
+    id: author
+    attributes:
+      label: Author
+      description: "Your GitHub handle, or the name you want shown."
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Download link
+      description: "An HTTPS link to the mod's zip: a GitHub release asset or another HTTPS address. Up to 200 MB. The link must stay up and must not change after you post it."
+    validations:
+      required: true
+  - type: textarea
+    id: manifest
+    attributes:
+      label: mod.json
+      description: "Paste the whole file."
+      render: json
+    validations:
+      required: true
+  - type: dropdown
+    id: class
+    attributes:
+      label: Kind of change
+      options:
+        - Cosmetic only (logos, movies, sound)
+        - Gameplay
+        - Gameplay and cosmetic
+    validations:
+      required: true
+  - type: textarea
+    id: sections
+    attributes:
+      label: What the mod changes
+      description: "Which parts of the game, for example the archive entries it replaces, or the roster section."
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game version and region tested
+      description: "For example US BLUS31519, with or without the game update, and the port release you used."
+    validations:
+      required: true
+  - type: checkboxes
+    id: rights
+    attributes:
+      label: Confirmation
+      options:
+        - label: The mod contains no game files that I do not have the right to share
+          required: true
+        - label: The mod does not edit the port's source
+          required: true
+        - label: Everything in this mod is my own work, and none of it comes from the game files
+          required: true
