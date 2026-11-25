@@ -1,0 +1,131 @@
+Patch 2519: sharpening pass for the fight picture (SHARPEN=<1..100>).
+
+A contrast-adaptive sharpen of the scene as it is copied into the HUD's target, after the edge smoothing (2511), so the
+HUD, text and menus stay as drawn. The title's AA hook asks for it with +16 on its answer (mode & 16), so it runs in
+fights only, like the edge smoothing. SHARPEN is the strength in percent (default 50 when asked for without a number);
+it is read when the pass is first built, so a change applies at the next start. Each pixel is pushed away from the
+average of its 4 neighbours, less where the neighbourhood already has strong contrast: edges do not ring and flat
+areas stay flat. Without the +16 from the title nothing changes.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 7fd2cb6c..60b33001 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -6595,15 +6595,80 @@ static void smaa_draw(int rt, D3D12_GPU_DESCRIPTOR_HANDLE gh_base)
+     }
+ }
+ 
++/* 2519 (sharpening, asked for by the maintainer, 2026-11-23): a contrast-adaptive
++ * sharpen of the scene as it is copied into the HUD's target, after the edge smoothing, so the HUD stays as drawn. The
++ * title's hook adds 16 to its AA answer for it (mode & 16). SHARPEN=<1..100> is the strength (the launcher's switch;
++ * default 50). Each pixel is pushed away from the average of its 4 neighbours, less where the neighbourhood already has
++ * strong contrast, so edges do not ring and flat areas stay flat. */
++static ID3D12PipelineState* s_sharp_pso;
++static int s_sharp_state;   /* 0 not tried, 1 ready, -1 failed */
++static ID3D12PipelineState* sharp_get_pso(DXGI_FORMAT fmt)
++{
++    if (s_sharp_state) return s_sharp_state > 0 ? s_sharp_pso : NULL;
++    s_sharp_state = -1;
++    int pct = 50; { const char* e = getenv("SHARPEN"); if (e && *e) pct = atoi(e); }
++    if (pct < 1) pct = 1; if (pct > 100) pct = 100;
++    char amt[32]; snprintf(amt, sizeof amt, "%.3f", pct / 100.0);
++    static const char vs[] =
++        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
++        "O main(uint i : SV_VertexID) { O o; o.uv = float2((i << 1) & 2, i & 2);\n"
++        "  o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n";
++    static const char ps[] =
++        "Texture2D t0 : register(t0);\n"
++        "float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {\n"
++        "  uint w, h; t0.GetDimensions(w, h); const int2 p = int2(pos.xy), hi = int2(w, h) - 1;\n"
++        "  const float4 c4 = t0.Load(int3(p, 0)); const float3 c = c4.rgb;\n"
++        "  const float3 n = t0.Load(int3(clamp(p + int2(0, -1), 0, hi), 0)).rgb;\n"
++        "  const float3 s = t0.Load(int3(clamp(p + int2(0, 1), 0, hi), 0)).rgb;\n"
++        "  const float3 e = t0.Load(int3(clamp(p + int2(1, 0), 0, hi), 0)).rgb;\n"
++        "  const float3 we = t0.Load(int3(clamp(p + int2(-1, 0), 0, hi), 0)).rgb;\n"
++        "  const float3 mn = min(c, min(min(n, s), min(e, we))), mx = max(c, max(max(n, s), max(e, we)));\n"
++        "  const float3 amp = sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 1e-4)));\n"
++        "  const float3 wt = amp * (-1.0 / lerp(8.0, 5.0, SHARP_AMT));\n"
++        "  const float3 r = ((n + s + e + we) * wt + c) / (1.0 + 4.0 * wt);\n"
++        "  return float4(saturate(r), c4.a);\n"
++        "}\n";
++    const D3D_SHADER_MACRO defs[] = { { "SHARP_AMT", amt }, { NULL, NULL } };
++    ID3DBlob* vb = NULL; ID3DBlob* pb = NULL; ID3DBlob* er = NULL;
++    HRESULT hr = D3DCompile(vs, sizeof(vs) - 1, "sharp_vs", NULL, NULL, "main", "vs_5_0", 0, 0, &vb, &er);
++    if (er) { er->lpVtbl->Release(er); er = NULL; }
++    if (SUCCEEDED(hr)) hr = D3DCompile(ps, sizeof(ps) - 1, "sharp_ps", defs, NULL, "main", "ps_5_0", 0, 0, &pb, &er);
++    if (er) { fprintf(stderr, "[SHARP] %s%c", (const char*)er->lpVtbl->GetBufferPointer(er), 10); er->lpVtbl->Release(er); }
++    if (SUCCEEDED(hr)) {
++        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; memset(&pd, 0, sizeof pd);
++        pd.pRootSignature = s_d3d.vp_root_sig;
++        pd.VS.pShaderBytecode = vb->lpVtbl->GetBufferPointer(vb); pd.VS.BytecodeLength = vb->lpVtbl->GetBufferSize(vb);
++        pd.PS.pShaderBytecode = pb->lpVtbl->GetBufferPointer(pb); pd.PS.BytecodeLength = pb->lpVtbl->GetBufferSize(pb);
++        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++        pd.SampleMask = UINT_MAX;
++        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++        pd.NumRenderTargets = 1; pd.RTVFormats[0] = fmt;
++        pd.SampleDesc.Count = 1;
++        hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&s_sharp_pso);
++    }
++    if (vb) vb->lpVtbl->Release(vb);
++    if (pb) pb->lpVtbl->Release(pb);
++    if (FAILED(hr)) { s_sharp_pso = NULL; fprintf(stderr, "[SHARP] pipeline failed (0x%08lX)%c", hr, 10); return NULL; }
++    s_sharp_state = 1;
++    fprintf(stderr, "[SHARP] sharpening on, strength %d%c", pct, 10);
++    return s_sharp_pso;
++}
++
+ /* Returns 1 when it ran: the caller rebinds its target and forgets its cached PSO, viewport and topology. */
+ static int aa_pass(int rt, int mode, D3D12_GPU_DESCRIPTOR_HANDLE gh_base)
+ {
+     OffRT* r = &s_d3d.off_rt[rt];
+-    ID3D12PipelineState* pso = mode == 3 ? NULL : aa_get_pso(mode, (DXGI_FORMAT)r->dxgi);
+-    if (mode != 3 && !pso) return 0;
++    const int sharpen = (mode & 16) != 0;   /* 2519 */
++    mode &= 15;
++    ID3D12PipelineState* spso = sharpen ? sharp_get_pso((DXGI_FORMAT)r->dxgi) : NULL;
++    if (!mode && !spso) return 0;
++    ID3D12PipelineState* pso = (mode == 1 || mode == 2) ? aa_get_pso(mode, (DXGI_FORMAT)r->dxgi) : NULL;
++    if ((mode == 1 || mode == 2) && !pso) { if (!spso) return 0; mode = 0; }
+     D3D12_RESOURCE_DESC rd;
+     { D3D12_RESOURCE_DESC* got = r->res->lpVtbl->GetDesc(r->res, &rd); (void)got; }
+-    if (mode == 3 && !smaa_ready((u32)rd.Width, rd.Height, (DXGI_FORMAT)r->dxgi)) return 0;
++    if (mode == 3 && !smaa_ready((u32)rd.Width, rd.Height, (DXGI_FORMAT)r->dxgi)) { if (!spso) return 0; mode = 0; }
+     int fresh = 0;
+     if (s_aa_tmp) {
+         D3D12_RESOURCE_DESC td;
+@@ -6645,12 +6710,29 @@ static int aa_pass(int rt, int mode, D3D12_GPU_DESCRIPTOR_HANDLE gh_base)
+     s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
+     s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+     aa_samplers();
+-    if (mode == 3) { smaa_draw(rt, gh_base); return 1; }
+-    s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, pso);
+     D3D12_GPU_DESCRIPTOR_HANDLE gh = gh_base;
+     gh.ptr += (u64)AA_SRV_BASE * s_d3d.srv_inc;
+-    s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+-    s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, 3, 1, 0, 0);
++    if (mode == 3) smaa_draw(rt, gh_base);
++    else if (mode) {
++        s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, pso);
++        s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
++        s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, 3, 1, 0, 0);
++    }
++    if (spso) {   /* 2519: sharpen what the smoothing left (copy it to the temp again first) */
++        if (mode) {
++            b.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++            s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++            off_rt_transition(rt, D3D12_RESOURCE_STATE_COPY_SOURCE);
++            s_d3d.cmd_list->lpVtbl->CopyResource(s_d3d.cmd_list, s_aa_tmp, r->res);
++            off_rt_transition(rt, D3D12_RESOURCE_STATE_RENDER_TARGET);
++            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++            s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++            s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rh, FALSE, NULL);
++        }
++        s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, spso);
++        s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
++        s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, 3, 1, 0, 0);
++    }
+     return 1;
+ }
+ 

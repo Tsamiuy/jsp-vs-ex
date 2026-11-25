@@ -82,6 +82,10 @@ static const char* const k_ui_v[] = { "0.50", "0.55", "0.60", "0.65", "0.70", "0
 static const char* const k_ui_n[] = { "50%", "55%", "60%", "65%", "70%", "75%", "80%", "85%", "90%", "95%", "100% (the original)" };
 static const char* const k_aa_v[] = { "off", "fxaa", "fxaa2", "smaa" };
 static const char* const k_aa_n[] = { "Off", "FXAA", "FXAA, stronger", "SMAA" };
+static const char* const k_aniso_v[] = { "1", "2", "4", "8", "16" };
+static const char* const k_aniso_n[] = { "The game's own", "Anisotropic 2x", "Anisotropic 4x", "Anisotropic 8x", "Anisotropic 16x" };
+static const char* const k_sharp_v[] = { "0", "25", "50", "75", "100" };
+static const char* const k_sharp_n[] = { "Off", "Light", "Medium", "Strong", "Strongest" };
 static const char* const k_mode_v[] = { "keyboard", "kbm", "controller" };
 static const char* const k_mode_n[] = { "Keyboard", "Keyboard and mouse", "Controller" };
 static const char* const k_sens_v[] = { "0.25", "0.50", "0.75", "1.00", "1.25", "1.50", "1.75", "2.00", "2.25", "2.50",
@@ -102,6 +106,8 @@ static const Item k_items[] = {
     { "OBJECT_DISTANCE", G_GRAPHICS, "Object draw distance", k_odist_v, k_odist_n, 4, 1, 1, LIVE, "jsp_game.cpp lod_select_hook" },
     { "UI_SCALE",        G_GRAPHICS, "Fight HUD size", k_ui_v, k_ui_n, 11, 10, 10, LIVE, "jsp_game.cpp ui_scale" },
     { "AA_MODE",         G_GRAPHICS, "Edge smoothing", k_aa_v, k_aa_n, 4, 1, 0, LIVE, "jsp_game.cpp aa_mode (unset = off; the launcher writes fxaa)" },
+    { "ANISO",           G_GRAPHICS, "Texture filtering", k_aniso_v, k_aniso_n, 5, 4, 0, NEXT_START, "toolkit 2520, static cache (unset = the game's own)" },
+    { "SHARPEN",         G_GRAPHICS, "Sharpening", k_sharp_v, k_sharp_n, 5, 2, 0, NEXT_START, "toolkit 2519 + jsp_game.cpp aa_mode, static cache (unset = off; fights only)" },
     { "FX_FULL",         G_GRAPHICS, "Full-size effects", k_off_on_v, k_off_n, 2, 1, 0, NEXT_START, "toolkit 2512, static cache (unset = off; the launcher writes 1)" },
     { "FPS_COUNTER",     G_GRAPHICS, "FPS counter", k_off_on_v, k_off_n, 2, 0, 0, LIVE, "jsp_game.cpp, g_rsx_stamp2 hook" },
     { "INPUT_MODE",      G_CONTROLS, "Input", k_mode_v, k_mode_n, 3, 0, 0, NEXT_START, "toolkit 6500 pad_input_mode, static cache (unset = a keyboard fills in when no pad is on port 0)" },
