@@ -146,7 +146,7 @@ while i != -1:
         struct.pack_into("<I", b, i + 24, 10)          # central directory: uncompressed size 10
     i = b.find(b"PK\x01\x02", i + 4)
 r = mv.scan_zip(bytes(b), max_unpacked=2000)
-check("zip lying header stopped by the read count", any("unpacked" in t or "unreadable" in t for _, t in r.problems), str(r.problems))
+check("zip lying header stopped by the read count", any("unpacked" in t or "decompressed" in t for _, t in r.problems), str(r.problems))
 # the download cap and link checks
 for bad in ("http://example.com/a.zip", "https://user:pw" + "@example.com/a.zip", "https://example.com:8443/a.zip", "file:///etc/passwd", "ftp://x/a"):
     try:
@@ -546,6 +546,76 @@ with tempfile.TemporaryDirectory() as d:
         f.write_text(text, encoding="utf-8")
         check("tested file %s" % text, tm.main(["x", str(f)]) == 1)
 
+# ---- round 4: handshake kill, watchdog message, decompression errors, ASCII digits
+import http.client as _hc
+import random as _random
+seen2 = {}
+
+
+class Ctx2:
+    def wrap_socket(self, sock, server_hostname=None):
+        seen2["during"] = c2.sock
+        return "tls"
+
+
+c2 = mv.PinnedHTTPSConnection("h.test", "93.184.216.34", 5, context=Ctx2(), connect=lambda a, t: "raw")
+c2.connect()
+check("the socket is visible to the watchdog during the handshake", seen2["during"] == "raw" and c2.sock == "tls")
+
+
+class Boom:
+    def wrap_socket(self, sock, server_hostname=None):
+        raise OSError("handshake")
+
+
+class RawSock:
+    closed = False
+
+    def close(self):
+        self.closed = True
+
+
+rs = RawSock()
+c3 = mv.PinnedHTTPSConnection("h.test", "93.184.216.34", 5, context=Boom(), connect=lambda a, t: rs)
+try:
+    c3.connect()
+except OSError:
+    pass
+check("a failed handshake closes the socket", rs.closed and c3.sock is None)
+
+
+class SlowBadConn:
+    sock = None
+
+    def request(self, *a, **k):
+        pass
+
+    def getresponse(self):
+        _time.sleep(0.3)
+        raise _hc.BadStatusLine("x")
+
+    def close(self):
+        pass
+
+
+try:
+    mv.fetch("https://a.test/p", resolver=resolver_for(T, []), conn_factory=lambda h, i, t: SlowBadConn(), deadline=0.05)
+    check("watchdog case ends", False)
+except mv.Refused as e:
+    check("a watchdog kill reads as the time limit, not a malformed answer", "took longer" in str(e), str(e))
+try:
+    mv.fetch("https://a.test/p", resolver=resolver_for(T, []), conn_factory=lambda h, i, t: SlowBadConn(), deadline=60)
+    check("malformed answer case ends", False)
+except mv.Refused as e:
+    check("a malformed answer is reported as such", "malformed" in str(e), str(e))
+rnd = _random.Random(5)
+Zc = bytearray(make_zip({"mod.json": M, "files/big.bin": bytes(rnd.randrange(0, 4) for _ in range(20000))}))
+i = Zc.find(b"files/big.bin", Zc.find(b"PK\x03\x04", 10)) + len(b"files/big.bin")
+for k in range(i + 20, i + 60):
+    Zc[k] ^= 0xFF
+rc_ = mv.scan_zip(bytes(Zc))
+check("a corrupt compressed file gets the decompression row", any("could not be decompressed" in t for _, t in rc_.problems), str(rc_.problems))
+
 # ---- the tested list validator
 H = "a" * 64
 ent = {"id": "tiny-logo", "name": "Tiny logo", "version": "1.0", "sha256": H, "tested_on": "0.6.1", "content": "own-work", "notes": ""}
@@ -554,6 +624,7 @@ check("tested one ok", not tm.check({"schema": 1, "mods": [ent]}))
 check("tested repo file ok", not tm.check(json.loads((HERE.parent.parent / "mods" / "tested.json").read_text(encoding="utf-8"))))
 check("tested content other", tm.check({"schema": 1, "mods": [dict(ent, content="game-derived")]}))
 check("tested content missing", tm.check({"schema": 1, "mods": [{k: v for k, v in ent.items() if k != "content"}]}))
+check("tested_on ASCII digits only", tm.check({"schema": 1, "mods": [dict(ent, tested_on="\u0661.\u0662.\u0663")]}))
 check("tested bad schema", tm.check({"schema": 2, "mods": []}))
 check("tested bad hash", tm.check({"schema": 1, "mods": [dict(ent, sha256="A" * 64)]}))
 check("tested bad release", tm.check({"schema": 1, "mods": [dict(ent, tested_on="v1")]}))

@@ -17,6 +17,7 @@ import http.client
 import io
 import ipaddress
 import json
+import lzma
 import os
 import re
 import socket
@@ -30,6 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 HASH_HEADER = b"jsp-mod-hash 1\n"
 MAX_DOWNLOAD = 200 * 1024 * 1024      # bytes of the download
@@ -41,7 +43,7 @@ MAX_REDIRECTS = 5
 MAX_JSON_DEPTH = 32                   # parse_manifest: value(depth) fails above 32
 READ_BLOCK = 64 * 1024                # download reads: the deadline is checked after each
 TIMEOUT = 30                          # seconds for each connect or read
-DEADLINE = 300                        # seconds for the whole download
+DEADLINE = 250                        # seconds for the whole download; the workflow's own limit for the whole script is 280
 MAX_LISTED = 200                      # files named in the comment
 MAX_COMMENT = 60000                   # GitHub's limit is 65536
 
@@ -177,10 +179,12 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self):
         sock = self._connect((self._ip, 443), self.timeout)
+        self.sock = sock        # set before the handshake, so the watchdog can kill a stalled handshake too
         try:
             self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
         except BaseException:
             sock.close()
+            self.sock = None
             raise
 
 
@@ -268,6 +272,8 @@ def fetch(url, max_bytes=MAX_DOWNLOAD, timeout=TIMEOUT, deadline=DEADLINE, resol
     except Refused:
         raise
     except http.client.HTTPException as e:
+        if expired[0]:
+            raise Refused("the download took longer than %d s" % deadline)
         raise Refused("the server's answer was malformed (%s)" % type(e).__name__)
     except (OSError, ValueError) as e:
         if expired[0]:
@@ -447,8 +453,8 @@ def scan_zip(data, max_entries=MAX_ENTRIES, max_unpacked=MAX_UNPACKED, max_file=
         except Refused as e:
             s.problems.append(("Archive", str(e) + " at " + rel))
             return s
-        except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, EOFError):
-            s.problems.append(("Archive", "an unreadable entry: %s" % rel))
+        except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, EOFError, RuntimeError, zlib.error, lzma.LZMAError):
+            s.problems.append(("Archive", "a file in the zip could not be decompressed: %s" % rel))
             return s
         if rel == "mod.json" and got > MAX_MANIFEST:
             s.problems.append(("Manifest", "mod.json is over %d KB" % (MAX_MANIFEST >> 10)))

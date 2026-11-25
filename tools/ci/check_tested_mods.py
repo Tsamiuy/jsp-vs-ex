@@ -61,7 +61,7 @@ def check(doc):
             errs.append(where + ": bad version")
         if not re.fullmatch(r"[0-9a-f]{64}", m["sha256"]):
             errs.append(where + ": sha256 must be 64 lowercase hex digits")
-        if not re.fullmatch(r"\d+\.\d+\.\d+", m["tested_on"]):
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", m["tested_on"]):
             errs.append(where + ": tested_on must be a release like 0.6.1")
         if (m["id"], m["version"]) in seen_iv:
             errs.append(where + ": id and version listed twice")

@@ -39,12 +39,23 @@ jobs:
         id: run
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
+        # The script gets 280 s in all (lookup, connect and download). If it is cut off or fails, the step still ends well and
+        # writes a fixed comment: no issue text and no mod text is in it. The comment job then posts it.
         run: |
-          python3 -I tools/ci/mod_verify.py --out "$RUNNER_TEMP/mod-check.md"
-          echo "comment=$(base64 -w0 "$RUNNER_TEMP/mod-check.md")" >> "$GITHUB_OUTPUT"
+          out="$RUNNER_TEMP/mod-check.md"
+          rm -f "$out"
+          rc=0
+          timeout -k 10 280 python3 -I tools/ci/mod_verify.py --out "$out" || rc=$?
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            printf '%s\n' '## Mod check: stopped' '' 'The checks stopped after 280 s (lookup, connect or download took too long); nothing was verified.' '' 'Automated checks only; a maintainer still plays it before it is added to the tested list.' > "$out"
+          elif [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+            printf '%s\n' '## Mod check: stopped' '' 'The checks did not finish; nothing was verified.' '' 'Automated checks only; a maintainer still plays it before it is added to the tested list.' > "$out"
+          fi
+          echo "comment=$(base64 -w0 "$out")" >> "$GITHUB_OUTPUT"
 
   comment:
     needs: check
+    if: always() && (needs.check.result == 'success' || needs.check.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -57,5 +68,8 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           COMMENT_B64: ${{ needs.check.outputs.comment }}
         run: |
-          printf '%s' "$COMMENT_B64" | base64 -d > "$RUNNER_TEMP/comment.md"
+          printf '%s' "$COMMENT_B64" | base64 -d > "$RUNNER_TEMP/comment.md" || : > "$RUNNER_TEMP/comment.md"
+          if [ ! -s "$RUNNER_TEMP/comment.md" ]; then
+            printf '%s\n' '## Mod check: stopped' '' 'The checks did not finish; nothing was verified.' > "$RUNNER_TEMP/comment.md"
+          fi
           gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/comment.md"
