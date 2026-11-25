@@ -25,7 +25,8 @@
  * Loose files (interface "loose-file", ENHANCEMENT): paths the game opens that are in no CPK. The toolkit's path resolver (patch 6504,
  * ps3emu/fs_path_ops.h) answers a read-only open or a stat of such a path with the mod's file (or the disc copy of the CPK an alias
  * names) even when the game folder holds a file of its own at that path (logged); the virtual-file view (6502) then serves the pinned
- * bytes that were hashed (the mod's open handle, or the window of the archive), so the bytes served are the bytes in the digest.
+ * bytes that were hashed for a mod file (its open handle); an alias's window is read from a fresh open of the disc archive and checked once
+ * against the planned hash when it is first opened (a later change of the archive is not seen, as for the CPK copies).
  * Logs: "[mods] ..." lines on stderr (play_stderr.txt).
  */
 #include "jsp_mods_glue.h"
@@ -319,6 +320,7 @@ struct LooseEntry {
 struct State {
     std::map<std::string, LooseEntry> loose;   // by lower-case path relative to data/PS3
     std::set<std::string> loose_logged;        // under mu: one log line per path and event
+    std::map<std::string, bool> loose_window;  // under mu: an alias's archive window matched the planned hash (checked once per path)
     ModsRoot root;
     bool root_ok = false;
     std::map<std::string, ModFile> files;   // "<id>/<path>" -> the open file (a failed open is kept with ok = false)
@@ -417,8 +419,10 @@ int p_resolve(const char* guest, char* host, size_t cap, uint64_t* vsize)
 {
     const LooseEntry* e = loose_entry(guest);
     if (!e) return 0;
-    if (e->host.size() + 1 > cap) {
-        if (loose_log_once("cap " + e->s.path)) logl("[mods] loose " + e->s.path + ": the host path is too long for the open: not served");
+    if (e->host.size() + 1 > cap) {   // the game would read the game-folder path (or nothing) under a digest that says modded
+        if (loose_log_once("cap " + e->s.path)) logl("[mods] loose " + e->s.path + ": the host path is too long for the open: not served, the set no longer runs as listed (online refused)");
+        g_kind.store((int)DigestKind::Refused);
+        g_copy_mismatch.store(1);
         return 0;
     }
     if (host[0]) {   // a copy in the game folder (an old installer's leftovers) loses to the mod's
@@ -459,6 +463,37 @@ ps3_fs_vfile* v_open(const char* guest_path, const char* host_path)
             return nullptr;
         }
         if (!e->s.file.empty() && st->files.find(e->s.file) == st->files.end()) return nullptr;
+        if (e->s.file.empty()) {   // an alias reads a fresh open of the archive: check its window once against the planned hash, like the CPK copies
+            bool ok;
+            {
+                std::lock_guard<std::mutex> lk(st->mu);
+                auto it = st->loose_window.find(e->s.path);
+                if (it == st->loose_window.end()) {
+                    bool good = false;
+                    if (FILE* f = std::fopen(host_path, "rb")) {
+                        jpsm::Sha256 h;
+                        std::vector<uint8_t> buf(1 << 16);
+                        good = true;
+                        for (uint64_t o = 0; o < e->s.len && good;) {
+                            const size_t k = size_t(std::min<uint64_t>(buf.size(), e->s.len - o));
+                            good = file_read(f, e->s.src + o, buf.data(), k) == k;
+                            if (good) h.update(buf.data(), k);
+                            o += k;
+                        }
+                        good = good && h.finish() == e->s.content;
+                        std::fclose(f);
+                    }
+                    it = st->loose_window.emplace(e->s.path, good).first;
+                    if (!good) {
+                        logl("[mods] loose " + e->s.path + ": the archive window differs from the planned bytes: not served, the set no longer runs as listed (online refused)");
+                        g_kind.store((int)DigestKind::Refused);
+                        g_copy_mismatch.store(1);
+                    }
+                }
+                ok = it->second;
+            }
+            if (!ok) return nullptr;
+        }
         return reinterpret_cast<ps3_fs_vfile*>(new View{ nullptr, guest_path ? guest_path : "", e });
     }
     const auto it = st->served.find(archive_key(host_path, g_fold_case));
@@ -663,6 +698,11 @@ extern "C" void jsp_mods_init(const char* vfs_root, const char* eboot, const cha
         LooseEntry e;
         e.s = kv.second;
         e.host = kv.second.file.empty() ? disc_dir + kv.second.archive : c.dir + "/" + kv.second.file;
+        if (e.host.size() + 1 > 1100) {   // the toolkit's host path buffer (ppu_fs.cpp cellFsOpen): the open could not be pointed here
+            logl("[mods] loose " + kv.second.path + ": its host path is longer than the open's buffer (1100): the set cannot run as listed (online refused)");
+            if (st->set.digest_kind != DigestKind::Refused) st->set.digest_kind = DigestKind::Refused;
+            continue;
+        }
         st->loose.emplace(kv.first, std::move(e));
     }
     g_kind.store((int)st->set.digest_kind);

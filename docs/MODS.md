@@ -1,8 +1,8 @@
 # Mods
 
-A mod is a folder in the port's mods folder with a `mod.json` and the files it names. The mods folder's list (`mods.txt`) says which mods load, in order. The rules for `mod.json` (schema 1) are in `installer/port/jsp/jsp_mods_core.h` (`parse_manifest`): an id of `[a-z0-9-]` that equals the folder name, a version, `interfaces` (`cpk-entry` 1, `roster` 1 or 2), and overrides of entries of the game's archives, each by a file with its SHA-256 or by an alias. A mod that breaks any rule is refused whole; the other mods still load.
+A mod is a folder in the port's mods folder with a `mod.json` and the files it names. The mods folder's list (`mods.txt`) says which mods load, in order. The rules for `mod.json` (schema 1) are in `installer/port/jsp/jsp_mods_core.h` (`parse_manifest`): an id of `[a-z0-9-]` that equals the folder name, a version, `interfaces` (`cpk-entry` 1, `roster` 1 or 2, `loose-file` 1), and overrides of entries of the game's archives, each by a file with its SHA-256 or by an alias. A mod that breaks any rule is refused whole; the other mods still load.
 
-A mod that only changes logos, movies or sound is cosmetic. Every other mod is gameplay, and online play compares the gameplay mods of both players (see [ONLINE.md](ONLINE.md)).
+A mod that only changes logos, movies or songs (`sound/<LANG>/BGM_*`) is cosmetic; other sound files (voices, effects) are gameplay. Every other mod is gameplay, and online play compares the gameplay mods of both players (see [ONLINE.md](ONLINE.md)).
 
 ## Getting a mod verified
 
@@ -118,7 +118,7 @@ voice banks and loading tips of an added fighter (ids 19, 20, 21). The mods fold
 - A loose file is gameplay: its lower-case path and the sha256 of the bytes served are in the digest (voices count as gameplay).
 - A copy at the same path in the game folder (an old installer's leftovers) loses to the mods-folder copy; this is logged once.
 - Served by the toolkit's path resolver (patch 6504, `ps3emu/fs_path_ops.h`): a read-only open or a stat of the path is answered with
-  the mod's file (or the disc copy of the archive an alias names), and the virtual-file view (patch 6502) serves the bytes that were hashed.
+  the mod's file (or the disc copy of the archive an alias names), and the virtual-file view (patch 6502) serves the bytes that were hashed for a `file` source (the mod's open handle). An `alias` window is read from a fresh open of the disc archive; its hash is checked once per path when the game first opens it, and a mismatch refuses online play (a change of the archive after that is not seen, as for the CPK copies).
 
 Songs are the only sound files that are cosmetic: `sound/<LANG>/BGM_*` in `cpk-entry`. Any other sound override is gameplay.
 
@@ -127,6 +127,7 @@ Songs are the only sound files that are cosmetic: `sound/<LANG>/BGM_*` in `cpk-e
 - The path form CRI uses when a name is in no CPK (bare relative, or under `data/PS3`): `loose_rel_from_guest` takes both, the first run
   reads the `[fs] open` lines. If the game opens through another path function than `cellFsOpen`, nothing is served.
 - That the game accepts a voice bank or tip served this way, and that a view's size via `cellFsFstat` is what CRI uses.
+- Directory listings do not show a mod-only loose file (only open and stat by path are answered).
 - The cue-sheet name table has no names for ids 19 to 21 (static reading): a bank may load and still not play.
 
 ## derived: bytes from the game or a third party

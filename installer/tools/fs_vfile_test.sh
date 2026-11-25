@@ -13,7 +13,7 @@ mkdir -p "$out"
 export CI=1   # a missing compiler fails instead of skipping
 py="${PYTHON:-$(command -v python3 || command -v python)}"
 rc=0
-for t in vfile errors large_file rw_switch aio imports; do
+for t in vfile errors large_file rw_switch aio imports path_ops; do
   echo "== test_ppu_fs_$t"
   "$py" -I "$tk/tools/test_ppu_fs_$t.py" --exe-out "$out/test_fs_$t" || rc=1
 done

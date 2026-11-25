@@ -1003,8 +1003,8 @@ static void test_glue_loose()
     const Bytes cva = noise(1500, 71), cvb = noise(2600, 72);
     put_file(mods + "/vo/f/CV_019_00_ST_JP.acb", cva);
     put_file(mods + "/vo/f/CV_019_00_ST_JP.awb", cvb);
-    const std::string TIPS = "progress/game/loading_game/tips/", tip = TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", donor = TIPS + "loading_game_tips_chara_018_000_ALL_m.pak";
-    put_text(mods + "/vo/mod.json", loose_mod("vo", lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb) + ", " + la(tip, donor)));
+    const std::string TIPS = "progress/game/loading_game/tips/", tip = TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", tipv = TIPS + "loading_game_tips_chara_019_000_ALL_v.pak", donor = TIPS + "loading_game_tips_chara_018_000_ALL_m.pak";
+    put_text(mods + "/vo/mod.json", loose_mod("vo", lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva) + ", " + lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb) + ", " + la(tip, donor) + ", " + la(tipv, donor)));
     put_text(root + "/mods.txt", "vo\n");
     put_text(root + "/eboot.elf", "x");
     setenv("JSP_MODS_DIR", mods.c_str(), 1);
@@ -1012,7 +1012,7 @@ static void test_glue_loose()
     unsetenv("JSP_MODS");
     const int refusals0 = g_online_refusals;
     std::string log = capture([&] { jsp_mods_init(disc.c_str(), (root + "/eboot.elf").c_str(), "BLUS31519"); });
-    CHECK(has(log, "[mods] serving 3 loose file(s) through the path resolver") && has(log, "[mods] vo 1.0.0: gameplay") && g_ps3_fs_path_ops == &k_path_ops && g_ps3_fs_vfile_ops == &k_ops);
+    CHECK(has(log, "[mods] serving 4 loose file(s) through the path resolver") && has(log, "[mods] vo 1.0.0: gameplay") && g_ps3_fs_path_ops == &k_path_ops && g_ps3_fs_vfile_ops == &k_ops);
     CHECK(g_online_refusals == refusals0 + 1);   // a gameplay set: the game's own online is off (as for any gameplay mod)
     const ps3_fs_path_ops* po = g_ps3_fs_path_ops;
     const ps3_fs_vfile_ops* vo = g_ps3_fs_vfile_ops;
@@ -1056,6 +1056,20 @@ static void test_glue_loose()
         log = capture([&] { CHECK(vo->open(("/dev_bdvd/PS3_GAME/USRDIR/data/PS3/" + tip).c_str(), (root + "/other.cpk").c_str()) == nullptr); });
         CHECK(has(log, "not the planned copy: not served"));
     }
+    {   // an alias window that differs from the plan is not served, once per path, and the set stops running as listed
+        const std::string g = "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/" + tipv;
+        std::string host = arch + tipv;
+        CHECK(resolve(g, host, nullptr) == 1);
+        Bytes bad = prog.file;
+        bad[prog.offset.at(donor) + 5] ^= 0x55;
+        put_file(arch + "partition_op_progress_ps3.cpk", bad);
+        const int before = g_kind.load();
+        log = capture([&] { CHECK(vo->open(g.c_str(), host.c_str()) == nullptr); });
+        CHECK(has(log, "the archive window differs from the planned bytes") && g_kind.load() == (int)DigestKind::Refused && jsp_mods_copy_mismatch() == 1);
+        CHECK(vo->open(g.c_str(), host.c_str()) == nullptr);   // the result is kept
+        put_file(arch + "partition_op_progress_ps3.cpk", prog.file);
+        g_kind.store(before); g_copy_mismatch.store(0);
+    }
     // paths that are not loose files are left alone: another name, a CPK itself, a non-game path
     for (const char* g : { "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_018_00_ST_JP.acb", "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/partition_op_sound_ps3.cpk",
                            "/dev_hdd0/game/BLUS31519-INSTALL/USRDIR/x.dat", "", "/dev_bdvd/PS3_GAME/USRDIR/data/PS3/sound/JP/CV_020_00_ST_JP.acb" }) {
@@ -1077,7 +1091,10 @@ static void test_glue_loose()
     }
     {   // a host buffer too small for the answer: left alone
         char tiny[8] = "/x";
-        CHECK(po->resolve("sound/JP/CV_019_00_ST_JP.acb", tiny, sizeof tiny, nullptr) == 0 && std::strcmp(tiny, "/x") == 0);
+        const int before = g_kind.load();
+        log = capture([&] { CHECK(po->resolve("sound/JP/CV_019_00_ST_JP.acb", tiny, sizeof tiny, nullptr) == 0 && std::strcmp(tiny, "/x") == 0); });
+        CHECK(has(log, "the set no longer runs as listed") && g_kind.load() == (int)DigestKind::Refused);   // not just a log line
+        g_kind.store(before); g_copy_mismatch.store(0);
     }
     std::string rm = "rm -rf '" + root + "'";
     CHECK(std::system(rm.c_str()) == 0);
