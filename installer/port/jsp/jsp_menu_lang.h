@@ -28,11 +28,11 @@ enum Id { MENU_BATTLE_MODES, MENU_TRAINING_MODE, MENU_IMPOSSIBLE_MODE, MENU_PORT
 static const char* const k_langs[5] = { "en", "es", "fr", "de", "it" };   // column order of the table
 // id <TAB> en <TAB> es <TAB> fr <TAB> de <TAB> it, one row per Id in enum order, first byte is the newline after R"MSG(
 static const char k_table[] = R"MSG(
-MENU_BATTLE_MODES	Battle Modes	Modos de combate	Modes de combat	Kampfmodi	Modalità di lotta
+MENU_BATTLE_MODES	Battle Modes	Modos de combate	Modes de combat	Kampfmodi	Modalità di battaglia
 MENU_TRAINING_MODE	Training Mode	Modo entrenamiento	Mode entraînement	Trainingsmodus	Modalità allenamento
 MENU_IMPOSSIBLE_MODE	Impossible Mode	Modo imposible	Mode impossible	Unmöglich-Modus	Modalità impossibile
 MENU_PORT_SETTINGS	Port Settings	Ajustes del port	Paramètres du portage	Port-Einstellungen	Impostazioni del port
-MENU_HELP_BATTLE	Choose a battle mode.	Elige un modo de combate.	Choisissez un mode de combat.	Wähle einen Kampfmodus.	Scegli una modalità di lotta.
+MENU_HELP_BATTLE	Choose a battle mode.	Elige un modo de combate.	Choisissez un mode de combat.	Wähle einen Kampfmodus.	Scegli una modalità di battaglia.
 MENU_HELP_TRAINING	Practice your moves against a training dummy.	Practica tus movimientos contra un muñeco de entrenamiento.	Entraînez-vous contre un mannequin d'entraînement.	Übe deine Moves an einer Trainingspuppe.	Allenati con le tue mosse contro un manichino.
 MENU_HELP_IMPOSSIBLE	Take on boss fights against an unbeatable CPU.	Enfréntate a combates de jefe contra una CPU invencible.	Affrontez des combats de boss contre un CPU imbattable.	Stell dich Bosskämpfen gegen eine unschlagbare CPU.	Affronta combattimenti contro boss gestiti da una CPU imbattibile.
 MENU_HELP_PORT_SETTINGS	Change the PC port's display, graphics, control and online settings.	Cambia los ajustes de pantalla, gráficos, controles y online del port para PC.	Modifiez les paramètres d'affichage, de graphismes, de commandes et en ligne du portage PC.	Ändere die Anzeige-, Grafik-, Steuerungs- und Online-Einstellungen der PC-Portierung.	Modifica le impostazioni di schermo, grafica, comandi e online del port per PC.

@@ -22,7 +22,7 @@ int main()
     // UTF-16LE with the terminating zero: a-grave, n-tilde, e-acute, u-umlaut, e-grave
     { const auto e = encode_utf16("\xC3\xA0\xC3\xB1\xC3\xA9\xC3\xBC\xC3\xA8"); const uint8_t w[] = { 0xE0,0, 0xF1,0, 0xE9,0, 0xFC,0, 0xE8,0, 0,0 };
       CHECK(e.size() == sizeof w && !std::memcmp(e.data(), w, sizeof w)); }
-    { const auto e = encode_utf16(text(MENU_BATTLE_MODES, "it")); CHECK(e.size() == (std::string("Modalit\xC3\xA0 di lotta").size() - 1 + 1) * 2); }   // 20 letters + zero
+    { const auto e = encode_utf16(text(MENU_BATTLE_MODES, "it")); CHECK(e.size() == (std::string("Modalit\xC3\xA0 di battaglia").size() - 1 + 1) * 2); }   // 20 letters + zero
     CHECK(encode_utf16("").size() == 2); CHECK(encode_utf16("A") == std::vector<uint8_t>({ 'A', 0, 0, 0 }));
     CHECK(encode_utf16("\xC3").empty()); CHECK(encode_utf16("\xF0\x9F\x98\x80").empty());   // truncated; above U+FFFF
     // every cell encodes, and no code point is above U+00FF (the catalogue's Latin-1 rule)
