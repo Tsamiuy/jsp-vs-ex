@@ -74,7 +74,9 @@ void vsn_arena_fix();   /* the VS loader's two arenas made larger (defined with 
  * set up is a 3v3. Without SIX_ASK it is always on (the older launchers); with SIX_ASK=1 it is off until the team size
  * window on Free Battle's 1 Player / 2 Players list says 3 vs 3, and off again on the main menu. */
 static std::atomic<int> g_six_live{-1};
-static inline bool six_live() { int v = g_six_live.load(); if (v < 0) { v = (kExp && std::getenv("SIX_ASK")) ? 0 : 1; g_six_live.store(v); } return v != 0; }
+/* Before the main menu has been seen (the title screen's demo fight after a start with no button pressed) nothing is chosen: with the
+ * team size window (SIX_ASK, the default) that is 2 vs 2. It began as 3 vs 3 here, and the demo fight's loading stopped. */
+static inline bool six_live() { int v = g_six_live.load(); if (v < 0) { v = std::getenv("SIX_ASK") ? 0 : 1; g_six_live.store(v); } return v != 0; }
 
 /* parked name boxes (see jsp_six_boxpos_enter): park centre in 1280x720 px, and per box the shift kx, ky (px) and a
  * "valid" flag, written by the game thread, read by the draw hook */
