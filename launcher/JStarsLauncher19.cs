@@ -376,6 +376,38 @@ namespace JStarsLauncher
 
     class Preset { public string Label, Address, Name; }
 
+    // ENHANCEMENT: the optional re-psn desktop app (the installer's unticked task "repsnapp"; installer/tools/stage_repsn_app.py): the
+    // release's folder beside the launcher, kept as it is. The Online tab of an installed launcher opens re-psn-app.exe with the arguments "ui --browser": v0.9.0's run() (cmd/re-psn-app/main.go) takes flags only after the ui
+    // subcommand (ui.go), a bare --browser is an unknown command (exit 2), and without --browser it hands the start to a re-psn-window.exe beside
+    // it (window.go findWindowProgram), so with it the app always opens the player's web browser. The launcher does not wait for it and adds no
+    // firewall rule. re-psn-app.exe needs re-psn-host.exe beside it; re-psn-window.exe is not shipped (the app opens the browser) and is ignored if present. Host test: launcher_repsn_app_test.py.
+    enum RepsnAppState { Missing, Incomplete, Ready }
+
+    static class RepsnApp
+    {
+        public const string Folder = "re-psn-app-v0.9.0-windows-amd64";   // the re-psn-app entry of installer/tools/toolchain.json
+        public const string AppExe = "re-psn-app.exe";
+        static readonly string[] Exes = { AppExe, "re-psn-host.exe" };
+
+        public static string Dir(string root) { return Path.Combine(root, Folder); }
+
+        // Missing: no app folder (the box was not ticked). Incomplete: the folder without both exes. Ready: re-psn-app.exe and re-psn-host.exe.
+        public static RepsnAppState Find(string root)
+        {
+            string d = Dir(root);
+            if (!Directory.Exists(d)) return RepsnAppState.Missing;
+            foreach (string e in Exes)
+                if (!File.Exists(Path.Combine(d, e))) return RepsnAppState.Incomplete;
+            return RepsnAppState.Ready;
+        }
+
+        public static ProcessStartInfo StartInfo(string root)
+        {
+            string d = Dir(root);
+            return new ProcessStartInfo { FileName = Path.Combine(d, AppExe), Arguments = "ui --browser", WorkingDirectory = d, UseShellExecute = false };
+        }
+    }
+
     class LauncherForm : Form, IMessageFilter
     {
         // ---- paths (the launcher sits in the PS3Recomp folder) ----

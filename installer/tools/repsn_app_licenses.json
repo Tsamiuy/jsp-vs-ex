@@ -1,0 +1,158 @@
+{
+ "about": "re-psn v0.9.0 app: the Go modules linked into the Windows builds of re-psn-app.exe and re-psn-host.exe, and each module's licence text at that exact version. Source of the list: app/go.mod and app/go.sum at the re-psn v0.9.0 tag, the 'Dependencies' section of its app/README.md, and go list -deps for windows/amd64 (16 modules besides the standard library; charmbracelet/x/termios is Unix-only and not linked; modules only tests use are left out: aymanbagabas/go-udiff, bits-and-blooms/bitset, charmbracelet/x/exp/golden, clipperhouse/stringish, golang.org/x/exp). The release exes are built with go1.27.4 (go version -m). Fields per module: module, version, licence, copyright, file (name of the cached text), sha256 of the text, url. The texts are not committed: stage_repsn_app.py downloads each from its url at build time into the toolchain cache, refuses any whose sha256 differs, and writes THIRD-PARTY-LICENSES.txt into the staged app folder; repsn_app_bundle_test.py checks this table.",
+ "modules": [
+  {
+   "module": "Go standard library",
+   "version": "go1.27.4",
+   "licence": "BSD-3-Clause",
+   "copyright": "Copyright 2009 The Go Authors.",
+   "file": "go-stdlib-LICENSE.txt",
+   "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+   "url": "https://raw.githubusercontent.com/golang/go/go1.27.4/LICENSE"
+  },
+  {
+   "module": "golang.org/x/sync",
+   "version": "v0.22.0",
+   "licence": "BSD-3-Clause",
+   "copyright": "Copyright 2009 The Go Authors.",
+   "file": "golang.org-x-sync-LICENSE.txt",
+   "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+   "url": "https://raw.githubusercontent.com/golang/sync/v0.22.0/LICENSE"
+  },
+  {
+   "module": "golang.org/x/sys",
+   "version": "v0.47.0",
+   "licence": "BSD-3-Clause",
+   "copyright": "Copyright 2009 The Go Authors.",
+   "file": "golang.org-x-sys-LICENSE.txt",
+   "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+   "url": "https://raw.githubusercontent.com/golang/sys/v0.47.0/LICENSE"
+  },
+  {
+   "module": "charm.land/bubbletea/v2",
+   "version": "v2.1.1",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2020-2026 Charmbracelet, Inc.",
+   "file": "charm.land-bubbletea-v2-LICENSE.txt",
+   "sha256": "373b3931e66627aadcfebd7771df93f3439203147e587a924508c63e20184d7f",
+   "url": "https://raw.githubusercontent.com/charmbracelet/bubbletea/v2.1.1/LICENSE"
+  },
+  {
+   "module": "charm.land/lipgloss/v2",
+   "version": "v2.0.6",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2021-2026 Charmbracelet, Inc.",
+   "file": "charm.land-lipgloss-v2-LICENSE.txt",
+   "sha256": "3f531fb89f23b218fbe16b24fb5950418fa1f0046db5cfddb2c1e0d6d39bfcc0",
+   "url": "https://raw.githubusercontent.com/charmbracelet/lipgloss/v2.0.6/LICENSE"
+  },
+  {
+   "module": "github.com/charmbracelet/x/term",
+   "version": "v0.2.2",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2023 Charmbracelet, Inc.",
+   "file": "github.com-charmbracelet-x-term-LICENSE.txt",
+   "sha256": "0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b",
+   "url": "https://raw.githubusercontent.com/charmbracelet/x/term/v0.2.2/LICENSE"
+  },
+  {
+   "module": "github.com/charmbracelet/x/ansi",
+   "version": "v0.11.9",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2023 Charmbracelet, Inc.",
+   "file": "github.com-charmbracelet-x-ansi-LICENSE.txt",
+   "sha256": "0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b",
+   "url": "https://raw.githubusercontent.com/charmbracelet/x/ansi/v0.11.9/LICENSE"
+  },
+  {
+   "module": "github.com/charmbracelet/x/windows",
+   "version": "v0.2.2",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2023 Charmbracelet, Inc.",
+   "file": "github.com-charmbracelet-x-windows-LICENSE.txt",
+   "sha256": "0baa4a5942a801d93f4050d2bc0039d8c037105fcd335230d118eec99a11782b",
+   "url": "https://raw.githubusercontent.com/charmbracelet/x/windows/v0.2.2/LICENSE"
+  },
+  {
+   "module": "github.com/charmbracelet/colorprofile",
+   "version": "v0.4.3",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2020-2024 Charmbracelet, Inc",
+   "file": "github.com-charmbracelet-colorprofile-LICENSE.txt",
+   "sha256": "57d6eeeb336030b89c0e0d12cf869f84b97a481cd00b350ef21fca995da5a39a",
+   "url": "https://raw.githubusercontent.com/charmbracelet/colorprofile/v0.4.3/LICENSE"
+  },
+  {
+   "module": "github.com/charmbracelet/ultraviolet",
+   "version": "v0.0.0-20261008173134-6b8d4baf91b4",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2025 Charmbracelet, Inc",
+   "file": "github.com-charmbracelet-ultraviolet-LICENSE.txt",
+   "sha256": "8a77c755a1d1fbdc932e86f0449549121820b6f4cc1234b12fcfc8d38013c1de",
+   "url": "https://raw.githubusercontent.com/charmbracelet/ultraviolet/6b8d4baf91b4/LICENSE"
+  },
+  {
+   "module": "github.com/clipperhouse/displaywidth",
+   "version": "v0.11.0",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2025 Matt Sherman",
+   "file": "github.com-clipperhouse-displaywidth-LICENSE.txt",
+   "sha256": "fcdcc889a11c39c73d36019b838af41b418eb7811af12b746ace40c3074bb96c",
+   "url": "https://raw.githubusercontent.com/clipperhouse/displaywidth/v0.11.0/LICENSE"
+  },
+  {
+   "module": "github.com/clipperhouse/uax29/v2",
+   "version": "v2.7.0",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2020 Matt Sherman",
+   "file": "github.com-clipperhouse-uax29-v2-LICENSE.txt",
+   "sha256": "07e9e3daaccc707c9b7d535ed1405a65d37919fdd42197fe55e68820e974688c",
+   "url": "https://raw.githubusercontent.com/clipperhouse/uax29/v2.7.0/LICENSE"
+  },
+  {
+   "module": "github.com/lucasb-eyer/go-colorful",
+   "version": "v1.4.1",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2013 Lucas Beyer",
+   "file": "github.com-lucasb-eyer-go-colorful-LICENSE.txt",
+   "sha256": "1e4cf2a117516ec1b54041d68ed4f5d331878b04de3386f4790e7b5b9c04e1ec",
+   "url": "https://raw.githubusercontent.com/lucasb-eyer/go-colorful/v1.4.1/LICENSE"
+  },
+  {
+   "module": "github.com/mattn/go-runewidth",
+   "version": "v0.0.30",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2016 Yasuhiro Matsumoto",
+   "file": "github.com-mattn-go-runewidth-LICENSE.txt",
+   "sha256": "88a2379b3ca34bf5c57127aff9dcb802bbb60ece0805cdbda65b3bd115f971d9",
+   "url": "https://raw.githubusercontent.com/mattn/go-runewidth/v0.0.30/LICENSE"
+  },
+  {
+   "module": "github.com/muesli/cancelreader",
+   "version": "v0.2.2",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2022 Erik Geiser and Christian Muehlhaeuser",
+   "file": "github.com-muesli-cancelreader-LICENSE.txt",
+   "sha256": "8c139dbbc83b4fb055b4100b6b9402f7de3dd6bbca05015bdfcc4b392c8cfd5f",
+   "url": "https://raw.githubusercontent.com/muesli/cancelreader/v0.2.2/LICENSE"
+  },
+  {
+   "module": "github.com/rivo/uniseg",
+   "version": "v0.4.7",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2019 Oliver Kuederle",
+   "file": "github.com-rivo-uniseg-LICENSE.txt",
+   "sha256": "a59885f5f0f3b3c07cf9444db5fe399b6f0791eac82055f7b85cc65500551039",
+   "url": "https://raw.githubusercontent.com/rivo/uniseg/v0.4.7/LICENSE.txt"
+  },
+  {
+   "module": "github.com/xo/terminfo",
+   "version": "v1.0.0",
+   "licence": "MIT",
+   "copyright": "Copyright (c) 2016 Anmol Sethi",
+   "file": "github.com-xo-terminfo-LICENSE.txt",
+   "sha256": "1f5f51151ba96f0492ce288bd007242f924fdad9f04002e175e951644340a891",
+   "url": "https://raw.githubusercontent.com/xo/terminfo/v1.0.0/LICENSE"
+  }
+ ]
+}

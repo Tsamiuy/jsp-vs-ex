@@ -376,6 +376,38 @@ namespace JStarsLauncher
 
     class Preset { public string Label, Address, Name; }
 
+    // ENHANCEMENT: the optional re-psn desktop app (the installer's unticked task "repsnapp"; installer/tools/stage_repsn_app.py): the
+    // release's folder beside the launcher, kept as it is. The Online tab of an installed launcher opens re-psn-app.exe with the arguments "ui --browser": v0.9.0's run() (cmd/re-psn-app/main.go) takes flags only after the ui
+    // subcommand (ui.go), a bare --browser is an unknown command (exit 2), and without --browser it hands the start to a re-psn-window.exe beside
+    // it (window.go findWindowProgram), so with it the app always opens the player's web browser. The launcher does not wait for it and adds no
+    // firewall rule. re-psn-app.exe needs re-psn-host.exe beside it; re-psn-window.exe is not shipped (the app opens the browser) and is ignored if present. Host test: launcher_repsn_app_test.py.
+    enum RepsnAppState { Missing, Incomplete, Ready }
+
+    static class RepsnApp
+    {
+        public const string Folder = "re-psn-app-v0.9.0-windows-amd64";   // the re-psn-app entry of installer/tools/toolchain.json
+        public const string AppExe = "re-psn-app.exe";
+        static readonly string[] Exes = { AppExe, "re-psn-host.exe" };
+
+        public static string Dir(string root) { return Path.Combine(root, Folder); }
+
+        // Missing: no app folder (the box was not ticked). Incomplete: the folder without both exes. Ready: re-psn-app.exe and re-psn-host.exe.
+        public static RepsnAppState Find(string root)
+        {
+            string d = Dir(root);
+            if (!Directory.Exists(d)) return RepsnAppState.Missing;
+            foreach (string e in Exes)
+                if (!File.Exists(Path.Combine(d, e))) return RepsnAppState.Incomplete;
+            return RepsnAppState.Ready;
+        }
+
+        public static ProcessStartInfo StartInfo(string root)
+        {
+            string d = Dir(root);
+            return new ProcessStartInfo { FileName = Path.Combine(d, AppExe), Arguments = "ui --browser", WorkingDirectory = d, UseShellExecute = false };
+        }
+    }
+
     class LauncherForm : Form, IMessageFilter
     {
         // ---- paths (the launcher sits in the PS3Recomp folder) ----
@@ -1383,11 +1415,47 @@ namespace JStarsLauncher
                 if (err != null) MessageBox.Show(this, err, Text);
             };
             p.Controls.Add(onlineSaveBtn);
+            // ENHANCEMENT: the optional re-psn desktop app, only in an installed launcher and only when setup copied it (box ticked).
+            // A row of its own under the save row; the tab scrolls.
+            RepsnAppState repsnState = installed ? RepsnApp.Find(root) : RepsnAppState.Missing;
+            if (repsnState != RepsnAppState.Missing)
+            {
+                var appBtn = new Button { Text = "Open the re-psn app", Location = P(16, y + 76), Size = Z(150, 28), Enabled = repsnState == RepsnAppState.Ready };
+                appBtn.Click += delegate { OpenRepsnApp(); };
+                p.Controls.Add(appBtn);
+                p.Controls.Add(new Label {
+                    Text = repsnState == RepsnAppState.Ready ? RepsnAppNote
+                        : "The re-psn app folder (" + RepsnApp.Folder + ") is incomplete: reinstall with the option ticked.",
+                    Location = P(16, y + 110), Size = Z(700, 60), ForeColor = SystemColors.GrayText });
+            }
             onlineMsg = new Label { Location = P(196, y + 2), Size = Z(520, 40), ForeColor = Color.FromArgb(170, 90, 0) };
             p.Controls.Add(onlineMsg);
             onlineWhere = new Label { Location = P(16, y + 44), Size = Z(700, 20), ForeColor = SystemColors.GrayText };
             p.Controls.Add(onlineWhere);
             return p;
+        }
+
+        // ENHANCEMENT: the re-psn desktop app's caveats, the same words as the installer's tasks page (installer/jsp.iss).
+        const string RepsnAppNote = "re-psn desktop app: pre-release, and the app is partial / in progress. Play first, host if it works for you. " +
+            "It is unsigned, so Windows SmartScreen may warn. Hosting from it on native Windows is not verified (tested only under Wine). " +
+            "There is no public server and no accounts: each host is a private server for friends. The game connects without the app. It opens in your web browser.";
+
+        // Opens re-psn-app.exe with "ui --browser" (the web browser start; see RepsnApp) and does not wait for it; it runs on its own and the launcher sends it nothing else.
+        void OpenRepsnApp()
+        {
+            if (RepsnApp.Find(root) != RepsnAppState.Ready)
+            {
+                MessageBox.Show(this, "The re-psn app is not complete in " + RepsnApp.Dir(root) + ": reinstall with the option ticked.", Text);
+                return;
+            }
+            try
+            {
+                using (Process.Start(RepsnApp.StartInfo(root))) { }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Could not start the re-psn app: " + ex.Message, Text);
+            }
         }
 
         // Find on LAN: the search runs on a worker thread for about 1.2 s (LanDiscover), the result comes back on the UI thread.

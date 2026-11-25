@@ -121,6 +121,55 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## re-psn desktop app (optional installer task)
+
+The installer has an unticked task for the [re-psn](https://github.com/undecuple/re-psn) desktop app, a pre-release. When it
+is ticked, setup copies the folder `re-psn-app-v0.9.0-windows-amd64` from the public re-psn v0.9.0 release, unchanged but for the window program, into the
+install folder: `re-psn-app.exe`, `re-psn-host.exe`, `README.md`, and the app's own `LICENSE` and
+`NOTICE.md`, which stay in that folder, and a `THIRD-PARTY-LICENSES.txt` that this project adds (below). The release's native window program is not shipped; the app opens your web browser. Nothing of it is in this tree: whoever builds the installer downloads the release zip
+with `installer/tools/fetch_toolchain.py` (version and SHA-256 in `installer/tools/toolchain.json`, checked against the
+release's `SHA256SUMS` too). The app is licensed under the MIT licence:
+
+```
+Copyright (c) 2026 sp00nz
+Copyright (c) 2026 undecuple
+```
+
+The full text is the app folder's `LICENSE`. The app's `NOTICE.md` lists its third-party parts: the Go standard library
+(BSD-3-Clause); [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Lip Gloss](https://github.com/charmbracelet/lipgloss),
+`github.com/charmbracelet/x/term` and the modules they need (MIT, Charmbracelet, Inc. and the authors of each module);
+`golang.org/x/sync` and `golang.org/x/sys` (BSD-3-Clause, Go); and the light colours of
+[gruvbox-material](https://github.com/sainnhe/gruvbox-material) (MIT, Copyright (c) 2020 sainnhe). re-psn began as a fork of
+[psnr](https://github.com/sp00nznet/psnr) by sp00nz (MIT).
+
+The app's own `NOTICE.md` in v0.9.0 names the server (`server/`) and the desktop app (`app/`) and their main dependencies; it does not
+carry the licence texts of the Go modules linked into the Windows programs `re-psn-app.exe` and `re-psn-host.exe`, and the release archive has none. This project
+adds them: the folder also holds `THIRD-PARTY-LICENSES.txt`, made at build time from the texts named in
+[`installer/tools/repsn_app_licenses.json`](installer/tools/repsn_app_licenses.json) (each checked against its SHA-256; each text is the module's own
+licence file at the exact version in re-psn's `app/go.mod` and `go.sum` at the v0.9.0 tag). The modules, versions and copyright lines:
+
+| Module | Version | Licence | Copyright line |
+|---|---|---|---|
+| `Go standard library` | `go1.27.4` | BSD-3-Clause | Copyright 2009 The Go Authors. |
+| `golang.org/x/sync` | `v0.22.0` | BSD-3-Clause | Copyright 2009 The Go Authors. |
+| `golang.org/x/sys` | `v0.47.0` | BSD-3-Clause | Copyright 2009 The Go Authors. |
+| `charm.land/bubbletea/v2` | `v2.1.1` | MIT | Copyright (c) 2020-2026 Charmbracelet, Inc. |
+| `charm.land/lipgloss/v2` | `v2.0.6` | MIT | Copyright (c) 2021-2026 Charmbracelet, Inc. |
+| `github.com/charmbracelet/x/term` | `v0.2.2` | MIT | Copyright (c) 2023 Charmbracelet, Inc. |
+| `github.com/charmbracelet/x/ansi` | `v0.11.9` | MIT | Copyright (c) 2023 Charmbracelet, Inc. |
+| `github.com/charmbracelet/x/windows` | `v0.2.2` | MIT | Copyright (c) 2023 Charmbracelet, Inc. |
+| `github.com/charmbracelet/colorprofile` | `v0.4.3` | MIT | Copyright (c) 2020-2024 Charmbracelet, Inc |
+| `github.com/charmbracelet/ultraviolet` | `v0.0.0-20261008173134-6b8d4baf91b4` | MIT | Copyright (c) 2025 Charmbracelet, Inc |
+| `github.com/clipperhouse/displaywidth` | `v0.11.0` | MIT | Copyright (c) 2025 Matt Sherman |
+| `github.com/clipperhouse/uax29/v2` | `v2.7.0` | MIT | Copyright (c) 2020 Matt Sherman |
+| `github.com/lucasb-eyer/go-colorful` | `v1.4.1` | MIT | Copyright (c) 2013 Lucas Beyer |
+| `github.com/mattn/go-runewidth` | `v0.0.30` | MIT | Copyright (c) 2016 Yasuhiro Matsumoto |
+| `github.com/muesli/cancelreader` | `v0.2.2` | MIT | Copyright (c) 2022 Erik Geiser and Christian Muehlhaeuser |
+| `github.com/rivo/uniseg` | `v0.4.7` | MIT | Copyright (c) 2019 Oliver Kuederle |
+| `github.com/xo/terminfo` | `v1.0.0` | MIT | Copyright (c) 2016 Anmol Sethi |
+
+Modules that only tests use (`go-udiff`, `bitset`, `x/exp/golden`, `stringish`, `golang.org/x/exp`) are not linked into the programs, and `charmbracelet/x/termios` (Unix only) is not linked into the Windows builds; they have no entry.
+
 ## Other software used at build or run time (not included)
 
 - For a hand build: Visual Studio Build Tools, clang-cl, CMake and Ninja. The installer uses the bundled llvm-mingw, CMake and Ninja instead.
