@@ -70,6 +70,21 @@ def dxt5(rgba, clear):
             out += bytes([a0, a1]) + abits.to_bytes(6, "little") + c0.to_bytes(2, "little") + c1.to_bytes(2, "little") + idx.to_bytes(4, "little")
     return bytes(out)
 
+def dxt5_decode(data, w, h):
+    """DXT5 bytes (4x4 blocks in rows) -> (h, w, 4) uint8 straight alpha; for the preview of the .inc files already in the tree."""
+    import numpy as np
+    out = np.zeros((h, w, 4), np.uint8); n = 0
+    for by in range((h + 3) // 4):
+        for bx in range((w + 3) // 4):
+            b = data[n:n + 16]; n += 16; a0, a1 = b[0], b[1]; ab = int.from_bytes(b[2:8], "little")
+            pal = [a0, a1] + ([((6 - i) * a0 + (i + 1) * a1) // 7 for i in range(6)] if a0 > a1 else [((4 - i) * a0 + (i + 1) * a1) // 5 for i in range(4)] + [0, 255])
+            c0 = int.from_bytes(b[8:10], "little"); c1 = int.from_bytes(b[10:12], "little"); idx = int.from_bytes(b[12:16], "little")
+            e0, e1 = c565(c0), c565(c1); cp = [e0, e1, tuple((2 * x + y) // 3 for x, y in zip(e0, e1)), tuple((x + 2 * y) // 3 for x, y in zip(e0, e1))]
+            for i in range(16):
+                x = bx * 4 + i % 4; y = by * 4 + i // 4
+                if x < w and y < h: out[y, x, :3] = cp[(idx >> (2 * i)) & 3]; out[y, x, 3] = pal[(ab >> (3 * i)) & 7]
+    return out
+
 def inc(data, note):
     return "/* %s */\n" % note + ",\n".join(", ".join("0x%02X" % b for b in data[i:i + 16]) for i in range(0, len(data), 16)) + "\n"
 
@@ -98,20 +113,32 @@ def main():
                     if not has_glyph(f, ch): bad.append((lang, id_, ch))
         print("missing glyphs:", bad or "none"); return 1 if bad else 0
     os.makedirs(out, exist_ok=True); sheet = []
-    for lang in LANGS[1:]:
+    new = {}   # (lang, name, style) -> straight-alpha RGBA array, for the preview
+    for lang in LANGS:
         for id_, name in LABELS:
-            m = mla.letters(font, tbl[id_][lang], W, H, LEFT, BASE)
-            bb = m.getbbox()
-            if bb and bb[2] > (W - LEFT) * mla.SS:      # wider than the picture: squeeze sideways to fit
-                k = ((W - LEFT) * mla.SS - LEFT * mla.SS) / float(bb[2] - LEFT * mla.SS); a = 1.0 / k
+            m = mla.letters(font, tbl[id_][lang], 2 * W, H, LEFT, BASE)   # drawn on a canvas twice as wide, so the true width is measured
+            bb = m.getbbox(); avail = (W - 8) * mla.SS    # 8 px right margin for the rim
+            if bb and bb[2] > avail:      # wider than the picture: squeeze sideways to fit
+                k = (avail - LEFT * mla.SS) / float(bb[2] - LEFT * mla.SS); a = 1.0 / k
                 m = m.transform(m.size, Image.AFFINE, (a, 0, LEFT * mla.SS * (1 - a), 0, 1, 0), Image.BICUBIC)
+            m = m.crop((0, 0, W * mla.SS, H * mla.SS))
             for style, arr, clear in zip(("light", "dark"), mla.styles(m, W, H, BASE), ((0, 0, 0), (255, 255, 255))):
                 note = "main menu row label \"%s\" (%s), %s look: 300x43 DXT5 (13200 bytes), drawn by mp_label_langs.py from jsp_menu_lang.h (own art)" % (tbl[id_][lang], lang, style)
                 open(os.path.join(out, "mp_label_%s_%s_%s.inc" % (lang, name, style)), "w", encoding="utf-8").write(inc(dxt5(arr, clear), note))
-                if style == "light": sheet.append(Image.fromarray(arr, "RGBA"))
-    if prev and sheet:
-        P = Image.new("RGBA", (W * 4, H * 4), (92, 92, 130, 255))
-        for i, s in enumerate(sheet): P.paste(s, ((i % 4) * W, (i // 4) * H), s)
+                new[(lang, name, style)] = arr; sheet.append(arr)
+    if prev and sheet:   # contact sheet: per row the old Impact English (the .inc files of the tree) then en es fr de it; light looks above, dark looks below
+        import numpy as np
+        inc_dir = os.path.join(root, "installer", "port", "jsp"); cols = ["old"] + LANGS
+        P = Image.new("RGBA", (W * len(cols), H * len(LABELS) * 2), (92, 92, 130, 255))
+        for si, style in enumerate(("light", "dark")):
+            for ri, (_, name) in enumerate(LABELS):
+                for ci, c in enumerate(cols):
+                    if c == "old":
+                        f = os.path.join(inc_dir, "mm_label_%s_%s.inc" % (name, style))
+                        if not os.path.exists(f): continue
+                        arr = dxt5_decode(bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", open(f).read())), W, H)
+                    else: arr = new[(c, name, style)]
+                    im = Image.fromarray(arr, "RGBA"); P.paste(im, (ci * W, (si * len(LABELS) + ri) * H), im)
         P.save(prev)
     print("wrote", out); return 0
 
