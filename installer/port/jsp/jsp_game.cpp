@@ -3326,7 +3326,7 @@ int impossible_tint_rects(short (*r)[4], float (*rgb)[3], int max)
     const uint32_t cursor = charsel_cursor();
     if (n < max && panel_open() == 2 && cursor >= 1 && cursor < 4 && g_imp_slot[cursor] && panel_level() == 4 && (!two || panel_first())) {
         /* the settings window's five stars; on the 2 Players screen Player 1's window stands on the left, over its grid (measured) */
-        r[n][0] = (short)(790 + (two ? -635 : 0)); r[n][1] = (short)(279 + (two ? 0 : 0)); r[n][2] = 5 * 40 + 2; r[n][3] = 39;
+        r[n][0] = (short)(790 + (two ? -635 : 0)); r[n][1] = (short)279; r[n][2] = 5 * 40 + 2; r[n][3] = 39;
         rgb[n][0] = 1.0f; rgb[n][1] = 0.36f; rgb[n][2] = 0.30f; n++;
     }
     return n;
