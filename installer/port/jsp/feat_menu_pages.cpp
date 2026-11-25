@@ -25,6 +25,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "jsp_mp_pack.h"   // the packed pictures (host test: installer/tools/menu_lang_test.sh)
 #include "jsp_menu_lang.h"   // the text language and the gate (host test: installer/tools/menu_lang_test.sh)
 #ifdef _WIN32
 #include <windows.h>
@@ -130,164 +131,41 @@ void psbar_tick()
  * moves the list cursor to that real row on Cross; the highlight part (func_001E3BE0, +0x40 wanted row) is held on
  * the screen row meanwhile. The new labels are drawn by docs/archive/jstars-notes/tools/mm_label.ps1 from a Windows font.
  * ------------------------------------------------------------------------------------------------------------- */
-/* The row labels (300x43 DXT5, a light and a dark one each), the page-1 title (512x64) and the help-bar watermark (1024x128), one set per language:
- * mp_label_<lang>_<name>_{light,dark}.inc, mp_title_<lang>.inc, mp_mark_<lang>.inc, drawn by installer/tools/mp_label_langs.py from the table in
- * jsp_menu_lang.h (our own art from Fira Sans Heavy Italic, SIL OFL 1.1; nothing from the game). A language whose files are absent has no set and
- * jml::labels_ready() is false for it, so the feature stays off there (the game's own menu). Added by this file's mp_register_sets(). */
-#if __has_include("mp_label_en_battle_light.inc") && __has_include("mp_title_en.inc") && __has_include("mp_mark_en.inc")
+/* The pictures of a language, one blob of 269440 bytes of DXT5 (8 row labels 300x43, light then dark, for Battle Modes / Training / Impossible /
+ * Port Settings; the page-1 title 512x64; the help-bar watermark 1024x128), packed as base 85 text of a 16-byte block RLE (jsp_mp_pack.h) in
+ * mp_pic_<lang>.inc, made by installer/tools/mp_label_langs.py from the table in jsp_menu_lang.h (our own art from Fira Sans Heavy Italic, SIL OFL 1.1;
+ * nothing from the game). A language whose file is absent has no set and jml::labels_ready() is false for it, so the feature stays off there (the
+ * game's own menu). Unpacked once, for the shown language only (mp_cur_set). */
+static const size_t kMpBlob = 8u * 13200u + 32768u + 131072u;
+#if __has_include("mp_pic_en.inc")
 #define MP_HAVE_EN 1
-static const uint8_t k_mp_lab_en[4][2][13200] = {
-    { {
-#include "mp_label_en_battle_light.inc"
-    }, {
-#include "mp_label_en_battle_dark.inc"
-    } },
-    { {
-#include "mp_label_en_training_light.inc"
-    }, {
-#include "mp_label_en_training_dark.inc"
-    } },
-    { {
-#include "mp_label_en_impossible_light.inc"
-    }, {
-#include "mp_label_en_impossible_dark.inc"
-    } },
-    { {
-#include "mp_label_en_portset_light.inc"
-    }, {
-#include "mp_label_en_portset_dark.inc"
-    } },
-};
-static const uint8_t k_mp_title_en[32768] = {
-#include "mp_title_en.inc"
-};
-static const uint8_t k_mp_mark_en[131072] = {
-#include "mp_mark_en.inc"
-};
+static const char k_mp_pic_en[] =
+#include "mp_pic_en.inc"
+;
 #endif
-#if __has_include("mp_label_es_battle_light.inc") && __has_include("mp_title_es.inc") && __has_include("mp_mark_es.inc")
+#if __has_include("mp_pic_es.inc")
 #define MP_HAVE_ES 1
-static const uint8_t k_mp_lab_es[4][2][13200] = {
-    { {
-#include "mp_label_es_battle_light.inc"
-    }, {
-#include "mp_label_es_battle_dark.inc"
-    } },
-    { {
-#include "mp_label_es_training_light.inc"
-    }, {
-#include "mp_label_es_training_dark.inc"
-    } },
-    { {
-#include "mp_label_es_impossible_light.inc"
-    }, {
-#include "mp_label_es_impossible_dark.inc"
-    } },
-    { {
-#include "mp_label_es_portset_light.inc"
-    }, {
-#include "mp_label_es_portset_dark.inc"
-    } },
-};
-static const uint8_t k_mp_title_es[32768] = {
-#include "mp_title_es.inc"
-};
-static const uint8_t k_mp_mark_es[131072] = {
-#include "mp_mark_es.inc"
-};
+static const char k_mp_pic_es[] =
+#include "mp_pic_es.inc"
+;
 #endif
-#if __has_include("mp_label_fr_battle_light.inc") && __has_include("mp_title_fr.inc") && __has_include("mp_mark_fr.inc")
+#if __has_include("mp_pic_fr.inc")
 #define MP_HAVE_FR 1
-static const uint8_t k_mp_lab_fr[4][2][13200] = {
-    { {
-#include "mp_label_fr_battle_light.inc"
-    }, {
-#include "mp_label_fr_battle_dark.inc"
-    } },
-    { {
-#include "mp_label_fr_training_light.inc"
-    }, {
-#include "mp_label_fr_training_dark.inc"
-    } },
-    { {
-#include "mp_label_fr_impossible_light.inc"
-    }, {
-#include "mp_label_fr_impossible_dark.inc"
-    } },
-    { {
-#include "mp_label_fr_portset_light.inc"
-    }, {
-#include "mp_label_fr_portset_dark.inc"
-    } },
-};
-static const uint8_t k_mp_title_fr[32768] = {
-#include "mp_title_fr.inc"
-};
-static const uint8_t k_mp_mark_fr[131072] = {
-#include "mp_mark_fr.inc"
-};
+static const char k_mp_pic_fr[] =
+#include "mp_pic_fr.inc"
+;
 #endif
-#if __has_include("mp_label_de_battle_light.inc") && __has_include("mp_title_de.inc") && __has_include("mp_mark_de.inc")
+#if __has_include("mp_pic_de.inc")
 #define MP_HAVE_DE 1
-static const uint8_t k_mp_lab_de[4][2][13200] = {
-    { {
-#include "mp_label_de_battle_light.inc"
-    }, {
-#include "mp_label_de_battle_dark.inc"
-    } },
-    { {
-#include "mp_label_de_training_light.inc"
-    }, {
-#include "mp_label_de_training_dark.inc"
-    } },
-    { {
-#include "mp_label_de_impossible_light.inc"
-    }, {
-#include "mp_label_de_impossible_dark.inc"
-    } },
-    { {
-#include "mp_label_de_portset_light.inc"
-    }, {
-#include "mp_label_de_portset_dark.inc"
-    } },
-};
-static const uint8_t k_mp_title_de[32768] = {
-#include "mp_title_de.inc"
-};
-static const uint8_t k_mp_mark_de[131072] = {
-#include "mp_mark_de.inc"
-};
+static const char k_mp_pic_de[] =
+#include "mp_pic_de.inc"
+;
 #endif
-#if __has_include("mp_label_it_battle_light.inc") && __has_include("mp_title_it.inc") && __has_include("mp_mark_it.inc")
+#if __has_include("mp_pic_it.inc")
 #define MP_HAVE_IT 1
-static const uint8_t k_mp_lab_it[4][2][13200] = {
-    { {
-#include "mp_label_it_battle_light.inc"
-    }, {
-#include "mp_label_it_battle_dark.inc"
-    } },
-    { {
-#include "mp_label_it_training_light.inc"
-    }, {
-#include "mp_label_it_training_dark.inc"
-    } },
-    { {
-#include "mp_label_it_impossible_light.inc"
-    }, {
-#include "mp_label_it_impossible_dark.inc"
-    } },
-    { {
-#include "mp_label_it_portset_light.inc"
-    }, {
-#include "mp_label_it_portset_dark.inc"
-    } },
-};
-static const uint8_t k_mp_title_it[32768] = {
-#include "mp_title_it.inc"
-};
-static const uint8_t k_mp_mark_it[131072] = {
-#include "mp_mark_it.inc"
-};
+static const char k_mp_pic_it[] =
+#include "mp_pic_it.inc"
+;
 #endif
 volatile bool g_mp_training_start = false;
 volatile int g_mp_entry = 0;            /* 1 Training row, 2 Impossible row: read when Free Battle's screens open */
@@ -333,24 +211,33 @@ static const std::string& mp_lang()
 }
 extern "C" const char* jsp_mp_lang(void) { return mp_lang().c_str(); }   /* the language the disc shows, for the port's pop-up texts (jsp_game.cpp) */
 struct MpSet { const uint8_t (*lab)[2][13200]; const uint8_t* title; const uint8_t* mark; };
-static MpSet mp_set(const std::string& l)   /* the picture set of a language; {} when its files are not in the build */
+static MpSet mp_set(const std::string& l)   /* the picture set of a language; {} when its file is not in the build or does not unpack */
 {
+    static std::map<std::string, std::vector<uint8_t>> cache;   /* unpacked blobs, kept for the run */
+    auto it = cache.find(l);
+    if (it == cache.end()) {
+        const char* text = nullptr;
 #ifdef MP_HAVE_EN
-    if (l == "en") return { k_mp_lab_en, k_mp_title_en, k_mp_mark_en };
+        if (l == "en") text = k_mp_pic_en;
 #endif
 #ifdef MP_HAVE_ES
-    if (l == "es") return { k_mp_lab_es, k_mp_title_es, k_mp_mark_es };
+        if (l == "es") text = k_mp_pic_es;
 #endif
 #ifdef MP_HAVE_FR
-    if (l == "fr") return { k_mp_lab_fr, k_mp_title_fr, k_mp_mark_fr };
+        if (l == "fr") text = k_mp_pic_fr;
 #endif
 #ifdef MP_HAVE_DE
-    if (l == "de") return { k_mp_lab_de, k_mp_title_de, k_mp_mark_de };
+        if (l == "de") text = k_mp_pic_de;
 #endif
 #ifdef MP_HAVE_IT
-    if (l == "it") return { k_mp_lab_it, k_mp_title_it, k_mp_mark_it };
+        if (l == "it") text = k_mp_pic_it;
 #endif
-    return { nullptr, nullptr, nullptr };
+        it = cache.emplace(l, text ? jmp::unpack(text, kMpBlob) : std::vector<uint8_t>()).first;
+        if (text && it->second.empty()) { std::printf("[mpages] the picture set of %s does not unpack\n", l.c_str()); std::fflush(stdout); }
+    }
+    const std::vector<uint8_t>& v = it->second;
+    if (v.size() != kMpBlob) return { nullptr, nullptr, nullptr };
+    return { (const uint8_t (*)[2][13200])v.data(), v.data() + 8u * 13200u, v.data() + 8u * 13200u + 32768u };
 }
 static void mp_register_sets()   /* tells jsp_menu_lang.h which languages have all their pictures */
 {

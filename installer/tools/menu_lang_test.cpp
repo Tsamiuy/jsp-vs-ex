@@ -1,5 +1,6 @@
 // Host test of installer/port/jsp/jsp_menu_lang.h: language pick, gate/fallback, table shape, UTF-16 encoding of the accented strings.
 #include "../port/jsp/jsp_menu_lang.h"
+#include "../port/jsp/jsp_mp_pack.h"
 #include <cstdio>
 static int fails = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -49,6 +50,24 @@ int main()
     CHECK(text_overlay(MENU_FREE_BATTLE, "fr") == u"Combat libre"); CHECK(text_overlay(MENU_CHOOSE_MODE, "en") == u"Choose a mode");
     CHECK(text_overlay(MENU_IMPOSSIBLE, "de") == u"Impossible");          // "Unmöglich" is not ASCII: English for now
     CHECK(text_overlay(MENU_CHOOSE_FIGHT, "es") == u"Elige un combate");
+    // the packed pictures (jsp_mp_pack.h): a golden text made by the Python tool, a round trip, malformed input
+    {
+        std::vector<uint8_t> blob(32, 0); for (int i = 0; i < 16; i++) blob.push_back((uint8_t)i);
+        for (int k = 0; k < 3; k++) blob.insert(blob.end(), 16, 0xAB);
+        for (int i = 16; i < 48; i++) blob.push_back((uint8_t)i);
+        blob.insert(blob.end(), 200 * 16, 0);
+        static const char gold[] = "HrXNDLJ-]O!!!!!!!!!!!!!!!!!!!#!YuS0#s[FA%5B8Q&O,0oZ0l<&Z0l<&Z0l<&Z0l:&'/rPj(IXD#)c>63+%%)D,=bsT-WHfe.q.Xu02lL.uu=%!!!!!!!!!!!!!!!!!76(@!!!!!!!!!!!!!!!!!!";
+        CHECK(blob.size() == 3328); CHECK(jmp::pack(blob) == gold);                              // the Python tool writes the same text
+        CHECK(jmp::unpack(gold, blob.size()) == blob);
+        CHECK(jmp::unpack(gold, blob.size() + 16).empty()); CHECK(jmp::unpack(gold, blob.size() - 16).empty());   // a wrong output size
+        std::string cut(gold, sizeof gold - 1 - 8); CHECK(jmp::unpack(cut.c_str(), blob.size()).empty());         // truncated
+        std::string bad(gold); bad[10] = '"'; CHECK(jmp::unpack(bad.c_str(), blob.size()).empty());               // a character outside the alphabet
+        CHECK(jmp::unpack("", 16).empty()); CHECK(jmp::unpack("!", 16).empty()); CHECK(jmp::unpack(nullptr, 16).empty());
+        uint32_t x = 12345; std::vector<uint8_t> r; for (int i = 0; i < 16 * 300; i++) { x = x * 1664525u + 1013904223u; r.push_back((i / 16) % 7 == 0 ? 0 : (uint8_t)(x >> 24)); }
+        CHECK(jmp::unpack(jmp::pack(r).c_str(), r.size()) == r);                                  // runs and literals mixed
+        std::vector<uint8_t> z(16 * 1000, 0); const std::string zs = jmp::pack(z); CHECK(zs.size() < 220); CHECK(jmp::unpack(zs.c_str(), z.size()) == z);   // runs longer than 128
+        const std::string& a = jmp::alphabet(); CHECK(a.size() == 85 && a.find('"') == std::string::npos && a.find('\\') == std::string::npos && a.find('?') == std::string::npos);
+    }
     if (!fails) std::printf("menu_lang_test: ok\n");
     return fails ? 1 : 0;
 }

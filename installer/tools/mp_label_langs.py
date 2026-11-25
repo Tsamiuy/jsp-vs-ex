@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""Two-page Main Menu row labels in es, fr, de and it: our own art, no game pixels.
+"""Two-page Main Menu pictures in en, es, fr, de and it: row labels, page title and help-bar watermark. Our own art, no game pixels.
 
 One command regenerates every picture from the text table in installer/port/jsp/jsp_menu_lang.h (the one place the words live: a reviewed
-translation is edited there, then this is run again):
+translation is edited there, then this is run again; add --font-hash check by the pinned SHA-256 in menu_label_art.py):
 
-  python3 -I installer/tools/mp_label_langs.py OUT_DIR [FONT.ttf]            writes mp_label_<lang>_<name>_{light,dark}.inc
-  python3 -I installer/tools/mp_label_langs.py --check [FONT.ttf]            glyph check only: every character of every label has a glyph
-  python3 -I installer/tools/mp_label_langs.py --preview PNG OUT_DIR [FONT]  also a contact sheet of the pictures
+  python3 installer/tools/mp_label_langs.py OUT_DIR [FONT.ttf]            writes OUT_DIR/mp_pic_<lang>.inc  (use installer/port/jsp as OUT_DIR)
+  python3 installer/tools/mp_label_langs.py --check [FONT.ttf]            glyph check only: every character of every label has a glyph
+  python3 installer/tools/mp_label_langs.py --preview PNG OUT_DIR [FONT]  also contact sheets PNG and PNG_title.png
 
-<name> is battle, training, impossible, portset (MENU_BATTLE_MODES, MENU_TRAINING_MODE, MENU_IMPOSSIBLE_MODE, MENU_PORT_SETTINGS).
-Each picture is a 300 x 43 DXT5 body (13200 bytes, 4x4 blocks in rows, as the .inc files of the English labels, packed like
-docs/archive/jstars-notes/tools/dxt5enc_any.py), light = the normal look (white letters, black rim), dark = the highlighted look (black
-letters, white glow). The letters come from menu_label_art.py (Fira Sans Heavy Italic, SIL OFL 1.1, pinned by SHA-256 there), at its cap
-height and slant; a label wider than the picture is squeezed sideways to fit.
+(Run it without -I when Pillow and numpy come from a PYTHONPATH, as in a nix python3.withPackages environment. Needs Pillow and numpy; the font is
+Fira Sans Heavy Italic 4.301, SIL OFL 1.1, the file pinned by SHA-256 in menu_label_art.py.)
 
-NOT RUN YET (written in a quiet window with no Pillow in the shell): the sizes LEFT 10 / BASE 31, the light = black-clear and dark = white-clear
-choice of the clear colour, and the match of the look with the English labels (those were drawn from Impact by mm_label.ps1, not from Fira Sans)
-are ASSUMPTIONS to check against a screenshot. The .inc files are not in the tree, so jsp_menu_lang.h keeps labels_ready false for these languages.
-Also open before a language can be switched on: the page-1 title picture ("Battle Modes", 512 x 64) and the help-bar watermark are English pictures too.
+What is in a picture set (one blob of 269440 bytes per language, DXT5, 4x4 blocks in rows):
+  8 row labels 300 x 43 (13200 bytes each): battle, training, impossible, portset, each light then dark;   light = the normal look (white-to-grey
+  letters, black rim), dark = the highlighted look (black letters, white glow); the letters come from menu_label_art.py at its cap height and slant,
+  a label wider than the picture is squeezed sideways to fit;
+  the page-1 title 512 x 64 (32768 bytes): yellow-to-orange italic letters, dark brown rim;
+  the help-bar watermark 1024 x 128 (131072 bytes): flat grey at alpha 26, right aligned.
+The blob is packed by installer/port/jsp/jsp_mp_pack.h's format (16-byte block RLE, then base 85 text in a string literal) into mp_pic_<lang>.inc
+(about 0.5 MB for all five languages together; the unpacker and its host test are jsp_mp_pack.h and installer/tools/menu_lang_test.cpp).
+
+Run on Linux with Pillow and numpy: the glyph check passes and the contact sheets were looked at. ASSUMPTIONS still to check against a game screenshot:
+LEFT 10 / BASE 31 of the 300 x 43 picture, the clear colour (black for light, white for dark), the title and watermark place and scale, and the look
+against the game's own labels (the old English ones were drawn from Impact by mm_label.ps1: wider letters, more tracking).
 """
 import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -132,6 +137,58 @@ def mark_picture(mla, Image, np, font, text):
     arr = np.zeros((H2 * SS, W2 * SS, 4)); arr[..., 0] = 156; arr[..., 1] = 157; arr[..., 2] = 156; arr[..., 3] = a * 26
     return mla._down(arr, W2, H2)
 
+def rle(blob):
+    """16-byte block RLE of jsp_mp_pack.h: op < 0x80 -> op+1 literal blocks follow; op >= 0x80 -> the next block repeats (op & 0x7F)+1 times."""
+    nb = len(blob) // 16; blk = lambda i: blob[i * 16:i * 16 + 16]; o = bytearray(); i = 0
+    while i < nb:
+        r = 1
+        while i + r < nb and r < 128 and blk(i) == blk(i + r): r += 1
+        if r >= 2: o.append(0x80 | (r - 1)); o += blk(i); i += r; continue
+        l = 1
+        while i + l < nb and l < 128 and not (i + l + 1 < nb and blk(i + l) == blk(i + l + 1)): l += 1
+        o.append(l - 1); o += blob[i * 16:(i + l) * 16]; i += l
+    return bytes(o)
+
+def unrle(d, out_bytes):
+    o = bytearray(); i = 0
+    while i < len(d):
+        b = d[i]; i += 1; c = (b & 0x7F) + 1
+        if b < 0x80: o += d[i:i + c * 16]; i += c * 16
+        else: o += d[i:i + 16] * c; i += 16
+    assert len(o) == out_bytes
+    return bytes(o)
+
+def alphabet():
+    return "".join(chr(c) for c in range(33, 127) if chr(c) not in '"\\?')[:85]
+
+def b85(d):
+    A = alphabet(); out = []
+    for i in range(0, len(d), 4):
+        g = d[i:i + 4]; n = len(g); v = int.from_bytes(g + b"\0" * (4 - n), "big"); t = []
+        for _ in range(5): t.append(A[v % 85]); v //= 85
+        out.append("".join(reversed(t))[:n + 1])
+    return "".join(out)
+
+def unb85(text):
+    A = alphabet(); out = bytearray(); i = 0
+    while i < len(text):
+        g = text[i:i + 5]; v = 0
+        for k in range(5): v = v * 85 + (A.index(g[k]) if k < len(g) else 84)
+        out += v.to_bytes(5, "big")[1:][:len(g) - 1] if False else v.to_bytes(4, "big")[:len(g) - 1]; i += 5
+    return bytes(out)
+
+def pack(blob):
+    r = rle(blob); return b85(len(r).to_bytes(4, "little") + r)
+
+def unpack(text, out_bytes):
+    d = unb85(text); n = int.from_bytes(d[:4], "little"); assert len(d) == 4 + n
+    return unrle(d[4:], out_bytes)
+
+def pic_inc(text, note):
+    """The packed text as the body of a C string literal, in lines of 118 characters."""
+    lines = ['"%s"' % text[i:i + 118] for i in range(0, len(text), 118)]
+    return "/* %s */\n" % note + "\n".join(lines) + "\n"
+
 def inc(data, note):
     return "/* %s */\n" % note + ",\n".join(", ".join("0x%02X" % b for b in data[i:i + 16]) for i in range(0, len(data), 16)) + "\n"
 
@@ -161,6 +218,7 @@ def main():
                     if not has_glyph(f, ch): bad.append((lang, id_, ch))
         print("missing glyphs:", bad or "none"); return 1 if bad else 0
     os.makedirs(out, exist_ok=True); sheet = []
+    blobs = {}   # lang -> {("lab", name, style) | "title" | "mark": DXT5 bytes}
     new = {}   # (lang, name, style) -> straight-alpha RGBA array, for the preview
     for lang in LANGS:
         for id_, name in LABELS:
@@ -172,20 +230,24 @@ def main():
             m = m.crop((0, 0, W * mla.SS, H * mla.SS))
             for style, arr, clear in zip(("light", "dark"), mla.styles(m, W, H, BASE), ((0, 0, 0), (255, 255, 255))):
                 note = "main menu row label \"%s\" (%s), %s look: 300x43 DXT5 (13200 bytes), drawn by mp_label_langs.py from jsp_menu_lang.h (own art)" % (tbl[id_][lang], lang, style)
-                open(os.path.join(out, "mp_label_%s_%s_%s.inc" % (lang, name, style)), "w", encoding="utf-8").write(inc(dxt5(arr, clear), note))
+                blobs.setdefault(lang, {})[("lab", name, style)] = dxt5(arr, clear)
                 new[(lang, name, style)] = arr; sheet.append(arr)
     pics = {}   # lang -> (title, mark) arrays
     for lang in LANGS:
         t_, m_ = title_picture(mla, Image, np, font, tbl["MENU_BATTLE_MODES"][lang]), mark_picture(mla, Image, np, font, tbl["MENU_BATTLE_MODES"][lang])
         pics[lang] = (t_, m_)
         note = "main menu page-1 %s \"%s\" (%s), %s, DXT5, drawn by mp_label_langs.py from jsp_menu_lang.h (own art)"
-        open(os.path.join(out, "mp_title_%s.inc" % lang), "w", encoding="utf-8").write(inc(dxt5(t_, (0, 0, 0)), note % ("title", tbl["MENU_BATTLE_MODES"][lang], lang, "512x64 (32768 bytes)")))
-        open(os.path.join(out, "mp_mark_%s.inc" % lang), "w", encoding="utf-8").write(inc(dxt5(m_, (0, 0, 0)), note % ("watermark", tbl["MENU_BATTLE_MODES"][lang], lang, "1024x128 (131072 bytes)")))
+        blobs[lang]["title"] = dxt5(t_, (0, 0, 0)); blobs[lang]["mark"] = dxt5(m_, (0, 0, 0))
+        blob = b"".join(blobs[lang][("lab", n, st)] for _, n in LABELS for st in ("light", "dark")) + blobs[lang]["title"] + blobs[lang]["mark"]
+        assert len(blob) == 269440
+        txt = pack(blob); assert unpack(txt, len(blob)) == blob   # the packed text must give the pictures back
+        open(os.path.join(out, "mp_pic_%s.inc" % lang), "w", encoding="utf-8").write(pic_inc(txt, "main menu pictures (%s), packed by mp_label_langs.py from jsp_menu_lang.h: 8 labels, title, watermark" % lang))
     if prev and pics:   # second sheet PREV_title.png: per row the old English then en es fr de it: the title (512 x 64) and the watermark at half size, its alpha x8 (it is 26 of 255)
         P2 = Image.new("RGBA", (1024, 64 * 6), (92, 92, 130, 255))
         for ri, c in enumerate(["old"] + LANGS):
             if c == "old":
                 rd = lambda n, w, h: dxt5_decode(bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", re.sub(r"/\*.*?\*/", "", open(os.path.join(root, "installer", "port", "jsp", n)).read(), flags=re.S))), w, h)
+                if not os.path.exists(os.path.join(root, "installer", "port", "jsp", "mm_title_battle.inc")): continue   # the old Impact files are gone from the tree
                 tt, mm = rd("mm_title_battle.inc", 512, 64), rd("mm_mark_battle.inc", 1024, 128)
             else: tt, mm = pics[c]
             mm = mm.copy(); mm[..., 3] = np.minimum(255, mm[..., 3].astype(int) * 8).astype(np.uint8)

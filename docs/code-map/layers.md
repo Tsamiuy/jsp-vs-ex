@@ -122,7 +122,7 @@ Rendering
 | `jsp_train_readout.h` | Pure: the Training readout's state, text and layout (last hit damage, combo, both fighters' health and Stamina; on unless `TRAINING_READOUT=0`); it ignores rollback re-run ticks (`jsp_stepper_in_replay`) and yields the shared overlay layer (`layer_step`) |
 | `jsp_overlay_api.h` | Declarations of the present-time RGBA overlay and the menu-label switches (toolkit 2516-2518) |
 | `jsp_version_line.h` | Pure: which version line the main menu shows |
-| `mp_label_<lang>_<name>_{light,dark}.inc`, `mp_title_<lang>.inc`, `mp_mark_<lang>.inc` (lang en, es, fr, de, it) | Generated label art for the two-page main menu, included by `feat_menu_pages.cpp` |
+| `mp_pic_<lang>.inc` (lang en, es, fr, de, it; packed, 0.6 MB together), `jsp_mp_pack.h` (the unpacker) | Generated pictures (row labels, title, watermark) for the two-page main menu, included by `feat_menu_pages.cpp` |
 | `exit_label_dark.inc`, `exit_label_light.inc` | Generated label art for Exit Game, included by `jsp_game.cpp` |
 | `jsp_session_startup.cpp` | Reports the two-thread drawing state (toolkit 7904) as startup evidence for the rollback session |
 
