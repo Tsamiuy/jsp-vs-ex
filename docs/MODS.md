@@ -128,3 +128,9 @@ Songs are the only sound files that are cosmetic: `sound/<LANG>/BGM_*` in `cpk-e
   reads the `[fs] open` lines. If the game opens through another path function than `cellFsOpen`, nothing is served.
 - That the game accepts a voice bank or tip served this way, and that a view's size via `cellFsFstat` is what CRI uses.
 - The cue-sheet name table has no names for ids 19 to 21 (static reading): a bank may load and still not play.
+
+## derived: bytes from the game or a third party
+
+A `file` source of a `cpk-entry` override or a `loose` entry may carry `"derived": true` (an alias takes none: it ships no bytes). It is
+bookkeeping only: not in the digest, logged as `[mods] <id>: marked derived`, and `jmods::manifest_derived` tells a verifier to check the
+mod but never put it on the tested list. A port that does not know the key ignores it on an override.

@@ -384,7 +384,7 @@ inline const std::vector<Interface>& supported_interfaces()
     static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 2 }, { "loose-file", 1 } };
     return k;
 }
-struct OverrideSpec { std::string entry, alias, file, sha256; };
+struct OverrideSpec { std::string entry, alias, file, sha256; bool derived = false; };   // derived: bytes taken from the game or a third party (a "file" source only)
 // ENHANCEMENT (roster): one added fighter. id 0..63 (the save's "owned" field covers ids 0..63: word id/32 of three words at save +0x29A9C,
 // the third also holds the supports 200..231 as id-136, jsp_unlock.cpp); after: the id it goes behind in the list (-1 = before the first
 // support, id >= 200); logo_as: a stock fighter id whose intro series logo this fighter shows (the switch @0x00127A94 is run with that id
@@ -575,6 +575,15 @@ struct Manifest {
     std::vector<std::vector<std::string>> loose_groups;    // groups whose members are loose paths
 };
 
+// True when any "file" source of the manifest (a cpk-entry override or a loose file) is marked derived: such a mod can be verified but is never
+// put on the tested list (PM 2026-11-24). Bookkeeping only: not in the digest.
+inline bool manifest_derived(const Manifest& m)
+{
+    for (const OverrideSpec& o : m.overrides) if (o.derived) return true;
+    for (const LooseSpec& l : m.loose) if (l.derived) return true;
+    return false;
+}
+
 inline bool parse_manifest(const std::string& text, const std::string& folder_id, const std::vector<Interface>& supported,
                            const std::string& title_id, Manifest& m, std::string& err)
 {
@@ -651,6 +660,7 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
                 if (a->type != Json::Str || !valid_rel_path(a->s)) { err = "entry " + s.entry + ": bad \"alias\""; return false; }
                 s.alias = a->s;
                 if (o.get("sha256")) { err = "entry " + s.entry + ": an alias takes no \"sha256\""; return false; }
+                if (o.get("derived")) { err = "entry " + s.entry + ": an alias takes no \"derived\" (it ships no bytes)"; return false; }
             } else {
                 if (f->type != Json::Str || !valid_rel_path(f->s)) { err = "entry " + s.entry + ": bad \"file\" path"; return false; }
                 s.file = f->s;
@@ -659,6 +669,10 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
                 s.sha256 = lower(h->s);
                 for (char c : s.sha256)
                     if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { err = "entry " + s.entry + ": \"sha256\" is not hex"; return false; }
+                if (const Json* d = o.get("derived")) {
+                    if (d->type != Json::Bool) { err = "entry " + s.entry + ": \"derived\" must be true or false"; return false; }
+                    s.derived = d->b;
+                }
             }
             m.overrides.push_back(std::move(s));
         }
@@ -1413,6 +1427,7 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
         } else {
             bool any_alias = false, any_file = false;
             for (const auto& r : st.ovr) (r.spec.alias.empty() ? any_file : any_alias) = true;
+            if (manifest_derived(st.m)) log.push_back(fmt("[mods] %s: marked derived (game or third-party bytes): it can be verified, never listed as tested", st.id.c_str()));
             std::string ifs;
             for (const auto& i : st.m.interfaces) ifs += fmt("%s%s %d", ifs.empty() ? "" : ", ", i.name.c_str(), i.version);
             log.push_back(fmt("[mods] %s %s: %s, %llu override%s%s, interfaces %s", st.id.c_str(), st.m.version.c_str(),

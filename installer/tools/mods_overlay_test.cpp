@@ -1526,6 +1526,20 @@ static void test_loose()
     }
     add_mod(io, "vo", loose_mod("vo", full));
 
+    {   // derived on a cpk-entry override and on a loose file: parsed, logged, out of the digest, an alias takes none
+        const Bytes ob = noise(500, 91);
+        io.mods["dv/f/o.pak"] = ob;
+        const auto dv = [&](const std::string& more) {
+            add_mod(io, "dv", "{ \"schema\": 1, \"id\": \"dv\", \"version\": \"1\", \"title\": \"t\", \"game\": { \"title_ids\": [\"BLUS31519\"] }, \"interfaces\": { \"cpk-entry\": 1 },\n"
+                    "\"overrides\": [ { \"entry\": \"progress/game/loading_game/tips/loading_game_tips_chara_018_000_ALL_m.pak\", \"file\": \"f/o.pak\", \"sha256\": \"" + sha_hex(ob) + "\"" + more + " } ] }");
+            return jmods::load_mod_set(io, "dv\n", opts());
+        };
+        const jmods::ModSet plain = dv(""), der = dv(", \"derived\": true");
+        CHECK(mod(der, "dv")->loaded && jmods::manifest_derived(mod(der, "dv")->m) && !jmods::manifest_derived(mod(plain, "dv")->m));
+        CHECK(has_log(der, "[mods] dv: marked derived") && !has_log(plain, "marked derived") && der.digest == plain.digest);
+        CHECK(!mod(dv(", \"derived\": 1"), "dv")->loaded && has_log(dv(", \"derived\": 1"), "\"derived\" must be true or false"));
+        CHECK(jmods::manifest_derived(mod(jmods::load_mod_set(io, "vo\n", opts()), "vo")->m) == false);
+    }
     // refusals
     const std::string acb = lf("sound/JP/CV_019_00_ST_JP.acb", "f/CV_019_00_ST_JP.acb", cva), awb = lf("sound/JP/CV_019_00_ST_JP.awb", "f/CV_019_00_ST_JP.awb", cvb);
     const std::string tip = TIPS + "loading_game_tips_chara_019_000_ALL_m.pak", donor = TIPS + "loading_game_tips_chara_018_000_ALL_m.pak";
