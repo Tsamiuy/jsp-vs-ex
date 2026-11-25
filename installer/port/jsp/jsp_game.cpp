@@ -773,6 +773,10 @@ float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
       { if (!banner_cur) { s_bbox[0] = box[0]; s_bbox[1] = box[1]; s_bbox[2] = box[2]; s_bbox[3] = box[3]; } banner_cur = true; } }
     const float cx = (box[0] + box[2]) * 0.5f, cy = (box[1] + box[3]) * 0.5f;
     if (cy > 0.65f) { *ax = 0.0f; *ay = 1.0f; return s; }                  /* top: y < 126 px (bars, emblem, its pointer) */
+    /* 3v3: a third fighter's face icon in the player block sits just above the partner icon, centre y -0.44 / -0.39 (boxes
+     * -0.714,-0.501..-0.629,-0.387 and -0.724,-0.502..-0.628,-0.269 measured at 50 %), above the bottom line below, so it
+     * kept its full size at a smaller HUD size. Small pieces left of x -0.6 down to y -0.3 go with the bottom-left block. */
+    if (cx < -0.6f && cy < -0.3f && cy >= -0.45f && box[2] - box[0] < 0.15f && box[3] - box[1] < 0.3f && !banner_prev && !banner_cur) { *ax = -1.0f; *ay = -1.0f; return s; }
     if (cy < -0.45f && !banner_prev && !banner_cur) {                      /* bottom: y > 522 px */
         if (cx < 0.2f)  { *ax = -1.0f; *ay = -1.0f; return s; }            /* x < 768 px */
         if (cx > 0.45f) { *ax = 1.0f;  *ay = -1.0f; return s; }            /* x > 928 px */
