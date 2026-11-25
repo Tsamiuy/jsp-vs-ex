@@ -34,7 +34,7 @@ check("read: off only for the value 0",
       re.search(r'menuBox\.Checked = !\(cur\.TryGetValue\("MENU_PAGES", out s\) && s == "0"\);', cs) is not None)
 check("the key is owned by the window (not kept twice in the other lines)", 'k == "MENU_PAGES"' in cs)
 check("game: the menu is off only for MENU_PAGES=0 (and on the EU disc, where it is US only: jsp_region.h)",
-      re.search(r'bool mp_on\(\) \{[^}]*return jsp_game_is_us\(\) && !\(e && e\[0\] == \'0\'\);', menu) is not None)
+      re.search(r'bool mp_on\(\)\s*\{\s*static const bool on = \[\] \{ const char\* e = std::getenv\("MENU_PAGES"\); if \(e && e\[0\] == \'0\'\) return false;\s*if \(!jsp_game_is_us\(\)\) return false;', menu) is not None)
 check("game: 3v3 is off with MENU_PAGES=0 or SIX=0 and on otherwise",
       re.search(r"if \(\(mp && mp\[0\] == '0'\) \|\| \(off && off\[0\] == '0'\)\) return false;", six) is not None)
 if fails:
