@@ -112,6 +112,20 @@ __attribute__((weak)) void six_pad_watch(uint32_t port, uint16_t* b);
 __attribute__((weak)) void six_ask_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
 __attribute__((weak)) void six_icall(uint32_t target, uint64_t* gpr);
 __attribute__((weak)) float six_ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay);
+/* feat_training_opts.cpp (more Training options: CPU Level and Behavior, position resets and saved positions, Support cooldown,
+ * Infinite Victory Burst, the key line); weak: absent = the Training settings as before */
+__attribute__((weak)) int train_opt_count(void);                 /* how many rows for the old Training settings menu */
+__attribute__((weak)) const char* train_opt_line(int i);         /* a row's text, e.g. "CPU: Guard" */
+__attribute__((weak)) void train_opt_press(int i);               /* Cross on a row */
+__attribute__((weak)) int train_opt_dummy_ai(void);              /* 1: the training dummy is driven through its AI unit (its pad getters answer as usual) */
+__attribute__((weak)) void train_opt_icall(uint32_t target, uint64_t* gpr);
+__attribute__((weak)) void train_opt_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
+__attribute__((weak)) int train_opt_layer(int redraw);           /* 1: its key line or message is on the overlay and carries the Training readout (readout_tick) */
+/* feat_training_menu.cpp (the two-window Training pause menu); weak: absent = the pause menu's Training settings row */
+__attribute__((weak)) int train_menu_on(void);                   /* 1: the new menu replaces the pause menu's Training settings row */
+__attribute__((weak)) int train_menu_hide(const float* box);     /* 1: this HUD draw is the game's own pause panel, under our windows: not drawn */
+__attribute__((weak)) int train_menu_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);   /* 1: the menu took the pad read */
+extern "C" __attribute__((weak)) int jsp_ps_active(void);        /* feat_port_settings.cpp (may be absent): its screen is up */
 
 namespace {
 
@@ -705,6 +719,7 @@ bool hud_target(uint32_t rt_off)
 float ui_scale(uint32_t rt_off, const float* box, float* ax, float* ay)
 {
     if (six_ui_scale) { const float cs = six_ui_scale(rt_off, box, ax, ay); if (cs != 1.0f) return cs; }   /* feat_3v3.cpp: 3v3 Character Select layout */
+    if (train_menu_hide && hud_target(rt_off) && train_menu_hide(box)) { *ax = 8.0f; *ay = 8.0f; return 0.0001f; }   /* the game's pause panel under the Training menu's windows */
     static float s = -1.0f;
     static int sgen = -1;
     if (s < 0.0f || sgen != jsp_setting_gen()) {   /* live: the in-game Graphics page changes it */
@@ -1080,6 +1095,8 @@ int g_bal_nobj = 0;
 jptr::Readout g_readout;
 std::mutex g_readout_mu;
 bool g_readout_drawn = false;   /* the overlay holds the readout (close it only then, so other overlay users are not wiped) */
+bool g_readout_show = false;    /* the readout is to be seen now (readout_tick); read by jsp_tr_readout_draw */
+bool g_readout_carried = false; /* feat_training_opts.cpp's drawing carries the readout (its key line is on the same layer) */
 
 FILE* bal_file()
 {
@@ -1528,6 +1545,23 @@ const int k_setting_count = (int)(sizeof k_settings / sizeof k_settings[0]);
 const uint32_t k_text_row = 12, k_text_back = 13;
 const uint32_t k_copy_settings = k_pause_copy + 0x400u;
 uint32_t g_pause_texts = 0;
+/* Extra rows from feat_training_opts.cpp: each borrows a text slot this menu never shows and, because those slots are
+ * small (26-74 bytes), the slot's entry is pointed at a 0x80-byte text buffer of ours after the tables. */
+const uint32_t k_extra_slots[8] = { 4, 5, 6, 7, 11, 14, 17, 19 };
+const uint32_t k_extra_text = k_pause_copy + 0x900u, k_extra_text_size = 0x80u;
+int extra_rows() { const int n = train_opt_count ? train_opt_count() : 0; return n < 0 ? 0 : n > 8 ? 8 : n; }
+void pause_extra_text(int i)
+{
+    if (!train_opt_line || i < 0 || i >= extra_rows()) return;
+    const uint32_t pack = g_pause_texts, slot = k_extra_slots[i];
+    if (vm_read32(pack) != k_stpk || slot >= vm_read32(pack + 8)) return;
+    const uint32_t entry = pack + 16 + slot * 48, buf = k_extra_text + (uint32_t)i * k_extra_text_size;
+    if (pack + vm_read32(entry) != buf) {
+        vm_write32(buf, 0xFFFE0000u);   /* the BOM FF FE, then an empty text */
+        vm_write32(entry, buf - pack); vm_write32(entry + 4, k_extra_text_size);
+    }
+    pause_set_text(pack, slot, train_opt_line(i));
+}
 
 void pause_setting_text(const PauseSetting& st)
 {
@@ -1557,7 +1591,7 @@ void pause_open(uint64_t* gpr)
     const uint32_t entry = pack + 16 + k_table_pause * 48, entry2 = pack + 16 + k_table_settings * 48;
     const uint32_t table = pack + vm_read32(entry);
     const bool ours = table == k_pause_copy;
-    if (!training_active() || kind != k_table_pause) {
+    if (!training_active() || kind != k_table_pause || (train_menu_on && train_menu_on())) {   /* the two-window menu: the game's pause menu stays as it is, hidden under it */
         if (ours) { vm_write32(entry, g_pause_offset); vm_write32(entry2, g_settings_offset); }
         return;
     }
@@ -1573,7 +1607,7 @@ void pause_open(uint64_t* gpr)
         vm_write32(k_pause_copy, rows + 1);
         /* Training settings, built from the Yes/No box: a title, one row per setting, then Back */
         const uint32_t box = pack + vm_read32(pack + 16 + 23 * 48);   /* Restart's Yes/No */
-        const uint32_t set_rows = 2u + (uint32_t)k_setting_count;
+        const uint32_t set_rows = 2u + (uint32_t)k_setting_count + (uint32_t)extra_rows();
         for (uint32_t i = 0; i < 0x10u + k_pause_row; i += 4) vm_write32(k_copy_settings + i, vm_read32(box + i));
         vm_write32(k_copy_settings, set_rows);
         vm_write32(k_copy_settings + 0x10u + 4, k_text_row);
@@ -1582,7 +1616,7 @@ void pause_open(uint64_t* gpr)
             const uint32_t to = k_copy_settings + 0x10u + r * k_pause_row;
             for (uint32_t i = 0; i < k_pause_row; i += 4) vm_write32(to + i, vm_read32(no_row + i));
             const bool back = r == set_rows - 1;
-            vm_write32(to + 4, back ? k_text_back : k_settings[r - 1].text);
+            vm_write32(to + 4, back ? k_text_back : (int)r - 1 < k_setting_count ? k_settings[r - 1].text : k_extra_slots[(int)r - 1 - k_setting_count]);
             vm_write32(to + 8, k_next_back);
             vm_write32(to + 0x48, r == 1 ? 5u : 1u);
         }
@@ -1609,6 +1643,7 @@ void pause_open(uint64_t* gpr)
     pause_set_text(g_pause_texts, k_text_row, "Training settings");
     pause_set_text(g_pause_texts, k_text_back, "Back");
     for (const PauseSetting& st : k_settings) pause_setting_text(st);
+    for (int i = 0; i < extra_rows(); i++) pause_extra_text(i);
 }
 
 /* Replaces a text in the V_Pause pack (STPK, held at object +0x38) in memory. UTF-16 little-endian after a BOM. */
@@ -1642,6 +1677,14 @@ void pause_tick(uint16_t* b)
     if (!pause_up() || vm_read32(g_pause_obj + 0x30) != k_copy_settings) return;
     const uint32_t depth = vm_read32(g_pause_obj + 0x3AC);
     const int i = (int)vm_read32(g_pause_obj + 0x3C + depth * 0x58 + 4) - 1;
+    if (i >= k_setting_count && i < k_setting_count + extra_rows() && (cur & CROSS)) {   /* a row of feat_training_opts.cpp */
+        if ((pressed & CROSS) && train_opt_press) {
+            train_opt_press(i - k_setting_count);
+            for (int k = 0; k < extra_rows(); k++) pause_extra_text(k);
+        }
+        *b = (uint16_t)(cur & ~CROSS);
+        return;
+    }
     if (i < 0 || i >= k_setting_count || !(cur & CROSS)) return;
     if (pressed & CROSS) {
         *k_settings[i].on = !*k_settings[i].on;
@@ -2686,6 +2729,7 @@ void impossible_icall(uint32_t target, uint64_t* gpr)
 int training_icall(uint32_t target, uint64_t* gpr)
 {
     if (six_icall) six_icall(target, gpr);   /* feat_3v3.cpp */
+    if (train_opt_icall) train_opt_icall(target, gpr);   /* feat_training_opts.cpp */
     if (target == 0x003959C8u) {
         if (!JSP_LOD_ENTRY_HOOKS_VERIFIED || !jsp_lod_hooks_active()) lod_select_hook((uint32_t)gpr[3]);
         return 0; // the verified entry wrapper applies it exactly once
@@ -2796,7 +2840,7 @@ int training_icall(uint32_t target, uint64_t* gpr)
             }
         }
         for (int k = 0; k < g_ndummy; k++)
-            if (g_dummy_pads[k] == o && !(training_active() && g_set_turnbased)) { gpr[3] = 0; return 1; }
+            if (g_dummy_pads[k] == o && !(training_active() && g_set_turnbased) && !(train_opt_dummy_ai && train_opt_dummy_ai())) { gpr[3] = 0; return 1; }
     }
     /* SIX_PROBE: func_0008A540 makes a fighter's health object (class 0x00875198, 0x230 bytes) through a factory call;
      * the host frames above it name the battle code that creates the fighters (llvm-symbolizer on build-pdb). */
@@ -2971,6 +3015,21 @@ void training_tick()
     }
 }
 
+/* The readout's box and its two lines, inside a drawing that is open; s scales the 1280 x 720 layout (1 = that size). */
+void readout_box(const std::string& l1, const std::string& l2, float s)
+{
+    const float sc = jptr::kScale * s;
+    const float w1 = jsp_overlay_text_width(l1.c_str(), sc), w2 = jsp_overlay_text_width(l2.c_str(), sc);
+    float w = w1 > w2 ? w1 : w2;
+    if (w <= 0) w = (float)(l1.size() > l2.size() ? l1.size() : l2.size()) * jptr::kGlyphMax * sc;   /* no atlas: the widest estimate */
+    const int right = (int)((float)jptr::kRight * s), pad = (int)((float)jptr::kBoxPad * s);
+    const int bx = right - (int)w - 2 * pad;
+    jsp_overlay_fill_rect(bx, (int)((float)jptr::kBoxY * s), right - bx, (int)((float)jptr::kBoxH * s), JSP_RGBA(0, 0, 0, 160));
+    const uint32_t white = JSP_RGBA(255, 255, 255, 255);
+    jsp_overlay_text_style((float)(right - pad) - (w1 > 0 ? w1 : w), jptr::kY1 * s, l1.c_str(), sc, white, 0);
+    jsp_overlay_text_style((float)(right - pad) - (w2 > 0 ? w2 : w), jptr::kY2 * s, l2.c_str(), sc, white, 0);
+}
+
 /* ENHANCEMENT: draws the Training readout (jsp_train_readout.h) on the port overlay, in the game's menu font with its black rim on a
  * translucent dark box, as the rollback badge and the Port Settings page. Once per pad poll; redraws only when the text changed. Shown
  * only in a Training fight, never with the pause menu up, Hide HUD on or in Turn-based; anywhere else the readout's own drawing is closed. */
@@ -2985,6 +3044,20 @@ void readout_tick()
     }
     const bool show = on && training_active() && training_fight_scene() && !pause_up() && !g_set_hidehud && !g_tb_mode;
     std::string l1, l2;
+    /* feat_training_opts.cpp keeps its key line on the same layer for the whole fight, and each begin() clears the layer. So while its
+     * line (or one of its short messages) is up, its drawing carries the readout's box too (jsp_tr_readout_draw, below): here the
+     * readout only says when that drawing has to be made again (its text changed, or it is to come or go). */
+    if (train_opt_layer) {
+        bool redraw;
+        {
+            std::lock_guard<std::mutex> lk(g_readout_mu);
+            if (!training_active()) g_readout.reset();
+            redraw = show != g_readout_show || (show && g_readout.changed());
+            g_readout_show = show;
+        }
+        if (train_opt_layer(redraw ? 1 : 0)) { g_readout_drawn = false; g_readout_carried = true; return; }
+        if (g_readout_carried) { g_readout_carried = false; std::lock_guard<std::mutex> lk(g_readout_mu); g_readout.invalidate(); }   /* its drawing is gone: the readout draws itself again */
+    } else g_readout_show = show;
     {
         std::lock_guard<std::mutex> lk(g_readout_mu);
         if (!training_active()) g_readout.reset();
@@ -3003,14 +3076,7 @@ void readout_tick()
         l1 = g_readout.line1(); l2 = g_readout.line2();
     }
     if (!jsp_overlay_begin(1280, 720)) return;   /* nothing recorded as drawn: the next tick tries again */
-    const float w1 = jsp_overlay_text_width(l1.c_str(), jptr::kScale), w2 = jsp_overlay_text_width(l2.c_str(), jptr::kScale);
-    float w = w1 > w2 ? w1 : w2;
-    if (w <= 0) w = (float)(l1.size() > l2.size() ? l1.size() : l2.size()) * jptr::kGlyphMax * jptr::kScale;   /* no atlas: the widest estimate */
-    const int bx = jptr::kRight - (int)w - 2 * jptr::kBoxPad;
-    jsp_overlay_fill_rect(bx, jptr::kBoxY, jptr::kRight - bx, jptr::kBoxH, JSP_RGBA(0, 0, 0, 160));
-    const uint32_t white = JSP_RGBA(255, 255, 255, 255);
-    jsp_overlay_text_style((float)(jptr::kRight - jptr::kBoxPad) - (w1 > 0 ? w1 : w), jptr::kY1, l1.c_str(), jptr::kScale, white, 0);
-    jsp_overlay_text_style((float)(jptr::kRight - jptr::kBoxPad) - (w2 > 0 ? w2 : w), jptr::kY2, l2.c_str(), jptr::kScale, white, 0);
+    readout_box(l1, l2, 1.0f);
     jsp_overlay_end();
     g_readout_drawn = true;
     std::lock_guard<std::mutex> lk(g_readout_mu);
@@ -3041,6 +3107,7 @@ uint32_t panel_level() { return vm_read32(g_seen_panel.obj + 0x48); }
  * (driver not CPU) stays free. */
 bool g_locked[4] = { false, false, false, false };
 
+extern bool g_two_players;   /* defined below: Free Battle / Training > 2 Players was chosen */
 void training_lock_slots()
 {
     if (!on_charsel()) return;
@@ -3059,6 +3126,20 @@ void training_lock_slots()
     }
     for (int k = 1; k < 4; k += 2) {
         if (vm_read32(setup_field(k, 0x00)) != 2) continue;
+        /* ENHANCEMENT: Training, 2 Players: the two partner slots stay free, as in Free Battle (1 Player keeps its one against
+         * one). A slot this session locked before (1 Player was chosen first) gets its padlock flag taken off again.
+         * TRAIN_2P_SLOTS=0: locked as before. */
+        static const bool open2p = [] { const char* e = std::getenv("TRAIN_2P_SLOTS"); return !(e && *e == '0'); }();
+        if (open2p && g_two_players && !g_tb_mode) {
+            if (g_locked[k]) {
+                g_locked[k] = false;
+                for (uint32_t base : bases) vm_write32(base + 0x2Cu * (uint32_t)k + 0x04, 0);
+                std::printf("[training] slot %d free again (2 Players)\n", k);
+            }
+            static bool said[4] = { false, false, false, false };
+            if (!said[k]) { said[k] = true; std::printf("[training] 2 Players: slot %d stays free (state %u, character %u)\n", k, vm_read32(setup_field(k, 0x08)), vm_read32(setup_field(k, 0x0C))); std::fflush(stdout); }
+            continue;
+        }
         if (!g_locked[k]) { g_locked[k] = true; std::printf("[training] slot %d locked\n", k); }
         for (uint32_t base : bases) {
             const uint32_t r = base + 0x2Cu * (uint32_t)k;
@@ -4113,6 +4194,10 @@ static void tex_patch_all(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
+    if (!(jsp_ps_active && jsp_ps_active())) {   /* the feature files (not while the Port Settings screen is up) */
+        if (train_menu_pad && train_menu_pad(port, b, lx, ly)) return;   /* the Training pause menu is up (feat_training_menu.cpp) */
+        if (train_opt_pad) train_opt_pad(port, b, lx, ly);   /* feat_training_opts.cpp */
+    }
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
     else if (port == 1 && !g_two_players) {
         static const bool always = [] { const char* e = std::getenv("PAD_P2_ALWAYS"); return e && *e == '1'; }();
@@ -4411,6 +4496,95 @@ extern "C" int jsp_on_charsel(void) { return on_charsel() ? 1 : 0; }
 extern "C" int jsp_on_stagesel(void) { return on_stagesel() ? 1 : 0; }
 extern "C" int jsp_training_active(void) { return training_active() ? 1 : 0; }
 extern "C" int jsp_training_fight_scene(void) { return training_fight_scene() ? 1 : 0; }
+/* for feat_training_opts.cpp */
+extern "C" int jsp_tr_active(void) { return training_active() && !g_tb_mode ? 1 : 0; }   /* plain Training (not Turn-based) */
+extern "C" int jsp_tr_fight(void) { return training_fight_scene() ? 1 : 0; }
+extern "C" int jsp_tr_paused(void) { return pause_up() ? 1 : 0; }
+/* The fighters taking part, found once per fight as the Group Camera does: health objects and fighter cameras are made in slot
+ * order, Player 1's first, so the n lowest addresses of each, in order, belong to the n setup slots that take part, in order. */
+extern "C" int jsp_tr_fighters(uint32_t* health, uint32_t* place, int* slot, int* team, int max)
+{
+    struct F { int slot, team; uint32_t health, cam, place; };
+    static F f[4]; static int nf = 0;
+    if (nf) { bool ok = true; for (int k = 0; k < nf; k++) if (vm_read32(f[k].cam) != k_cam_vt) ok = false; if (!ok) nf = 0; }
+    if (!nf) {
+        int slots[4], n = 0;
+        for (int q = 0; q < 4; q++) if (vm_read32(setup_field(q, 0x08)) != 2) slots[n++] = q;
+        if (n < 2) return 0;
+        uint32_t hs[4] = { 0, 0, 0, 0 }, cams[4] = { 0, 0, 0, 0 };
+        int nh = 0, nc = 0;
+        for (int i = 0; i < g_bal_nobj; i++) nh = tb_lowest(g_bal_obj[i], hs, n, nh);
+        const unsigned long long now = GetTickCount64();
+        for (const FreeCamObj& c : g_cam_objs) if (c.obj && now - c.ms <= 500 && vm_read32(c.obj) == k_cam_vt) nc = tb_lowest(c.obj, cams, n, nc);
+        if (nh < n || nc < n) return 0;
+        F g[4];
+        for (int k = 0; k < n; k++) {
+            g[k] = F{ slots[k], (int)vm_read32(setup_field(slots[k], 0x10)), hs[k], cams[k], tb_find_place(hs[k], cams[k]) };
+            if (!g[k].place) return 0;
+        }
+        for (int k = 0; k < n; k++) f[k] = g[k];
+        nf = n;
+    }
+    int n = 0;
+    for (; n < nf && n < max; n++) { health[n] = f[n].health; place[n] = f[n].place; slot[n] = f[n].slot; team[n] = f[n].team; }
+    return n;
+}
+extern "C" int jsp_tr_dummy_pads(uint32_t* pads, int max) { int n = 0; for (; n < g_ndummy && n < max; n++) pads[n] = g_dummy_pads[n]; return n; }
+/* The battle numbers its fighters differently from the setup slots: unit 0 Player 1, unit 1 the other team's first fighter (slot 2),
+ * unit 2 Player 1's partner (slot 1), unit 3 the other team's second (slot 3). */
+extern "C" int jsp_tr_unit_of_slot(int slot) { return slot == 0 ? 0 : slot == 2 ? 1 : slot == 1 ? 2 : 3; }
+/* the first CPU fighter's stars as Character Select left them: 0 the training dummy, 1-5 */
+extern "C" int jsp_tr_cpu_stars(void)
+{
+    for (int k = 0; k < 4; k++) {
+        if (vm_read32(setup_field(k, 0x08)) == 2 || vm_read32(setup_field(k, 0x00)) != 2) continue;
+        if (g_dummy[k] && vm_read32(setup_field(k, 0x18)) == 0) return 0;
+        const uint32_t lv = vm_read32(setup_field(k, 0x18));
+        return lv <= 4 ? (int)lv + 1 : 1;
+    }
+    return 0;
+}
+/* feat_training_opts.cpp's key line carries the Training readout (see readout_tick): the readout's box inside that file's drawing,
+ * s = the picture's height / 720. 1 = drawn. */
+extern "C" int jsp_tr_readout_draw(float s)
+{
+    std::string l1, l2;
+    {
+        std::lock_guard<std::mutex> lk(g_readout_mu);
+        if (!g_readout_show) return 0;
+        l1 = g_readout.line1(); l2 = g_readout.line2();
+    }
+    readout_box(l1, l2, s);
+    std::lock_guard<std::mutex> lk(g_readout_mu);
+    g_readout.drawn(l1 + "\n" + l2);
+    return 1;
+}
+/* for feat_training_menu.cpp: the game's pause menu while it is open: its depth (0 the pause list, 1 a Yes / No box) and
+ * the selected row counting from 1 (Close menu 1, Skill table 2, Restart 3, Re-select 4, Return to main menu 5) */
+extern "C" int jsp_tr_pause_info(int* depth, int* row)
+{
+    if (!pause_up() || vm_read32(g_pause_obj) != k_pause_vt) return 0;
+    const uint32_t d = vm_read32(g_pause_obj + 0x3AC);
+    if (d > 8) return 0;
+    *depth = (int)d; *row = (int)vm_read32(g_pause_obj + 0x3C + d * 0x58 + 4);
+    return 1;
+}
+/* puts the pause list's selector on a row (the selector is not drawn under the Training menu's windows) */
+extern "C" void jsp_tr_pause_set_row(int row)
+{
+    if (!pause_up() || vm_read32(g_pause_obj) != k_pause_vt || row < 1 || row > 8) return;
+    const uint32_t d = vm_read32(g_pause_obj + 0x3AC);
+    if (d == 0) vm_write32(g_pause_obj + 0x3C + 4, (uint32_t)row);
+}
+/* the Training settings of this file: 0 Unlimited Stamina, 1 Free Camera, 2 Hide HUD, 3 Group Camera; set -1 reads */
+extern "C" int jsp_tr_flag(int which, int set)
+{
+    bool* f = which == 0 ? &g_set_stamina : which == 1 ? &g_set_freecam : which == 2 ? &g_set_hidehud : which == 3 ? &g_set_groupcam : nullptr;
+    if (!f) return 0;
+    if (set >= 0 && *f != (set != 0)) { *f = set != 0; std::printf("[pause] %s %s (Training menu)\n", which == 0 ? "Unlimited Stamina" : which == 1 ? "Free Camera" : which == 2 ? "Hide HUD" : "Group Camera", *f ? "on" : "off"); std::fflush(stdout); }
+    return *f ? 1 : 0;
+}
+extern "C" int jsp_tr_has_groupcam(void) { return kExp ? 1 : 0; }
 
 /* Impossible AI: entry/leave hooks from port/lift_game_hooks.json (lifter --fn-hooks, with the LOD hooks).
  * Hit receivers (vtable 0x00875108): +0x18 the battle unit index; some fighters have a second receiver with the same

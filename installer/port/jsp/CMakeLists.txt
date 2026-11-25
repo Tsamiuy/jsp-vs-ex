@@ -236,6 +236,8 @@ add_executable(${PROJECT_NAME}
     jsp_roster.cpp # ENHANCEMENT: roster section of mod.json (added fighters on the character select), only with a roster mod
     jsp_mods.cpp       # ENHANCEMENT: the mods folder (mods.txt, JSP_MODS_LIST/JSP_MODS_DIR, JSP_MODS=0 off): virtual CPK archives through toolkit patch 6502
     feat_menu_pages.cpp  # ENHANCEMENT: two-page main menu, on by default (MENU_PAGES=0 off); Battle Modes page with Training Mode and Impossible Mode rows
+    feat_training_opts.cpp  # ENHANCEMENT: more Training options (CPU Level / Behavior, position resets and saved positions, Support cooldown, Infinite Victory Burst, key line); TRAIN_OPTS=0 off
+    feat_training_menu.cpp  # ENHANCEMENT: the two-window Training pause menu (TRAIN_MENU=0: the old Training settings row)
     feat_3v3.cpp  # ENHANCEMENT: 3v3 Free Battle, on by default with the two-page menu (SIX=0 or MENU_PAGES=0 off); the team size window, 3v3 Character Select, six fighters in the fight
     # ENHANCEMENT, EXPERIMENTAL rollback netcode: every file below does nothing unless JSP_ROLLBACK=1 (docs/ROLLBACK.md)
     jsp_rollback.cpp   # the entry points main.cpp and stubs.cpp call; each returns at once without JSP_ROLLBACK=1
