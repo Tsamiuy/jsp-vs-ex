@@ -25,6 +25,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "jsp_menu_lang.h"   // the text language and the gate (host test: installer/tools/menu_lang_test.sh)
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -182,9 +183,30 @@ static int g_mp_trans = 0, g_mp_trans_to = 0, g_mp_trans_row = 0;   /* page chan
 static unsigned long long g_mp_trans_t = 0;
 /* on by default since 2026-11-21 (the maintainer: cleaner than the game's chain of pop-up windows); MENU_PAGES=0 gives the
  * game's own main menu */
+/* The text language (jsp_menu_lang.h): PS3_LANG, else the Windows UI language, else English. The feature runs only for a language with all of its
+ * text and row-label pictures, on a disc whose label textures are the US ones (g_mp_off, set in mp_tex_upload); else the game's own menu, with
+ * one log line. */
+static std::atomic<bool> g_mp_off{false};
+static const std::string& mp_lang()
+{
+    static const std::string l = [] { int w = 0;
+#ifdef _WIN32
+        w = (int)(GetUserDefaultUILanguage() & 0x3FF);
+#endif
+        return jml::pick(std::getenv("PS3_LANG"), w); }();
+    return l;
+}
 /* US only for now (jsp_region.h): the pages rewrite guest memory at US 1.00 addresses and their lift hooks are in the US lift only, so an EU
  * build keeps the game's own one-page menu (mp_on() false: the pad filter, the texture patch and the row count leave the menu alone). */
-bool mp_on() { static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); return jsp_game_is_us() && !(e && e[0] == '0'); }(); return on; }
+bool mp_on()
+{
+    static const bool on = [] { const char* e = std::getenv("MENU_PAGES"); if (e && e[0] == '0') return false;
+        if (!jsp_game_is_us()) return false;   /* EU build: jsp_game.cpp logs it with the other US-only features */
+        const std::string why = jml::gate(mp_lang(), true);
+        if (!why.empty()) { std::printf("[mpages] off: %s\n", why.c_str()); std::fflush(stdout); return false; }
+        return true; }();
+    return on && !g_mp_off.load();
+}
 int mp_page_now() { return g_mp_page; }
 bool mp_busy() { return g_mp_trans != 0 || g_ps_wait != 0; }
 /* The top page's "Port Settings" row is there only when the screen it opens is in the build (feat_port_settings.cpp,
@@ -270,7 +292,15 @@ void mp_tex_upload(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
     MpTex* hit = nullptr; const char* what = ""; int id = -1, sub = -1;
     if (lab) for (int k = 0; k < 9 && !hit; k++) for (int st = 0; st < 2; st++) if (k_mp_lab_fnv[k][st] == f) { hit = &g_mp_lab[k][st]; what = st ? "label black" : "label white"; id = k; sub = st; break; }
     if (art) for (int r = 0; r < 9 && !hit; r++) for (int v = 0; v < 2; v++) if (k_mp_art_fnv[r][v] && k_mp_art_fnv[r][v] == f) { hit = &g_mp_art[r][v]; what = "art"; id = r; sub = v; break; }
-    if (!hit) return;
+    if (!hit) {
+        /* Not a US label: on another disc (an EU disc in Spanish, a tester's screenshot) no row label ever matches, and the rows stay the
+         * game's own text next to our help lines. Nine label-sized textures and not one match: this disc's textures are not the US ones, and
+         * the feature turns itself off (the game's own one-page menu). ASSUMPTION: the count 9 (one menu has 9 rows); not run on an EU disc. */
+        static int seen = 0; static bool ever = false;
+        for (int k = 0; k < 9 && !ever; k++) for (int q = 0; q < 2; q++) if (g_mp_lab[k][q].addr) ever = true;
+        if (lab && !ever && ++seen >= 9 && !g_mp_off.exchange(true))
+            { std::printf("[mpages] off: %s\n", jml::gate(mp_lang(), false).c_str()); std::fflush(stdout); }
+        return; }
     /* the port's own picture coming back (the bytes of another row, written here): not that row's texture */
     for (int k = 0; k < 9; k++) for (int q = 0; q < 2; q++) { const MpTex& t = lab ? g_mp_lab[k][q] : g_mp_art[k][q]; if (t.addr == off && &t != hit) return; }
     if (hit->addr == off && hit->fwrote == f) return;   /* what the port wrote, or the page wants it as loaded */
@@ -490,10 +520,10 @@ void mp_help(ppu_context* ctx)
         if (ok && b0 != base) { base = b0; std::printf("[mpages] help strings at %08X\n", base); std::fflush(stdout); }
     }
     if (!g_psbar_str) psbar_fill(mpf_game_new(ctx, kPsbarBytes));
-    if (!own[0]) { static const char16_t* const t[4] = { u"Choose a battle mode.", u"Practice your moves against a training dummy.", u"Take on boss fights against an unbeatable CPU.",
-                                                          u"Change the PC port's display, graphics, control and online settings." };
-        for (int k = 0; k < 4; k++) { size_t n = 0; while (t[k][n]) n++; const uint32_t a = mpf_game_new(ctx, (uint32_t)(n + 1) * 2u + 16u); if (!a) continue;
-            for (size_t i = 0; i <= n; i++) { vm_base[a + 2 * i] = (uint8_t)t[k][i]; vm_base[a + 2 * i + 1] = (uint8_t)(t[k][i] >> 8); } own[k] = a; } }
+    if (!own[0]) { static const jml::Id ids[4] = { jml::MENU_HELP_BATTLE, jml::MENU_HELP_TRAINING, jml::MENU_HELP_IMPOSSIBLE, jml::MENU_HELP_PORT_SETTINGS };
+        for (int k = 0; k < 4; k++) { const std::vector<uint8_t> u = jml::encode_utf16(jml::text(ids[k], mp_lang()));   /* UTF-16LE, as the game's strings */
+            const uint32_t a = u.empty() ? 0 : mpf_game_new(ctx, (uint32_t)u.size() + 16u); if (!a) continue;
+            std::memcpy(vm_base + a, u.data(), u.size()); own[k] = a; } }
     if (show < 0 || show > 8) return;
     const int want = mp_lab_of(g_mp_page, show);
     uint32_t to = 0;

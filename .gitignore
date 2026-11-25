@@ -186,6 +186,8 @@ __pycache__/
 !/installer/tools/version_line_test.sh
 !/installer/tools/net_badge_test.cpp
 !/installer/tools/net_badge_test.sh
+!/installer/tools/menu_lang_test.cpp
+!/installer/tools/menu_lang_test.sh
 !/installer/tools/net_delay_rule_test.cpp
 !/installer/tools/net_delay_rule_test.sh
 !/installer/tools/train_readout_test.cpp
