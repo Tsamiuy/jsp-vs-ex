@@ -10,6 +10,7 @@ that are still in review are named in one line where they matter, nothing more.
 | [netcode.md](netcode.md) | The game's own Online Battle and the experimental rollback netcode: settings, start decision, match sequence, threads |
 | [patches.md](patches.md) | Every toolkit patch on `main`: number, toolkit files, area, switches and the glue that calls into it |
 | [build-and-test.md](build-and-test.md) | The player build (payload, setup, first run, CMake), the CI workflows and jobs, the host tests |
+| [mods.md](mods.md) | The mods folder: load sequence, the overlay and loose-file tables, the interfaces, how a mod set reaches online, and what the verifier checks against the loader |
 
 ## How to read it
 
@@ -32,6 +33,7 @@ that are still in review are named in one line where they matter, nothing more.
 | The renderer or another runtime library | [patches.md](patches.md), then `patches/INDEX.md` and the patch itself |
 | A setting | `jsp/jsp_settings.h` (key table shared with the settings window), `installer/launcher/launcher.c` |
 | Online or rollback | [netcode.md](netcode.md), [../ROLLBACK.md](../ROLLBACK.md), [../ONLINE.md](../ONLINE.md) |
+| The mods loader, an interface or the mod verifier | [mods.md](mods.md), [../MODS.md](../MODS.md) |
 | How a rollback match starts and ends (team size, KO, disconnect, stall, adaptive delay) | [netcode.md, start and match](netcode.md#4-rollback-start-and-match) |
 | A test | [build-and-test.md, host tests](build-and-test.md#3-host-tests), `tools/ci/host-tests.txt` |
 
