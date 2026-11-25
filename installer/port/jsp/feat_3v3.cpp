@@ -484,7 +484,13 @@ static void six_winmsg_enter_body(ppu_context* ctx)
 static thread_local uint32_t t_six_state_obj = 0;
 static std::atomic<uint32_t> g_six_state_obj{0};   /* for the pad filter (3v3 lock) */
 static std::atomic<uint32_t> g_six_cs_dump_req{0};
-extern "C" void jsp_six_state_enter(ppu_context* ctx) { t_six_state_obj = (uint32_t)ctx->gpr[3]; g_six_state_obj.store(t_six_state_obj); }
+static std::atomic<uint32_t> g_six_state_seq{0};   /* counts the calls: tells a fresh object from the last visit's */
+extern "C" void jsp_six_state_enter(ppu_context* ctx) { t_six_state_obj = (uint32_t)ctx->gpr[3]; g_six_state_obj.store(t_six_state_obj); g_six_state_seq++; }
+/* for feat_model_preview.cpp: Character Select's player state object (func_00188A58's r3; player state at +0x60 + 0x14 * player),
+ * how often the function has run, and whether the 3 vs 3 Character Select (three boxes a team) is the one in use */
+extern "C" uint32_t jsp_cs_state_seq(void) { return g_six_state_seq.load(); }
+extern "C" uint32_t jsp_cs_state_obj(void) { return g_six_state_obj.load(); }
+extern "C" int jsp_cs_is_3v3(void) { static const bool on = std::getenv("SIX_CSEL") != nullptr; return on && six_live() ? 1 : 0; }
 extern "C" void jsp_six_state_leave(ppu_context* ctx)
 {
     (void)ctx;
@@ -1060,7 +1066,8 @@ static void six_newtest(ppu_context* ctx, const char* tag)
 extern "C" void jsp_six_teardown1_enter(ppu_context* ctx) { six_newtest(ctx, "before func_0043DDFC"); six_heap_restore("func_0043DDFC"); six_newtest(ctx, "after restore"); }
 extern "C" void jsp_six_teardown2_enter(ppu_context* ctx) { six_newtest(ctx, "before func_0043DF54"); six_heap_restore("func_0043DF54"); six_newtest(ctx, "after restore"); }
 extern "C" void jsp_six_teardown3_enter(ppu_context* ctx) { six_newtest(ctx, "before func_0043E018"); six_heap_restore("func_0043E018"); six_newtest(ctx, "after restore"); }
-extern "C" void jsp_six_teardown4_enter(ppu_context* ctx) { six_newtest(ctx, "before func_0043E644"); six_heap_restore("func_0043E644"); six_newtest(ctx, "after restore"); }
+__attribute__((weak)) void model_preview_layout_enter(ppu_context* ctx);   /* feat_model_preview.cpp (may be absent): func_0043E644(heap manager, layout, mask) is entered */
+extern "C" void jsp_six_teardown4_enter(ppu_context* ctx) { if (model_preview_layout_enter) model_preview_layout_enter(ctx); six_newtest(ctx, "before func_0043E644"); six_heap_restore("func_0043E644"); six_newtest(ctx, "after restore"); }
 extern "C" void jsp_six_heapalloc_leave(ppu_context* ctx)
 {
     const int big = t_six_big; const uint32_t sz = t_six_alloc_size; t_six_alloc_size = 0;
@@ -3454,8 +3461,10 @@ extern "C" void jsp_vsc_remove_leave(ppu_context* ctx)
     for (int w = 0; w < 3; w++) vm_write32(rec + (uint32_t)w * 4, t_vsc_rm_w[w]);
 }
 /* func_00333FCC (set a pane's picture) enter: the portraits part's per-frame setter (func_002F0E84, lr 0x002F0FD4, r28 = part) */
+__attribute__((weak)) void model_preview_setpic(ppu_context* ctx);   /* feat_model_preview.cpp (may be absent): func_00333FCC(pane, picture) is entered */
 extern "C" void jsp_vsc_setpic_enter(ppu_context* ctx)
 {
+    if (model_preview_setpic) model_preview_setpic(ctx);
     if (!g_vsc.on || !vm_base) return;
     /* A picture object draws white for its first ~40 frames after its first use (a test run: even a copy of box 1's
      * object did), and the game asks for the unit 4 / 5 pictures only when their panes appear (~frame 19), so their
@@ -3608,9 +3617,11 @@ extern "C" void jsp_six_calc_leave(ppu_context* ctx)
     if (g_six_cs.layout && t_six_calc_layout == g_six_cs.layout) six_cs_frame(ctx);
 }
 static void six_layout_dump(uint32_t layout, uint32_t lr, uint32_t at);
+__attribute__((weak)) void model_preview_find(ppu_context* ctx);   /* feat_model_preview.cpp (may be absent): func_0032B230(layout, hash) is entered */
 extern "C" void jsp_find_enter(ppu_context* ctx)
 {
     t_find_layout = (uint32_t)ctx->gpr[3]; t_find_hash = (uint32_t)ctx->gpr[4];
+    if (model_preview_find) model_preview_find(ctx);   /* learns the grid's layouts */
     static const bool cl_env = std::getenv("SIX_CSCLONE") != nullptr; const bool cl = cl_env && six_live();
     if (!cl) return;
     const uint32_t lr = (uint32_t)ctx->lr;

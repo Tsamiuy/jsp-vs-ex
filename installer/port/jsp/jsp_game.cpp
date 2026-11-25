@@ -126,6 +126,9 @@ __attribute__((weak)) int train_menu_on(void);                   /* 1: the new m
 __attribute__((weak)) int train_menu_hide(const float* box);     /* 1: this HUD draw is the game's own pause panel, under our windows: not drawn */
 __attribute__((weak)) int train_menu_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);   /* 1: the menu took the pad read */
 extern "C" __attribute__((weak)) int jsp_ps_active(void);        /* feat_port_settings.cpp (may be absent): its screen is up */
+/* feat_model_preview.cpp (the Model Viewer in place of the grid on the 1 Player Character Select); weak: absent = the grid as before */
+__attribute__((weak)) void model_preview_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
+__attribute__((weak)) void model_preview_icall(uint32_t target, uint64_t* gpr);
 /* feat_arcade_coop.cpp (Arcade for 2 Players: a 1 Player / 2 Players window, Player 2 plays the partner in split screen); weak: absent = Arcade as before */
 __attribute__((weak)) void arc_coop_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly);
 __attribute__((weak)) void arc_coop_icall(uint32_t target, uint64_t* gpr);   /* a test switch of that file */
@@ -2735,6 +2738,7 @@ int training_icall(uint32_t target, uint64_t* gpr)
     if (six_icall) six_icall(target, gpr);   /* feat_3v3.cpp */
     if (train_opt_icall) train_opt_icall(target, gpr);   /* feat_training_opts.cpp */
     if (arc_coop_icall) arc_coop_icall(target, gpr);   /* feat_arcade_coop.cpp */
+    if (model_preview_icall) model_preview_icall(target, gpr);   /* feat_model_preview.cpp */
     if (target == 0x003959C8u) {
         if (!JSP_LOD_ENTRY_HOOKS_VERIFIED || !jsp_lod_hooks_active()) lod_select_hook((uint32_t)gpr[3]);
         return 0; // the verified entry wrapper applies it exactly once
@@ -4199,6 +4203,7 @@ static void tex_patch_all(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
+    if (model_preview_pad) model_preview_pad(port, b, lx, ly);   /* feat_model_preview.cpp */
     if (!(jsp_ps_active && jsp_ps_active())) {   /* the feature files (not while the Port Settings screen is up) */
         if (train_menu_pad && train_menu_pad(port, b, lx, ly)) return;   /* the Training pause menu is up (feat_training_menu.cpp) */
         if (arc_coop_pad) arc_coop_pad(port, b, lx, ly);   /* feat_arcade_coop.cpp */
@@ -4502,6 +4507,8 @@ extern "C" int jsp_on_charsel(void) { return on_charsel() ? 1 : 0; }
 extern "C" int jsp_on_stagesel(void) { return on_stagesel() ? 1 : 0; }
 extern "C" int jsp_training_active(void) { return training_active() ? 1 : 0; }
 extern "C" int jsp_training_fight_scene(void) { return training_fight_scene() ? 1 : 0; }
+/* for feat_model_preview.cpp: 0 Free Battle, 1 Impossible 2 vs 1 (the Impossible modes come through Free Battle's screens) */
+extern "C" int jsp_imp_mode(void) { return g_imp_mode; }
 /* for feat_arcade_coop.cpp */
 extern "C" int jsp_ac_main_menu_open(void) { return main_menu_open() ? 1 : 0; }
 extern "C" int jsp_ac_on_charsel(void) { return on_charsel() ? 1 : 0; }
