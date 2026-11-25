@@ -3,7 +3,7 @@
 
 What the port adds or changes compared with the PS3 game (section 1), and how far the port reproduces the game's own features (section 2). Every status rests on a recorded result: a note, a test or a pull request. Anything not listed has not been checked. Options that change gameplay are opt-in. The order of the planned items: [ROADMAP.md](ROADMAP.md).
 
-Port features: 19 available, 16 in progress, 14 planned.
+Port features: 19 available, 17 in progress, 13 planned.
 
 ## 1. What the port adds
 
@@ -84,7 +84,7 @@ Port features: 19 available, 16 in progress, 14 planned.
 | Feature | What it does | State | Default | Setting, notes |
 |---|---|---|---|---|
 | <a id="colour-palettes"></a>Colour palettes | Character palettes made on your PC from your own game's textures; packs by other people stay outside this repository | planned | off |  |
-| <a id="modding"></a>Modding | A mods folder for textures, HUDs, music and data, and tools that export models and scenes from your own copy to common formats on your PC (exports stay on your PC) | planned | - |  |
+| <a id="modding"></a>Modding | The mods folder and its loader are built: a mod replaces files inside the game's archives (by its own file with a SHA-256, or by another entry of your own copy), and on the US disc can add fighters 19 to 21 to the character select and serve their voice banks and loading tips; mods.txt sets the load order, gameplay mods are compared online, and the mod package standard is in MODS.md. Planned: textures, HUDs, music and balance interfaces, online mod sync, and tools that export models and scenes from your own copy to common formats on your PC (exports stay on your PC) | in progress | host tests | File overrides since 0.6.0; roster and loose files are host-tested, not yet run in a game; see [MODS.md](MODS.md) |
 
 ## 2. The PS3 game's features in the port
 

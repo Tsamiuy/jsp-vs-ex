@@ -11,18 +11,18 @@ Every mod follows this standard. It describes what the port and the checks enfor
 ### Package
 
 - A mod MUST be shared as one zip file (Archive: "not a readable zip file").
-- The zip MUST hold either one top-level folder named exactly like the mod id, with `mod.json` directly inside it, or `mod.json` at its top level (Layout). Every file MUST be inside that mod folder (Layout: "a file outside the mod folder"). The folder form SHOULD be used: it unpacks straight into the mods folder.
+- The zip MUST hold either one top-level folder named exactly like the mod id, with `mod.json` directly inside it, or `mod.json` at its top level (Layout). The folder name is compared with the id in `mod.json`: in an issue check that is the Layout row, with `--zip` the Manifest row. Every file MUST be inside that mod folder (Layout: "a file outside the mod folder"). The folder form SHOULD be used: it unpacks straight into the mods folder.
 - Installed, the mod MUST be at `mods\<id>\` in the install folder, with `mod.json` directly inside (loader: "no mod.json", "id ... is not the folder name").
-- Limits (Archive): at most 2000 entries in the zip, at most 500 MB unpacked in all, no single file over 300 MB, `mod.json` at most 256 KB (the loader's own limit is 1 MiB), no encrypted entry. The zip MUST be at most 200 MB (Download in an issue check; `--zip` refuses a larger file).
-- Paths (Paths): relative, with `/` between parts, at most 255 bytes; no drive letter, leading `/`, backslash, `..`, `.` or empty part; no part that ends in a dot or a space; none of `\ : < > " | ? *` or a control character; no Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, `CONIN$`, `CONOUT$`, with or without an extension); no symbolic link or other entry that is not a plain file or folder; no NUL; a non-ASCII name only when the zip marks it as UTF-8; each path once, and no two paths that differ only in case; no file whose path is also a folder of another file.
-- Installed, a file of a mod MUST NOT be reached through a symbolic link or a junction (loader: "it is reached through a link or junction (not followed)").
-- No programs, scripts or nested archives (File types). A file is refused by its extension: `.exe .dll .com .scr .msi .msix .appx .sys .ocx .cpl .pif .asi .so .dylib .jar .app .bat .cmd .ps1 .vbs .vbe .js .jse .wsf .hta .reg .lnk .url .py .pyc .sh .lua .php .pl .rb .wasm .html .htm`, and the archives `.zip .7z .rar .tar .gz .tgz .xz .bz2 .cab .iso .apk .dmg`. It is also refused by its first bytes: a Windows program (`MZ` with a `PE` header at the offset in bytes 0x3C-0x3F), a Linux or macOS program, a script (`#!`), a zip, gzip, xz, 7z, RAR, cabinet or WebAssembly file. A maintainer can override a hit on the first bytes after looking at the file. Source and build files are refused too: `.c .cc .cpp .h .hpp .inc .patch .diff`, `CMakeLists.txt`, and any path in a `port/`, `installer/`, `tools/` or `third_party/` folder of the mod.
+- Limits (Archive): at most 2000 entries in the zip, at most 500 MB unpacked in all, no single file over 300 MB, no encrypted entry. `mod.json` MUST be at most 256 KB (Manifest; the loader's own limit is 1 MiB). The zip MUST be at most 200 MB (Download in an issue check; `--zip` refuses a larger file).
+- Paths (Paths): relative, with `/` between parts, at most 255 bytes; no drive letter, leading `/`, backslash, `..`, `.` or empty part; no part that ends in a dot or a space; none of `\ : < > " | ? *` or a control character; no Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, `COM¹`-`COM³`, `LPT¹`-`LPT³`, `CONIN$`, `CONOUT$`, with or without an extension); no symbolic link or other entry that is not a plain file or folder; no NUL; a non-ASCII name only when the zip marks it as UTF-8; each path once, and no two paths that differ only in case; no file whose path is also a folder of another file.
+- Installed, a file of a mod MUST NOT be reached through a symbolic link or a junction (loader: the reason "it is reached through a link or junction (not followed)" on Windows, "it is reached through a link (not followed)" elsewhere, inside a "file ... is missing (...)" or "no mod.json (...)" refusal).
+- No programs, scripts or nested archives (File types). A file is refused by its extension: `.exe .dll .com .scr .msi .msix .appx .sys .ocx .cpl .pif .asi .so .dylib .jar .app .bat .cmd .ps1 .vbs .vbe .js .jse .wsf .hta .reg .lnk .url .py .pyc .sh .lua .php .pl .rb .wasm .html .htm`, and the archives `.zip .7z .rar .tar .gz .tgz .xz .bz2 .cab .iso .apk .dmg`. It is also refused by its first bytes: a Windows program (`MZ` with a `PE` header at the offset in bytes 0x3C-0x3F), a Linux or macOS program, a script (`#!`), a zip, gzip, xz, 7z, RAR, cabinet or WebAssembly file. A maintainer can override a hit on the first bytes after looking at the file. Source and build files are refused too: `.c .cc .cpp .h .hpp .inc .patch .diff`, `CMakeLists.txt`, and any file inside a folder named `port`, `installer`, `tools` or `third_party` at the top of the mod folder (any case; the same names deeper down are not refused).
 - There is no list of allowed types: any file that is not refused passes. A mod SHOULD hold only `mod.json`, the files it names, a README and a preview image.
 - An installer or helper script is not part of the mod. Inside the mod folder it fails File types; beside the mod folder in the same zip it fails Layout. If an author ships one, it MUST be a separate download, and it MUST only copy the mod folder into `mods\<id>` and add the id to `mods.txt` (an uninstaller only takes them out again). Not enforced yet: nothing checks a separate download, and a maintainer never runs it.
 
 ### mod.json
 
-`mod.json` MUST be UTF-8 (one leading byte order mark is allowed) and strict JSON (Manifest; loader): no comments, no trailing comma, no key twice in one object, no `\uD800`-`\uDFFF` escape, at most 32 levels deep.
+`mod.json` MUST be UTF-8, and one leading byte order mark is allowed (Manifest: "mod.json is not UTF-8"; the loader does not check the encoding and takes any byte from 0x20 up inside a string). It MUST be strict JSON (Manifest; loader): no comments, no trailing comma, no key twice in one object, no `\uD800`-`\uDFFF` escape, and no value deeper than 32 levels (the top value is level 0; a value at a level above 32 is refused).
 
 | Field | Type | Required | Rule | Enforced by |
 | --- | --- | --- | --- | --- |
@@ -48,8 +48,8 @@ Each roster fighter (any other key is refused; Manifest; loader):
 
 | Key | Type | Required | Rule |
 | --- | --- | --- | --- |
-| `id` | integer | yes | 19, 20 or 21, not already in the list (stock or an earlier mod) |
-| `after` | integer | no | 0 to 255, an id already in the list at that point (default: before the first support) |
+| `id` | integer | yes | 19, 20 or 21, not already in the list: the stock list or this mod's earlier fighters (Manifest; loader), or a fighter an earlier mod added (loader only) |
+| `after` | integer | no | 0 to 255, an id already in the list at that point (default: before the first support). The loader knows the fighters earlier mods added; the verifier knows only the stock list and this mod's own earlier fighters, so an `after` that names another mod's fighter passes the loader but fails Manifest |
 | `logo_as` | integer | no | a stock fighter id (on the stock list, below 200) |
 | `owned` | boolean | no | default `true` |
 | `card_as` | integer | no, needs `roster` 2 | an id on the stock list |
@@ -75,14 +75,14 @@ Example, a cosmetic logo mod (`mods\my-logo\mod.json`):
 }
 ```
 
-The `sha256` here is a placeholder: use the SHA-256 of your own file. A roster example and a loose-file example are in their sections below.
+The `sha256` here is a placeholder: as written, the example fails the Manifest check. Put the SHA-256 of your own file there. A roster example and a loose-file example are in their sections below.
 
 ### Classes: gameplay or cosmetic
 
 - The loader decides the class; the author cannot lower it. A mod is **cosmetic** only when its `mod.json` parsed in full, `gameplay` is not `true`, `cpk-entry` is its only interface, and every override entry is on the allow-list: `game/logo/...`, `movie/...` or a song, `sound/<LANG>/BGM_...` (a file directly in a language folder). Everything else is **gameplay**: voices and other sound files, any `roster` or `loose` section (even one that only sets `card_as`), any other entry. A listed mod that the loader refuses counts as gameplay unless it is provably cosmetic.
 - The loader logs the class (`[mods] <id> <version>: gameplay` or `cosmetic`). In an issue check, Kind of change fails when the form says cosmetic and the manifest makes the mod gameplay.
 - Online: the gameplay mods that were applied make the **mod-set digest**, a SHA-256 over `jsp-modset 1`, the EBOOT's id and, for each such mod in load order, its id and version, each entry or loose path it serves with the SHA-256 of the bytes served, and its roster fighters (not `card_as`). Rollback folds the digest into the build word that both games compare, so two players meet only with the same gameplay mods, the same versions and the same load order. When a listed gameplay mod was refused, or a copy of an archive a gameplay mod changes differs from the one the plan was made from, the set "does not run as listed" and rollback does not start at all. Cosmetic mods are not in the digest: two players may use different ones. See [ROLLBACK.md](ROLLBACK.md) and [ONLINE.md](ONLINE.md).
-- The game's own online (Ranked and Free over re-psn) has no build word to compare, so any gameplay mod, applied or refused, turns it off for that session (`[mods] game online refused: gameplay mod set active`). A set of cosmetic mods only, or no mods, leaves it on.
+- The game's own online (Ranked and Free over re-psn) has no build word to compare, so it is on only when the set has no digest. It is off for that session (`[mods] game online refused: gameplay mod set active`) when a gameplay mod serves at least one entry, loose file or roster fighter, or when the set does not run as listed (a listed gameplay mod was refused, an archive copy differs, the roster could not be applied). A gameplay mod that serves nothing (`gameplay: true` with no overrides, or every entry lost to a later mod) leaves it on, as do cosmetic mods only, or no mods.
 
 ### Hashes
 
@@ -93,7 +93,7 @@ The `sha256` here is a placeholder: use the SHA-256 of your own file. A roster e
 
 - `game.title_ids` names the discs a mod is for. A mod SHOULD name only the discs it was tested on. Without `title_ids` (or with an empty list) the loader tries the mod on any disc.
 - `cpk-entry` follows each disc's own archive index: an entry must exist on that disc and the file must fit its slot there, or the mod is refused.
-- `roster` and `loose-file` run on the US 1.00 disc (`BLUS31519`) only: `title_ids` MUST name it (Manifest; loader), and on any other disc the loader refuses the mod whole. Such a mod is gameplay, so a refused one also turns online off for that session. From 0.7.0 the refusal line ends with "the roster interface is not available on this disc yet" (or the loose-file interface).
+- `roster` and `loose-file` run on the US 1.00 disc (`BLUS31519`) only: `title_ids` MUST name it (Manifest; loader), and on any other disc the loader refuses the mod whole. A mod whose `title_ids` lists only `BLUS31519` is refused on another disc with "made for another game version (this one is ...)". A roster or loose-file mod whose `title_ids` does not name `BLUS31519`, or that runs on another disc while naming it among others, is refused with "a roster mod (or a loose-file mod) needs game.title_ids to name BLUS31519 and runs only on that build". Such a mod is gameplay, so a refused one also turns online off for that session. Release 0.7.0 is planned to add to that refusal that the interface is not available on this disc yet.
 
 ### Provenance
 
