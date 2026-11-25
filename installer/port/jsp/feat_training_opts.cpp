@@ -1,4 +1,6 @@
 /* More Training options: no cooldown for Support call-ins, infinite Victory Burst, new CPU options, and placement resets.
+ * On by default (TRAIN_OPTS=0 off). Does nothing in a rollback run (jsp_tr_session). Addresses and layouts are the US disc's (the build
+ * the port is lifted from).
  *
  * Rows added to the pause menu's Training settings (jsp_game.cpp asks train_opt_count / _line / _press):
  *   CPU: Stand / Guard / Jump / Attack / Fights back
@@ -69,6 +71,12 @@ __attribute__((weak)) int train_menu_on(void);   // feat_training_menu.cpp: the 
 // drawing, s = picture height / 720. The overlay is one layer and every drawing replaces the last, so whoever has something on it for
 // the whole fight (the key line here) draws the other's part too. Absent: nothing.
 extern "C" __attribute__((weak)) int jsp_tr_readout_draw(float s);
+extern "C" int jsp_tr_session(void);        // jsp_game.cpp: 1 = an online session (rollback match) is on, or its ticks are being run again: nothing here may run
+extern "C" int jsp_tr_two_players(void);    // jsp_game.cpp: 2 Players was chosen (Player 2's pad counts)
+// The other users of the one overlay layer (weak: a build without them has none): the settings page, version line and pad-join prompt,
+// and the rollback message line and badges. While one of them holds the layer, nothing here draws on it or closes it.
+extern "C" __attribute__((weak)) int jsp_port_menu_overlay_held(void);
+extern "C" __attribute__((weak)) int jsp_net_overlay_held(void);
 
 namespace {
 int envi(const char* k, int d) { const char* e = std::getenv(k); return e && *e ? std::atoi(e) : d; }
@@ -78,6 +86,9 @@ bool ok(uint32_t a) { return a >= 0x10000u && a < 0xF0000000u && !(a & 3u); }
 float fget(uint32_t ea) { union { float f; uint32_t u; } c; c.u = vm_read32(ea); return c.f; }
 void fput(uint32_t ea, float v) { union { float f; uint32_t u; } c; c.f = v; vm_write32(ea, c.u); }
 uint32_t scene() { return vm_read32(0x0094DEC4u); }
+bool layer_free() { return !(jsp_port_menu_overlay_held && jsp_port_menu_overlay_held()) && !(jsp_net_overlay_held && jsp_net_overlay_held()); }
+/* our drawing goes: the layer is closed only when nobody else holds it (a holder's begin() has replaced our drawing already) */
+void layer_close() { if (layer_free()) jsp_overlay_close(); }
 
 enum { ROW_CPU, ROW_RESET_START, ROW_RESET_CLOSE, ROW_SUPPORT, ROW_BURST, ROW_COUNT };
 enum { CPU_STAND, CPU_GUARD, CPU_JUMP, CPU_ATTACK, CPU_FIGHT, CPU_COUNT };
@@ -112,6 +123,7 @@ void trail_clear() { g_ntrail = 0; g_trail_at = 0; g_trail_have = false; }
 
 bool g_p1_moved = false;               /* this fight: Player 1 has entered its first state (the intros are over) */
 unsigned long long g_fight_scene_ms = 0;   /* when the scene word first showed the fight's scenes */
+unsigned long long g_hud_ms = 0;           /* when the fight's health bars first showed (the intros are over by then) */
 uint32_t g_sup[8]; int g_nsup = 0;     /* Support cooldown timers seen this fight (set through func_00491F98) */
 void forget() { g_nspot = 0; g_ndpad = 0; g_nheld = 0; g_reset = 0; g_reset_polls = 0; g_nsup = 0; g_saved = false; g_report_at = 0; trail_clear(); }
 
@@ -128,9 +140,17 @@ void spots_take()
     std::printf("\n"); std::fflush(stdout);
 }
 
+/* A fighter's place is x, y, z, 1.0 and the same again 0x10 later. jsp_game.cpp finds it once per fight.
+ * ASSUMPTION (measured on the US disc, not read from the game's code): the health objects and the fighter cameras are
+ * made in slot order, Player 1's first, so the n lowest addresses of each belong to the n slots that take part; and the
+ * place is the nearest record before the health object that has the two 1.0 words and the camera's x and z.
+ * So nothing is written on trust: before EVERY write the two 1.0 markers are looked at again. A place that no longer
+ * has them (the object was freed or moved) is not written, and the fight's places are taken anew (g_stale). */
+bool g_stale = false;
+bool place_ok(uint32_t place) { return ok(place) && vm_read32(place + 0x0Cu) == 0x3F800000u && vm_read32(place + 0x1Cu) == 0x3F800000u; }
 void put(const Spot& f, float x, float y, float z)
 {
-    if (!ok(f.place)) return;
+    if (!place_ok(f.place)) { g_stale = true; return; }
     fput(f.place, x); fput(f.place + 4, y); fput(f.place + 8, z);
     fput(f.place + 0x10, x); fput(f.place + 0x14, y); fput(f.place + 0x18, z);
 }
@@ -182,7 +202,7 @@ void ask_reset(int kind, const char* how)
     std::printf("[trainopt] %s: %s\n", how, kind == 1 ? "Reset to start positions" : "Reset close together"); std::fflush(stdout);
 }
 
-P3 live(const Spot& f) { P3 p = { 0.0f, 0.0f, 0.0f }; if (ok(f.place)) { p.x = fget(f.place); p.y = fget(f.place + 4); p.z = fget(f.place + 8); } return p; }
+P3 live(const Spot& f) { P3 p = { 0.0f, 0.0f, 0.0f }; if (place_ok(f.place)) { p.x = fget(f.place); p.y = fget(f.place + 4); p.z = fget(f.place + 8); } return p; }
 void say_places(const char* what)
 {
     std::printf("[trainopt] %s:", what);
@@ -277,6 +297,7 @@ void hints_draw(float s, int ow, int oh)
 }
 void hints_show()
 {
+    if (!layer_free()) { g_hint_up = false; return; }   /* another user has the layer: no drawing, and the line counts as not up */
     int ow = 0, oh = 0; jsp_overlay_output_size(&ow, &oh);
     if (ow <= 0 || oh <= 0 || !jsp_overlay_begin(0, 0)) return;
     hints_draw((float)oh / 720.0f, ow, oh);
@@ -289,6 +310,7 @@ void hints_show()
 char g_toast_text[64] = "";
 bool toast_draw(const char* text)
 {
+    if (!layer_free()) return false;
     int ow = 0, oh = 0; jsp_overlay_output_size(&ow, &oh);
     if (ow <= 0 || oh <= 0 || !jsp_overlay_begin(0, 0)) return false;
     if (hints_on() && g_hint_up) hints_draw((float)oh / 720.0f, ow, oh);
@@ -406,7 +428,8 @@ extern "C" void train_opt_reset(int kind)
 }
 extern "C" int train_opt_saved(void) { return g_saved ? 1 : 0; }
 
-int train_opt_count(void) { return enabled() ? ROW_COUNT : 0; }
+extern "C" int train_opt_on(void) { return enabled() ? 1 : 0; }   /* feat_training_menu.cpp: TRAIN_OPTS=0 leaves these rows out of its windows */
+int train_opt_count(void) { return enabled() && !jsp_tr_session() ? ROW_COUNT : 0; }   /* no rows in a rollback run: they would do nothing */
 
 const char* train_opt_line(int i)
 {
@@ -437,17 +460,19 @@ void train_opt_press(int i)
  * (jsp_tr_readout_draw), so the readout must not draw or close the layer itself. redraw: its text changed, or it is to go: drawn again now. */
 int train_opt_layer(int redraw)
 {
-    if (!enabled() || !(g_hint_up || g_toast_until)) return 0;
+    if (!enabled() || jsp_tr_session() || !layer_free() || !(g_hint_up || g_toast_until)) return 0;
     if (redraw) { if (g_toast_until) toast_draw(g_toast_text); else hints_show(); }
     return 1;
 }
 
-int train_opt_dummy_ai(void) { return enabled() && jsp_tr_active() && (g_stars >= 0 || g_cpu != CPU_STAND) ? 1 : 0; }
+int train_opt_dummy_ai(void) { return enabled() && !jsp_tr_session() && jsp_tr_active() && (g_stars >= 0 || g_cpu != CPU_STAND) ? 1 : 0; }
 
 /* jsp_game.cpp training_icall: every indirect call of the game */
 void train_opt_icall(uint32_t target, uint64_t* gpr)
 {
-    if (!enabled() || !jsp_tr_active()) return;
+    /* Everything below writes the game's memory from the host's clock: never in an online session or a re-run tick
+     * (the two sides would no longer agree). */
+    if (!enabled() || jsp_tr_session() || !jsp_tr_active()) return;
     if (target == 0x0004296Cu && !g_p1_moved && g_fight_scene_ms && ok((uint32_t)gpr[3]) && vm_read32((uint32_t)gpr[3] + 4) == 0) {
         g_p1_moved = true;
         std::printf("[trainopt] Player 1 can move %llu ms after the loading (intros %s)\n", GetTickCount64() - g_fight_scene_ms, envi("TRAIN_INTROS", 0) ? "kept" : "skipped"); std::fflush(stdout);
@@ -479,6 +504,7 @@ void train_opt_icall(uint32_t target, uint64_t* gpr)
     if (mode == CPU_FIGHT || (g_stars < 0 && mode == CPU_STAND)) {   /* the AI thinks (old Stand: its pad is not read by the fighter) */
         for (int i = 0; i < g_nheld; i++) if (g_held[i] == u) { think_back(); break; }
         if (g_stars > 0) {   /* CPU Level: the AI level of these stars */
+            /* ASSUMPTION: the AI levels the game gives 1 to 5 stars, read from fights started at each star count (US disc) */
             static const uint32_t k_level[5] = { 0, 2, 7, 12, 16 };
             const uint32_t lv = k_level[g_stars > 5 ? 4 : g_stars - 1];
             if (vm_read32(u + 0x20) != lv) {
@@ -488,6 +514,9 @@ void train_opt_icall(uint32_t target, uint64_t* gpr)
         }
         return;
     }
+    /* ASSUMPTION: AI unit +0x14 bit 1 is "this unit thinks" (cleared: the unit presses nothing by itself); the pad words
+     * below (+0x20 buttons: bit 8 guard, bit 7 jump, bits 13 and 4 the attack; +0x30..+0x3C the sticks) were found by
+     * watching the unit's pad, not read from the game's code. */
     if (vm_read32(u + 0x14) & 2u) {
         bool have = false; for (int i = 0; i < g_nheld; i++) have |= g_held[i] == u;
         if (!have && g_nheld < 4) g_held[g_nheld++] = u;
@@ -510,9 +539,9 @@ void train_opt_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     (void)lx; (void)ly;
     if (!enabled() || port > 1) return;
-    if (!jsp_tr_active() || scene() < 0xBu) {
-        if (port == 0) { if (g_nspot || g_ndpad) forget(); g_p1_moved = false; g_fight_scene_ms = 0;
-            if (g_hint_up) { g_hint_up = false; g_toast_until = 0; jsp_overlay_close(); }   /* the fight is over: the key line goes */
+    if (jsp_tr_session() || !jsp_tr_active() || scene() < 0xBu) {   /* also: an online session or a re-run tick (see train_opt_icall) */
+        if (port == 0) { if (g_nspot || g_ndpad) forget(); g_p1_moved = false; g_fight_scene_ms = 0; g_hud_ms = 0;
+            if (g_hint_up || g_toast_until) { g_hint_up = false; g_toast_until = 0; layer_close(); }   /* the fight is over: the key line goes */
             g_icons = 0; g_icons_tried = false; }
         return;
     }
@@ -520,7 +549,12 @@ void train_opt_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
         static const bool keep = envi("TRAIN_INTROS", 0) == 1;
         const unsigned long long now = GetTickCount64();
         if (!g_fight_scene_ms) g_fight_scene_ms = now;
-        if (!keep && !g_p1_moved && now - g_fight_scene_ms < 20000 && (now - g_fight_scene_ms) % 600u < 120u) { *b |= (uint16_t)(0x4000 | 0x0008); return; }
+        /* The skip is pressed until Player 1 can move. That moment is seen through one of the game's calls
+         * (train_opt_icall); should it ever be missed, the presses must not go on into the fight (Start would open the
+         * pause menu): they also stop 1.5 s after the health bars have come up, and after 20 s at the latest. */
+        if (!g_hud_ms && jsp_tr_fight()) g_hud_ms = now;
+        const bool bars_up = g_hud_ms && now - g_hud_ms > 1500;
+        if (!keep && !g_p1_moved && !bars_up && now - g_fight_scene_ms < 20000 && (now - g_fight_scene_ms) % 600u < 120u) { *b |= (uint16_t)(0x4000 | 0x0008); return; }
     }
     const bool fight = jsp_tr_fight() != 0, paused = jsp_tr_paused() != 0;
     if (port == 0) {
@@ -545,23 +579,28 @@ void train_opt_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
             }
         }
         if (g_reset_polls > 0 && fight && !paused) { g_reset_polls--; reset_write(g_reset); }
+        if (g_stale) {   /* a place had lost its markers: nothing was written there; the places are found again */
+            g_stale = false; g_nspot = 0; g_reset = 0; g_reset_polls = 0; g_saved = false; trail_clear();
+            std::printf("[trainopt] a fighter's place is no longer valid: positions are taken again, the saved ones are dropped\n"); std::fflush(stdout);
+        }
         if (fight && !paused) trail_step();
         if (g_report_at && GetTickCount64() >= g_report_at) { g_report_at = 0; say_places("a second later"); }
+        if (!layer_free()) { g_hint_up = false; g_toast_until = 0; }   /* another user drew on the layer: nothing of ours is on it any more, and it is not ours to close */
         if (g_toast_until && GetTickCount64() >= g_toast_until) {   /* our line goes; the Training menu's windows are its own to close */
             g_toast_until = 0;
-            if (!(paused && train_menu_on && train_menu_on())) { if (hints_on() && g_hint_up && fight && !paused) hints_show(); else { jsp_overlay_close(); g_hint_up = false; } }
+            if (!(paused && train_menu_on && train_menu_on())) { if (hints_on() && g_hint_up && fight && !paused) hints_show(); else { layer_close(); g_hint_up = false; } }
         }
         /* the key line: up once Player 1 can move, off while the game is paused (the pause menu draws on the same
          * layer), and put back when something else has cleared the layer */
         if (hints_on()) {
             const bool want = fight && !paused && g_p1_moved;
-            if (!want && g_hint_up) { g_hint_up = false; if (!g_toast_until && !(paused && train_menu_on && train_menu_on())) jsp_overlay_close(); }   /* paused with the Training menu: its windows are on the layer already */
+            if (!want && g_hint_up) { g_hint_up = false; if (!g_toast_until && !(paused && train_menu_on && train_menu_on())) layer_close(); }   /* paused with the Training menu: its windows are on the layer already */
             else if (want && !g_toast_until && (!g_hint_up || !jsp_overlay_active())) hints_show();
         }
         if ((g_burst || logon()) && fight) {   /* Infinite Victory Burst (with TRAIN_OPT_LOG=1 the manager is logged either way) */
             const uint32_t m = vm_read32(0x00952198u);
             if (ok(m) && m >= 0x10000000u && vm_read32(m + 0x18) == 0x00886128u) {
-                static const int full = envi("TRAIN_BURST_FULL", 7500);
+                static const int full = envi("TRAIN_BURST_FULL", 7500);   /* ASSUMPTION: 7500 is a full gauge (the highest value seen; TRAIN_BURST_FULL changes it) */
                 if (logon()) {
                     static uint32_t last[8]; static unsigned said = 0; static unsigned long long t_last = 0;
                     const uint32_t now[8] = { vm_read32(m + 0x0C), vm_read32(m + 0x1C), vm_read32(m + 0x20), vm_read32(m + 0x2C), vm_read32(m + 0x34), vm_read32(m + 0x38), vm_read32(m + 0x128), vm_read32(m + 0x12C) };
@@ -594,6 +633,7 @@ void train_opt_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     }
     /* Select held in the fight: Select + Cross / Circle reset the positions, Select + Triangle calls the CPU, Select + R1
      * saves the positions, and nothing else gets through but Start */
+    if (port == 1 && !jsp_tr_two_players()) return;   /* 1 Player: the second pad is not in the fight, so it resets nothing either */
     static uint16_t prev[2] = { 0, 0 };
     const uint16_t SELECT = 0x0001, START = 0x0008, CROSS = 0x4000, CIRCLE = 0x2000, TRIANGLE = 0x1000, SQUARE = 0x8000, R1 = 0x0800, cur = *b, pressed = (uint16_t)(cur & ~prev[port]);
     prev[port] = cur;

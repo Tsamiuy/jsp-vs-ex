@@ -15,7 +15,10 @@
  *   Tested in scripted runs: menus, Character Select, Stage Select and a fight show the same 6 fault lines as without
  *   the heaps, and the Gallery's model the same fault lines as without.
  *
- * Step 2 (experiment, MODEL_PREVIEW=1): the Gallery's viewer object on Character Select.
+ * ASSUMPTION for everything below: the addresses, class layouts and heap group numbers are the US disc's (the build the
+ * port is lifted from), found by reading the lifted code and by test runs, as the notes say at each place.
+ *
+ * Step 2: the Gallery's viewer object on Character Select.
  *   The viewer (class at 0x001B2318..0x001B67FF) is made by func_001B54BC(viewer, parent node), told a character with
  *   func_001B26A8(viewer, id) and run once a frame with func_001B65D8(viewer). Its constructor
  *     - unloads and gives back the loaders [registry + 0x60] and [+ 0x64] (groups 2A, 2B: Character Select's own packs),
@@ -55,10 +58,30 @@ extern "C" __attribute__((weak)) const char* jsp_alt_name(int chr, int alt); // 
 extern "C" int jsp_cs_is_3v3(void);           // jsp_game.cpp: the 3 vs 3 Character Select (three boxes a team) is the one in use
 extern "C" uint32_t jsp_cs_state_seq(void);   // jsp_game.cpp: how often func_00188A58 has run (the object below is this visit's once it has moved)
 extern "C" uint32_t jsp_cs_state_obj(void);   // jsp_game.cpp: Character Select's player state object (player state at +0x60 + 0x14 * player)
+extern "C" int jsp_session_on(void);          // jsp_game.cpp: a rollback run, an online session or a re-run tick: nothing of the viewer runs
+// The other users of the one overlay layer (weak: a build without them has none). While one holds the layer the viewer's texts are
+// not drawn and the layer is not closed from here.
+extern "C" __attribute__((weak)) int jsp_port_menu_overlay_held(void);
+extern "C" __attribute__((weak)) int jsp_net_overlay_held(void);
+
+#ifndef JSP_EXPERIMENTS
+#define JSP_EXPERIMENTS 0
+#endif
 
 namespace {
 int envi(const char* k, int d) { const char* e = std::getenv(k); return e && *e ? std::atoi(e) : d; }
-bool enabled() { static const bool v = envi("MODEL_PREVIEW", 1) == 1; return v; }   /* MODEL_PREVIEW=0 = off */
+/* a probe's switch: read in experiments builds only (elsewhere the probe is off whatever is set) */
+#if JSP_EXPERIMENTS
+int probe_env(const char* k, int d) { return envi(k, d); }
+#else
+int probe_env(const char*, int d) { return d; }
+#endif
+/* MODEL_PREVIEW=0 = off (the switch for the viewer). In a rollback run it is off whatever the setting says: a rollback match
+ * is set up on Free Battle's 1 Player Character Select, and the viewer changes the menus' heap layout, the grid's table and what is
+ * loaded, which the two sides must not differ in. That answer is taken once, at the first question (the run's mode does not change),
+ * so nothing of the file runs in such a run, the heap change at the start included. */
+bool enabled() { static const bool v = envi("MODEL_PREVIEW", 1) == 1 && !jsp_session_on(); return v; }
+bool layer_free() { return !(jsp_port_menu_overlay_held && jsp_port_menu_overlay_held()) && !(jsp_net_overlay_held && jsp_net_overlay_held()); }
 bool logon() { static const bool v = envi("MODEL_PREVIEW_LOG", 0) == 1; return v; }
 bool ok(uint32_t a) { return a >= 0x10000u && a < 0x30000000u; }
 void say(const char* fmt, ...) { va_list ap; va_start(ap, fmt); std::printf("[modelpv] "); std::vprintf(fmt, ap); std::printf("\n"); std::fflush(stdout); va_end(ap); }
@@ -513,7 +536,7 @@ bool window_up() { if (!g_part || g_phase < 3 || g_title_gone || g_close_ticks) 
  *    every tick of Character Select and left standing when the screen goes). The recolour cannot tell two of the same
  *    character apart: both get it.
  * MODEL_PREVIEW_ALT=0: no colours. */
-bool alt_on() { static const bool v = envi("MODEL_PREVIEW_ALT", 1) != 0; return v; }
+bool alt_on() { static const bool v = envi("MODEL_PREVIEW_ALT", 1) != 0 && jsp_alt_count != nullptr; return v; }   /* a build without colour data: Triangle stays the game's */
 int alt_count(int chr) { const int n = alt_on() && jsp_alt_count ? jsp_alt_count(chr) : 1; return n < 1 ? 1 : n > 8 ? 8 : n; }
 const char* alt_name(int chr, int alt) { const char* n = jsp_alt_name ? jsp_alt_name(chr, alt) : nullptr; return n ? n : ""; }
 std::atomic<int> g_tri{0};              /* Triangle presses seen by the pad hook */
@@ -580,7 +603,11 @@ void ovl_arrow(float x, float y, int dir, float h, uint32_t rgba)
 void overlay_show(const Ovl& w)
 {
     const bool any = w.random || w.arrows || w.name[0] || w.poses > 1 || w.pic || w.alts > 1;
+    /* another user has the layer: its begin() has replaced our drawing, so nothing of ours is up, nothing is drawn and the layer is
+     * not ours to close; the texts come back with the first call after it is free */
+    if (!layer_free()) { g_ovl_up = false; g_random_text = false; return; }
     if (!any) { if (g_ovl_up) { jsp_overlay_close(); g_ovl_up = false; } g_random_text = false; return; }
+    if (g_ovl_up && !jsp_overlay_active()) g_ovl_up = false;   /* someone closed the layer meanwhile: draw again */
     if (g_ovl_up && !std::memcmp(&w, &g_ovl_now, sizeof w)) return;
     int ow = 0, oh = 0; jsp_overlay_output_size(&ow, &oh);
     if (ow <= 0 || oh <= 0 || !jsp_overlay_begin(0, 0)) { g_ovl_up = false; return; }
@@ -844,7 +871,7 @@ void car_tick(const ppu_context* ctx)
     if (!known) { static int said = -1; if (said != want) { said = want; say("the viewer has no record for character %d: the logo stays", want); } }
     { static int last_want = -2, last_alt = 0; if (want != last_want || want_alt != last_alt) { last_want = want; last_alt = want_alt; g_car_changed = now; } }
     /* MODEL_PREVIEW_DUMP=1 (probe): the grid layouts' panes, 1.5 s after a Support is first shown on the list */
-    { static const bool dump = envi("MODEL_PREVIEW_DUMP", 0) != 0; static unsigned n = 0;
+    { static const bool dump = probe_env("MODEL_PREVIEW_DUMP", 0) != 0; static unsigned n = 0;
       if (dump && g_car_on && sup_slot && want >= 200 && ++n == 90u) for (int i = 0; i < g_ngrid_layout; i++) {
           const uint32_t list = vm_read32(g_grid_layout[i] + 0x14u), arr = ok(list) ? vm_read32(list + 0x08u) : 0u, cnt = ok(list) ? vm_read32(list + 0x0Cu) : 0u;
           say("layout %08X: %u panes", g_grid_layout[i], cnt);
@@ -1003,7 +1030,7 @@ void tick(const ppu_context* ctx)
             }
         }
         /* MODEL_PREVIEW_DUMP=2 (probe): the window part's own layout, every pane, 2 s after it was made and again with a model shown */
-        if (g_part) { static const bool dump = envi("MODEL_PREVIEW_DUMP", 0) == 2; static int done = 0;
+        if (g_part) { static const bool dump = probe_env("MODEL_PREVIEW_DUMP", 0) == 2; static int done = 0;
             const bool now2 = done == 1 && vm_read32(g_viewer) == 2u && !g_logo;
             if (dump && ((done == 0 && g_phase_ticks == 120u) || now2)) { done++;
                 const uint32_t lobj = vcall(ctx, g_part, 0x54), lay = ok(lobj) ? vm_read32(lobj + 4u) : 0u /* as func_001C1B34 gets it: the +0x54 virtual, then +4 */, list = ok(lay) ? vm_read32(lay + 0x14u) : 0u, arr = ok(list) ? vm_read32(list + 0x08u) : 0u, cnt = ok(list) ? vm_read32(list + 0x0Cu) : 0u;
@@ -1117,10 +1144,13 @@ void model_preview_setpic(ppu_context* ctx)
 /* jsp_game.cpp training_icall: every indirect call of the game */
 void model_preview_icall(uint32_t target, uint64_t* gpr)
 {
+    if (!enabled()) return;   /* off, or a rollback run: nothing below runs */
+#if JSP_EXPERIMENTS
     /* MODEL_PREVIEW_WHO=<hex target> (probe): where an indirect call comes from (the return address and r3 .. r6), 12 times */
     { static const uint32_t who = (uint32_t)std::strtoul(std::getenv("MODEL_PREVIEW_WHO") ? std::getenv("MODEL_PREVIEW_WHO") : "0", nullptr, 16);
       if (who && target == who) { static unsigned n = 0; if (n++ < 12) { const ppu_context* c = reinterpret_cast<const ppu_context*>(reinterpret_cast<const char*>(gpr) - offsetof(ppu_context, gpr));
           say("target %08X called from %08X: r3 %08X r4 %08X r5 %08X r6 %08X", target, (uint32_t)c->lr - 4u, (uint32_t)gpr[3], (uint32_t)gpr[4], (uint32_t)gpr[5], (uint32_t)gpr[6]); } } }
+#endif
     /* Drawing. In the Gallery the scene's own virtuals draw the viewer: +0x18 -> func_001B8958(viewer), +0x38 (once a
      * pass, 0..5 and 7) -> func_001B99A4(viewer, pass), +0x3C (once a pass) -> func_001B4B0C(viewer, pass). The Progress
      * scene has the library's empty virtuals there (func_0064D294 / func_0064D214 / func_0064D204), which mark the node
@@ -1176,7 +1206,15 @@ void model_preview_icall(uint32_t target, uint64_t* gpr)
             if (nhide < 0) { nhide = 0; const char* e = std::getenv("MODEL_PREVIEW_HIDE");   /* default: the grid's page line (L1 01/07 R1) and the dark panel behind the grid */
                 for (const char* q = e ? e : "0087C0B8,0087C508"; *q && nhide < 8;) { char* end = nullptr; const uint32_t v = (uint32_t)std::strtoul(q, &end, 16); if (end == q) break; hide[nhide++] = v; q = *end ? end + 1 : end; } }
             bool mine = false; for (int i = 0; i < nhide; i++) mine |= hide[i] == vt;
-            if (mine) { const bool up = g_no_preview ? false : car_mode() ? (g_phase >= 0 && !g_support_grid) : (g_part && g_phase >= 3); vm_write32(part + 0x1Cu, up ? 0u : 1u); }
+            if (mine) {
+                /* +0x1C is written to 0 while the window is up and back to 1 once, when it is not (any more): a part this file did
+                 * not hide is left alone (the 2 Players, 3 vs 3 and Online screens draw these parts as the game wants them) */
+                static uint32_t hid[8]; static int nhid = 0;
+                const bool up = g_no_preview ? false : car_mode() ? (g_phase >= 0 && !g_support_grid) : (g_part && g_phase >= 3);
+                int at = -1; for (int i = 0; i < nhid; i++) if (hid[i] == part) at = i;
+                if (up) { if (at < 0 && nhid < 8) { hid[nhid++] = part; at = nhid - 1; } if (at >= 0) vm_write32(part + 0x1Cu, 0u); }
+                else if (at >= 0) { vm_write32(part + 0x1Cu, 1u); hid[at] = hid[--nhid]; }
+            }
         }
         return;
     }
@@ -1211,7 +1249,7 @@ void model_preview_icall(uint32_t target, uint64_t* gpr)
             teardown(c);
         }
         /* a menu is running and Character Select is not up: the packs are asked for ahead of time */
-        else if (g_phase == 0 && preload() && g_room_ok && !t_in_viewer && GetTickCount64() - g_cs_ms > 300) {
+        else if (g_phase == 0 && preload() && g_room_ok && !t_in_viewer && GetTickCount64() - g_cs_ms > 300 && vm_read32(0x00956550u) != 4u) {   /* not with the cursor on Online Battle: its menus get nothing of ours */
             if (g_packs == 0) { if (packs_ask(c, false)) say("the packs are asked for ahead of time (a menu on heap layout 3)"); }
             else if (g_packs == 1) packs_check(c);
         }

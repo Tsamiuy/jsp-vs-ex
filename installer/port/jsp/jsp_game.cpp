@@ -1108,6 +1108,11 @@ jptr::Readout g_readout;
 std::mutex g_readout_mu;
 bool g_readout_drawn = false;   /* the overlay holds the readout (close it only then, so other overlay users are not wiped) */
 bool g_readout_show = false;    /* the readout is to be seen now (readout_tick); read by jsp_tr_readout_draw */
+/* This fight: Player 1 has entered its first state, so the intros are over and the fighters can move (the indirect call 0x0004296C with
+ * +4 == 0, the sign the test auto-pilot waits for; ASSUMPTION: measured on the US disc, not read from the game's code). Set on the
+ * game's thread, cleared by readout_tick when the scene word shows a menu or a loading screen. The readout waits for it: it is not
+ * shown over the intros (the maintainer 2026-11-25). Display only: nothing of the game is written. */
+std::atomic<bool> g_p1_can_move{false};
 bool g_readout_carried = false; /* feat_training_opts.cpp's drawing carries the readout (its key line is on the same layer) */
 
 FILE* bal_file()
@@ -2828,6 +2833,7 @@ int training_icall(uint32_t target, uint64_t* gpr)
         }
     }
     if (target == 0x0004296Cu && g_auto.on && vm_read32((uint32_t)gpr[3] + 4) == 0) g_auto.p1_moved = true;
+    if (target == 0x0004296Cu && vm_read32((uint32_t)gpr[3] + 4) == 0) g_p1_can_move.store(true);   /* the Training readout waits for it */
     screens_note(target, (uint32_t)gpr[3]);
     static int dummy_mask = -1;
     if (dummy_mask < 0) { const char* e = std::getenv("TRAINING_DUMMY_TEST"); dummy_mask = e ? (int)std::strtol(e, nullptr, 16) : 0; }
@@ -3056,12 +3062,16 @@ void readout_tick()
         char e[16];
         on = jptr::key_on(jsp_setting_get(jptr::kKey, e, sizeof e) ? e : nullptr);
     }
-    const bool show = on && training_active() && training_fight_scene() && !pause_up() && !g_set_hidehud && !g_tb_mode;
+    if (vm_read32(0x0094DEC4u) < 0xBu) g_p1_can_move.store(false);   /* a menu or a loading screen: the next fight has its own intros */
+    const bool show = on && training_active() && training_fight_scene() && !pause_up() && !g_set_hidehud && !g_tb_mode && g_p1_can_move.load();
     std::string l1, l2;
     /* feat_training_opts.cpp keeps its key line on the same layer for the whole fight, and each begin() clears the layer. So while its
      * line (or one of its short messages) is up, its drawing carries the readout's box too (jsp_tr_readout_draw, below): here the
      * readout only says when that drawing has to be made again (its text changed, or it is to come or go). */
-    if (train_opt_layer) {
+    /* Another user of the layer (the settings page, version line or join prompt; the rollback message or a badge) comes first: then
+     * neither the key line's drawing nor the readout is made, and the readout's own yield below runs as before. */
+    const bool others = jsp_port_menu_overlay_held() || jsp_net_overlay_held();
+    if (train_opt_layer && !others) {
         bool redraw;
         {
             std::lock_guard<std::mutex> lk(g_readout_mu);
@@ -3071,7 +3081,10 @@ void readout_tick()
         }
         if (train_opt_layer(redraw ? 1 : 0)) { g_readout_drawn = false; g_readout_carried = true; return; }
         if (g_readout_carried) { g_readout_carried = false; std::lock_guard<std::mutex> lk(g_readout_mu); g_readout.invalidate(); }   /* its drawing is gone: the readout draws itself again */
-    } else g_readout_show = show;
+    } else {
+        g_readout_show = show;
+        if (g_readout_carried) { g_readout_carried = false; std::lock_guard<std::mutex> lk(g_readout_mu); g_readout.invalidate(); }
+    }
     {
         std::lock_guard<std::mutex> lk(g_readout_mu);
         if (!training_active()) g_readout.reset();
@@ -3079,7 +3092,7 @@ void readout_tick()
          * rollback glue's message line and status badges (jsp_net_game.cpp; with JSP_ROLLBACK=1 a Training fight can run under rollback,
          * e.g. the local bench). Each begin() clears the layer, so the readout yields (jptr::layer_step): while another user holds the
          * layer it neither draws nor closes, and draws again once that drawing is gone; it closes only its own drawing. */
-        switch (jptr::layer_step(show, g_readout_drawn, jsp_port_menu_overlay_held() || jsp_net_overlay_held())) {
+        switch (jptr::layer_step(show, g_readout_drawn, others)) {
         case jptr::Layer::Yield: g_readout_drawn = false; g_readout.invalidate(); return;
         case jptr::Layer::Close: jsp_overlay_close(); g_readout_drawn = false; g_readout.invalidate(); return;
         case jptr::Layer::Idle: g_readout.invalidate(); return;
@@ -4208,12 +4221,14 @@ static void tex_patch_all(uint32_t off, uint32_t w, uint32_t h, uint32_t fmt)
 void game_pad_filter(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (port == 0) { shadow_range_tick(); fps_counter_apply(); }
-    if (model_preview_pad) model_preview_pad(port, b, lx, ly);   /* feat_model_preview.cpp */
     if (!(jsp_ps_active && jsp_ps_active())) {   /* the feature files (not while the Port Settings screen is up) */
         if (train_menu_pad && train_menu_pad(port, b, lx, ly)) return;   /* the Training pause menu is up (feat_training_menu.cpp) */
         if (arc_coop_pad) arc_coop_pad(port, b, lx, ly);   /* feat_arcade_coop.cpp */
         if (train_opt_pad) train_opt_pad(port, b, lx, ly);   /* feat_training_opts.cpp */
     }
+    /* after the Arcade file: on the partner's box of Arcade for 2 Players that file adds Player 2's pad to Player 1's, and the
+     * viewer's list must see (and keep from the hidden grid) those presses too */
+    if (model_preview_pad) model_preview_pad(port, b, lx, ly);   /* feat_model_preview.cpp */
     if (port == 1 && g_tb_running && !pause_up()) { *b = g_tb_buttons[1]; *lx = g_tb_lx[1]; *ly = g_tb_ly[1]; }
     else if (port == 1 && !g_two_players) {
         static const bool always = [] { const char* e = std::getenv("PAD_P2_ALWAYS"); return e && *e == '1'; }();
@@ -4522,17 +4537,32 @@ extern "C" int jsp_ac_charsel_slot(void) { return on_charsel() ? (int)charsel_cu
 extern "C" int jsp_ac_main_list_open(void) { return main_list_open() ? 1 : 0; }
 extern "C" int jsp_ac_menu_page(void) { return mp_on() ? mp_page_now() : 1; }   /* 1 = the game's rows (Battle Modes page or the old menu) */
 extern "C" void jsp_set_two_players(int on) { if (g_two_players != (on != 0)) { std::printf("[pad] %s (feature)\n", on ? "2 Players: player 2's pad counts" : "1 Player: player 2's pad off"); std::fflush(stdout); } g_two_players = on != 0; }
-/* for feat_training_opts.cpp */
-extern "C" int jsp_tr_active(void) { return training_active() && !g_tb_mode ? 1 : 0; }   /* plain Training (not Turn-based) */
+/* for feat_training_opts.cpp and feat_training_menu.cpp */
+/* 1 = the game runs for rollback play: the feature files (Training options and menu, Arcade for 2 Players, the Model Viewer) write the
+ * game's memory and press buttons from the host's clock, so they do nothing then. */
+extern "C" int jsp_session_on(void)
+{
+    /* the whole run when the game was started for rollback play (JSP_ROLLBACK: its menus and Character Select set the match up, the
+     * session itself begins only at the fight), a running session (g_ko_track), and the rollback core's re-run ticks */
+    static const bool rb = [] { const char* e = std::getenv("JSP_ROLLBACK"); return e && *e && e[0] != '0'; }();
+    return (rb || g_ko_track != 0 || jsp_stepper_in_replay() != 0) ? 1 : 0;
+}
+extern "C" int jsp_tr_session(void) { return jsp_session_on(); }
+extern "C" int jsp_tr_two_players(void) { return g_two_players ? 1 : 0; }
+extern "C" int jsp_tr_active(void) { return training_active() && !g_tb_mode && !jsp_tr_session() ? 1 : 0; }   /* plain Training (not Turn-based), and no online session */
 extern "C" int jsp_tr_fight(void) { return training_fight_scene() ? 1 : 0; }
 extern "C" int jsp_tr_paused(void) { return pause_up() ? 1 : 0; }
-/* The fighters taking part, found once per fight as the Group Camera does: health objects and fighter cameras are made in slot
- * order, Player 1's first, so the n lowest addresses of each, in order, belong to the n setup slots that take part, in order. */
+/* The fighters taking part, found once per fight as the Group Camera does.
+ * ASSUMPTION (measured on the US disc, not read from the game's code): health objects and fighter cameras are made in slot order,
+ * Player 1's first, so the n lowest addresses of each, in order, belong to the n setup slots that take part, in order; and a fighter's
+ * place is the nearest record before its health object with the two 1.0 words and the camera's x and z (tb_find_place).
+ * The kept answer is thrown away when a camera has lost its class or a place its two 1.0 markers; the caller checks the markers
+ * again before every write (feat_training_opts.cpp put). */
 extern "C" int jsp_tr_fighters(uint32_t* health, uint32_t* place, int* slot, int* team, int max)
 {
     struct F { int slot, team; uint32_t health, cam, place; };
     static F f[4]; static int nf = 0;
-    if (nf) { bool ok = true; for (int k = 0; k < nf; k++) if (vm_read32(f[k].cam) != k_cam_vt) ok = false; if (!ok) nf = 0; }
+    if (nf) { bool ok = true; for (int k = 0; k < nf; k++) if (vm_read32(f[k].cam) != k_cam_vt || vm_read32(f[k].place + 0x0Cu) != 0x3F800000u || vm_read32(f[k].place + 0x1Cu) != 0x3F800000u) ok = false; if (!ok) nf = 0; }
     if (!nf) {
         int slots[4], n = 0;
         for (int q = 0; q < 4; q++) if (vm_read32(setup_field(q, 0x08)) != 2) slots[n++] = q;

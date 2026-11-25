@@ -1,4 +1,5 @@
-/* The two-window Training pause menu (in the style of a fighting game's practice mode menu). TRAIN_MENU=0: the old pause menu with its Training settings row.
+/* The two-window Training pause menu (in the style of a fighting game's practice mode menu). On by default; TRAIN_MENU=0: the old pause menu with its Training settings row.
+ * Does nothing in a rollback run (jsp_tr_session).
  *
  * Start in a Training fight opens the game's own pause menu as before (that is what pauses the fight), but it is not
  * drawn (jsp_game.cpp ui_scale asks train_menu_hide for every HUD draw: the ones inside the pause panel's place go off
@@ -15,7 +16,9 @@
  * presses Cross; the game's own Yes / No box and Skill table then show as always, and our windows come back if the
  * pause list does. Closing is Cross on the hidden "Close menu".
  * The values are jsp_game.cpp's Training settings (jsp_tr_flag) and feat_training_opts.cpp's (train_opt_value /
- * train_opt_reset). TRAIN_MENU_LOG=1 logs the steps. */
+ * train_opt_reset). TRAIN_MENU_LOG=1 logs the steps. 
+ * The addresses and the pause menu's layout are the US disc's (the build the port is lifted from).
+ */
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -36,11 +39,18 @@ extern "C" int jsp_tr_has_groupcam(void);
 extern "C" int train_opt_value(int what, int set);        // feat_training_opts.cpp: 0 CPU Level, 1 CPU Behavior, 2 Support cooldown off, 3 Infinite Victory Burst
 extern "C" void train_opt_reset(int kind);                // 1 start positions, 2 close together, 3 the CPU to Player 1, 4 saved positions, 5 save now
 extern "C" int train_opt_saved(void);                     // positions are saved in this fight
+extern "C" int train_opt_on(void);                        // 0 with TRAIN_OPTS=0: the rows of that file are left out
+extern "C" int jsp_tr_session(void);                      // jsp_game.cpp: an online session is on or its ticks are run again: this menu stays away
+// The other users of the one overlay layer (weak: a build without them has none). While one holds the layer the windows are not drawn
+// (they come back with the next pulse once it is free) and the layer is not closed from here.
+extern "C" __attribute__((weak)) int jsp_port_menu_overlay_held(void);
+extern "C" __attribute__((weak)) int jsp_net_overlay_held(void);
 
 namespace {
 int envi(const char* k, int d) { const char* e = std::getenv(k); return e && *e ? std::atoi(e) : d; }
 bool enabled() { static const bool v = envi("TRAIN_MENU", 1) != 0; return v; }
 bool logon() { static const bool v = envi("TRAIN_MENU_LOG", 0) == 1; return v; }
+bool layer_free() { return !(jsp_port_menu_overlay_held && jsp_port_menu_overlay_held()) && !(jsp_net_overlay_held && jsp_net_overlay_held()); }
 
 enum { B_SELECT = 0x0001, B_START = 0x0008, B_UP = 0x0010, B_RIGHT = 0x0020, B_DOWN = 0x0040, B_LEFT = 0x0080, B_CIRCLE = 0x2000, B_CROSS = 0x4000 };
 enum { K_ONOFF, K_STARS, K_BEHAVIOR, K_ACTION };
@@ -52,14 +62,16 @@ const std::vector<Cat>& cats()
 {
     static const std::vector<Cat> c = [] {
         std::vector<Cat> v;
-        v.push_back({ "CPU Settings", 0, "", {
+        const bool opts = train_opt_on() != 0;   /* TRAIN_OPTS=0: the rows that feat_training_opts.cpp does are not shown (they would do nothing) */
+        if (opts) v.push_back({ "CPU Settings", 0, "", {
             { "CPU Level", K_STARS, V_STARS, "0 stars: a training dummy. 1 to 5 stars: the CPU fights at that level." },
             { "CPU Behavior", K_BEHAVIOR, V_BEHAVIOR, "What the dummy does at 0 stars." } } });
-        v.push_back({ "System Settings", 0, "", {
-            { "Unlimited Stamina", K_ONOFF, V_STAMINA, "Stamina is not used up." },
-            { "Support Cooldown", K_ONOFF, V_COOLDOWN, "Off: a Support can be called again as soon as it has left." },
-            { "Infinite Victory Burst", K_ONOFF, V_BURST, "The Victory gauge stays full and a burst does not run out." } } });
-        v.push_back({ "Position Reset", 0, "", {
+        Cat sys{ "System Settings", 0, "", {
+            { "Unlimited Stamina", K_ONOFF, V_STAMINA, "Stamina is not used up." } } };
+        if (opts) { sys.opts.push_back({ "Support Cooldown", K_ONOFF, V_COOLDOWN, "Off: a Support can be called again as soon as it has left." });
+                    sys.opts.push_back({ "Infinite Victory Burst", K_ONOFF, V_BURST, "The Victory gauge stays full and a burst does not run out." }); }
+        v.push_back(sys);
+        if (opts) v.push_back({ "Position Reset", 0, "", {
             { "Reset to Start Positions", K_ACTION, V_RESET_START, "Everyone back to where the fight began. In the fight: Select + Cross." },
             { "Reset Close Together", K_ACTION, V_RESET_CLOSE, "The opponent right in front of Player 1. In the fight: Select + Circle." },
             { "Move CPU to Player", K_ACTION, V_CALL, "Brings the opponent to Player 1. In the fight: Select + Triangle." },
@@ -237,6 +249,7 @@ void draw()
 {
     int ow = 0, oh = 0; jsp_overlay_output_size(&ow, &oh);
     if (ow <= 0 || oh <= 0) { ow = 1280; oh = 720; }
+    if (!layer_free()) { g_drawn_at = GetTickCount64(); return; }   /* another user has the layer: not drawn now, tried again with the next pulse */
     if (!jsp_overlay_begin(0, 0)) return;
     g_s = (float)oh / 720.0f; g_ox = (int)(((float)ow - 1280.0f * g_s) * 0.5f); g_oy = 0;
     const std::vector<Cat>& cs = cats();
@@ -311,7 +324,7 @@ void draw()
 void hide_windows(const char* why)
 {
     if (!g_shown) return;
-    g_shown = false; jsp_overlay_close();
+    g_shown = false; if (layer_free()) jsp_overlay_close();   /* another user's drawing is not ours to close (its begin() has replaced ours already) */
     if (logon()) { std::printf("[trainmenu] windows off (%s) at %llu\n", why, GetTickCount64()); std::fflush(stdout); }
 }
 
@@ -327,9 +340,10 @@ void go(int game_row, const char* what)
 }
 }
 
-int train_menu_on(void) { return enabled() ? 1 : 0; }
+int train_menu_on(void) { return enabled() && !jsp_tr_session() ? 1 : 0; }   /* a rollback run: the game's pause menu keeps its own Training settings row */
 
-/* render thread: is this HUD draw the game's pause panel? (720p: x 432..848, y 192..528; the box is in -1..1, y up) */
+/* render thread: is this HUD draw the game's pause panel? (720p: x 432..848, y 192..528; the box is in -1..1, y up)
+ * ASSUMPTION: the panel is told from other HUD draws only by that box, measured on screenshots at 1280 x 720. */
 int train_menu_hide(const float* box)
 {
     if (!g_cover) return 0;
@@ -340,6 +354,9 @@ int train_menu_hide(const float* box)
 int train_menu_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
 {
     if (!enabled()) return 0;
+    /* an online session or a re-run tick: the menu does nothing (it presses buttons for the game from the host's clock);
+     * windows that are up go, the pad is the game's */
+    if (jsp_tr_session()) { if (port == 0 && (g_shown || g_cover)) { hide_windows("an online session"); g_cover = false; g_goal = 0; g_sent = 0; g_owner = 0; g_owner_known = false; g_skill_mirror = false; } return 0; }
     int depth = 0, row = 0;
     const bool list_up = jsp_tr_active() && jsp_tr_pause_info(&depth, &row) && depth == 0;
     const unsigned long long now = GetTickCount64();
