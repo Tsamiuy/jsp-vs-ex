@@ -1383,6 +1383,12 @@ static void test_card_as(MemIo& io)
         CHECK(!mod(r1, "v1")->loaded && has_log(r1, "unknown key \"card_as\""));
         add_mod(io, "v1", roster_mod("v1", "{ \"id\": 19, \"card_as\": 18 }", "\"roster\": 2"));
         CHECK(mod(jmods::load_mod_set(io, "v1\n", opts()), "v1")->loaded);
+        // the EU disc: a card_as mod is refused with the reason (the roster interface is US only for now, jsp_region.h)
+        jmods::Options eu = opts(); eu.title_id = "BLES02136";
+        add_mod(io, "v1", "{ \"schema\": 1, \"id\": \"v1\", \"version\": \"1\", \"game\": { \"title_ids\": [\"BLES02136\", \"BLUS31519\"] },\n"
+                          "  \"interfaces\": { \"roster\": 2 }, \"roster\": { \"fighters\": [ { \"id\": 19, \"card_as\": 18 } ] } }\n");
+        jmods::ModSet r2 = jmods::load_mod_set(io, "v1\n", eu);
+        CHECK(!mod(r2, "v1")->loaded && r2.roster.empty() && has_log(r2, "the roster interface is not available on this disc yet"));
     }
     // parse: card_as is kept, logged, and does not change the digest (the card is cosmetic)
     const auto card_set = [&](const char* fighters) { add_mod(io, "ca", roster_mod("ca", fighters, "\"roster\": 2")); return jmods::load_mod_set(io, "ca\n", opts()); };   // one id: the digest names it
@@ -1602,6 +1608,9 @@ static void test_loose()
         jmods::Options o = opts(); o.title_id = "BLES02136";
         const jmods::ModSet r = jmods::load_mod_set(io, "vo\n", o);
         CHECK(!mod(r, "vo")->loaded && r.loose.empty());
+        add_mod(io, "vo3", "{ \"schema\": 1, \"id\": \"vo3\", \"version\": \"1\", \"title\": \"t\", \"game\": { \"title_ids\": [\"BLES02136\", \"BLUS31519\"] }, \"interfaces\": { \"loose-file\": 1 }, \"loose\": [ " + acb + ", " + awb + " ] }");
+        const jmods::ModSet r3 = jmods::load_mod_set(io, "vo3\n", o);   // the EU disc: refused with the reason
+        CHECK(!mod(r3, "vo3")->loaded && r3.loose.empty() && has_log(r3, "the loose-file interface is not available on this disc yet"));
         add_mod(io, "vo2", "{ \"schema\": 1, \"id\": \"vo2\", \"version\": \"1\", \"title\": \"t\", \"game\": { \"title_ids\": [\"BLES02136\"] }, \"interfaces\": { \"loose-file\": 1 }, \"loose\": [ " + acb + ", " + awb + " ] }");
         CHECK(!mod(jmods::load_mod_set(io, "vo2\n", opts()), "vo2")->loaded);
     }

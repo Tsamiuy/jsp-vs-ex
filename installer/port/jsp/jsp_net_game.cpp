@@ -43,6 +43,7 @@ extern "C" unsigned jsp_net_notice_gen(void) { return 0; }
 
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
+#include "jsp_region.h"
 #include "jsp_hook_chain.h"
 #include "jsp_overlay_api.h"
 #include "jsp_net_session.h"
@@ -143,6 +144,18 @@ void note_off(jpno::Refusal r) { g_refusal_src.store(jsp_online_source()); g_ref
 RendezvousNotice g_rdv;
 void decide_env()
 {
+    // US only for now (jsp_region.h): the session's frame hooks, the fight tick hash and the snapshot ranges sit at US 1.00 addresses. An EU
+    // build refuses a rollback start here, before anything reads the other switches, with the same two variables resolve_env sets on a refusal
+    // (JSP_ROLLBACK=0, JSP_NET_REFUSED=1) and nothing else. Unlike resolve_env's both-methods refusal it does NOT remove PS3_NET_ONLINE: on EU
+    // rollback never runs, so the game's own online has nothing to clash with and stays as the player set it. It does not call note_off either:
+    // the on-screen notice is drawn by the Port Settings module, which is off on EU, so the reason is in the log only (the [net] REFUSED line).
+    // A US build never takes this branch: its decision is unchanged.
+    if (!jsp_game_is_us() && jpno::flag_on(std::getenv(jpno::kKeyOn))) {
+        _putenv_s(jpno::kKeyOn, "0");
+        _putenv_s(jpno::kKeyRefused, "1");
+        std::fprintf(stderr, "[net] env decision: REFUSED\n[net] REFUSED: rollback netcode is " JSP_NOT_THIS_DISC "\n");
+        return;
+    }
     std::string why; jpno::Refusal code = jpno::Refusal::None;
     const jpno::Boot r = jpno::resolve_env([](const char* k) { return std::getenv(k); },
                                            [](const char* k, const char* v) { _putenv_s(k, v ? v : ""); },   // "" removes the variable on Windows

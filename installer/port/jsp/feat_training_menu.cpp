@@ -29,6 +29,11 @@
 #include <windows.h>
 #endif
 #include "ppu_recomp.h"
+#include "jsp_region.h"
+// US only for now (jsp_region.h): the two-window Training menu sits on hooks, guest addresses and lifted functions of the US 1.00 code, so an EU build
+// compiles none of this file. Its callers (jsp_game.cpp, the other feat_*.cpp) reach it through weak symbols, which an EU build
+// leaves null: the feature is simply absent; its lift hooks are in the US lift only (firstrun.py, lift_game_hooks.json).
+#if JSP_US_CODE
 #include "jsp_overlay_api.h"
 
 extern "C" int jsp_tr_active(void);                       // jsp_game.cpp: plain Training
@@ -465,3 +470,4 @@ int train_menu_pad(uint32_t port, uint16_t* b, uint16_t* lx, uint16_t* ly)
     if (redraw) draw();
     return 1;
 }
+#endif  // JSP_US_CODE

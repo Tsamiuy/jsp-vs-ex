@@ -19,6 +19,7 @@
 #include "ps3emu/ps3types.h"
 #include "ps3emu/error_codes.h"
 #include "ppu_recomp.h"     /* ppu_context, vm_write8/32 */
+#include "jsp_region.h"
 
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 
@@ -82,7 +83,7 @@ void audio_get_port_config(ppu_context* ctx)
     ctx->gpr[3] = (uint64_t)(int64_t)r;
     static int lead = -1;
     if (lead < 0) { const char* e = std::getenv("CRI_LEAD"); lead = e ? std::atoi(e) : 0; }
-    if (r != CELL_OK || lead <= 0 || (uint32_t)ctx->lr != 0x006A5BD8u || !cfg) return;
+    if (r != CELL_OK || lead <= 0 || !jsp_game_is_us() || (uint32_t)ctx->lr != 0x006A5BD8u || !cfg) return;   /* the US 1.00 return address */
     const uint32_t nb = (uint32_t)vm_read64(cfg + 16);
     uint32_t l = (uint32_t)lead;
     if (nb && l > nb - 1) l = nb - 1;
@@ -190,8 +191,10 @@ DWORD WINAPI thread_dump_main(LPVOID arg)
         report_guest_stacks(10);
         /* Scene probe (FINDINGS 12 of the v0.15 notes): registry *(0x95BD9C), resource manager *(0x95BBF4),
          * scene objects = guest words equal to the scene vtable 0x8822C8 (scan once, 16-byte aligned, below 0x20000000);
-         * scene state byte-word at +0x3C (func_00444088: 0 -> 1 wait -> 2 -> 3 -> 4 done). */
-        {
+         * scene state byte-word at +0x3C (func_00444088: 0 -> 1 wait -> 2 -> 3 -> 4 done). US 1.00 addresses: EU skips it (jsp_region.h). */
+        if (!jsp_game_is_us()) {
+            if (n == 0) std::fprintf(stderr, "[jsp-scene] the scene probe reads US 1.00 addresses: " JSP_NOT_THIS_DISC "\n");
+        } else {
             static uint32_t scenes[8];
             static unsigned nscenes = 0;
             /* The scan found no object with vtable word 0x8822C8 at +0: the scene object r3 seen by
@@ -308,6 +311,7 @@ void install_traces(void)
     FILE* f = std::fopen(path, "r");
     if (!f) return;
     std::fclose(f);
+    if (!jsp_game_is_us()) { std::fprintf(stderr, "[jsp-fn] trace_funcs: the addresses are the US 1.00 code's: " JSP_NOT_THIS_DISC "\n"); return; }
     install_trace<0>(0x444088);
     install_trace<1>(0x2F01FC);
     install_trace<2>(0x42EDC8);

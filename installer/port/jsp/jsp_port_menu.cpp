@@ -70,6 +70,7 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void
 #endif
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
+#include "jsp_region.h"
 #include "jsp_overlay_api.h"
 extern "C" uint32_t cellGcm_flip_request_count(void);
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
@@ -1121,10 +1122,14 @@ void on_panel_update(ppu_context* c)
         ver_refresh();
     }
     if (!port_menu_env()) return;
+#if JSP_US_CODE   // US 1.00 functions (an EU lift has neither; the hook is never installed there: jsp_register_port_menu_overrides)
     if (g_trampoline_fn != (void (*)(void*))func_001E6E98) return;
     g_trampoline_fn = nullptr;
     func_001E6E98(c);
     if (g_trampoline_fn != (void (*)(void*))func_001E6C68) return;
+#else
+    return;
+#endif
     const uint32_t a4 = (uint32_t)c->gpr[4], a5 = (uint32_t)c->gpr[5], a6 = (uint32_t)c->gpr[6];
     std::lock_guard<std::mutex> lk(g_mu);
     if (g_panel != obj) std::fprintf(stderr, "[portmenu] panel object 0x%08X (was 0x%08X)\n", obj, g_panel);
@@ -1192,6 +1197,10 @@ extern "C" void jsp_register_port_menu_overrides(void)
     load_version_line();
     g_pad_join_notify = jsp_pad_join_notify;   // the join text does not depend on the Port Settings page or the US build
     if (!port_menu_env() && !top_items()) return;
+    if (!jsp_game_is_us()) {   // jsp_region.h: an EU build (the instruction check below would read EU code at a US address)
+        std::fprintf(stderr, "[portmenu] the Port Settings page, the version line and the rollback notice are " JSP_NOT_THIS_DISC " (the [net] log lines remain)\n");
+        return;
+    }
     if (vm_read32(k_row_count_insn) != 0x3B200005u) {   // the hooks' addresses are those of the US 1.00 code only
         std::fprintf(stderr, "[portmenu] JSP_PORT_MENU, a version line or a rollback notice is set, but this is not the US 1.00 build (0x%08X holds 0x%08X): the page, the line and the notice stay off (the [net] log lines remain)\n", k_row_count_insn, vm_read32(k_row_count_insn));
         return;

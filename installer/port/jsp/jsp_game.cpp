@@ -58,6 +58,7 @@
 
 #include "ps3emu/error_codes.h"
 #include "ppu_recomp.h"     /* ppu_context, vm_base */
+#include "jsp_region.h"
 #include "jsp_lod_lifetime.h"
 #include "jsp_overlay_api.h"   /* the port overlay (toolkit patch 2517): the Training readout */
 #include "jsp_train_readout.h"
@@ -400,7 +401,7 @@ void pc_text_put(int image_id, uint32_t ea, uint32_t size)
     if (lo < base) lo = ea;
     const uint32_t hi = ea + size;
     static int exit_text = -1;
-    if (exit_text < 0) { const char* e = std::getenv("EXIT_OPTION"); exit_text = (e && e[0] == '0') ? 0 : 1; }
+    if (exit_text < 0) { const char* e = std::getenv("EXIT_OPTION"); exit_text = (!jsp_game_is_us() || (e && e[0] == '0')) ? 0 : 1; }   /* Exit Game is US only (below) */
     for (uint32_t a = lo; a + 2 <= hi; a++) {
         const uint8_t* p = vm_base + a;
         if ((p[0] != 'P' && p[0] != 'U' && p[0] != 'o') || p[1] != 0) continue;
@@ -4816,7 +4817,35 @@ extern "C" void jsp_register_game_overrides(void)
     (void)h_data_check; (void)h_create_game_data; (void)h_content_permit;
     const char* pt = std::getenv("PC_TEXT");
     if (!pt || pt[0] != '0') {
-        g_spu_put_hook_img = pc_text_put;
+        g_spu_put_hook_img = pc_text_put;   /* found by the text itself (no guest address): every disc */
+    }
+    /* Everything below reads or writes guest state at US 1.00 addresses (scene step 0x0094DEC4, the menus' cursors, Training, the
+     * Impossible CPU, the HUD size and edge smoothing's fight test, Exit Game, the menu mouse and jump). An EU build installs none of it:
+     * the game runs as on the console, with the PC wording of the save texts (above). jsp_region.h. */
+    if (!jsp_game_is_us()) {
+        /* One line per feature that would be on (or was switched on): those on by default always, the rest when their setting asks for them.
+         * The opt-in ones with their own file log there (Unlock everything, the roster, rollback, AUTO_FIGHT, Port Settings). */
+        struct Off { const char* what; const char* key; bool on_by_default; float neutral; };   /* neutral: the value that changes nothing */
+        static const Off k_off[] = {
+            { "Two-page Main Menu", "MENU_PAGES", true, 0.0f }, { "3v3 Free Battle", "SIX", true, 0.0f }, { "Model Viewer on Character Select", "MODEL_PREVIEW", true, 0.0f },
+            { "Arcade for 2 Players", "ARC_COOP", true, 0.0f }, { "Training options", "TRAIN_OPTS", true, 0.0f }, { "Training menu (Hide HUD, readout, 2 Players Training)", "TRAIN_MENU", true, 0.0f },
+            { "Training Mode and Impossible Mode rows", "TRAINING_MODE", true, 0.0f }, { "Exit Game", "EXIT_OPTION", true, 0.0f },
+            { "Menu mouse and d-pad jump", "MENU_JUMP", true, 0.0f }, { "KO count option (Stage Select)", nullptr, true, 0.0f }, { "Fight HUD size", "UI_SCALE", false, 1.0f }, { "Edge smoothing", "AA_MODE", false, 0.0f },
+            { "Sharpening", "SHARPEN", false, 0.0f }, { "FPS counter", "FPS_COUNTER", false, 0.0f }, { "Shadow distance", "SHADOW_RANGE", false, 1.0f },
+            { "Model detail", "MODEL_DETAIL", false, 1.0f }, { "Object draw distance", "OBJECT_DISTANCE", false, 1.0f },
+        };
+        for (const Off& o : k_off) {
+            char v[32] = "";
+            const bool set = o.key && jsp_setting_get(o.key, v, sizeof v) != 0;   /* no key: no switch, always on */
+            /* AA_MODE is a word (off, fxaa, fxaa2, smaa): atof gives 0 for every one, so a word other than "off" counts as asked */
+            const bool word = set && (v[0] < '0' || v[0] > '9') && v[0] != '-' && v[0] != '.';
+            /* switched off: 0, off or false in any case (no shared helper parses these; the features themselves test v[0] == '0') */
+            const bool off_word = set && (!std::strcmp(v, "0") || !_stricmp(v, "off") || !_stricmp(v, "false") || v[0] == '0');
+            const bool asked = o.on_by_default ? !off_word
+                                               : set && v[0] && (word ? std::strcmp(v, "off") != 0 : (float)std::atof(v) != o.neutral);
+            if (asked) std::fprintf(stderr, "[game] %s%s%s%s: " JSP_NOT_THIS_DISC "\n", o.what, o.key ? " (" : "", o.key ? o.key : "", o.key ? ")" : "");
+        }
+        return;
     }
     const char* xo = std::getenv("EXIT_OPTION");
     if (!xo || xo[0] != '0') g_exit_filter_on = true;

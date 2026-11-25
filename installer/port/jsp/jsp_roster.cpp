@@ -42,6 +42,7 @@
 
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
+#include "jsp_region.h"
 #include "jsp_hook_chain.h"
 #include "jsp_mods_core.h"   // pure rules (the card name redirect)
 
@@ -53,6 +54,10 @@ extern "C" int jsp_mods_roster_stock(uint32_t* out, int cap);                   
 extern "C" void jsp_mods_roster_failed(const char* why);                                /* the set no longer runs as listed */
 extern "C" int jsp_unlock_owns_save_hook(void);                                         /* jsp_unlock.cpp: it wraps the save update itself */
 
+// US only for now (jsp_region.h): every address above and below is the US 1.00 image's. An EU build compiles only the EU branch at the end
+// of this file: the mods layer already refuses a roster mod on another disc (jsp_mods_core.h), and if one ever reached here the set is
+// reported as not run as listed before any guest memory is read or written.
+#if JSP_US_CODE
 namespace {
 
 typedef void (*fn_t)(ppu_context*);
@@ -257,3 +262,15 @@ extern "C" void jsp_register_roster_overrides(void)
     std::fprintf(stderr, "[roster] %d ids at 0x%08X (stock %d), %d added fighter(s), logo hook %d, save hook %s\n", n, where, ns, g_added_n,
                  want_logo ? 1 : 0, save_hook_ours ? "own" : "shared with the unlock cheat");
 }
+#else   // !JSP_US_CODE: the symbols the rest of the port links to, doing nothing
+extern "C" void jsp_card_as_enter(ppu_context*) {}
+extern "C" void jsp_card_as_leave(ppu_context*) {}
+extern "C" void jsp_roster_after_save_update(ppu_context*) {}
+extern "C" void jsp_register_roster_overrides(void)
+{
+    int id[8], logo[8], owned[8];
+    if (jsp_mods_roster_fighters(id, logo, owned, 8) <= 0) return;   // no roster mod applied: the stock game
+    std::fprintf(stderr, "[roster] the roster interface (added fighters, card_as) is " JSP_NOT_THIS_DISC ": nothing is changed\n");
+    jsp_mods_roster_failed("the roster interface is " JSP_NOT_THIS_DISC);
+}
+#endif  // JSP_US_CODE

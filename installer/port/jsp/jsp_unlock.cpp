@@ -19,11 +19,15 @@
 
 #include "ps3emu/ps3types.h"
 #include "ppu_recomp.h"
+#include "jsp_region.h"
 
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
 extern "C" void jsp_roster_after_save_update(ppu_context* c);   /* jsp_roster.cpp: the owned bits of roster mods (shares this hook) */
 extern "C" int jsp_unlock_owns_save_hook(void);                  /* answered at the end of this file: the roster registers its own save-update hook only when this is 0 */
 
+// US only for now (jsp_region.h): the save manager address, the hook and the checksum function are the US 1.00 code's. An EU build
+// compiles only the registration below, which says so in the log and changes nothing.
+#if JSP_US_CODE
 namespace {
 
 typedef void (*fn_t)(ppu_context*);
@@ -151,11 +155,17 @@ void save_update_wrap(ppu_context* c)
 }
 
 }  // namespace
+#else
+namespace { bool g_hooked = false; }
+#endif
 
 extern "C" void jsp_register_unlock_overrides(void)
 {
     const char* e = std::getenv("JSP_UNLOCK_ALL");
     if (!e || !*e || e[0] == '0') return;
+#if !JSP_US_CODE
+    std::fprintf(stderr, "[unlock] JSP_UNLOCK_ALL set, but Unlock everything is " JSP_NOT_THIS_DISC ": the save is not changed\n");
+#else
     for (uint64_t i = 0; i < function_table_count; i++)
         if (function_table[i].addr == 0x0014E898u) {
             g_orig_update = function_table[i].func;
@@ -165,6 +175,7 @@ extern "C" void jsp_register_unlock_overrides(void)
             return;
         }
     std::fprintf(stderr, "[unlock] no lifted function at 0014E898\n");
+#endif
 }
 
 extern "C" int jsp_unlock_owns_save_hook(void) { return g_hooked ? 1 : 0; }

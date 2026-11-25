@@ -686,7 +686,7 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
         const bool decl = std::find_if(m.interfaces.begin(), m.interfaces.end(), [](const Interface& i) { return i.name == "loose-file"; }) != m.interfaces.end();
         if (!decl) { err = "mod.json: \"loose\" needs interface \"loose-file\""; return false; }
         if (title_id != kRosterTitle || std::find(m.title_ids.begin(), m.title_ids.end(), std::string(kRosterTitle)) == m.title_ids.end()) {
-            err = std::string("mod.json: a loose-file mod needs game.title_ids to name ") + kRosterTitle + " and runs only on that build (this one is " + (title_id.empty() ? "unknown" : title_id) + ")";
+            err = std::string("mod.json: a loose-file mod needs game.title_ids to name ") + kRosterTitle + " and runs only on that build (this one is " + (title_id.empty() ? "unknown" : title_id) + "): the loose-file interface is not available on this disc yet";
             return false;
         }
         if (v->type != Json::Arr || v->arr.empty() || v->arr.size() > 64) { err = "mod.json: \"loose\" must be an array of 1 to 64 files"; return false; }
@@ -761,7 +761,7 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
         const bool decl = std::find_if(m.interfaces.begin(), m.interfaces.end(), [](const Interface& i) { return i.name == "roster"; }) != m.interfaces.end();
         if (!decl) { err = "mod.json: \"roster\" needs interface \"roster\""; return false; }
         if (title_id != kRosterTitle || std::find(m.title_ids.begin(), m.title_ids.end(), std::string(kRosterTitle)) == m.title_ids.end()) {
-            err = std::string("mod.json: a roster mod needs game.title_ids to name ") + kRosterTitle + " and runs only on that build (this one is " + (title_id.empty() ? "unknown" : title_id) + ")";
+            err = std::string("mod.json: a roster mod needs game.title_ids to name ") + kRosterTitle + " and runs only on that build (this one is " + (title_id.empty() ? "unknown" : title_id) + "): the roster interface is not available on this disc yet";
             return false;
         }
         if (v->type != Json::Obj) { err = "mod.json: \"roster\" must be an object"; return false; }

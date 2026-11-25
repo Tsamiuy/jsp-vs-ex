@@ -44,6 +44,11 @@
 #include <windows.h>
 #endif
 #include "ppu_recomp.h"
+#include "jsp_region.h"
+// US only for now (jsp_region.h): the Model Viewer on Character Select sits on hooks, guest addresses and lifted functions of the US 1.00 code, so an EU build
+// compiles none of this file. Its callers (jsp_game.cpp, the other feat_*.cpp) reach it through weak symbols, which an EU build
+// leaves null: the feature is simply absent; its lift hooks are in the US lift only (firstrun.py, lift_game_hooks.json).
+#if JSP_US_CODE
 #include "jsp_overlay_api.h"
 #include <vector>
 
@@ -1307,3 +1312,4 @@ void model_preview_icall(uint32_t target, uint64_t* gpr)
     if (g_phase == 0 && g_cs_ticks < 3u) return;   /* the answer to "is the preview made here" comes in the third frame (above) */
     tick(reinterpret_cast<const ppu_context*>(reinterpret_cast<const char*>(gpr) - offsetof(ppu_context, gpr)));
 }
+#endif  // JSP_US_CODE

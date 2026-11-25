@@ -278,6 +278,14 @@ if(NOT MSVC)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE jsp_gekkonet)
 target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_ROLLBACK_BUILD=1)
+# The disc the lift is from (firstrun.py: -DJSP_GAME_REGION=US or EU). jsp_region.h: an EU build compiles the US-only features out.
+# Unset (a hand-made build without firstrun.py) builds the US code, as before.
+if(JSP_GAME_REGION STREQUAL "EU")
+    target_compile_definitions(${PROJECT_NAME} PRIVATE JSP_REGION_EU=1)
+    message(STATUS "Game region:     EU (the US-only features are compiled out, jsp_region.h)")
+else()
+    message(STATUS "Game region:     US")
+endif()
 # The rollback build id from the release content (jsp_build_id.cmake), on the one file that reads it.
 include("${CMAKE_CURRENT_SOURCE_DIR}/jsp_build_id.cmake")
 jsp_build_id(JSP_NET_BUILD_ID "${PROJECT_VERSION}" "${JSP_GAME_REGION}" "${CMAKE_CURRENT_SOURCE_DIR}" "${PS3RECOMP_DIR}")

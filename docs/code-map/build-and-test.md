@@ -113,7 +113,10 @@ flowchart LR
 | `port-compile` | Windows (`:338-366`) | heavy | `export_toolkit.py`, then `tools/ci/port_syntax_check.py` with the bundled clang |
 
 `port_syntax_check.py` builds a stand-in `ppu_recomp.h` (a declaration for every game function the glue names) and runs
-`-fsyntax-only` on every `installer/port/jsp/*.cpp` and the toolkit's PPU scaffold. Per-file include paths in its `FILE_INCS`
+`-fsyntax-only` on every `installer/port/jsp/*.cpp` and the toolkit's PPU scaffold. It does this twice: once as the US build, and once as
+the EU build (`-DJSP_REGION_EU=1`, what `CMakeLists.txt` adds for `JSP_GAME_REGION=EU`) with a stand-in that declares only the names in
+`tools/ci/eu_lift_funcs.txt` (the ones the EU lift also has), so a direct call of a US-only game function outside `#if JSP_US_CODE`
+(`jsp_region.h`) fails CI as it fails the real EU build; the other names are poisoned there (`#pragma GCC poison`), so a source that declares a US-only function itself (a link error in the real build) fails too. A port file that tests `JSP_US_CODE` must include `jsp_region.h` itself (checked by text; the passes run with `-w`). Limits of the EU pass: it sees only lifted functions called by name. US addresses used as numbers (calls through `ps3_indirect_call_to`, `function_table`, `ppu_register_function` or `jsp_hook_chain` at a US address, `vm_read*` / `vm_write*` of US data addresses) are not caught and stay behind `jsp_game_is_us()` at run time, reviewed by hand; and a name on `eu_lift_funcs.txt` compiles on EU but is in general a different function there. Per-file include paths in its `FILE_INCS`
 (`:29`: `jsp_net_probe.cpp`, `jsp_stepper.cpp`) mirror CMake's `set_source_files_properties` by hand. It does not cover lifted code, the runtime libraries, GekkoNet, the
 link or a run.
 
