@@ -982,7 +982,7 @@ namespace JStarsLauncher
             p.Controls.Add(shadowRangeBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Far keeps buildings', plants' and other fighters' shadows sharp further away.",
+                Text = "Far keeps buildings', plants' and other fighters' shadows sharp further away. US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
             p.Controls.Add(new Label { Text = "Model detail", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
@@ -994,7 +994,7 @@ namespace JStarsLauncher
             p.Controls.Add(modelDetailBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Characters and stage models keep their detailed version further from the camera.",
+                Text = "Characters and stage models keep their detailed version further from the camera. US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
             p.Controls.Add(new Label { Text = "Object draw distance", Location = P(16, y), AutoSize = true, Font = new Font("Segoe UI", 9F, FontStyle.Bold) });
@@ -1006,7 +1006,7 @@ namespace JStarsLauncher
             p.Controls.Add(objectDistBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Map objects (plants, props) that the game hides when the camera is far from them.",
+                Text = "Map objects (plants, props) that the game hides when the camera is far from them. US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             return p;
         }

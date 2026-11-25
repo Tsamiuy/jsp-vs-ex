@@ -145,8 +145,11 @@ RendezvousNotice g_rdv;
 void decide_env()
 {
     // US only for now (jsp_region.h): the session's frame hooks, the fight tick hash and the snapshot ranges sit at US 1.00 addresses. An EU
-    // build refuses a rollback start here, before anything reads the other switches, the same way resolve_env refuses one (JSP_ROLLBACK=0,
-    // JSP_NET_REFUSED=1). The game's own online is left as it is. A US build never takes this branch: its decision is unchanged.
+    // build refuses a rollback start here, before anything reads the other switches, with the same two variables resolve_env sets on a refusal
+    // (JSP_ROLLBACK=0, JSP_NET_REFUSED=1) and nothing else. Unlike resolve_env's both-methods refusal it does NOT remove PS3_NET_ONLINE: on EU
+    // rollback never runs, so the game's own online has nothing to clash with and stays as the player set it. It does not call note_off either:
+    // the on-screen notice is drawn by the Port Settings module, which is off on EU, so the reason is in the log only (the [net] REFUSED line).
+    // A US build never takes this branch: its decision is unchanged.
     if (!jsp_game_is_us() && jpno::flag_on(std::getenv(jpno::kKeyOn))) {
         _putenv_s(jpno::kKeyOn, "0");
         _putenv_s(jpno::kKeyRefused, "1");

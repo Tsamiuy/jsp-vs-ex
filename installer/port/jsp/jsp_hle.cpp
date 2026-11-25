@@ -191,8 +191,10 @@ DWORD WINAPI thread_dump_main(LPVOID arg)
         report_guest_stacks(10);
         /* Scene probe (FINDINGS 12 of the v0.15 notes): registry *(0x95BD9C), resource manager *(0x95BBF4),
          * scene objects = guest words equal to the scene vtable 0x8822C8 (scan once, 16-byte aligned, below 0x20000000);
-         * scene state byte-word at +0x3C (func_00444088: 0 -> 1 wait -> 2 -> 3 -> 4 done). */
-        {
+         * scene state byte-word at +0x3C (func_00444088: 0 -> 1 wait -> 2 -> 3 -> 4 done). US 1.00 addresses: EU skips it (jsp_region.h). */
+        if (!jsp_game_is_us()) {
+            if (n == 0) std::fprintf(stderr, "[jsp-scene] the scene probe reads US 1.00 addresses: " JSP_NOT_THIS_DISC "\n");
+        } else {
             static uint32_t scenes[8];
             static unsigned nscenes = 0;
             /* The scan found no object with vtable word 0x8822C8 at +0: the scene object r3 seen by

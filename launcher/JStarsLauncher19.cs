@@ -720,7 +720,7 @@ namespace JStarsLauncher
             p.Controls.Add(shadowRangeBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Far keeps buildings', plants' and other fighters' shadows sharp further away.",
+                Text = "Far keeps buildings', plants' and other fighters' shadows sharp further away. US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
             // MODEL_DETAIL / OBJECT_DISTANCE for the game: the map models' detail switch distances and how far map
@@ -742,7 +742,7 @@ namespace JStarsLauncher
             p.Controls.Add(objectDistBox);
             y += 28;
             p.Controls.Add(new Label {
-                Text = "Map objects (plants, props) that the game hides when the camera is far from them.",
+                Text = "Map objects (plants, props) that the game hides when the camera is far from them. US disc only for now.",
                 Location = P(16, y), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
 

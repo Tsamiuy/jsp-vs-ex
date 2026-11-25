@@ -16,6 +16,12 @@ Two passes (--region both, the default; jsp_region.h):
       fails here as it fails in a real EU build (2026-11-25: 92 errors in five files of 6ada03e); the other names are poisoned (#pragma GCC
       poison), so a source that declares a US-only function itself (a link error in the real build) fails too. The scaffold and SPU
       files run once.
+  Every port file that tests JSP_US_CODE must include jsp_region.h itself (checked first, by text): the passes run with -w, and an undefined
+  JSP_US_CODE would read as 0 and drop the US code without a word.
+  LIMITS of the EU pass: it only sees lifted functions called BY NAME. A US address used as a number is not caught: calls through
+  ps3_indirect_call_to or function_table / ppu_register_function / jsp_hook_chain at a US address, and vm_read*/vm_write* of US data
+  addresses; those stay behind jsp_game_is_us() at run time and are reviewed by hand. Nor does a name on eu_lift_funcs.txt mean the same
+  function: the EU code is shifted, so a name that compiles on EU is in general a different function there.
 Not covered: anything generated (the lifted PPU and SPU code, the NID table), the runtime library, linking, running.
 Compilers: the llvm-mingw clang the installer bundles (x86_64-w64-mingw32-clang++ / -clang). Standard library only.
 """
@@ -53,6 +59,12 @@ def main():
                     for m in re.findall(r"\bfunc_[0-9A-F]{8}\b", p.read_text(encoding="utf-8", errors="replace"))})
     eu_have = {ln.strip() for ln in (ROOT / "tools/ci/eu_lift_funcs.txt").read_text(encoding="utf-8").splitlines()
                if ln.strip() and not ln.startswith("#")}
+    # a file that tests JSP_US_CODE without jsp_region.h would compile its US code out silently under -w (an undefined macro is 0)
+    no_inc = [p.name for p in sorted(port.glob("*")) if p.suffix in (".cpp", ".h", ".inc") and p.name != "jsp_region.h"
+              and re.search(r"^\s*#\s*(el)?if\b.*\bJSP_US_CODE\b", t := p.read_text(encoding="utf-8", errors="replace"), re.M)
+              and not re.search(r'^\s*#\s*include\s+"jsp_region\.h"', t, re.M)]
+    for n in no_inc:
+        print(f"FAIL {n}: tests JSP_US_CODE but does not include jsp_region.h")
     passes = [r for r in ("US", "EU") if a.region in (r, "both")]
     with tempfile.TemporaryDirectory(prefix="jsp_stub_") as tmp:
         jobs = []
@@ -83,8 +95,8 @@ def main():
                 print(f"FAIL {name}\n{(r.stdout + r.stderr)[-3000:]}")
             else:
                 print(f"ok   {name}")
-    print(f"port syntax check: {len(jobs) - bad}/{len(jobs)} files compile")
-    return 1 if bad else 0
+    print(f"port syntax check: {len(jobs) - bad}/{len(jobs)} files compile" + (f"; {len(no_inc)} file(s) without jsp_region.h" if no_inc else ""))
+    return 1 if bad or no_inc else 0
 
 
 if __name__ == "__main__":
