@@ -16,7 +16,8 @@
 //      original file. A replacement is written IN PLACE over its entry's own 2048-aligned slot: the archive keeps its size and layout
 //      (GMOD R6: the game reacts to the archive's size or end layout; an archive that grew left the boot black even with unchanged
 //      bytes). A replacement larger than its slot is refused for now (the appended layout is not proven in a game).
-//   6. Class: an entry is cosmetic only under the allow-list (game/logo/, movie/, sound/); every other path is gameplay. The manifest's
+//   6. Class: an entry is cosmetic only under the allow-list (game/logo/, movie/, and songs: sound/<LANG>/BGM_*; D40, PM 2026-11-24: voices and
+//      other sound files are gameplay); every other path is gameplay. The manifest's
 //      "gameplay": true can raise a mod's class, never lower it.
 //   7. Digest: SHA-256 over "jsp-modset 1\n", the EBOOT id, and for each applied gameplay mod in load order "id version\n" plus
 //      "entry sha256-of-served-bytes\n" per served entry. No applied gameplay mod = no digest. A listed mod that was refused and is not
@@ -33,6 +34,15 @@
 //      the name "_rgb8_256_chara_ico_NNN.png"; the guest side (jsp_roster.cpp) rewrites NNN of exactly the added id's name to the donor's for
 //      the length of the lookup. No archive changes, so the donor must have a full card in the same set (a stock-list id, see roster_card_ok).
 //      It is not in the digest: a peer that does not redirect plays the same fight.
+//   9. ENHANCEMENT, loose files (interface "loose-file" 1): files the game opens by a path that is in no CPK, served from the mods folder
+//      (or, as an alias, from a row of the player's own CPK, so no game data ships): the voice banks and loading tips of an added fighter.
+//      Rules (any violation refuses the whole mod): US 1.00 only; "path" is relative to data/PS3, passes valid_rel_path, starts in one of
+//      the six archive folders, has no row in that archive (a CPK hit wins before any loose lookup, so use cpk-entry), and is one of the
+//      names the game builds for the ids 19, 20, 21 (loose_name_ok); a "file" source is checked by sha256, an "alias" names an
+//      uncompressed row of a CPK; an .acb needs its .awb of the same stem in the same mod (the ACB carries the AWB's hash). The later mod wins
+//      a path (a "[mods] conflict" line); a group (or a pair) that loses a member is dropped whole. A loose file is gameplay: the path and the
+//      sha256 of the bytes served are in the digest. jsp_mods.cpp serves them through a toolkit path hook (patch 6504, ps3emu/fs_path_ops.h)
+//      and the virtual-file provider (6502); the game-folder copy of the same path, if any, loses to the mod's.
 // ASSUMPTION: CRI does not check an entry's FileSize against the header's EnabledPackedSize/EnabledDataSize (2x the sum of the FileSize
 // values on the US disc; the header row is left as it is, so a smaller replacement leaves them unchanged). The first in-game run of a
 // smaller replacement tests it.
@@ -154,9 +164,14 @@ inline uint64_t le64(const uint8_t* p)
 // ---- classification (D40: default gameplay, cosmetic allow-list) ------------------------------------------------------------------
 inline bool is_cosmetic_path(const std::string& entry)
 {
-    static const char* const allow[] = { "game/logo/", "movie/", "sound/" };
+    static const char* const allow[] = { "game/logo/", "movie/" };
     for (const char* a : allow)
         if (entry.compare(0, strlen(a), a) == 0) return true;
+    // Songs only (D40, PM 2026-11-24): sound/<LANG>/BGM_*. Voices, effects and every other sound file are gameplay.
+    if (entry.compare(0, 6, "sound/") == 0) {
+        const size_t s = entry.find('/', 6);
+        if (s != std::string::npos && s > 6 && entry.find('/', s + 1) == std::string::npos && entry.compare(s + 1, 4, "BGM_") == 0) return true;
+    }
     return false;
 }
 // "battle/..." -> "partition_op_battle_ps3.cpk"; "" for a folder no overridable archive has (the patch archive is not overridable).
@@ -366,7 +381,7 @@ struct Interface { std::string name; int version; };
 // What this build supports. Round 1: cpk-entry 1 only ("balance" joins with its applier, step R8).
 inline const std::vector<Interface>& supported_interfaces()
 {
-    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 2 } };
+    static const std::vector<Interface> k = { { "cpk-entry", 1 }, { "roster", 2 }, { "loose-file", 1 } };
     return k;
 }
 struct OverrideSpec { std::string entry, alias, file, sha256; };
@@ -393,6 +408,82 @@ inline bool roster_logo_ok(int id)
 {
     if (id < 0 || id >= 200) return false;
     return std::find(std::begin(kStockRoster), std::end(kStockRoster), (uint32_t)id) != std::end(kStockRoster);
+}
+// ---- loose files (interface "loose-file" 1, pure rules) -------------------------------------------------------------------------------
+struct LooseSpec { std::string path, file, alias, sha256; bool derived = false; };   // derived: game-derived content a mod author declares (a verifier never lists such a mod as tested)
+inline bool loose_lang_ok(const std::string& l)
+{
+    if (l.size() < 2 || l.size() > 3) return false;
+    for (char c : l) if (c < 'A' || c > 'Z') return false;
+    return true;
+}
+inline bool all_digits(const std::string& s, size_t from, size_t n)
+{
+    if (s.size() < from + n) return false;
+    for (size_t i = from; i < from + n; ++i) if (s[i] < '0' || s[i] > '9') return false;
+    return true;
+}
+// Round 1 names (ids 19, 20, 21, as the game builds them from the fighter id, matched without regard to case):
+//   sound/<LANG>/(CV|PV)_0<id>_<dd>_ST_<LANG>.(acb|awb)                          voice banks (func_0048DAD4 formats, func_0048AE48 appends the extension)
+//   progress/game/loading_game/tips/loading_game_tips_chara_0<id>_000_ALL_(m|v).pak                    the shared tip image
+//   progress/game/loading_game/tips/<LANG>/loading_game_tips_(title|mes)_chara_0<id>_000_<LANG>_(m|v).pak  the per-language title and message
+inline bool loose_name_ok(const std::string& path)
+{
+    const std::vector<std::string> p = [&] { std::vector<std::string> v; size_t s = 0; for (;;) { size_t e = path.find('/', s); if (e == std::string::npos) { v.push_back(path.substr(s)); break; } v.push_back(path.substr(s, e - s)); s = e + 1; } return v; }();
+    const auto id_ok = [](const std::string& f, size_t at) { return f.size() >= at + 3 && f[at] == '0' && ((f[at + 1] == '1' && f[at + 2] == '9') || (f[at + 1] == '2' && (f[at + 2] == '0' || f[at + 2] == '1'))); };
+    const auto up = [](std::string x) { for (char& c : x) if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A'); return x; };
+    if (p.size() == 3 && lower(p[0]) == "sound" && loose_lang_ok(up(p[1]))) {
+        const std::string l = lower(p[1]), f = lower(p[2]);   // cv_019_00_st_jp.acb
+        if (f.size() < 3 || (f.compare(0, 3, "cv_") != 0 && f.compare(0, 3, "pv_") != 0)) return false;
+        const std::string rest = f.substr(3);                  // 019_00_st_jp.acb
+        if (!id_ok(rest, 0) || rest.size() < 4 || rest[3] != '_' || !all_digits(rest, 4, 2) || rest.compare(6, 4, "_st_") != 0) return false;
+        const std::string tail = rest.substr(10);              // jp.acb
+        return tail == l + ".acb" || tail == l + ".awb";
+    }
+    static const char* const tips[] = { "progress", "game", "loading_game", "tips" };
+    if (p.size() < 5 || p.size() > 6) return false;
+    for (int i = 0; i < 4; ++i) if (lower(p[(size_t)i]) != tips[i]) return false;
+    const std::string f = lower(p.back());
+    if (p.size() == 5) {   // loading_game_tips_chara_019_000_all_m.pak
+        static const char pre[] = "loading_game_tips_chara_";
+        if (f.compare(0, sizeof pre - 1, pre) != 0) return false;
+        const std::string r = f.substr(sizeof pre - 1);
+        return id_ok(r, 0) && r.compare(3, 9, "_000_all_") == 0 && (r.substr(12) == "m.pak" || r.substr(12) == "v.pak");
+    }
+    if (!loose_lang_ok(up(p[4]))) return false;
+    const std::string l = lower(p[4]);
+    for (const char* kind : { "loading_game_tips_title_chara_", "loading_game_tips_mes_chara_" }) {
+        const size_t n = std::strlen(kind);
+        if (f.compare(0, n, kind) != 0) continue;
+        const std::string r = f.substr(n);                     // 019_000_us_m.pak
+        if (!id_ok(r, 0) || r.compare(3, 5, "_000_") != 0) return false;
+        const std::string t = r.substr(8);
+        return t == l + "_m.pak" || t == l + "_v.pak";
+    }
+    return false;
+}
+// The path relative to data/PS3 a guest path names, or "" when it is none: a path with ".../data/PS3/<rest>" after the device (/dev_bdvd/PS3_GAME/USRDIR,
+// /dev_hdd0/game/<folder>/USRDIR, /app_home/...), or a bare relative path that starts in one of the archive folders (the form CRI is seen to use on a miss
+// is not proven). Backslashes are slashes; the result keeps the guest's case.
+inline std::string loose_rel_from_guest(const std::string& guest)
+{
+    std::string g = guest;
+    for (char& c : g) if (c == '\\') c = '/';
+    std::string rel;
+    const std::string lg = lower(g);
+    const size_t at = lg.find("/data/ps3/");
+    if (at != std::string::npos) rel = g.substr(at + 10);
+    else if (lg.compare(0, 9, "data/ps3/") == 0) rel = g.substr(9);
+    else rel = g.size() && g[0] == '/' ? g.substr(1) : g;
+    return archive_of(lower(rel)).empty() ? std::string() : rel;
+}
+// An .acb and its .awb (same stem) travel together: the pair's other member's path, or "".
+inline std::string loose_pair_of(const std::string& path)
+{
+    const std::string l = lower(path);
+    if (l.size() > 4 && l.compare(l.size() - 4, 4, ".acb") == 0) return path.substr(0, path.size() - 4) + ".awb";
+    if (l.size() > 4 && l.compare(l.size() - 4, 4, ".awb") == 0) return path.substr(0, path.size() - 4) + ".acb";
+    return "";
 }
 // card_as donor: an id on the stock list (a stock fighter, or a support that is on it). ASSUMPTION: every id on the stock list has a full
 // 256x220 card in the shared card set (checked for 018 and 211 in the shared set's texture table; the 019, 020, 021 and 208 entries are 64x55
@@ -480,6 +571,8 @@ struct Manifest {
     std::vector<OverrideSpec> overrides;
     std::vector<std::string> conflicts_ok;
     std::vector<RosterFighter> roster;
+    std::vector<LooseSpec> loose;                          // ENHANCEMENT (loose-file)
+    std::vector<std::vector<std::string>> loose_groups;    // groups whose members are loose paths
 };
 
 inline bool parse_manifest(const std::string& text, const std::string& folder_id, const std::vector<Interface>& supported,
@@ -575,22 +668,79 @@ inline bool parse_manifest(const std::string& text, const std::string& folder_id
         err = "mod.json: overrides need interface \"cpk-entry\"";
         return false;
     }
+    if ((v = j.get("loose"))) {
+        const bool decl = std::find_if(m.interfaces.begin(), m.interfaces.end(), [](const Interface& i) { return i.name == "loose-file"; }) != m.interfaces.end();
+        if (!decl) { err = "mod.json: \"loose\" needs interface \"loose-file\""; return false; }
+        if (title_id != kRosterTitle || std::find(m.title_ids.begin(), m.title_ids.end(), std::string(kRosterTitle)) == m.title_ids.end()) {
+            err = std::string("mod.json: a loose-file mod needs game.title_ids to name ") + kRosterTitle + " and runs only on that build (this one is " + (title_id.empty() ? "unknown" : title_id) + ")";
+            return false;
+        }
+        if (v->type != Json::Arr || v->arr.empty() || v->arr.size() > 64) { err = "mod.json: \"loose\" must be an array of 1 to 64 files"; return false; }
+        std::set<std::string> seen;
+        for (const Json& o : v->arr) {
+            if (o.type != Json::Obj) { err = "mod.json: a loose file is not an object"; return false; }
+            for (const std::string& k : o.keys)
+                if (k != "path" && k != "file" && k != "alias" && k != "sha256" && k != "derived") { err = "mod.json: loose file: unknown key \"" + k + "\""; return false; }
+            LooseSpec l;
+            const Json* e = o.get("path");
+            if (!e || e->type != Json::Str || !valid_rel_path(e->s)) { err = "mod.json: a loose file has no valid \"path\""; return false; }
+            l.path = e->s;
+            if (archive_of(l.path).empty()) { err = "loose " + l.path + ": its first folder names no archive folder of the game"; return false; }
+            if (!loose_name_ok(l.path)) { err = "loose " + l.path + ": not a name the game builds for the added fighters 19, 20, 21 (voice banks CV_/PV_, loading tips)"; return false; }
+            if (!seen.insert(lower(l.path)).second) { err = "loose " + l.path + " is listed twice"; return false; }
+            const Json* a = o.get("alias");
+            const Json* f = o.get("file");
+            if (!!a == !!f) { err = "loose " + l.path + ": give exactly one of \"alias\" and \"file\""; return false; }
+            if (a) {
+                if (a->type != Json::Str || !valid_rel_path(a->s) || archive_of(a->s).empty()) { err = "loose " + l.path + ": bad \"alias\""; return false; }
+                l.alias = a->s;
+                if (o.get("sha256")) { err = "loose " + l.path + ": an alias takes no \"sha256\""; return false; }
+                if (o.get("derived")) { err = "loose " + l.path + ": an alias takes no \"derived\" (it ships no bytes)"; return false; }
+            } else {
+                if (f->type != Json::Str || !valid_rel_path(f->s)) { err = "loose " + l.path + ": bad \"file\" path"; return false; }
+                l.file = f->s;
+                const Json* h = o.get("sha256");
+                if (!h || h->type != Json::Str || h->s.size() != 64) { err = "loose " + l.path + ": \"file\" needs a 64-digit \"sha256\""; return false; }
+                l.sha256 = lower(h->s);
+                for (char c : l.sha256)
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { err = "loose " + l.path + ": \"sha256\" is not hex"; return false; }
+                if (const Json* d = o.get("derived")) {
+                    if (d->type != Json::Bool) { err = "loose " + l.path + ": \"derived\" must be true or false"; return false; }
+                    l.derived = d->b;
+                }
+            }
+            m.loose.push_back(std::move(l));
+        }
+        for (const LooseSpec& l : m.loose) {   // an ACB carries its AWB's hash: the pair comes from one mod
+            const std::string pr = loose_pair_of(l.path);
+            if (pr.empty()) continue;
+            if (std::find_if(m.loose.begin(), m.loose.end(), [&](const LooseSpec& x) { return lower(x.path) == lower(pr); }) == m.loose.end()) {
+                err = "loose " + l.path + ": its pair " + pr + " is not in the same mod (an .acb and its .awb come from one mod)";
+                return false;
+            }
+        }
+    }
     if ((v = j.get("groups"))) {
         if (v->type != Json::Arr) { err = "mod.json: \"groups\" must be an array of arrays"; return false; }
         std::set<std::string> grouped;
         for (const Json& g : v->arr) {
             if (g.type != Json::Arr || g.arr.empty()) { err = "mod.json: a group must be a non-empty array"; return false; }
             std::vector<std::string> one;
+            int kind = -1;   // 0 = cpk entries, 1 = loose paths: a group is all of one kind
             for (const Json& x : g.arr) {
                 if (x.type != Json::Str) { err = "mod.json: a group holds a non-string"; return false; }
-                if (std::find_if(m.overrides.begin(), m.overrides.end(), [&](const OverrideSpec& s) { return s.entry == x.s; }) == m.overrides.end()) {
+                const bool in_o = std::find_if(m.overrides.begin(), m.overrides.end(), [&](const OverrideSpec& s) { return s.entry == x.s; }) != m.overrides.end();
+                const bool in_l = std::find_if(m.loose.begin(), m.loose.end(), [&](const LooseSpec& l) { return l.path == x.s; }) != m.loose.end();
+                if (!in_o && !in_l) {
                     err = "group entry " + x.s + " has no override in this mod";
                     return false;
                 }
+                if (kind >= 0 && kind != (in_l ? 1 : 0)) { err = "group entry " + x.s + ": a group is either cpk entries or loose files, not both"; return false; }
+                kind = in_l ? 1 : 0;
                 if (!grouped.insert(x.s).second) { err = "entry " + x.s + " is in two groups"; return false; }
                 one.push_back(x.s);
             }
-            m.groups.push_back(std::move(one));
+            (kind == 1 ? m.loose_groups : m.groups).push_back(std::move(one));
         }
     }
     if ((v = j.get("roster"))) {
@@ -964,6 +1114,14 @@ struct ResolvedOverride {
     Digest content{};      // SHA-256 of the bytes served (for an alias, the donor's)
     bool served = false;   // after conflicts
 };
+struct ResolvedLoose {
+    LooseSpec spec;
+    std::string archive;   // alias: the archive basename the bytes are read from
+    uint64_t len = 0;      // bytes served
+    uint64_t src = 0;      // alias: offset of the bytes in the archive
+    Digest content{};      // SHA-256 of the bytes served
+    bool served = false;   // after conflicts
+};
 struct ModState {
     std::string id;
     int line = 0;
@@ -974,6 +1132,7 @@ struct ModState {
     std::string reason;    // why it was refused
     Manifest m;
     std::vector<ResolvedOverride> ovr;
+    std::vector<ResolvedLoose> loose;
 };
 struct Options {
     std::string list_name = "mods.txt";   // for the log line only
@@ -981,8 +1140,17 @@ struct Options {
     std::string eboot_id;                 // region and version as the port detects it (digest input)
     std::vector<Interface> supported = supported_interfaces();
 };
+// ENHANCEMENT (loose-file): what the game finds at a path that is in no CPK. Keyed by the lower-case path relative to data/PS3.
+struct LooseServed {
+    std::string path, mod_id;   // path: as the mod wrote it
+    std::string file;           // "<mod id>/<file>" for a file source ("" = alias)
+    std::string archive;        // alias: the archive basename the bytes are in
+    uint64_t src = 0, len = 0;  // alias: offset in the archive; len: the bytes served either way
+    Digest content{};
+};
 struct ModSet {
     std::vector<ModState> mods;
+    std::map<std::string, LooseServed> loose;
     std::map<std::string, Plan> plans;   // by archive basename
     std::vector<RosterFighter> roster;   // every applied mod's added fighters, load order (build_roster_list gives the list)
     DigestKind digest_kind = DigestKind::None;
@@ -1077,6 +1245,56 @@ inline bool resolve_mod(Io& io, ModState& st, std::map<std::string, Archive>& ar
             return false;
         }
         st.ovr.push_back(std::move(r));
+    }
+    return true;
+}
+
+// ENHANCEMENT (loose-file): resolve one mod's loose files (rows, files, hashes). false + reason = refuse the mod.
+inline bool resolve_loose(Io& io, ModState& st, std::map<std::string, Archive>& archives, std::string& err)
+{
+    for (const LooseSpec& s : st.m.loose) {
+        ResolvedLoose r;
+        r.spec = s;
+        const auto archive_for = [&](const std::string& entry) -> const Archive* {
+            const std::string base = archive_of(entry);
+            auto ai = archives.find(base);
+            if (ai == archives.end()) ai = archives.emplace(base, load_archive(io, base)).first;
+            return &ai->second;
+        };
+        const Archive* pa = archive_for(s.path);
+        if (!pa->ok) { err = pa->err; return false; }
+        for (const auto& kv : pa->index)   // a CPK hit wins before any loose lookup
+            if (lower(kv.first) == lower(s.path)) { err = "loose " + s.path + " has a row in " + archive_of(s.path) + " (" + kv.first + "): use overrides (cpk-entry)"; return false; }
+        if (!s.alias.empty()) {
+            const Archive* da = archive_for(s.alias);
+            if (!da->ok) { err = da->err; return false; }
+            r.archive = archive_of(s.alias);
+            const auto dr = da->index.find(s.alias);
+            if (dr == da->index.end()) {
+                err = "loose " + s.path + ": alias " + s.alias + " is not in " + r.archive;
+                for (const auto& kv : da->index)
+                    if (lower(kv.first) == lower(s.alias)) { err += " (did you mean " + kv.first + "?)"; break; }
+                return false;
+            }
+            const TocRow& d = da->rows[dr->second];
+            if (d.size != d.extract) { err = "loose " + s.path + ": alias " + s.alias + " is CRI-compressed (not supported)"; return false; }
+            r.len = d.size;
+            r.src = da->toc_offset + d.offset;
+            if (r.src + r.len > da->file_size) { err = "loose " + s.path + ": alias " + s.alias + " runs past its archive"; return false; }
+            if (!hash_source(io, true, r.archive, r.src, r.len, r.content)) { err = "loose " + s.path + ": cannot read alias " + s.alias; return false; }
+        } else {
+            const std::string rel = st.id + "/" + s.file;
+            if (!io.mod_size(rel, r.len)) {
+                err = "loose " + s.path + ": file " + s.file + " is missing";
+                const std::string w = io.mod_why(rel);
+                if (!w.empty()) err += " (" + w + ")";
+                return false;
+            }
+            if (!hash_source(io, false, rel, 0, r.len, r.content)) { err = "loose " + s.path + ": cannot read " + s.file; return false; }
+            if (hex(r.content) != s.sha256) { err = "loose " + s.path + ": " + s.file + " does not match its sha256"; return false; }
+        }
+        if (r.len == 0) { err = "loose " + s.path + ": the file is empty"; return false; }
+        st.loose.push_back(std::move(r));
     }
     return true;
 }
@@ -1180,7 +1398,7 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
                 text.resize(size_t(sz));
                 if (io.mod_read(rel, 0, text.data(), text.size()) != text.size()) err = "cannot read mod.json";
                 else if ((st.manifest_ok = parse_manifest(text, e.id, opt.supported, opt.title_id, st.m, err)) &&
-                         resolve_mod(io, st, archives, err) && check_roster(st.m, roster_ids, err))
+                         resolve_mod(io, st, archives, err) && resolve_loose(io, st, archives, err) && check_roster(st.m, roster_ids, err))
                     st.loaded = true;
             }
         }
@@ -1221,6 +1439,23 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
             owner[entry] = { mi, oi };
         }
     }
+    // Loose files: the same rule, by lower-case path.
+    std::map<std::string, std::pair<size_t, size_t>> lowner;
+    for (size_t mi = 0; mi < set.mods.size(); ++mi) {
+        ModState& st = set.mods[mi];
+        if (!st.loaded) continue;
+        for (size_t li = 0; li < st.loose.size(); ++li) {
+            const std::string key = lower(st.loose[li].spec.path);
+            const auto it = lowner.find(key);
+            if (it != lowner.end()) {
+                const ModState& prev = set.mods[it->second.first];
+                const bool ok = std::find(st.m.conflicts_ok.begin(), st.m.conflicts_ok.end(), prev.id) != st.m.conflicts_ok.end();
+                if (!ok) log.push_back(fmt("[mods] conflict loose %s: %s overridden by %s", st.loose[li].spec.path.c_str(), prev.id.c_str(), st.id.c_str()));
+            }
+            lowner[key] = { mi, li };
+        }
+    }
+    for (const auto& kv : lowner) set.mods[kv.second.first].loose[kv.second.second].served = true;
     for (const auto& kv : owner) set.mods[kv.second.first].ovr[kv.second.second].served = true;
     for (ModState& st : set.mods) {
         if (!st.loaded) continue;
@@ -1237,6 +1472,37 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
                     }
             log.push_back(fmt("[mods] %s: group of %llu dropped, a later mod overrides part of it (%s ...)", st.id.c_str(), (unsigned long long)g.size(),
                               g.front().c_str()));
+        }
+        {   // loose groups and the .acb/.awb pairs (which always travel together)
+            std::vector<std::vector<std::string>> lg = st.m.loose_groups;
+            for (const auto& l : st.m.loose) {
+                const std::string pr = loose_pair_of(l.path);
+                if (!pr.empty() && lower(l.path) < lower(pr)) lg.push_back({ l.path, pr });
+            }
+            for (const auto& g : lg) {
+                bool lost = false;
+                for (const auto& e : g)
+                    for (const auto& r : st.loose) if (lower(r.spec.path) == lower(e) && !r.served) lost = true;
+                if (!lost) continue;
+                for (const auto& e : g)
+                    for (auto& r : st.loose)
+                        if (lower(r.spec.path) == lower(e) && r.served) {
+                            r.served = false;
+                            lowner.erase(lower(e));
+                        }
+                log.push_back(fmt("[mods] %s: loose group of %llu dropped, a later mod serves part of it (%s ...)", st.id.c_str(), (unsigned long long)g.size(), g.front().c_str()));
+            }
+            for (const auto& r : st.loose)
+                if (r.served) {
+                    st.applied = true;
+                    LooseServed ls;
+                    ls.path = r.spec.path; ls.mod_id = st.id; ls.len = r.len; ls.content = r.content;
+                    if (r.spec.alias.empty()) ls.file = st.id + "/" + r.spec.file;
+                    else { ls.archive = r.archive; ls.src = r.src; }
+                    set.loose[lower(r.spec.path)] = ls;
+                    log.push_back(fmt("[mods] loose %s <- %s %s (%llu B)", r.spec.path.c_str(), r.spec.alias.empty() ? st.id.c_str() : "alias",
+                                      r.spec.alias.empty() ? r.spec.file.c_str() : r.spec.alias.c_str(), (unsigned long long)r.len));
+                }
         }
         for (const auto& r : st.ovr) if (r.served) st.applied = true;
         if (!st.m.roster.empty()) {
@@ -1276,6 +1542,8 @@ inline ModSet load_mod_set(Io& io, const std::string& list_text, const Options& 
         std::string l = st.id + " " + st.m.version + "\n";
         for (const auto& r : st.ovr)
             if (r.served) l += r.spec.entry + " " + hex(r.content) + "\n";
+        for (const auto& r : st.loose)
+            if (r.served) l += "loose " + lower(r.spec.path) + " " + hex(r.content) + "\n";
         for (const RosterFighter& f : st.m.roster) l += fmt("roster %d after %d logo %d owned %d\n", f.id, f.after, f.logo_as, f.owned ? 1 : 0);
         h.update((const uint8_t*)l.data(), l.size());
     }

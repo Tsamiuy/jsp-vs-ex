@@ -1,0 +1,116 @@
+Patch 6504: a title port may point a read-only cellFs open or a stat at another host file, and name the size a stat reports (g_ps3_fs_path_ops, NULL by default).
+
+New header include/ps3emu/fs_path_ops.h: a resolver, resolve(guest_path, host_path, cap, virtual_size). cellFsOpen (read-only: not
+O_WRONLY, O_RDWR, O_CREAT or O_TRUNC) and cellFsStat call it right after the guest path was translated to a host path, whether or not the
+translated file exists; the port may replace the host path in place, and for cellFsStat set the size to report (regular files). It never
+runs for writes or directory listings. With the pointer NULL: one atomic load per read-only open and per stat, nothing else changes.
+Use in J-Stars: the mods folder serves files the game opens by a name that is in no archive (voice banks and loading tips of an added
+fighter): the resolver answers with the mod's file, or with the archive a window of which is the file; the virtual-file view of patch 6502
+then serves the pinned bytes. Upstream candidate (general: "let a port answer a path with its own file"). Only ppu_fs.cpp translates paths in
+the J-Stars build, so only it is hooked; sys_fs.c and libs/filesystem/cellFs.c are not.
+Test: the J-Stars host test installer/tools/mods_overlay_test.sh (resolver glue, with the toolkit); the patch itself is checked by the
+port syntax check (ppu_fs.cpp compiles) and by export_toolkit.py applying it.
+
+diff --git a/include/ps3emu/fs_path_ops.h b/include/ps3emu/fs_path_ops.h
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/include/ps3emu/fs_path_ops.h
+@@ -0,0 +1,46 @@
++/*
++ * ps3recomp - port path resolver for cellFs (runtime/ppu/ppu_fs.cpp).
++ *
++ * A title port may answer a guest path with a host path of its own, for a file the
++ * game opens read-only by a name that is in no archive and not (or not only) in the
++ * game tree: cellFsOpen and cellFsStat call resolve() right after the guest path has
++ * been translated to a host path. The port may replace that host path (in place) and,
++ * for cellFsStat, the size the guest sees. Use: a port that serves files a mod keeps in
++ * its own folder under the names the game asks for; paired with ps3emu/fs_vfile.h when
++ * the bytes must come from the port's own open file or a window of another file.
++ *
++ * g_ps3_fs_path_ops is NULL by default, and then nothing changes: one atomic load per
++ * read-only cellFsOpen and per cellFsStat.
++ *
++ * Contract:
++ *  - resolve(guest_path, host_path, cap, virtual_size): host_path holds the translated
++ *    host path on entry (a NUL-terminated string in a buffer of cap bytes). Return 0 to
++ *    leave it, or 1 after writing the replacement into host_path (it must fit cap).
++ *    virtual_size is NULL for cellFsOpen; for cellFsStat it points at UINT64_MAX on
++ *    entry, and the port may set the size to report (it is applied to regular files only).
++ *    It must not call back into cellFs. Called for read-only opens (not O_WRONLY, O_RDWR,
++ *    O_CREAT or O_TRUNC) and for stats by path, never for writes or directory listings.
++ *  - May be called from any guest thread.
++ */
++#ifndef PS3EMU_FS_PATH_OPS_H
++#define PS3EMU_FS_PATH_OPS_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct ps3_fs_path_ops {
++    int (*resolve)(const char* guest_path, char* host_path, size_t cap, uint64_t* virtual_size);
++} ps3_fs_path_ops;
++
++/* Defined in runtime/ppu/ppu_fs.cpp. NULL = no resolver. */
++extern const ps3_fs_path_ops* volatile g_ps3_fs_path_ops;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_FS_PATH_OPS_H */
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 1111111..2222222 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -121,6 +121,7 @@
+ #include "ps3emu/log_first.h"
+ #include "ps3emu/ps3_env_once.h"   /* ps3_env_once: each switch looked up once */
+ #include "ps3emu/fs_vfile.h"       /* patch 6502: g_ps3_fs_vfile_ops */
++#include "ps3emu/fs_path_ops.h"    /* patch 6504: g_ps3_fs_path_ops */
+ 
+ /* Host root that the PS3 mount points map into (dir containing PS3_GAME). */
+ extern "C" const char* ppu_vfs_root = ".";
+@@ -175,6 +176,13 @@
+  * translators. (extern "C" is ill-formed at block scope.) */
+ extern "C" void ps3_vfs_ps3game_fallback(char* path, size_t cap);
+ 
++/* Patch 6504: the port path resolver (ps3emu/fs_path_ops.h). NULL by default. */
++extern "C" { const ps3_fs_path_ops* volatile g_ps3_fs_path_ops = nullptr; }
++static const ps3_fs_path_ops* fs_path_provider(void)
++{
++    return __atomic_load_n(&g_ps3_fs_path_ops, __ATOMIC_ACQUIRE);
++}
++
+ /* Translate a guest path to a host path under ppu_vfs_root. Known PS3 mount
+  * prefixes are stripped; the rest is appended to the root. */
+ static void host_path(char* out, size_t cap, const char* guest)
+@@ -340,6 +348,9 @@
+     uint32_t flags  = (uint32_t)ctx->gpr[4];
+     uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
+     host_path(hpath, sizeof hpath, gpath);
++    /* Patch 6504: a read-only open may be pointed at another host file by the port's resolver (ps3emu/fs_path_ops.h). */
++    if ((flags & 0x3) == CELL_FS_O_RDONLY && !(flags & (CELL_FS_O_TRUNC | CELL_FS_O_CREAT)))
++        if (const ps3_fs_path_ops* pops = fs_path_provider()) pops->resolve(gpath, hpath, sizeof hpath, nullptr);
+ 
+     /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
+      * file and that is opened in its place. */
+@@ -813,11 +824,14 @@
+     guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
+     uint32_t sb = (uint32_t)ctx->gpr[4];
+     host_path(hpath, sizeof hpath, gpath);
++    uint64_t pops_size = UINT64_MAX;   /* patch 6504: the port resolver may also name the size to report */
++    if (const ps3_fs_path_ops* pops = fs_path_provider()) pops->resolve(gpath, hpath, sizeof hpath, &pops_size);
+     fs_stat64_t st;
+     if (FS_STAT64(hpath, &st) != 0) {
+         if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> ENOENT\n", gpath);
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
+     }
++    if (pops_size != UINT64_MAX && !(st.st_mode & S_IFDIR)) st.st_size = (decltype(st.st_size))pops_size;
+     if (ps3_env_once("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> OK (size=%lld)\n", gpath, (long long)st.st_size);
+     uint32_t mode = (st.st_mode & S_IFDIR) ? (CELL_FS_S_IFDIR | 0x1FF)
+                                            : (CELL_FS_S_IFREG | 0x1B6);
