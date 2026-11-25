@@ -1316,7 +1316,7 @@ static void test_card_as(MemIo& io)
             std::map<uint32_t, uint8_t> b; bool oob = false;   // oob: a read outside what was written
             uint8_t rd(uint32_t a) { auto it = b.find(a); if (it == b.end()) { oob = true; return 0; } return it->second; }
             void wr(uint32_t a, uint8_t v) { if (!b.count(a)) oob = true; b[a] = v; }
-            void put(uint32_t a, const std::string& t) { for (size_t i = 0; i <= t.size(); ++i) b[a + (uint32_t)i] = i < t.size() ? (uint8_t)t[i] : 0; }
+            void put(uint32_t a, const std::string& t) { b.clear(); for (size_t i = 0; i <= t.size(); ++i) b[a + (uint32_t)i] = i < t.size() ? (uint8_t)t[i] : 0; }
             std::string get(uint32_t a) { std::string t; while (b.count(a + (uint32_t)t.size()) && b[a + (uint32_t)t.size()]) t += (char)b[a + (uint32_t)t.size()]; return t; }
         } mem;
         const int ids[2] = { 19, 21 }, donors[2] = { 18, 211 };

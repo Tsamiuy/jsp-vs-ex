@@ -79,7 +79,13 @@ of the lookup and puts them back. No archive is changed and nothing ships with t
 - `card_as` is cosmetic: it is not in the digest, so a peer that does not redirect still plays the same fight. A card is not a model:
   the fighter's fight data, model and voice are still not served by this field.
 
+### Limits
+
+The hook sees lookups by name only. The game also stores precomputed name hashes (including for ids 19 to 21), so a screen that looks a card up by
+hash skips it: only the character select grid is meant, other screens are unverified.
+
 ### Open (needs a game run)
 
 - That the select grid's cards come through this lookup, and that the donor's card shows for the added id (only read from the lift).
 - That every stock-list id has a full card in the shared set (checked for 018 and 211).
+- That the donor's card is in the set on every screen that shows the grid: a per-id card pak (`chara_256_ico_%03d_ALL_m.pak`, loader without a static caller) might mean it is not on some screen.

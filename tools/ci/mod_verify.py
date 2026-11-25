@@ -61,7 +61,7 @@ SOURCE_EXT = {".cpp", ".h", ".c", ".cc", ".hpp", ".inc", ".patch", ".diff"}
 SOURCE_NAMES = {"cmakelists.txt"}
 SOURCE_DIRS = {"port", "installer", "third_party", "tools"}
 
-SUPPORTED = {"cpk-entry": 1, "roster": 1}                  # supported_interfaces()
+SUPPORTED = {"cpk-entry": 1, "roster": 2}                  # supported_interfaces()
 ARCHIVE_FOLDERS = {"battle", "character", "game", "map", "progress", "sound"}   # archive_of()
 COSMETIC_PREFIXES = ("game/logo/", "movie/", "sound/")     # is_cosmetic_path()
 ROSTER_TITLE = "BLUS31519"
@@ -683,7 +683,7 @@ def _check_roster(r, ifaces, title_ids):
             errs.append("a roster fighter is not an object")
             continue
         for k in o:
-            if k not in ("id", "after", "logo_as", "owned"):
+            if k not in ("id", "after", "logo_as", "owned") and not (k == "card_as" and ifaces.get("roster", 0) >= 2):
                 errs.append("roster fighter: unknown key \"%s\"" % k)
         if not _is_int(o.get("id")) or o["id"] not in ROSTER_IDS:
             errs.append("roster fighter \"id\" must be 19, 20 or 21")
@@ -695,6 +695,8 @@ def _check_roster(r, ifaces, title_ids):
             errs.append("roster: fighter goes after id %d, which is not a stock id or an earlier fighter of this mod" % o["after"])
         if "logo_as" in o and (not _is_int(o["logo_as"]) or not 0 <= o["logo_as"] < 200 or o["logo_as"] not in STOCK_ROSTER):
             errs.append("roster fighter \"logo_as\" must be a stock fighter id (on the stock list, below 200)")
+        if "card_as" in o and ifaces.get("roster", 0) >= 2 and (not _is_int(o["card_as"]) or o["card_as"] not in STOCK_ROSTER):
+            errs.append("roster fighter \"card_as\" must be a stock fighter id (on the stock list; the card's own art has to exist in the game)")
         if "owned" in o and not isinstance(o["owned"], bool):
             errs.append("roster fighter \"owned\" must be true or false")
         if _is_int(o.get("id")):

@@ -28,6 +28,10 @@
 //     jsp_card_as_leave puts them back. The hook is on func_0051BDC8 and not on func_0051C0D8 itself because that stub tail-calls
 //     (the lifter refuses a hook around a tail call) and it has about a hundred direct callers, which a table hook would not see.
 //     Nothing else is touched: no archive, no other name.
+//     LIMITS: the hook sees lookups by NAME only. func_001CF87C stores precomputed name hashes (including 019..021), so a screen that looks
+//     a card up by hash skips it: only the character select grid is meant, other screens are unverified. ASSUMPTION: the donor's card is in the
+//     shared set on every screen that shows the grid; a per-id pak (chara_256_ico_%03d_ALL_m.pak, func_0043521C, no static caller seen) might
+//     mean the donor's card is not in the set on some screen. Both go on the GPU-run checklist.
 // ASSUMPTION: the free areas below are never used by the game or the runtime: no pointer in the image refers to them and the runtime
 // allocators keep elsewhere (checked by reading the image and the allocator ranges, not by a memory trace).
 // A fight with an added fighter is untested: nothing here serves model, voice or card data.
@@ -70,7 +74,8 @@ constexpr uint32_t kSaveMgr = 0x0095B90Cu;
 constexpr uint32_t kOwnedOffset = 0x29A9Cu;          // three big-endian words: ids 0..63 are fighters; ids 64 and up would hit the support bits (supports 200+ are stored as id - 136 in the third word)
 constexpr int kOwnedWords = 3;
 
-constexpr uint32_t kNameLookup = 0x0051BDC8u;        // func_0051BDC8(set, kind, name): the entry the card hook is on (lift_game_hooks.json)
+// func_0051BDC8(set, kind, name) @0x0051BDC8 is the entry the card hook is on (lift_game_hooks.json). Whether the lift has the hook cannot be
+// checked here (the function exists with or without it and the lift leaves no runtime marker): a lift made before the hook just does not redirect.
 constexpr uint32_t kCardKind = 2;                    // r4 of func_0051C0D8's tail call: the textures of a set
 
 struct Added { int id, logo_as, owned; };
@@ -246,7 +251,6 @@ extern "C" void jsp_register_roster_overrides(void)
     }
     {   // the card redirect: it needs the lifted entry hook, which only a lift made with lift_game_hooks.json has
         const int nc = jsp_mods_roster_cards(g_card_ids, g_card_donors, 8);
-        if (nc > 0 && !has_function(kNameLookup)) { give_up("the card name lookup func_0051BDC8 is not in the lift"); return; }
         g_card_n = nc;
         if (nc > 0) std::fprintf(stderr, "[roster] card_as: %d added id(s) borrow a stock card through the func_0051BDC8 entry hook\n", nc);
     }
