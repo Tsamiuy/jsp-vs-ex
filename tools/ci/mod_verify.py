@@ -49,7 +49,7 @@ REFUSED_EXT = {".exe", ".dll", ".bat", ".cmd", ".ps1", ".py", ".sh", ".so",
                ".msi", ".com", ".scr", ".vbs", ".jar", ".dylib", ".lnk", ".pyc",
                ".asi", ".js", ".hta", ".wsf", ".cpl", ".reg", ".pif", ".vbe", ".jse", ".sys", ".ocx", ".msix", ".appx",
                ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".xz", ".bz2", ".cab", ".iso", ".apk", ".lua", ".php", ".pl", ".rb",
-               ".wasm", ".html", ".htm", ".url", ".dmg", ".app"}   # the last three: a nested archive hides its files from the checks
+               ".wasm", ".html", ".htm", ".url", ".dmg", ".app"}   # archives (.zip ... .iso, .apk, .dmg): a nested archive hides its files from the checks
 SNIFF = ((b"\x7fELF", "a Linux program"), (b"#!", "a script"), (b"PK\x03\x04", "a nested zip"), (b"PK\x05\x06", "a nested zip"),
          (b"\xfe\xed\xfa\xce", "a macOS program"), (b"\xfe\xed\xfa\xcf", "a macOS program"), (b"\xce\xfa\xed\xfe", "a macOS program"),
          (b"\xcf\xfa\xed\xfe", "a macOS program"), (b"\xca\xfe\xba\xbe", "a macOS or Java program"), (b"\xbe\xba\xfe\xca", "a macOS program"),
