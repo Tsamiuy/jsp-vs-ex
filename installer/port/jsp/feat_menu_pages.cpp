@@ -459,6 +459,14 @@ void mp_pad(uint32_t port, uint16_t* b)
     mp_list_fix(menu);
     mp_preview_image(menu);
     mp_preview_log(menu);
+    /* Up / Down on the list while the highlight is held on a Training / Impossible row: the hold ends here, and the move
+     * starts from the row the player sees (a tester's video: the highlight stayed on Training Mode for about
+     * 7 s of presses after coming back to the Battle Modes page). Not while the list slides (highlight state not 3). */
+    if (g_mp_pin >= 0 && (pressed & (0x0010 | 0x0040)) && !(mp_hilite_ok() && vm_read32(g_mp_hilite + 0x38) != 3u)) {
+        std::printf("[mpages] Up / Down on the list: the hold of row %d ends (the game's cursor was %u)\n", g_mp_pin, vm_read32(menu + 0x44)); std::fflush(stdout);
+        vm_write32(menu + 0x44, (uint32_t)g_mp_pin); vm_write32(0x00956550u, (uint32_t)g_mp_pin);
+        g_mp_pin = -1; g_mp_back = -1; g_mp_away = false;
+    }
     const int row = (int)vm_read32(menu + 0x44);
     if (pressed & (CROSS | START)) {
         if (g_mp_page == 0 && row == 0) {   /* Battle Modes: the second page, same screen */
@@ -544,9 +552,18 @@ extern "C" void jsp_mp_hilite_enter(ppu_context* ctx)
     g_mp_hilite = part; g_mp_hilite_vt = vm_read32(part);
     { const uint32_t menu = jsp_main_menu_obj(); if (menu >= 0x10000u && menu < 0x30000000u && vm_read32(menu) == 0x0087D600u) mp_preview_image(menu); }
     if (g_mp_pin >= 0) {
-        const uint32_t menu = jsp_main_menu_obj(); const bool back = jsp_main_list_open() && menu >= 0x10000u && vm_read32(menu + 0x44) == (uint32_t)g_mp_pin;
-        vm_write32(part + 0x40, (uint32_t)g_mp_pin);
-        if (back) { static int k = 0; if (++k > 30) { k = 0; g_mp_pin = -1; } }   /* back on the page row: let go */
+        const uint32_t menu = jsp_main_menu_obj(); const bool open = jsp_main_list_open() && menu >= 0x10000u && menu < 0x30000000u;
+        const uint32_t cur = open ? vm_read32(menu + 0x44) : 0xFFFFFFFFu;
+        const bool back = open && cur == (uint32_t)g_mp_pin;
+        /* the cursor has left both the held row and the row it stood for (the stick moved it): let go at once */
+        const bool moved = open && cur < (uint32_t)mp_rows() && cur != (uint32_t)g_mp_pin && (int)cur != mp_real_row(g_mp_page, g_mp_pin) &&
+                           !(mp_hilite_ok() && vm_read32(g_mp_hilite + 0x38) != 3u);
+        static int k = 0;
+        if (moved) { k = 0; g_mp_pin = -1; g_mp_back = -1; g_mp_away = false; }
+        else {
+            vm_write32(part + 0x40, (uint32_t)g_mp_pin);
+            if (back) { if (++k > 30) { k = 0; g_mp_pin = -1; } } else k = 0;   /* back on the page row: let go */
+        }
     }
 }
 /* the bullets of rows the page does not have: hidden (layout calc leave, the main list layout) */

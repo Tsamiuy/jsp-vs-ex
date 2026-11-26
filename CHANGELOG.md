@@ -4,6 +4,18 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### For players
+
+**Fixed**
+
+- **The Battle Modes list no longer sticks on Training Mode or Impossible Mode.** After picking Training Mode or Impossible Mode and coming back to the Battle Modes page, the highlight could stay on that row for several seconds while Up and Down moved the game's cursor underneath, so the picture showed the wrong row. The highlight now follows Up and Down at once. Tried in scripted runs on one Windows PC with a keyboard; coming back from a whole fight with quick presses is not tried.
+
+### Technical changes
+
+#### Fixed
+
+- **Game (two-page Main Menu):** `feat_menu_pages.cpp`: picking Training Mode or Impossible Mode holds the highlight on that row (`g_mp_pin`) while the game opens the screen behind, and the hold was let go only after the cursor had rested on the row for 30 highlight frames (the counter was never reset), so a press before that moved the game's cursor under a highlight that stayed. An Up or Down press on the open list (highlight state 3) now ends the hold and the move starts from the held row; in the highlight hook a cursor that has left both the held row and the row it stood for ends it too; the 30-frame counter is reset whenever the cursor is not on the held row. Tested (scripted runs, one Windows PC, keyboard): the Battle Modes page, Training Mode, Cross, Circle, then four Downs: before, all four pictures show the highlight on Training Mode; after, it moves on to Impossible Mode, J-Adventure and Victory Road (a first Down inside the list's slide-in is held as before). Not tested: coming back from a whole fight with quick presses, a second pad, online. (#284)
+
 ## [0.7.0] - 2026-11-25
 
 ### For players
