@@ -4,6 +4,22 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### For players
+
+**Changed**
+
+- **Fights draw faster.** The picture work for a fight does less for every frame: it skips the textures a shader never uses and reads the HUD size box and the index lists faster. On one Windows PC a 3 vs 3 fight with one drawing thread went from about 28 to about 29.7 frames per second and a 2 vs 2 fight from about 29 to 30 (the game's cap); with two drawing threads every scene was already at the cap there, so you may see the gain only as less load. The gain is meant for slower PCs, and it is not measured on one. A fifth part, which moves more of the drawing work to the second thread when two-thread drawing is on, is off by default and has to be switched on by hand; the technical notes list the switches for every part.
+
+### Technical changes
+
+#### Changed
+
+- **Graphics:** toolkit patch 7929 (`libs/video/rsx_d3d12_backend.c`): `TEX_USED_ONLY` (on; `=0` off): each draw prepares only the texture units its fragment program samples (the program's texture instructions are scanned once per program offset and again when its first two instruction words change); the other units get the null view without a lookup, upload or checksum. Tested (one Windows PC): one-frame replays bit-exact, drawing thread 10.47 to 9.64 ms in 2 vs 2; 3 vs 3 and 2 vs 2 fights at HUD size 0.50 look right. (#287)
+- **Graphics:** toolkit patch 7930 (`libs/video/rsx_d3d12_backend.c`): `UI_BOX_NT` (on; `=0` off): the HUD-scale box reads vertex positions from write-combined memory with one streaming load (MOVNTDQA) instead of plain loads. Tested (one Windows PC): replays bit-exact, 2 Players 3 vs 3 35.7 to 31.7 ms; the HUD looks right at size 0.50. (#287)
+- **Graphics:** toolkit patch 7931 (`libs/video/rsx_d3d12_backend.c`): `IX_AVX2` (on; `=0` off): the first pass over 16-bit indices (swap, widen, min and max, restart index) runs 16 at a time with AVX2, which the build already needs. Tested (one Windows PC): replays bit-exact, 1.0 to 1.6 ms less per frame. (#287)
+- **Graphics:** toolkit patch 7932 (`libs/video/rsx_d3d12_backend.c`, `libs/video/cellGcmSys.c`): `PREP_PIPE` (off; `=1` on, only with two-thread drawing `PIPE=1`): the draw preparation runs on the submit thread; a label gate keeps the game's view of the next batch's labels and reports until it is done, and the batch's fragment programs are copied at the hand-off. Tested (one Windows PC, PIPE=1): the Arcade 2 Players route, Training and its menu, and 3v3 and 2v2 fights look right with it on, the log shows `live reads 0` in every run, and the second thread's work per frame went from 16.7 to 11.6 ms (3 vs 3) and 14.7 to 9.0 ms (2 vs 2). Not tested: the Free Battle TIPS loading screen with it on, a slower PC. (#287)
+- **Graphics:** toolkit patch 7933 (`libs/video/rsx_d3d12_backend.c`): `UI_POS` (on; `=0` off, needs `UI_BOX_NT`): the HUD-scale box reads positions from a plain-memory copy the CPU vertex paths keep, instead of the upload ring. Tested (one Windows PC): Training at HUD size 1.00, 0.75 and 0.50 and Hide HUD give the same HUD with it on and off (the only pixel differences are the fighters' idle motion), and the 2 Players 3 vs 3 Character Select layout is right; the FIFO thread did 5 to 7 % less work in replays. (#287)
+
 ## [0.7.0] - 2026-11-25
 
 ### For players

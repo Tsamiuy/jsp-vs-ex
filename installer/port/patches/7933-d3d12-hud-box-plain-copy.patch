@@ -1,0 +1,163 @@
+Patch 7933: the HUD-scale box reads vertex positions from a plain-memory copy (UI_POS, on by default; needs 7930).
+
+The CPU vertex paths keep attribute 0 of each vertex they write into the vertex upload ring in a plain-memory side copy,
+tagged with the batch; vp_record_cb reads positions from there instead of the write-combined ring (a vertex not noted in
+this batch: the old read). Same values, same box, same picture. UI_POS=0: off. Measured: 2 Players 3v3 replays, FIFO
+thread 16.28 -> 15.43 ms and 16.22 -> 15.04 ms, pictures bit-exact.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 4bf25a9..4da2151 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5505,6 +5505,29 @@ static void fpk_fill(u32 fp_addr, const u8* code, float* out)
+  * the drawing thread). One 16-byte streaming load (MOVNTDQA, made for reading write-combined memory) per vertex instead.
+  * Same values, same box. */
+ #include <immintrin.h>
++/* UI_POS (=0 off): attribute 0 of every vertex the CPU paths write into the vertex upload ring,
++ * kept in plain memory (s_pos0, tagged with the batch), so the UI_SCALE box reads it instead of the write-combined ring. */
++static float (*s_pos0)[4]; static u32* s_pos0_gen; static u32 s_pos0_cur = 1;
++static inline void pos0_note(const void* dst, const float* v)
++{
++    if (!s_pos0) return;
++    const intptr_t off = (const u8*)dst - (const u8*)s_d3d.vp_vb_mapped;
++    if (off < 0 || (off & 255) || off >= (intptr_t)2 * MAX_VERTICES * 256) return;
++    const u32 k = (u32)(off >> 8);
++    s_pos0[k][0] = v[0]; s_pos0[k][1] = v[1]; s_pos0[k][2] = v[2]; s_pos0[k][3] = v[3];
++    s_pos0_gen[k] = s_pos0_cur;
++}
++static int ui_pos_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("UI_POS"); on = (e && *e == '0') ? 0 : 1; }
++    if (on && !s_pos0 && s_d3d.vp_vb_mapped) {
++        s_pos0 = (float(*)[4])malloc(sizeof(float[4]) * 2u * MAX_VERTICES);
++        s_pos0_gen = (u32*)calloc(2u * MAX_VERTICES, sizeof(u32));
++        if (!s_pos0 || !s_pos0_gen) { free(s_pos0); free(s_pos0_gen); s_pos0 = NULL; s_pos0_gen = NULL; on = 0; }
++    }
++    return on && s_pos0;
++}
+ static int ui_box_nt_on(void)
+ {
+     static int on = -1;
+@@ -5711,9 +5734,17 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+           float box[4] = { 1e9f, 1e9f, -1e9f, -1e9f };
+           const int nt = ui_box_nt_on() && !((uintptr_t)vv & 15u);   /* UI_BOX_NT */
+           float a_nt[4];
++          const float (*sp)[4] = NULL;   /* UI_POS: attribute 0 from the side copy */
++          if (ui_pos_on()) {
++              const u32 k0 = (u32)(((u64)s_d3d.vp_parity * MAX_VERTICES * 256u + dr->vb_byte_offset) >> 8);
++              u32 ok = (dr->vb_byte_offset & 255u) == 0 && k0 + dr->vertex_count <= 2u * MAX_VERTICES;
++              for (u32 i = 0; ok && i < dr->vertex_count; i++) ok = s_pos0_gen[k0 + i] == s_pos0_cur;
++              if (ok) sp = (const float (*)[4])&s_pos0[k0];
++          }
+           for (u32 i = 0; i < dr->vertex_count; i++) {
+               const float* a = vv + (u64)i * 64u;   /* attribute 0 of vertex i */
+-              if (nt) { ui_nt_load16(a, a_nt); a = a_nt; }
++              if (sp) a = sp[i];
++              else if (nt) { ui_nt_load16(a, a_nt); a = a_nt; }
+               float x, y;
+               if (pk == 1) { const float w = a[3] != 0.0f ? a[3] : 1.0f; x = a[0] / w; y = a[1] / w; }
+               else {
+@@ -9114,6 +9145,7 @@ static void rf_batch_reset(void)
+     s_d3d.draw_count = 0;
+     if (s_vpull.ring_mapped) vpull_report();
+     s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
++    if (++s_pos0_cur == 0) { if (s_pos0_gen) memset(s_pos0_gen, 0, sizeof(u32) * 2u * MAX_VERTICES); s_pos0_cur = 1; }   /* UI_POS */
+ }
+ /* End of prepare: what submit reads, taken from the live state. With PIPE=1 the FIFO thread then gets a fresh draw list
+  * and the other ring half at once (the old reset minus the per-record flags, which the submit half clears on its own
+@@ -9133,6 +9165,7 @@ static void rf_detach(RfFrame* f, int piped)
+     s_d3d.draws = (s_d3d.draws == s_draws_buf[0]) ? s_draws_buf[1] : s_draws_buf[0];
+     s_d3d.draw_count = 0;
+     s_d3d.vp_parity ^= 1;
++    if (++s_pos0_cur == 0) { if (s_pos0_gen) memset(s_pos0_gen, 0, sizeof(u32) * 2u * MAX_VERTICES); s_pos0_cur = 1; }   /* UI_POS */
+ }
+ 
+ static void render_frame_submit(const RfFrame* f)
+@@ -10704,6 +10737,14 @@ static void vs_arrays(const rsx_state* st, u32 prim, u32 count)
+ 
+ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+ {
++    if (s_pos0) {   /* UI_POS: built on the stack, then one copy (the ring is write-combined) and the note */
++        VPSlot tmp[16];
++        if (s_vs_on > 0) s_vs.conv++;
++        for (int i = 0; i < 16; i++) rsx_fetch_attrib(state, i, vi, tmp[i].v);
++        memcpy(out16, tmp, sizeof tmp);
++        pos0_note(out16, tmp[0].v);
++        return;
++    }
+     if (s_vs_on > 0) s_vs.conv++;
+     for (int i = 0; i < 16; i++) {
+         rsx_fetch_attrib(state, i, vi, out16[i].v);
+@@ -10863,6 +10904,7 @@ static void read_vp_vertex_fast(const rsx_state* state, u32 vi, VPSlot* out16)
+         for (int k = 0; k < s_vf.n; k++) rsx_fetch_attrib(state, s_vf.idx[k], vi, tmp[s_vf.idx[k]].v);
+     }
+     memcpy(out16, tmp, sizeof tmp);
++    pos0_note(out16, tmp[0].v);   /* UI_POS */
+ }
+ 
+ /* Per-draw vertex cache for the paths that expand one guest vertex into
+@@ -10898,6 +10940,7 @@ static void read_vp_vertex_cached(const rsx_state* state, u32 vi, VPSlot* out16)
+         s_vc_tag[h] = vi;
+     }
+     memcpy(out16, s_vc[h], sizeof(VPSlot) * 16);
++    pos0_note(out16, s_vc[h][0].v);   /* UI_POS */
+     /* VTX_CACHE_CHECK=1: also refetch on every lookup and count differences
+      * (validation for a new title; the refetch costs what the cache saves). */
+     { static int chk = -1; if (chk < 0) chk = getenv("VTX_CACHE_CHECK") ? 1 : 0;
+@@ -11074,7 +11117,7 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+             read_vp_vertex(state, first + q*4 + k, c[k]);
+         /* quad -> two triangles (perimeter winding) */
+         static const int idx[6] = {0,1,2, 0,2,3};
+-        for (int t = 0; t < 6; t++) { memcpy(&out[o*16], c[idx[t]], sizeof(c[0])); o++; }
++        for (int t = 0; t < 6; t++) { memcpy(&out[o*16], c[idx[t]], sizeof(c[0])); pos0_note(&out[o*16], c[idx[t]][0].v); o++; }
+         if (env_on("VTX_DUMP", &s_env_vtx_dump)) { static int _n=0; if (PS3_LOG_FIRST(_n, 4)) {
+             FILE* f = fopen("vtx_dump.txt", _n==1 ? "w" : "a");
+             if (f) { for (u32 k = 0; k < 4; k++)
+@@ -11258,12 +11301,12 @@ static u32 upload_quad_strip_vp(const rsx_state* state, u32 first, u32 count)
+         read_vp_vertex(state, b + 1, v1);
+         read_vp_vertex(state, b + 2, v2);
+         read_vp_vertex(state, b + 3, v3);
+-        memcpy(&out[(o + 0)*16], v0, sizeof(v0));
+-        memcpy(&out[(o + 1)*16], v1, sizeof(v1));
+-        memcpy(&out[(o + 2)*16], v3, sizeof(v3));
+-        memcpy(&out[(o + 3)*16], v0, sizeof(v0));
+-        memcpy(&out[(o + 4)*16], v3, sizeof(v3));
+-        memcpy(&out[(o + 5)*16], v2, sizeof(v2));
++        memcpy(&out[(o + 0)*16], v0, sizeof(v0)); pos0_note(&out[(o + 0)*16], v0[0].v);
++        memcpy(&out[(o + 1)*16], v1, sizeof(v1)); pos0_note(&out[(o + 1)*16], v1[0].v);
++        memcpy(&out[(o + 2)*16], v3, sizeof(v3)); pos0_note(&out[(o + 2)*16], v3[0].v);
++        memcpy(&out[(o + 3)*16], v0, sizeof(v0)); pos0_note(&out[(o + 3)*16], v0[0].v);
++        memcpy(&out[(o + 4)*16], v3, sizeof(v3)); pos0_note(&out[(o + 4)*16], v3[0].v);
++        memcpy(&out[(o + 5)*16], v2, sizeof(v2)); pos0_note(&out[(o + 5)*16], v2[0].v);
+         o += 6;
+     }
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+@@ -11306,7 +11349,7 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
+         for (u32 k = 0; k < 4; k++)
+             read_vp_vertex_cached(state, read_guest_index(state, first + q*4 + k), c[k]);
+         static const int idx[6] = {0,1,2, 0,2,3};
+-        for (int t = 0; t < 6; t++) { memcpy(&out[o*16], c[idx[t]], sizeof(c[0])); o++; }
++        for (int t = 0; t < 6; t++) { memcpy(&out[o*16], c[idx[t]], sizeof(c[0])); pos0_note(&out[o*16], c[idx[t]][0].v); o++; }
+         if (env_on("VTX_DUMP", &s_env_vtx_dump)) { static int _n=0; if (PS3_LOG_FIRST(_n, 6)) {
+             FILE* f = fopen("vtx_dump.txt", _n==1 ? "w" : "a");
+             if (f) {
+@@ -12339,12 +12382,12 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+         read_vp_vertex(state, read_guest_index(state, b + 1), v1);
+         read_vp_vertex(state, read_guest_index(state, b + 2), v2);
+         read_vp_vertex(state, read_guest_index(state, b + 3), v3);
+-        memcpy(&out[(o + 0)*16], v0, sizeof(v0));
+-        memcpy(&out[(o + 1)*16], v1, sizeof(v1));
+-        memcpy(&out[(o + 2)*16], v3, sizeof(v3));
+-        memcpy(&out[(o + 3)*16], v0, sizeof(v0));
+-        memcpy(&out[(o + 4)*16], v3, sizeof(v3));
+-        memcpy(&out[(o + 5)*16], v2, sizeof(v2));
++        memcpy(&out[(o + 0)*16], v0, sizeof(v0)); pos0_note(&out[(o + 0)*16], v0[0].v);
++        memcpy(&out[(o + 1)*16], v1, sizeof(v1)); pos0_note(&out[(o + 1)*16], v1[0].v);
++        memcpy(&out[(o + 2)*16], v3, sizeof(v3)); pos0_note(&out[(o + 2)*16], v3[0].v);
++        memcpy(&out[(o + 3)*16], v0, sizeof(v0)); pos0_note(&out[(o + 3)*16], v0[0].v);
++        memcpy(&out[(o + 4)*16], v3, sizeof(v3)); pos0_note(&out[(o + 4)*16], v3[0].v);
++        memcpy(&out[(o + 5)*16], v2, sizeof(v2)); pos0_note(&out[(o + 5)*16], v2[0].v);
+         o += 6;
+     }
+     s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;

@@ -1,0 +1,48 @@
+Patch 7930: the UI_SCALE box reads the HUD vertex positions with a streaming load (UI_BOX_NT, on by default).
+
+vp_record_cb read every HUD vertex's position back from the vertex upload heap, which is write-combined memory: each
+plain load goes all the way to RAM (2 Players 3v3: 16 % of the drawing thread). One 16-byte streaming load (MOVNTDQA,
+made for reading write-combined memory) per vertex instead. Same values, same box, same picture. UI_BOX_NT=0: plain
+loads as before.
+Measured on replays: 2 Players 3v3 35.71 -> 31.73 ms, 2v2 16.31 -> 14.58 ms, pictures bit-exact. HUD sizes 1.00 /
+0.75 / 0.50, Hide HUD and the 3v3 Character Select layout looked the same in real runs.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 87a376e..92e8db6 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5401,6 +5401,22 @@ static void fpk_fill(u32 fp_addr, const u8* code, float* out)
+     if (m->nk) memcpy(out, m->k, (size_t)m->nk * 16);
+ }
+ 
++/* UI_BOX_NT (=0 off): the UI_SCALE box below reads each vertex's position back from the vertex
++ * upload heap, which is write-combined memory: every plain load there goes all the way to RAM (2 Players 3v3: 16 % of
++ * the drawing thread). One 16-byte streaming load (MOVNTDQA, made for reading write-combined memory) per vertex instead.
++ * Same values, same box. */
++#include <immintrin.h>
++static int ui_box_nt_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("UI_BOX_NT"); on = (e && *e == '0') ? 0 : 1; }
++    return on;
++}
++__attribute__((target("sse4.1"))) static inline void ui_nt_load16(const void* p, float out[4])
++{
++    const __m128i v = _mm_stream_load_si128((__m128i*)p);
++    _mm_storeu_si128((__m128i*)out, v);
++}
+ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+ {
+     const rsx_state* st = s_d3d.current_rsx_state;
+@@ -5594,8 +5610,11 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+           const float* k464 = st->vertex_constants[464];
+           const float* k466 = st->vertex_constants[466];
+           float box[4] = { 1e9f, 1e9f, -1e9f, -1e9f };
++          const int nt = ui_box_nt_on() && !((uintptr_t)vv & 15u);   /* UI_BOX_NT */
++          float a_nt[4];
+           for (u32 i = 0; i < dr->vertex_count; i++) {
+               const float* a = vv + (u64)i * 64u;   /* attribute 0 of vertex i */
++              if (nt) { ui_nt_load16(a, a_nt); a = a_nt; }
+               float x, y;
+               if (pk == 1) { const float w = a[3] != 0.0f ? a[3] : 1.0f; x = a[0] / w; y = a[1] / w; }
+               else {
