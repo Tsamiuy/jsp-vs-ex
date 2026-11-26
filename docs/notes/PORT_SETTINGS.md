@@ -35,7 +35,7 @@ AppData one. The main page shows the path. The launcher's window closes with the
 
 | Page | Setting (file key) | When it applies |
 |---|---|---|
-| Display | Render resolution (`RES_SCALE`), Display mode (`FULLSCREEN`), Window size (`WINDOW_SIZE`), FPS in the window title (`TITLE_STATS`) | next start (read once by the toolkit; F11 still switches fullscreen in the game) |
+| Display | Render resolution (`RES_SCALE`), Display mode (`FULLSCREEN`), Window size (`WINDOW_SIZE`), Model viewer (`MODEL_PREVIEW`, off by default), FPS in the window title (`TITLE_STATS`) | next start (read once by the toolkit; F11 still switches fullscreen in the game) |
 | Graphics | Fight HUD size (`UI_SCALE`), Edge smoothing (`AA_MODE`), FPS counter (`FPS_COUNTER`), Shadow distance (`SHADOW_RANGE`), Model detail (`MODEL_DETAIL`), Object draw distance (`OBJECT_DISTANCE`) | now (the readers in `jsp_game.cpp` re-read when a page changes them; model detail and object distance are rewritten into the map objects already seen) |
 | Graphics | Shadows (`SHADOW_SCALE`), Full-size effects (`FX_FULL`) | next start (static caches in the toolkit) |
 | Controls | Input (`INPUT_MODE`), Mouse sensitivity (`MOUSE_SENS`) | next start (static caches in toolkit patch 6500) |

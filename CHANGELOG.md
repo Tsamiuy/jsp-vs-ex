@@ -4,6 +4,12 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+### Technical changes
+
+#### Changed
+
+- **Docs:** the features page (`docs/features.tsv`, `docs/FEATURES.md`) says the Model Viewer is off by default and names the Display tab's "Model viewer" box and `MODEL_PREVIEW=1` as the way to turn it on, and `docs/notes/PORT_SETTINGS.md` lists the new Model viewer row on the Port Settings Display page. `python3 tools/features.py --check` and `tools/ci/repo_checks.py`: 0 problems; nothing run in a game. (#286)
+
 ## [0.7.0] - 2026-11-25
 
 ### For players
