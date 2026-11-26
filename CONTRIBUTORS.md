@@ -40,8 +40,8 @@ Keep the list to names or handles you are happy to have public.
 Updated by the contributors workflow from merged pull requests in this repository (it started on 2026-11-04; earlier work is in the lines above). Do not edit by hand.
 
 <!-- contributors:start -->
-- [undecuple](https://github.com/undecuple): 115 merged pull requests, most recent #275, #273, #264
-- [Tsamiuy](https://github.com/Tsamiuy): 91 merged pull requests, most recent #272, #271, #270
+- [undecuple](https://github.com/undecuple): 120 merged pull requests, most recent #282, #280, #279
+- [Tsamiuy](https://github.com/Tsamiuy): 96 merged pull requests, most recent #287, #286, #285
 <!-- contributors:end -->
 
 ## Play testers
