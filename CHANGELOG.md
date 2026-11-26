@@ -4,6 +4,8 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-26
+
 ### For players
 
 **Changed**
