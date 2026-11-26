@@ -113,6 +113,7 @@ inline constexpr LocalSetting kLocalOnly[] = {
     { "RES_SCALE", "video" }, { "FULLSCREEN", "window" }, { "WINDOW_SIZE", "window" }, { "TITLE_STATS", "window" },
     { "SHADOW_SCALE", "video: presentation only" }, { "UI_SCALE", "video: HUD size" }, { "AA_MODE", "video" },
     { "ANISO", "video: presentation only" }, { "SHARPEN", "video: presentation only" },
+    { "MODEL_PREVIEW", "video: presentation only (off in a rollback run)" },
     { "FX_FULL", "video" }, { "FPS_COUNTER", "overlay" }, { "INPUT_MODE", "pad/device" }, { "MOUSE_SENS", "pad/device" },
     { "BOOST_OFF_ON_EXIT", "machine power plan" }, { "CPU_BOOST", "machine power plan" },
     { "(disc, EBOOT)", "install" }, { "(Online tab)", "network identity: never copied from the host" },

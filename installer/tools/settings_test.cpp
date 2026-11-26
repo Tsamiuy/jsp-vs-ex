@@ -256,6 +256,7 @@ int main(int argc, char** argv)
         // Source inventory only: LIVE keys use direct settings lookup or the
         // coherent session tuple. Actual consumer effects need separate tests.
         const std::string game = slurp(root + "/installer/port/jsp/jsp_game.cpp");
+        const std::string viewer = slurp(root + "/installer/port/jsp/feat_model_preview.cpp");   // reads MODEL_PREVIEW through its own envi()
         std::string patches;
         for (const char* dir : { "/installer/port/patches/", "/installer/patches/" }) {
             std::string cmd = "ls " + root + dir + "*.patch 2>/dev/null";
@@ -273,7 +274,8 @@ int main(int argc, char** argv)
             const bool snapshot_read = session_key && game.find("jpss::reader_snapshot()") != std::string::npos
                 && game.find(std::string("session_setting_float(inputs.live[(size_t)jpss::Key::") + session_key + "],") != std::string::npos;
             const bool live_read = snapshot_read || game.find("setting_float(" + q) != std::string::npos || game.find("jsp_setting_get(" + q) != std::string::npos;
-            const bool env_read = patches.find("getenv(" + q) != std::string::npos || game.find("getenv(" + q) != std::string::npos;
+            const bool env_read = patches.find("getenv(" + q) != std::string::npos || game.find("getenv(" + q) != std::string::npos
+                || viewer.find("envi(" + q) != std::string::npos;
             if (it.apply == jps::LIVE) { if (!live_read) std::printf("%s: LIVE but no settings reader found\n", it.key); CHECK(live_read); }
             else { if (!env_read) std::printf("%s: no reader found\n", it.key); CHECK(env_read || live_read); }
         }
@@ -398,7 +400,7 @@ int main(int argc, char** argv)
         press(BTN_CROSS);                                                               // closed -> main
         CHECK(m.page == MAIN && m.main_rows().size() == 6 && m.main_rows()[0] == DISPLAY && m.main_rows()[3] == ONLINE && m.main_rows()[5] == CLOSED);
         // Display: RES_SCALE changes with Right, saved at once, applies on the next start
-        press(BTN_CROSS); CHECK(m.page == DISPLAY && m.srows.size() == 5 && m.srows.back().kind == SRow::RESET);
+        press(BTN_CROSS); CHECK(m.page == DISPLAY && m.srows.size() == 6 && m.srows.back().kind == SRow::RESET);
         press(BTN_RIGHT);
         CHECK(io.saves == 1 && io.file == "RES_SCALE=1.25\r\n" && m.smsg == "Saved. Applies on the next start." && !m.smsg_err);
         CHECK(m.row_pending(m.srows[0]) && m.row_value(m.srows[0]) == "900p");           // the running game has no RES_SCALE: still on 1

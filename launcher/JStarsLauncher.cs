@@ -458,6 +458,7 @@ namespace JStarsLauncher
         static readonly string[] SharpIds = { "0", "25", "50", "75", "100" };
         CheckBox pipeBox;   // PIPE for the game: two-thread drawing (toolkit patches 2912, 7907), on by default
         CheckBox menuBox;   // MENU_PAGES for the game: the two-page Main Menu (and 3v3 with it), on by default; only the off choice is written
+        CheckBox viewerBox; // MODEL_PREVIEW for the game: the 3D model on 1 Player Character Select, off by default
         CheckBox unlockBox;                  // ENHANCEMENT (opt-in): one start with everything unlocked; never saved to the settings file
         volatile bool unlockThisRun;
         string backupNote = "";              // what BackupSave did, written to the log once RunGame has opened it
@@ -769,6 +770,15 @@ namespace JStarsLauncher
             p.Controls.Add(new Label {
                 Text = "Off = the game's own Main Menu, and no 3v3. US disc only for now (not on the EU disc yet).",
                 Location = P(250, y + 2), AutoSize = true, ForeColor = SystemColors.GrayText });
+            y += 30;
+
+            // MODEL_PREVIEW for the game: the fighter's 3D model in place of the face grid on 1 Player Character Select. Off by default.
+            viewerBox = new CheckBox { Text = "Model viewer", Location = P(16, y), AutoSize = true, Checked = false };
+            viewerBox.CheckedChanged += delegate { SaveIfReady(); };
+            p.Controls.Add(viewerBox);
+            p.Controls.Add(new Label {
+                Text = "The fighter's 3D model on 1 Player Character Select (Left / Right to choose).",
+                Location = P(170, y + 2), AutoSize = true, ForeColor = SystemColors.GrayText });
             y += 30;
 
             boostOffBox = new CheckBox { Text = "Turn CPU boost off again when the game closes (keeps the PC cool)", Location = P(16, y), AutoSize = true, Checked = true };
@@ -1763,7 +1773,7 @@ namespace JStarsLauncher
                     int eq = t.IndexOf('=');
                     if (t.Length == 0 || t.StartsWith("#") || eq <= 0) continue;
                     string k = t.Substring(0, eq).Trim(), v = t.Substring(eq + 1).Trim();
-                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "ANISO" || k == "SHARPEN" || k == "PIPE" || k == "PIPE_SEEN" || k == "MENU_PAGES" ||
+                    if (k == "RES_SCALE" || k == "FULLSCREEN" || k == "WINDOW_SIZE" || k == "BOOST_OFF_ON_EXIT" || k == "UI_SCALE" || k == "AA_MODE" || k == "FX_FULL" || k == "TITLE_STATS" || k == "FPS_COUNTER" || k == "ANISO" || k == "SHARPEN" || k == "PIPE" || k == "PIPE_SEEN" || k == "MENU_PAGES" || k == "MODEL_PREVIEW" ||
                         k == "SHADOW_SCALE" || k == "SHADOW_RANGE" || k == "MODEL_DETAIL" || k == "OBJECT_DISTANCE" ||
                         k == "INPUT_MODE" || k == "MOUSE_SENS" || k.StartsWith("PAD_KEY_") || k.StartsWith("KB_KEY_") ||
                         k.StartsWith("KBM_KEY_") || k.StartsWith("PAD_BTN_"))
@@ -1805,6 +1815,8 @@ namespace JStarsLauncher
             pipeBox.Checked = !(cur.TryGetValue("PIPE_SEEN", out s) && s == "2" && cur.TryGetValue("PIPE", out s) && s != "1");
             // The two-page Main Menu is on unless the file says MENU_PAGES=0 (the same rule the game uses).
             menuBox.Checked = !(cur.TryGetValue("MENU_PAGES", out s) && s == "0");
+            // The Model Viewer is off unless the file says MODEL_PREVIEW=1 (the same rule the game uses).
+            viewerBox.Checked = cur.TryGetValue("MODEL_PREVIEW", out s) && s.Trim() == "1";
             // Graphics tab: an unknown or missing value shows the default (Medium, Normal, Normal, Normal).
             int sh;
             if (!cur.TryGetValue("SHADOW_SCALE", out s) || !int.TryParse(s, out sh)) sh = 2;
@@ -1866,6 +1878,7 @@ namespace JStarsLauncher
             lines.Add("PIPE_SEEN=2");   // marks PIPE below as a choice made with the on-by-default window
             lines.Add("PIPE=" + (pipeBox.Checked ? "1" : "0"));
             if (!menuBox.Checked) lines.Add("MENU_PAGES=0");   // on is the default: nothing is written for it
+            lines.Add("MODEL_PREVIEW=" + (viewerBox.Checked ? "1" : "0"));
             lines.Add("SHADOW_SCALE=" + (shadowBox.SelectedIndex + 1));
             lines.Add("SHADOW_RANGE=" + (shadowRangeBox.SelectedIndex == 1 ? "2" : "1"));
             lines.Add("MODEL_DETAIL=" + ModelDetailIds[modelDetailBox.SelectedIndex]);
