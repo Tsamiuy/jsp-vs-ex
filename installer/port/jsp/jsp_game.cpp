@@ -4835,7 +4835,7 @@ extern "C" void jsp_register_game_overrides(void)
          * The opt-in ones with their own file log there (Unlock everything, the roster, rollback, AUTO_FIGHT, Port Settings). */
         struct Off { const char* what; const char* key; bool on_by_default; float neutral; };   /* neutral: the value that changes nothing */
         static const Off k_off[] = {
-            { "Two-page Main Menu", "MENU_PAGES", true, 0.0f }, { "3v3 Free Battle", "SIX", true, 0.0f }, { "Model Viewer on Character Select", "MODEL_PREVIEW", true, 0.0f },
+            { "Two-page Main Menu", "MENU_PAGES", true, 0.0f }, { "3v3 Free Battle", "SIX", true, 0.0f }, { "Model Viewer on Character Select", "MODEL_PREVIEW", false, 0.0f },
             { "Arcade for 2 Players", "ARC_COOP", true, 0.0f }, { "Training options", "TRAIN_OPTS", true, 0.0f }, { "Training menu (Hide HUD, readout, 2 Players Training)", "TRAIN_MENU", true, 0.0f },
             { "Training Mode and Impossible Mode rows", "TRAINING_MODE", true, 0.0f }, { "Exit Game", "EXIT_OPTION", true, 0.0f },
             { "Menu mouse and d-pad jump", "MENU_JUMP", true, 0.0f }, { "KO count option (Stage Select)", nullptr, true, 0.0f }, { "Fight HUD size", "UI_SCALE", false, 1.0f }, { "Edge smoothing", "AA_MODE", false, 0.0f },

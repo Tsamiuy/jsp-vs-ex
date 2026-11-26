@@ -99,6 +99,7 @@ static const Item k_items[] = {
     { "RES_SCALE",       G_DISPLAY,  "Render resolution", k_res_v, k_res_n, JPS_N(k_res_v), 0, 0, NEXT_START, "toolkit 2503/2504, once at the first present" },
     { "FULLSCREEN",      G_DISPLAY,  "Display mode", k_off_on_v, k_win_fs_n, 2, 0, 0, NEXT_START, "toolkit 2500, at window creation (F11 switches in the game)" },
     { "WINDOW_SIZE",     G_DISPLAY,  "Window size", k_winsize_v, k_winsize_n, JPS_N(k_winsize_v), 0, 0, NEXT_START, "toolkit 2500, at window creation" },
+    { "MODEL_PREVIEW",   G_DISPLAY,  "Model viewer", k_off_on_v, k_off_n, 2, 0, 0, NEXT_START, "feat_model_preview.cpp enabled(), static (unset = off; the settings window's box; always off in a rollback run)" },
     { "TITLE_STATS",     G_DISPLAY,  "FPS in the window title", k_off_on_v, k_off_n, 2, 0, 0, NEXT_START, "toolkit 2500/0007 (the launchers set 0 when unset)" },
     { "SHADOW_SCALE",    G_GRAPHICS, "Shadows", k_shadow_v, k_shadow_n, 4, 1, 1, NEXT_START, "toolkit 2502, static cache" },
     { "SHADOW_RANGE",    G_GRAPHICS, "Shadow distance", k_srange_v, k_srange_n, 2, 0, 0, LIVE, "jsp_game.cpp shadow_range_tick" },
