@@ -1,5 +1,5 @@
 /* Model preview on Character Select: the Gallery's model viewer stands on the right, where the character grid was, on the
- * 1 Player screens. On unless MODEL_PREVIEW=0
+ * 1 Player screens. Off unless MODEL_PREVIEW=1 (Experiments builds: on unless MODEL_PREVIEW=0)
  * (1 Player Character Select of Victory Road, Arcade, Free Battle, Training and Impossible; not 2 Players, 3 vs 3 or
  * Online).
  *
@@ -81,11 +81,13 @@ int probe_env(const char* k, int d) { return envi(k, d); }
 #else
 int probe_env(const char*, int d) { return d; }
 #endif
-/* MODEL_PREVIEW=0 = off (the switch for the viewer). In a rollback run it is off whatever the setting says: a rollback match
+/* MODEL_PREVIEW is the switch for the viewer. In a rollback run it is off whatever the setting says: a rollback match
  * is set up on Free Battle's 1 Player Character Select, and the viewer changes the menus' heap layout, the grid's table and what is
  * loaded, which the two sides must not differ in. That answer is taken once, at the first question (the run's mode does not change),
  * so nothing of the file runs in such a run, the heap change at the start included. */
-bool enabled() { static const bool v = envi("MODEL_PREVIEW", 1) == 1 && !jsp_session_on(); return v; }
+/* The viewer is off unless MODEL_PREVIEW=1 (the settings window's "Model viewer" box); Experiments builds keep it on unless
+ * MODEL_PREVIEW=0. Always off in a rollback run. */
+bool enabled() { static const bool v = envi("MODEL_PREVIEW", JSP_EXPERIMENTS ? 1 : 0) == 1 && !jsp_session_on(); return v; }
 bool layer_free() { return !(jsp_port_menu_overlay_held && jsp_port_menu_overlay_held()) && !(jsp_net_overlay_held && jsp_net_overlay_held()); }
 bool logon() { static const bool v = envi("MODEL_PREVIEW_LOG", 0) == 1; return v; }
 bool ok(uint32_t a) { return a >= 0x10000u && a < 0x30000000u; }
@@ -243,6 +245,25 @@ void grid_hide_named()
         }
     }
 }
+/* The roots when no face picture named them: Character Select can be built again without the face cells getting new
+ * pictures (Re-select Characters from the pause menu, the screen after a 3v3 battle; a player's log: "the grid is
+ * hidden (0 roots, 4 panes ...)" and the grid stayed under the viewer). The grid's layouts are known by then from its
+ * pane lookups, and a layout draws from its root pane [layout + 0x10] (the comment above). A root is taken only when it
+ * has the child table the hiding walks (vtable 0x00882E60 at +0xE8). Called on every tick, also when face pictures
+ * named some roots already: a player's log (Arcade 2 Players, a battle quit, back on Character Select) had
+ * "the grid is hidden (1 roots, 7 panes ...)": only one layer's faces got new pictures, the other layer stayed under
+ * the viewer showing the list's cells. The roots named by pictures were each layout's [layout + 0x10] in every visit
+ * of that log (layout + 0x11FB0 both times), so a layout's root is the same pane. Returns how many roots there are. */
+int grid_roots_from_layouts()
+{
+    for (int i = 0; i < g_ngrid_layout && g_ngrid < 4; i++) {
+        const uint32_t r = vm_read32(g_grid_layout[i] + 0x10u); if (!ok(r)) continue;
+        const uint32_t tb = vm_read32(r + 0xE8u); if (!ok(tb) || vm_read32(tb) != 0x00882E60u) continue;
+        bool have = false; for (int k = 0; k < g_ngrid; k++) have |= g_grid_root[k] == r;
+        if (!have) { g_grid_root[g_ngrid++] = r; say("the grid's root pane %d: %08X, from layout %08X (no face picture named it)", g_ngrid, r, g_grid_layout[i]); }
+    }
+    return g_ngrid;
+}
 void grid_show(bool on)
 {
     if (on) {
@@ -262,7 +283,8 @@ void grid_show(bool on)
         }
     }
     grid_hide_named();
-    if (!g_grid_hidden) { g_grid_hidden = true; say("the grid is hidden (%d roots, %d panes were visible)", g_ngrid, g_ngrid_was); }
+    static int said_roots = -1;
+    if (!g_grid_hidden || said_roots != g_ngrid) { g_grid_hidden = true; said_roots = g_ngrid; say("the grid is hidden (%d roots, %d panes were visible)", g_ngrid, g_ngrid_was); }
 }
 
 /* run a viewer function with our registry copy in place */
@@ -1049,7 +1071,7 @@ void tick(const ppu_context* ctx)
                 std::fflush(stdout); } }
         if (!g_part || envi("MODEL_PREVIEW_PANE_ALSO", 0)) show_picture();
         if (car_mode() && g_part) { if (stop >= 5) car_tick(ctx); }
-        else if (g_part) { static const bool hide = envi("MODEL_PREVIEW_HIDEGRID", 1) != 0; if (hide) grid_show(false); }
+        else if (g_part) { static const bool hide = envi("MODEL_PREVIEW_HIDEGRID", 1) != 0; if (hide) { grid_roots_from_layouts(); grid_show(false); } }
         if (!car_mode() && g_phase == 3 && stop >= 5 && g_phase_ticks >= 30) {
             call(func_001B26A8, ctx, g_viewer, (uint64_t)(int64_t)chr);
             if (g_part) call(func_001C1624, ctx, g_part, (uint64_t)(int64_t)chr);
@@ -1306,7 +1328,7 @@ void model_preview_icall(uint32_t target, uint64_t* gpr)
             return; }
     }
     /* the grid is hidden from the first frame, unless the preview could not be made */
-    if (car_mode() && window_on() && g_phase >= 0 && g_phase < 3 && g_ngrid && envi("MODEL_PREVIEW_HIDEGRID", 1)) grid_show(false);
+    if (car_mode() && window_on() && g_phase >= 0 && g_phase < 3 && grid_roots_from_layouts() && envi("MODEL_PREVIEW_HIDEGRID", 1)) grid_show(false);
     if (g_phase < 0 && g_grid_hidden) grid_show(true);
     if (t_in_viewer || g_phase < 0) return;
     if (g_phase == 0 && g_cs_ticks < 3u) return;   /* the answer to "is the preview made here" comes in the third frame (above) */
