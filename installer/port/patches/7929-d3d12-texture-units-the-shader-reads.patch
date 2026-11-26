@@ -1,0 +1,85 @@
+Patch 7929: prepare only the texture units the fragment program reads (TEX_USED_ONLY, on by default).
+
+Every draw resolved all 16 texture units (lookup, upload check, checksum, view compare), also the ones its fragment
+program never samples. Now the program is scanned once for its texture instructions (TEX / TXP / TXD / TXL / TXB /
+TEXBEM / TXPBEM), the mask is kept per program offset (scanned again when its first two instruction words change), and
+the other units get the null view without any work. TEX_USED_ONLY=0 resolves all units as before.
+Measured on one-frame replays: drawing thread 10.47 -> 9.64 ms (2v2), 2 Players 3v3 37.4 -> 31.5 ms, pictures
+bit-exact; in real fights together with 7930: 2 Players 3v3 about 20 -> 25 flips/s.
+
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 5772c28..87a376e 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -3409,6 +3409,51 @@ static int zargb_txp_on(void)
+     if (on < 0) { const char* e = getenv("ZPASS_ARGB_TXP"); on = (e && *e == '0') ? 0 : 1; }
+     return on;
+ }
++/* TEX_USED_ONLY=1 makes prepare resolve only the texture units the
++ * fragment program samples (TEX / TXP / TXD / TXL / TXB / TEXBEM / TXPBEM); the other units get the null view without
++ * a lookup, upload or checksum. On by default (TEX_USED_ONLY=0 off). g_sl_ab (set by a test harness for an A/B run) overrides it
++ * per pass: 0 = off, 1 = on, -1 = the switch. */
++int g_sl_ab = -1;
++static int tex_used_only_now(void)
++{
++    if (g_sl_ab >= 0) return g_sl_ab;
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("TEX_USED_ONLY"); on = (e && *e == '0') ? 0 : 1; }   /* on unless TEX_USED_ONLY=0 */
++    return on;
++}
++static u32 fp_tex_units_scan(u32 off, u32* sig)
++{
++    extern uint8_t* vm_base;
++    const u8* uc = vm_base + off;
++    u32 units = 0, h = 2166136261u;
++    for (u32 o = 0; o + 16 <= 0x10000u;) {
++        const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
++        const u32 w2 = rsx_fp_read_word(uc + o + 8), w3 = rsx_fp_read_word(uc + o + 12);
++        h = (h ^ w0) * 16777619u; h = (h ^ w2) * 16777619u;
++        const u32 op = (w0 >> 24) & 63u;
++        if (!(w2 & (1u << 31)) && (op == 0x17u || op == 0x18u || op == 0x19u || op == 0x2Fu || op == 0x31u ||
++                                   op == 0x33u || op == 0x34u))
++            units |= 1u << ((w0 >> 17) & 15u);
++        o += 16;
++        if (!(w2 & (1u << 31)) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2)) o += 16;   /* inline constant */
++        if (w0 & 1u) break;                                                                         /* END */
++    }
++    *sig = h;
++    return units;
++}
++/* Cached by program offset; an entry is trusted while the program's first two instruction words are the same
++ * (a program rewritten in place at the same offset is scanned again). */
++static u32 fp_tex_units_cached(u32 off)
++{
++    extern uint8_t* vm_base;
++    static struct { u32 off, w0, w4, units; } c[512];
++    const u32 k = (off >> 4) & 511u;
++    const u32 w0 = rsx_fp_read_word(vm_base + off), w4 = rsx_fp_read_word(vm_base + off + 16);
++    if (c[k].off == off + 1u && c[k].w0 == w0 && c[k].w4 == w4) return c[k].units;
++    u32 sig; const u32 units = fp_tex_units_scan(off, &sig);
++    c[k].off = off + 1u; c[k].w0 = w0; c[k].w4 = w4; c[k].units = units;
++    return units;
++}
+ static void vp_shadow_pack(const D3D12DrawRecord* dr, u32 off, u8 sh[16], u32 units)
+ {
+     extern uint8_t* vm_base;
+@@ -8703,9 +8748,19 @@ static void render_frame_prepare(RfFrame* f)
+          * resolves to an offscreen RT (sampled directly), an uploaded guest
+          * texture, or a null SRV. */
+         double _sv0 = perf_on() ? perf_now() : 0.0;
++        u32 _fmask = 0xFFFFu;   /* units the fragment program samples (all when off) */
++        if (tex_used_only_now() && dr->fp_addr) {
++            extern u32 cellGcmResolveLocated(int local, u32 offset);
++            const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
++            if (foff != 0xFFFFFFFFu) _fmask = fp_tex_units_cached(foff);
++        }
+         for (int _u = 0; _u < DRAW_SRV_STRIDE; _u++) {
+             u32 wslot = draw_srv_win(_d) + (u32)_u;   /* patch 2907: parity half */
+             dr->tex_rt[_u] = -1;
++            if (!(_fmask & (1u << _u))) {   /* not sampled: the null view, nothing resolved */
++                srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                continue;
++            }
+             /* A depth surface read as a texture: its colour copy (made in the
+              * RT pre-pass), refreshed from the depth buffer just before this
+              * draw (ds_convert). */

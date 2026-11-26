@@ -1,0 +1,536 @@
+Patch 7932: PREP_PIPE=1 runs render_frame_prepare on the PIPE submit thread (off by default; only with PIPE on).
+
+measured steps P1-P4 and split part 1: prepare works on the handed-off batch (always), the FIFO thread waits for the GPU
+itself before recording into the ring half the previous batch used, the submit thread runs prepare + submit, a label
+gate holds the game's view of the next batch's labels / semaphores / reports until the previous prepare finished, and the
+batch's fragment programs are copied at the hand-off. Measured: live 2 Players 3v3 with PIPE=1 + 7929-7931,
+25.85 / 29.11 / 26.98 / 29.54 flips/s (off / on / off / on), replay bit-exact.
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 348e180..6af2144 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2400,9 +2400,15 @@ static int gcm_word_diag(void)
+ 
+ /* One data word for the 3D engine (subchannel 0, or 1 unless GCM_SUBCH1_2D),
+  * plus the methods whose answer the walker writes itself. */
++/* PREP_PIPE: the backend's label gate. Before the walker lets the game see a label / semaphore / reference /
++ * notify / report value of the next batch, the previous batch's prepare (on the submit thread) must have read guest
++ * memory. NULL = no gate (PREP_PIPE off). */
++void (*g_rsx_prep_gate)(void) = NULL;
+ static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
+ {
+     extern u32 g_rsx_last_reference;
++    if (g_rsx_prep_gate && (m == 0x50u || m == 0x104u || m == 0x1D70u || m == 0x1D74u || m == 0x1800u))
++        g_rsx_prep_gate();   /* PREP_PIPE */
+     /* #466: rsx_state feeds only the legacy vtable backend. With the draw
+      * engine up and no vtable registered, the state it builds is never read,
+      * so only the methods with effects outside it are worth handing over.
+@@ -2914,6 +2920,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     }
+                     if (m == 0x64u)      s_sema_offset = v;
+                     else if (m == 0x6Cu) {
++                        if (g_rsx_prep_gate) g_rsx_prep_gate();   /* PREP_PIPE */
+                         /* The RSX has fetched past a RELEASE before its
+                          * semaphore write lands, so a guest that sees the
+                          * label must also see `get` past the command. `get`
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index b56eaf8..4bf25a9 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -486,6 +486,7 @@ typedef struct RfFrame {
+     double rf0; u32 fi;
+     D3D12DrawRecord* draws; u32 n; int parity; int present; int piped;
+     int have_st; float vc[16];
++    int prep_on_pipe;   /* PREP_PIPE: prepare runs on the submit thread for this batch */
+ } RfFrame;
+ static void render_frame_submit(const RfFrame* f);
+ static struct {
+@@ -541,11 +542,49 @@ int rsx_d3d12_pipe_effective_state(void)
+ }
+ /* End PIPE effective-state witness. */
+ 
++/* PREP_PIPE: PREP_PIPE=1 (with PIPE on) runs render_frame_prepare on the
++ * submit thread too. The FIFO thread waits for the GPU itself before it records into the ring half batch N-1 used, the
++ * walker's label-like writes wait until prepare has read guest memory (the gate), and prepare reads the batch's
++ * fragment programs from a copy made at the hand-off (fp_bytes). Off by default. */
++static void render_frame_prepare(RfFrame* f);
++static const u8* fp_bytes(u32 off);
++static volatile DWORD s_ft_pipe_tid;   /* the submit thread (fp_bytes serves the copy only there) */
++static volatile LONG s_prep_busy;
++static HANDLE s_prep_done;
++static u64 s_prep_gate_n, s_prep_gate_waits; static double s_prep_gate_ms;
++static int prep_pipe_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("PREP_PIPE"); on = (e && *e == '1') ? 1 : 0;
++                  if (on) { s_prep_done = CreateEventA(NULL, TRUE, TRUE, NULL); if (!s_prep_done) on = 0; }
++                  if (on) fprintf(stderr, "[PREP_PIPE] on: prepare runs on the submit thread, label gate on%c", 10); }
++    return on;
++}
++static void prep_gate(void)   /* FIFO thread (walker), before a label-like write */
++{
++    s_prep_gate_n++;
++    if (!s_prep_busy) return;
++    LARGE_INTEGER q0, q1, fq; QueryPerformanceCounter(&q0);
++    for (;;) {
++        const DWORD r = MsgWaitForMultipleObjects(1, &s_prep_done, FALSE, INFINITE, QS_SENDMESSAGE);
++        if (r == WAIT_OBJECT_0) break;
++        MSG m; PeekMessageA(&m, NULL, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
++    }
++    QueryPerformanceCounter(&q1); QueryPerformanceFrequency(&fq);
++    s_prep_gate_ms += (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)fq.QuadPart;
++    s_prep_gate_waits++;
++}
+ static DWORD WINAPI pipe_thread(LPVOID arg)
+ {
+     (void)arg;
++    s_ft_pipe_tid = GetCurrentThreadId();
+     for (;;) {
+         WaitForSingleObject(s_pipe.go, INFINITE);
++        if (s_pipe.f.prep_on_pipe) {   /* PREP_PIPE */
++            render_frame_prepare(&s_pipe.f);
++            InterlockedExchange(&s_prep_busy, 0);
++            SetEvent(s_prep_done);
++        }
+         render_frame_submit(&s_pipe.f);
+         SetEvent(s_pipe.done);
+     }
+@@ -3375,11 +3414,71 @@ static int off_ds_find(u32 off);
+  * DEPTH24_D8/DEPTH16 views compared here, so every material read the far-depth bytes of the map as "lit": the
+  * indoor floor of Yoshiwara under the roof came out washed out instead of shadowed (v0.15 FINDINGS 29/31).
+  * So: A8R8G8B8 + depth surface + depth func + TXP = comparison, + TEX = bytes, as before. */
++/* PREP_PIPE split: the batch's fragment programs, copied at the hand-off (FIFO thread); fp_bytes(off) returns the copy
++ * on the submit thread while that batch is prepared there, guest memory everywhere else. */
++static int s_fps_on;
++static struct { u32 off; u32 at; } s_fps_tab[4096]; static u32 s_fps_n;
++static u8* s_fps_arena; static u32 s_fps_used, s_fps_cap;
++static u64 s_fps_progs, s_fps_bytes, s_fps_miss;
++static const u8* fp_bytes(u32 off)
++{
++    extern uint8_t* vm_base;
++    if (s_fps_on && GetCurrentThreadId() == s_ft_pipe_tid) {
++        for (u32 k = (off >> 4) & 4095u, i = 0; i < 4096u; i++, k = (k + 1) & 4095u) {
++            if (!s_fps_tab[k].off) break;
++            if (s_fps_tab[k].off == off + 1u) return s_fps_arena + s_fps_tab[k].at;
++        }
++        s_fps_miss++;   /* not copied at the hand-off: read live (counted in the [PREP_PIPE] line) */
++    }
++    return vm_base + off;
++}
++static void fp_snapshot_add(u32 off)   /* FIFO thread, at the hand-off */
++{
++    extern uint8_t* vm_base;
++    u32 k = (off >> 4) & 4095u;
++    for (u32 i = 0; i < 4096u; i++, k = (k + 1) & 4095u) {
++        if (!s_fps_tab[k].off) break;
++        if (s_fps_tab[k].off == off + 1u) return;
++    }
++    if (s_fps_n >= 3072u) return;
++    const u8* uc = vm_base + off; u32 o = 0;
++    for (; o + 16 <= 0x10000u;) {   /* the program's length, as fp_txp_units_at walks it */
++        const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
++        const u32 w2 = rsx_fp_read_word(uc + o + 8), w3 = rsx_fp_read_word(uc + o + 12);
++        o += 16;
++        if (!(w2 & (1u << 31)) && ((w1 & 3u) == 2 || (w2 & 3u) == 2 || (w3 & 3u) == 2)) o += 16;
++        if (w0 & 1u) break;
++    }
++    const u32 len = o + 64u;
++    if (s_fps_used + len > s_fps_cap) {
++        u32 nc = s_fps_cap ? s_fps_cap * 2u : (1u << 20);
++        while (nc < s_fps_used + len) nc *= 2u;
++        u8* na = (u8*)realloc(s_fps_arena, nc); if (!na) return;
++        s_fps_arena = na; s_fps_cap = nc;
++    }
++    memcpy(s_fps_arena + s_fps_used, uc, o);
++    memset(s_fps_arena + s_fps_used + o, 0, 64);
++    s_fps_tab[k].off = off + 1u; s_fps_tab[k].at = s_fps_used;
++    s_fps_used += len; s_fps_n++; s_fps_progs++; s_fps_bytes += o;
++}
++static void fp_snapshot_batch(const RfFrame* f)   /* FIFO thread, at the hand-off, after pipe_wait */
++{
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    memset(s_fps_tab, 0, sizeof s_fps_tab); s_fps_n = 0; s_fps_used = 0;
++    u32 last = 0xFFFFFFFFu;
++    for (u32 d = 0; d < f->n && d < MAX_DRAWS; d++) {
++        const u32 a = f->draws[d].fp_addr;
++        if (!a || a == last) continue;
++        last = a;
++        const u32 off = cellGcmResolveLocated((a & 0x3u) == 1, a & ~0x3u);
++        if (off != 0xFFFFFFFFu) fp_snapshot_add(off);
++    }
++}
+ static u32 fp_txp_units_at(u32 off)
+ {
+     extern uint8_t* vm_base;
+     if (!vm_base) return 0;
+-    const u8* uc = vm_base + off;
++    const u8* uc = fp_bytes(off);
+     u32 units = 0;
+     for (u32 o = 0; o + 16 <= 0x10000u;) {
+         const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
+@@ -3424,7 +3523,7 @@ static int tex_used_only_now(void)
+ static u32 fp_tex_units_scan(u32 off, u32* sig)
+ {
+     extern uint8_t* vm_base;
+-    const u8* uc = vm_base + off;
++    const u8* uc = fp_bytes(off);
+     u32 units = 0, h = 2166136261u;
+     for (u32 o = 0; o + 16 <= 0x10000u;) {
+         const u32 w0 = rsx_fp_read_word(uc + o), w1 = rsx_fp_read_word(uc + o + 4);
+@@ -3448,7 +3547,7 @@ static u32 fp_tex_units_cached(u32 off)
+     extern uint8_t* vm_base;
+     static struct { u32 off, w0, w4, units; } c[512];
+     const u32 k = (off >> 4) & 511u;
+-    const u32 w0 = rsx_fp_read_word(vm_base + off), w4 = rsx_fp_read_word(vm_base + off + 16);
++    const u32 w0 = rsx_fp_read_word(fp_bytes(off)), w4 = rsx_fp_read_word(fp_bytes(off) + 16);
+     if (c[k].off == off + 1u && c[k].w0 == w0 && c[k].w4 == w4) return c[k].units;
+     u32 sig; const u32 units = fp_tex_units_scan(off, &sig);
+     c[k].off = off + 1u; c[k].w0 = w0; c[k].w4 = w4; c[k].units = units;
+@@ -3529,8 +3628,8 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+      * shader_cache.bin never stopped growing and fights built shaders every few seconds (HITCH=50: 30-50 frames of
+      * 100-400 ms per Free Battle). */
+     static int kbuf = -1; if (kbuf < 0) { const char* e = getenv("FP_KBUF"); kbuf = (e && *e == '0') ? 0 : 1; }
+-    int n = (any_sh || kbuf) ? rsx_fp_decompile_buffered_shadow_ex(vm_base + off, 0x10000, fp_ctrl, cube_mask, shd, hlsl, sizeof(hlsl), &nconst)
+-                             : rsx_fp_decompile(vm_base + off, 0x10000, fp_ctrl, hlsl, sizeof(hlsl));
++    int n = (any_sh || kbuf) ? rsx_fp_decompile_buffered_shadow_ex(fp_bytes(off), 0x10000, fp_ctrl, cube_mask, shd, hlsl, sizeof(hlsl), &nconst)
++                             : rsx_fp_decompile(fp_bytes(off), 0x10000, fp_ctrl, hlsl, sizeof(hlsl));
+     if (any_sh) { static int _l = 0; if (PS3_LOG_FIRST(_l, 24)) {
+         fprintf(stderr, "[SHADOW] fp=0x%08X units:", fp_addr);
+         for (int u = 0; u < 16; u++) if (sh[u]) fprintf(stderr, " t%d(en=%d func=%d lin=%d un=%d)", u, sh[u] & 3, (sh[u] >> 2) & 7, (sh[u] >> 5) & 1, (sh[u] >> 6) & 1);
+@@ -3621,7 +3720,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+       if (cb) {
+           char* cbe = strstr(cb, "};\n");
+           static __thread float kv[256 * 4];
+-          const int nk = rsx_fp_extract_consts(vm_base + off, 0x10000, kv, 256);
++          const int nk = rsx_fp_extract_consts(fp_bytes(off), 0x10000, kv, 256);
+           if (cbe) {
+               static const char rep_decl[] = "static const float4 fp_alpha = float4(0.0, 0.0, 0.0, 0.0);\n";
+               const size_t old_len = (size_t)(cbe + 3 - cb), new_len = sizeof rep_decl - 1, used = strlen(hlsl);
+@@ -3899,7 +3998,7 @@ static ID3DBlob* vp_fp_compile_blob(u32 fp_addr, u32 off, u32 ctrl, u32 cube_mas
+      * (code hash 0xF01DA36B) before compositing it, which leaves a rim around whatever stands in front of smoke
+      * (in RPCS3 too). All 8 samples then read the centre (tc8). */
+     { static int nb = -1; if (nb < 0) nb = getenv("FX_NOBLUR") || fx_full() ? 1 : 0;
+-      if (nb && fx_blur_hash(vm_base + off) == 0xF01DA36Bu) {
++      if (nb && fx_blur_hash(fp_bytes(off)) == 0xF01DA36Bu) {
+           char t[16] = "(input.tc0)";
+           for (char c = '0'; c < '8'; c++) { t[9] = c;
+               for (char* q = strstr(hlsl, t); q; q = strstr(q + 1, t)) q[9] = '8'; }
+@@ -4270,7 +4369,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+         const u64 fr = s_d3d.frame_count + 1;
+         if (on && m_frame[k] == fr && m_off[k] == off) { fpm_hash = m_hash[k]; fpm_size = m_size[k]; fpm_units = m_units[k]; }
+         else {
+-            fpm_hash = rsx_fp_code_hash_memo(vm_base + off, 0x10000, &fpm_size, &fpm_units);
++            fpm_hash = rsx_fp_code_hash_memo(fp_bytes(off), 0x10000, &fpm_size, &fpm_units);
+             if (on) { m_frame[k] = fr; m_off[k] = off; m_hash[k] = fpm_hash; m_size[k] = fpm_size; m_units[k] = fpm_units; }
+         }
+     }
+@@ -4291,7 +4390,7 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+                                  consts_inline = (e && e[0] == '0') ? 1 : 0; }
+         if (consts_inline) {
+             uhash = 2166136261u;
+-            const u8* up = vm_base + off;
++            const u8* up = fp_bytes(off);
+             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
+         } else {
+             uhash = fpm_hash;
+@@ -8319,7 +8418,8 @@ static void gput_end(void)
+  * render_frame_submit (the draw loop, post passes, Close/Execute, Present). RfFrame carries what both halves share. */
+ static void render_frame_prepare(RfFrame* f)
+ {
+-    s_fpk_batch++;   /* FPK_MEMO: constants are read again for this batch */
++    /* PREP_PIPE P1: prepare works on the handed-off batch (f->draws, f->n, f->parity), taken by rf_detach before it. */
++    if (!f->prep_on_pipe) s_fpk_batch++;   /* FPK_MEMO: constants are read again for this batch (PREP_PIPE: at the hand-off) */
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
+ 
+@@ -8331,7 +8431,7 @@ static void render_frame_prepare(RfFrame* f)
+      * costs little. */
+     if (!gpu_overlap_on()) wait_for_gpu();   /* patch 2907: GPU_OVERLAP=1 builds while the GPU works */
+     grave_sweep(s_d3d.frame_count);
+-    rdoc_frame_begin(s_d3d.draw_count);
++    rdoc_frame_begin(f->n);
+     /* RES_SCALE: the upload buffers that filled new targets are done with
+      * (the GPU is idle here) and are n*n times their guest size; let them go. */
+     if (s_rs > 1)
+@@ -8351,7 +8451,7 @@ static void render_frame_prepare(RfFrame* f)
+      * recorded, constants uploaded, per-draw VS compiled and cached, and not one
+      * of them submitted. While !vp_ready there is nothing to be stale against,
+      * so only the "have microcode" test belongs here. */
+-    if (s_d3d.current_rsx_state && !s_d3d.vp_ready &&
++    if (!f->prep_on_pipe && s_d3d.current_rsx_state && !s_d3d.vp_ready &&   /* PREP_PIPE: done at the hand-off */
+         s_d3d.current_rsx_state->vp_ucode_bytes >= 16)
+         compile_vp();
+     /* Per-draw VP constants are snapshotted at record time (vp_record_cb). */
+@@ -8469,10 +8569,10 @@ static void render_frame_prepare(RfFrame* f)
+     /* Frames with no ops (init/boot presents) don't count against the cap --
+      * PNG-decode-heavy titles burn hundreds of empty presents before the first
+      * real draw. */
+-    if (env_str("RTT_DUMP", &s_env_rtt_dump) && s_d3d.draw_count > 0) { static int _f=0; int _cap = atoi(s_env_rtt_dump); if (_cap < 2) _cap = 14; if (PS3_LOG_FIRST(_f, _cap)) {
+-        fprintf(stderr, "[RTT] frame %d: %u ops\n", _f, s_d3d.draw_count);
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-            D3D12DrawRecord* r = &s_d3d.draws[_d];
++    if (env_str("RTT_DUMP", &s_env_rtt_dump) && f->n > 0) { static int _f=0; int _cap = atoi(s_env_rtt_dump); if (_cap < 2) _cap = 14; if (PS3_LOG_FIRST(_f, _cap)) {
++        fprintf(stderr, "[RTT] frame %d: %u ops\n", _f, f->n);
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++            D3D12DrawRecord* r = &f->draws[_d];
+             fprintf(stderr, "[RTT]  op%02u %s rt=0x%X mrt=0x%X/0x%X/0x%X t0=0x%X fp=0x%X n=%u cmask=%X vp=%u,%u %ux%u blend=%d\n",
+                 _d, r->is_clear?"CLR ":(r->is_vp?"draw":"leg "), r->rt_off,
+                 r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+@@ -8485,10 +8585,10 @@ static void render_frame_prepare(RfFrame* f)
+      * ops, retargets pass N to the backbuffer). */
+     { const char* rp = env_str("RTT_PASS", &s_env_rtt_pass);
+       if (rp) {
+-        int keep = atoi(rp), seen = 0; u32 cut = s_d3d.draw_count;
++        int keep = atoi(rp), seen = 0; u32 cut = f->n;
+         int viewrt = getenv("RTT_VIEWRT") != NULL;
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-            D3D12DrawRecord* r = &s_d3d.draws[_d];
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++            D3D12DrawRecord* r = &f->draws[_d];
+             if (r->is_clear || !r->is_vp) continue;
+             if (seen == keep) {
+                 /* Alone: retarget op N to the backbuffer. With RTT_VIEWRT:
+@@ -8501,15 +8601,15 @@ static void render_frame_prepare(RfFrame* f)
+             seen++;
+         }
+         if (viewrt) {
+-            for (u32 _j = cut; _j < s_d3d.draw_count && _j < MAX_DRAWS; _j++) {
+-                D3D12DrawRecord* r = &s_d3d.draws[_j];
++            for (u32 _j = cut; _j < f->n && _j < MAX_DRAWS; _j++) {
++                D3D12DrawRecord* r = &f->draws[_j];
+                 if (r->is_vp && !r->is_clear && r->rt_off == 0) {
+-                    if (cut < MAX_DRAWS) s_d3d.draws[cut++] = *r;
++                    if (cut < MAX_DRAWS) f->draws[cut++] = *r;
+                     break;
+                 }
+             }
+         }
+-        s_d3d.draw_count = (cut < s_d3d.draw_count) ? cut : s_d3d.draw_count;
++        f->n = (cut < f->n) ? cut : f->n;
+       } }
+ 
+     /* DRAW_LIMIT=<N>: keep only the first N recorded ops this frame. The duck's
+@@ -8518,7 +8618,7 @@ static void render_frame_prepare(RfFrame* f)
+      * painted over them". Diagnostic only. */
+     { static int lim = -1;
+       if (lim < 0) { const char* e = getenv("DRAW_LIMIT"); lim = e ? atoi(e) : 0; }
+-      if (lim > 0 && s_d3d.draw_count > (u32)lim) s_d3d.draw_count = (u32)lim; }
++      if (lim > 0 && f->n > (u32)lim) f->n = (u32)lim; }
+ 
+     /* DRAW_SKIP_CLASS=noend|topo:N|blend:0/1|ztest (shard hunt, diagnostic): drop the VP draws of one class; DRAW_CLASS_STATS=1 logs the populations. */
+     { static const char* sc = (const char*)1; static int st = -1;
+@@ -8526,12 +8626,12 @@ static void render_frame_prepare(RfFrame* f)
+       if (sc || st) {
+         u32 keep = 0, n_noend = 0, n_vp = 0, topo_n[16] = {0}, n_blend = 0, n_skip = 0;
+         extern u32 cellGcmResolveLocated(int local, u32 offset);
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-            const typeof(s_d3d.draws[0])* D = &s_d3d.draws[_d];
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++            const typeof(f->draws[0])* D = &f->draws[_d];
+             int drop = 0;
+             if (!D->is_clear && D->is_vp) {
+                 u32 o = cellGcmResolveLocated((D->fp_addr & 3u) == 1, D->fp_addr & ~3u);
+-                int noend = (o != 0xFFFFFFFFu) && rsx_fp_program_size(vm_base + o, 0x10000) == 0;
++                int noend = (o != 0xFFFFFFFFu) && rsx_fp_program_size(fp_bytes(o), 0x10000) == 0;
+                 n_vp++; n_noend += noend; topo_n[D->topology & 15]++; n_blend += D->blend ? 1 : 0;
+                 if (sc) {
+                     if (!strcmp(sc, "noend")) drop = noend;
+@@ -8540,13 +8640,13 @@ static void render_frame_prepare(RfFrame* f)
+                 }
+             }
+             if (drop) { n_skip++; continue; }
+-            if (keep != _d) s_d3d.draws[keep] = s_d3d.draws[_d];
++            if (keep != _d) f->draws[keep] = f->draws[_d];
+             keep++;
+         }
+         static int nl = 0;
+         if (st && (nl++ % 200) == 0) { fprintf(stderr, "[CLASS] vp-in-ED10000=%u noend=%u blend=%u skipped=%u topo:", n_vp, n_noend, n_blend, n_skip);
+             for (int t = 0; t < 16; t++) if (topo_n[t]) fprintf(stderr, " %d=%u", t, topo_n[t]); fprintf(stderr, "\n"); }
+-        s_d3d.draw_count = keep;
++        f->n = keep;
+       } }
+ 
+     /* DRAW_SKIP_TEX=<hex raw offset>: drop every op binding that texture on
+@@ -8557,12 +8657,12 @@ static void render_frame_prepare(RfFrame* f)
+       want = draw_filter_tex(sk);
+       if (want) {
+         u32 keep = 0;
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-            if (!s_d3d.draws[_d].is_clear && s_d3d.draws[_d].tex[0].raw == want) continue;
+-            if (keep != _d) s_d3d.draws[keep] = s_d3d.draws[_d];
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++            if (!f->draws[_d].is_clear && f->draws[_d].tex[0].raw == want) continue;
++            if (keep != _d) f->draws[keep] = f->draws[_d];
+             keep++;
+         }
+-        s_d3d.draw_count = keep;
++        f->n = keep;
+       } }
+ 
+     /* DRAW_KEEP_TEX=<hex raw offset>: the inverse -- keep only the ops binding
+@@ -8594,15 +8694,15 @@ static void render_frame_prepare(RfFrame* f)
+         static D3D12DrawRecord kept[MAX_DRAWS];
+         u32 nk = 0;
+         if (!noclr)
+-            for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++)
+-                if (s_d3d.draws[_d].is_clear && nk < MAX_DRAWS) kept[nk++] = s_d3d.draws[_d];
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++)
+-            if (!s_d3d.draws[_d].is_clear && s_d3d.draws[_d].tex[0].raw == want
+-                && (kblend < 0 || s_d3d.draws[_d].blend == kblend)
++            for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++)
++                if (f->draws[_d].is_clear && nk < MAX_DRAWS) kept[nk++] = f->draws[_d];
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++)
++            if (!f->draws[_d].is_clear && f->draws[_d].tex[0].raw == want
++                && (kblend < 0 || f->draws[_d].blend == kblend)
+                 && nk < MAX_DRAWS)
+-                kept[nk++] = s_d3d.draws[_d];
+-        for (u32 _k = 0; _k < nk; _k++) s_d3d.draws[_k] = kept[_k];
+-        s_d3d.draw_count = nk;
++                kept[nk++] = f->draws[_d];
++        for (u32 _k = 0; _k < nk; _k++) f->draws[_k] = kept[_k];
++        f->n = nk;
+       } }
+ 
+     /* DRAW_LAST_TEX=<hex raw offset>: move the ops binding that texture to the
+@@ -8613,20 +8713,20 @@ static void render_frame_prepare(RfFrame* f)
+     { static const char* lt = (const char*)1; static u32 want = 0;
+       if (lt == (const char*)1) lt = getenv("DRAW_LAST_TEX");
+       want = draw_filter_tex(lt);
+-      if (want && s_d3d.draw_count > 1) {
++      if (want && f->n > 1) {
+         static D3D12DrawRecord moved[MAX_DRAWS];
+         u32 nm = 0, keep = 0;
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-            if (!s_d3d.draws[_d].is_clear && s_d3d.draws[_d].tex[0].raw == want) {
+-                if (nm < MAX_DRAWS) moved[nm++] = s_d3d.draws[_d];
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++            if (!f->draws[_d].is_clear && f->draws[_d].tex[0].raw == want) {
++                if (nm < MAX_DRAWS) moved[nm++] = f->draws[_d];
+                 continue;
+             }
+-            if (keep != _d) s_d3d.draws[keep] = s_d3d.draws[_d];
++            if (keep != _d) f->draws[keep] = f->draws[_d];
+             keep++;
+         }
+         for (u32 _m = 0; _m < nm && keep < MAX_DRAWS; _m++)
+-            s_d3d.draws[keep++] = moved[_m];
+-        s_d3d.draw_count = keep;
++            f->draws[keep++] = moved[_m];
++        f->n = keep;
+       } }
+ 
+     /* Render-to-texture pre-pass: make sure an offscreen RT resource exists for
+@@ -8635,8 +8735,8 @@ static void render_frame_prepare(RfFrame* f)
+      * too, and the colour copy of each one a draw samples: both settle their
+      * size here, before any draw's SRV window points at them. */
+     for (int _i = 0; _i < MAX_OFF_RTS; _i++) s_d3d.off_rt[_i].used = 0;
+-    for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-        D3D12DrawRecord* dr = &s_d3d.draws[_d];
++    for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++        D3D12DrawRecord* dr = &f->draws[_d];
+         const float dsc = rs_draw_sc(dr);   /* RES_SCALE; 1 when unset */
+         if (dr->is_vp && dr->rt_off)
+             off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt, dr->no_color ? 0.0f : dsc);
+@@ -8651,8 +8751,8 @@ static void render_frame_prepare(RfFrame* f)
+         }
+         for (int _u = 0; _u < 16; _u++) dr->tex_ds[_u] = -1;   /* set below for draws */
+     }
+-    for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-        const D3D12DrawRecord* dr = &s_d3d.draws[_d];
++    for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++        const D3D12DrawRecord* dr = &f->draws[_d];
+         for (int _u = 0; _u < 16 && dr->is_vp && !dr->is_clear; _u++) {
+             const int ds = dr->tex[_u].set ? off_ds_find(dr->tex[_u].raw) : -1;
+             if (ds < 0) continue;
+@@ -8671,8 +8771,8 @@ static void render_frame_prepare(RfFrame* f)
+     double _pre0 = perf_on() ? perf_now() : 0.0;
+     if (vp_fp_par_threads() >= 2 && !fp_async_on()) {   /* compile this batch's new programs in parallel */
+         vp_fp_jobs_reset(); s_fp_collect = 1;
+-        for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-            D3D12DrawRecord* dr = &s_d3d.draws[_d];
++        for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++            D3D12DrawRecord* dr = &f->draws[_d];
+             if (!dr->is_vp || dr->is_clear || !dr->fp_addr) continue;
+             u32 unnorm_dim[16][3];
+             u32 unnorm_mask = dr_unnorm_units(dr, unnorm_dim);
+@@ -8684,8 +8784,8 @@ static void render_frame_prepare(RfFrame* f)
+         vp_fp_run_jobs();
+     }
+     for (int _i = 0; _i < VP_TEX_SLOTS; _i++) s_d3d.vp_tex[_i].used = 0;
+-    for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+-        D3D12DrawRecord* dr = &s_d3d.draws[_d];
++    for (u32 _d = 0; _d < f->n && _d < MAX_DRAWS; _d++) {
++        D3D12DrawRecord* dr = &f->draws[_d];
+         if (!dr->is_vp || dr->is_clear) continue;
+         /* Debug: RTT_VIEWRT=<hex raw offset> makes display draws sample that
+          * offscreen RT at t0 (the composite blit then shows it fullscreen). */
+@@ -8774,7 +8874,7 @@ static void render_frame_prepare(RfFrame* f)
+             if (foff != 0xFFFFFFFFu) _fmask = fp_tex_units_cached(foff);
+         }
+         for (int _u = 0; _u < DRAW_SRV_STRIDE; _u++) {
+-            u32 wslot = draw_srv_win(_d) + (u32)_u;   /* patch 2907: parity half */
++            u32 wslot = draw_srv_win_p(f->parity, _d) + (u32)_u;   /* patch 2907: parity half */
+             dr->tex_rt[_u] = -1;
+             if (!(_fmask & (1u << _u))) {   /* not sampled: the null view, nothing resolved */
+                 srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+@@ -8964,8 +9064,8 @@ static void render_frame_prepare(RfFrame* f)
+               const u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1, dr->fp_addr & ~0x3u);
+               if (vm_base && foff != 0xFFFFFFFFu) {
+                   float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
+-                      + ((u64)s_d3d.vp_parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+-                  fpk_fill(dr->fp_addr, vm_base + foff, &ts[20]);
++                      + ((u64)f->parity * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
++                  fpk_fill(dr->fp_addr, fp_bytes(foff), &ts[20]);
+                   { static int sk = -1; static unsigned long long lt = 0; static int nl = 0;   /* DIAG SHK_DBG at replay */
+                     if (sk < 0) sk = getenv("SHK_DBG") ? 1 : 0;
+                     const unsigned long long nw = GetTickCount64();
+@@ -9021,7 +9121,7 @@ static void rf_batch_reset(void)
+ static void rf_detach(RfFrame* f, int piped)
+ {
+     f->draws = s_d3d.draws; f->n = s_d3d.draw_count; f->parity = s_d3d.vp_parity;
+-    f->present = s_present_this_frame; f->piped = piped;
++    f->present = s_present_this_frame; f->piped = piped; f->prep_on_pipe = 0;
+     const rsx_state* st = s_d3d.current_rsx_state;
+     f->have_st = st != NULL;
+     if (st) for (u32 r = 0; r < 4; r++) for (u32 c = 0; c < 4; c++) f->vc[r * 4 + c] = st->vertex_constants[r][c];
+@@ -10099,14 +10199,37 @@ static void render_frame_run(void)
+ {
+     RfFrame f;
+     if (!pipe_on()) {
++        rf_detach(&f, 0);          /* PREP_PIPE P1: the batch is taken before prepare, which works on f */
+         render_frame_prepare(&f);
+-        rf_detach(&f, 0);
+         render_frame_submit(&f);
+         return;
+     }
+     pipe_wait();               /* batch N-1's submit is done (and with it its Present) */
++    if (prep_pipe_on() && !s_d3d.tex_bound) {   /* PREP_PIPE P3: prepare on the submit thread */
++        { extern void (*g_rsx_prep_gate)(void); g_rsx_prep_gate = prep_gate; }
++        /* P2: batch N-1's GPU work is done before this thread records batch N+1 into the ring half N-1 used (the
++         * submit thread is idle after pipe_wait, so the queue and its fence are this thread's for the moment). */
++        if (!gpu_overlap_on()) wait_for_gpu();
++        s_fpk_batch++;   /* the FIFO-side start of prepare */
++        if (s_d3d.current_rsx_state && !s_d3d.vp_ready && s_d3d.current_rsx_state->vp_ucode_bytes >= 16) compile_vp();
++        rf_detach(&f, 1);
++        f.prep_on_pipe = 1;
++        fp_snapshot_batch(&f); s_fps_on = 1;   /* the batch's programs as they are now */
++        ResetEvent(s_prep_done);
++        InterlockedExchange(&s_prep_busy, 1);
++        s_pipe.f = f;
++        s_pipe.busy = 1;
++        s_pipe.n_sub++;
++        if ((s_pipe.n_sub % 600) == 0)
++            fprintf(stderr, "[PREP_PIPE] %llu batches; FIFO thread waited for the submit thread %llu times %.1f ms; label gate %llu of %llu writes waited, %.1f ms; programs copied %llu (%.1f MB), live reads %llu%c",
++                    (unsigned long long)s_pipe.n_sub, (unsigned long long)s_pipe.n_wait, s_pipe.wait_ms,
++                    (unsigned long long)s_prep_gate_waits, (unsigned long long)s_prep_gate_n, s_prep_gate_ms,
++                    (unsigned long long)s_fps_progs, (double)s_fps_bytes / 1048576.0, (unsigned long long)s_fps_miss, 10);
++        SetEvent(s_pipe.go);
++        return;
++    }
++    rf_detach(&f, 1);          /* the FIFO thread records the next batch into the other list (PREP_PIPE P1: before prepare) */
+     render_frame_prepare(&f);  /* waits for the GPU, uploads, descriptors, PSOs */
+-    rf_detach(&f, 1);          /* the FIFO thread records the next batch into the other list */
+     s_pipe.f = f;
+     s_pipe.busy = 1;
+     s_pipe.n_sub++;
