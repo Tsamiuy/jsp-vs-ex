@@ -357,6 +357,11 @@ void MessageHub::pump()
 
 // ---- DirectRendezvous -------------------------------------------------------------------------------------------------------
 // Messages: HELO {'H','E','L','O', local_count} client -> host; PLAN {'P','L','A','N', session_id u64, host_count, client_first, client_count}.
+bool SessionPlan::has_remote(const Endpoint& endpoint) const
+{
+    return std::any_of(remotes.begin(), remotes.end(), [&](const PeerSlots& peer) { return peer.ep == endpoint; });
+}
+
 std::array<uint8_t, 4> SessionPlan::peer_slot_mask() const
 {
     std::array<uint8_t, 4> m{};
@@ -412,6 +417,7 @@ int DirectRendezvous::poll()
 namespace {
 // GekkoNetAdapter has no user pointer: one adapter per process, bound to the mux of the running session.
 UdpMux* g_mux = nullptr;
+const SessionPlan* g_plan = nullptr;
 std::vector<GekkoNetResult*> g_results;
 
 void ad_send(GekkoNetAddress* a, const char* data, int len)
@@ -427,6 +433,7 @@ GekkoNetResult** ad_recv(int* n)
         g_mux->pump();
         Endpoint from{}; std::vector<uint8_t> d;
         while (g_mux->pop(kTagGekko, from, d)) {
+            if (!g_plan->has_remote(from)) continue;
             GekkoNetResult* r = (GekkoNetResult*)std::malloc(sizeof(GekkoNetResult));
             const std::array<uint8_t, 6> w = from.wire();
             r->addr.data = std::malloc(w.size()); r->addr.size = (unsigned)w.size();
@@ -440,7 +447,6 @@ GekkoNetResult** ad_recv(int* n)
     return g_results.data();
 }
 void ad_free(void* p) { std::free(p); }
-GekkoNetAdapter g_adapter = {ad_send, ad_recv, ad_free};
 
 // The state buffer GekkoNet stores per saved frame. It names the save; the bytes live in the snapshot ring (the buffer cannot be a spectator
 // state transfer, see the plan). Fixed little-endian-agnostic: only read back by the same process.
@@ -461,6 +467,8 @@ bool read_replay_head(const std::vector<uint8_t>& b, ReplayHead* h)
 }
 }
 
+GekkoNetAdapter NetSession::adapter_ = {ad_send, ad_recv, ad_free};
+
 NetSession::NetSession() {}
 NetSession::~NetSession() { stop(); }
 
@@ -477,6 +485,7 @@ void NetSession::stop()
     std::lock_guard<std::recursive_mutex> lk(gmu_);
     if (gs_) { GekkoSession* g = (GekkoSession*)gs_; gekko_destroy(&g); gs_ = nullptr; }
     g_mux = nullptr;   // one session per process (see start): nothing else is bound to the adapter
+    g_plan = nullptr;
     g_results.clear();
     mode_ = SessionMode::Game; cur_delay_ = 0;
     rec_copy_.clear(); rec_updates_ = 0; recording_ = false; replay_finished_ = false;
@@ -518,7 +527,6 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
         if (dn != d0) return refuse("local delays on one peer must be equal (GekkoNet desyncs under loss with unequal local delays)");
     }
     plan_ = plan; cfg_ = cfg;
-    g_mux = &mux;
     GekkoSession* g = nullptr;
     if (!gekko_create(&g, GekkoGameSession)) return refuse("gekko_create failed");
     GekkoConfig c{};
@@ -531,7 +539,7 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
     c.desync_detection = cfg.desync_detection;
     c.check_distance = 0;
     gekko_start(g, &c);
-    gekko_net_adapter_set(g, &g_adapter);
+    gekko_net_adapter_set(g, &adapter_);
     gekko_set_disconnect_timeout(g, cfg.disconnect_timeout_ms);
     // Actors in slot order so every peer gets the same handle for the same slot.
     for (unsigned s = 0; s < plan.total_players; s++) {
@@ -554,6 +562,8 @@ bool NetSession::start(UdpMux& mux, const SessionPlan& plan, const SessionConfig
         if (!ok) { gekko_destroy(&g); return refuse("the replay recording could not start"); }
         recording_ = true;
     }
+    g_plan = &plan_;
+    g_mux = &mux;
     gs_ = g;
     pending_.assign((size_t)plan.local_count * cfg.input_size, 0);   // zero wire bytes = neutral (see pad_pack_to_wire)
     last_poll_ms_.store(now_ms());

@@ -5,7 +5,7 @@
 #include "session/spectator_session.h"
 #include "session/stress_session.h"
 
-GEKKONET_API bool gekko_create(GekkoSession** session, GekkoSessionType session_type)
+GEKKONET_API bool gekko_create(GekkoSession** session, GekkoSessionType session_type) try
 {
     if (*session) {
         return false;
@@ -33,6 +33,11 @@ GEKKONET_API bool gekko_create(GekkoSession** session, GekkoSessionType session_
     }
 
     return true;
+}
+catch (...) {
+    // jsp: An unavailable random device can throw during construction. Report creation failure
+    // through the C API; the output pointer stays null until construction succeeds.
+    return false;
 }
 
 bool gekko_destroy(GekkoSession** session)

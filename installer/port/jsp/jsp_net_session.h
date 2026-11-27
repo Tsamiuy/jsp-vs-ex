@@ -36,6 +36,8 @@
 #include <thread>
 #include <vector>
 
+struct GekkoNetAdapter;
+
 namespace jspnet {
 
 // ---- addresses (IPv4 only) ------------------------------------------------------------------------------------------------
@@ -89,6 +91,7 @@ public:
     bool pop(uint8_t tag, Endpoint& from, std::vector<uint8_t>& data, uint64_t* arrived_ms = nullptr);
     uint64_t sent = 0, received = 0, dropped = 0, overflow = 0, oversize = 0, unknown_tag = 0, send_fail = 0; int last_send_err = 0;   // counters (dropped = by the LinkModel)
 private:
+    friend struct NetSessionTest;
     struct Delayed { uint64_t due_us; Endpoint to; std::vector<uint8_t> bytes; };
     struct Queued { Endpoint from; std::vector<uint8_t> data; uint64_t ms; };
     void raw_send(const Endpoint& to, const std::vector<uint8_t>& bytes);
@@ -185,6 +188,7 @@ struct SessionPlan {
     uint8_t total_players = 0;      // over all peers; slot s is GekkoNet handle s
     uint8_t local_first = 0, local_count = 0;
     std::vector<PeerSlots> remotes; // 1 entry for the 2-peer case
+    bool has_remote(const Endpoint& endpoint) const;
     // Handshake roster mapping: peer id (== handshake roster slot, host 0, client 1) -> mask of game slots that peer owns, e.g. 2+2 = {0b0011, 0b1100}.
     std::array<uint8_t, 4> peer_slot_mask() const;
 };
@@ -377,6 +381,8 @@ public:
     // so the saved states of earlier frames are never loaded again (gekko_final_frame, a local GekkoNet addition: gekkonet/PIN.md). -1 = none / not a game session.
     int final_frame() const;
 private:
+    friend struct NetSessionTest;
+    static GekkoNetAdapter adapter_;
     uint8_t cur_delay_ = 0;   // the local players' input delay now (set_local_delay)
 
     static constexpr int kNoTick = 0x7fffffff;

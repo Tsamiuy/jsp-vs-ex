@@ -1,7 +1,10 @@
 // net_transport_test.cpp -- host test of the transport pieces of jsp_net_session: endpoint wire form, pad wire encoding, message channel
 // epochs (restarted peer, stale packets), rendezvous validation (stray datagrams), bounded queues, heartbeat thread, roster masks.
-// In-process, real localhost UDP. Build and run: installer/tools/net_session_test.sh. Prints one line per check, exit 1 on any failure.
+// Packet admission uses an in-memory adapter. The rest uses real localhost UDP. Build and run: installer/tools/net_session_test.sh.
 #include "jsp_net_session.h"
+
+#include "backend.h"
+#include "zpp/zpp_bits.h"
 
 #include <chrono>
 #include <cstdio>
@@ -18,8 +21,180 @@ static void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::millisec
 // Pump both hubs for up to `ms` until `done()`.
 template <class F> static bool until(int ms, UdpMux* a, UdpMux* b, F done) { (void)a; (void)b; for (int i = 0; i < ms / 2; i++) { if (done()) return true; sleep_ms(2); } return done(); }
 
-int main()
+// A local adapter fixture with no socket. Read the receiver's magic from its normal sync request
+// so each injected message tests sender admission even when its session magic matches.
+static uint16_t sync_magic;
+static GekkoNetAdapter capture_sync{
+    [](GekkoNetAddress*, const char* data, int size) {
+        std::vector<uint8_t> bytes(data, data + size);
+        Gekko::NetPacket packet{};
+        zpp::bits::in in(bytes);
+        if (success(in(packet.header, packet.body)) && packet.header.type == Gekko::SyncRequest)
+            sync_magic = std::get<Gekko::SyncMsg>(packet.body).rng_data;
+    },
+    nullptr,
+    [](void*) {}  // Injected results refer to stack objects alive until HandleData returns.
+};
+
+static void deliver(Gekko::MessageSystem& receiver, uint8_t from, Gekko::PacketType type, const Gekko::MsgBody& body)
 {
+    std::vector<uint8_t> bytes;
+    zpp::bits::out out(bytes);
+    const Gekko::MsgHeader header{type, sync_magic};
+    const bool encoded = success(out(header, body));
+    CHECK(encoded);
+    if (!encoded) return;
+    GekkoNetResult result{};
+    result.addr = {&from, sizeof from};
+    result.data = bytes.data();
+    result.data_len = static_cast<unsigned>(bytes.size());
+    GekkoNetResult* results[] = {&result};
+    receiver.HandleData(&capture_sync, results, 1);
+}
+
+static void add_remote(Gekko::MessageSystem& receiver, int handle, uint8_t endpoint)
+{
+    Gekko::NetAddress address(&endpoint, sizeof endpoint);
+    receiver.remotes.push_back(std::make_unique<Gekko::Player>(handle, GekkoRemotePlayer, &address));
+    sync_magic = 0;
+    receiver.CheckStatusActors();
+    receiver.SendPendingOutput(&capture_sync);
+    CHECK(sync_magic != 0);
+    receiver.remotes.back()->SetStatus(Gekko::Connected);
+}
+
+namespace jspnet {
+struct NetSessionTest {
+    static void receive_adapter(const SessionPlan& plan, const Endpoint& admitted,
+                                const Endpoint& other_ip, const Endpoint& other_port)
+    {
+        UdpMux mux;
+        NetSession session;
+        SessionConfig cfg;
+        cfg.keepalive_stale_ms = 0;
+        const bool started = session.start(mux, plan, cfg);
+        CHECK(started);
+        if (!started) return;
+
+        // Feed already-demultiplexed datagrams to the actual GekkoNet callback without a UDP socket.
+        mux.q_[kTagGekko] = {{other_ip, {1}, 0}, {admitted, {2, 3}, 0}, {other_port, {4}, 0}};
+        const auto& adapter = NetSession::adapter_;
+        int count = 0;
+        GekkoNetResult** received = adapter.receive_data(&count);
+        CHECK(count == 1);
+        if (count == 1) {
+            const GekkoNetResult& result = *received[0];
+            const auto sender = admitted.wire();
+            const uint8_t payload[] = {2, 3};
+            CHECK(result.addr.size == sender.size() && std::memcmp(result.addr.data, sender.data(), sender.size()) == 0);
+            CHECK(result.data_len == sizeof payload && std::memcmp(result.data, payload, sizeof payload) == 0);
+        }
+        for (int i = 0; i < count; ++i) {
+            adapter.free_data(received[i]->addr.data);
+            adapter.free_data(received[i]->data);
+            adapter.free_data(received[i]);
+        }
+        adapter.receive_data(&count);
+        CHECK(count == 0);
+    }
+};
+}
+
+static void packet_admission()
+{
+    SessionPlan plan;
+    Endpoint admitted{}, other_ip{}, other_port{};
+    CHECK(parse_endpoint("127.0.0.1:4242", admitted));
+    CHECK(parse_endpoint("127.0.0.2:4242", other_ip));
+    CHECK(parse_endpoint("127.0.0.1:4243", other_port));
+    CHECK(!plan.has_remote(admitted));
+    plan.total_players = 2;
+    plan.local_count = 1;
+    plan.remotes = {{admitted, 1, 1}};
+    CHECK(plan.has_remote(admitted));
+    CHECK(!plan.has_remote(other_ip));
+    CHECK(!plan.has_remote(other_port));
+    NetSessionTest::receive_adapter(plan, admitted, other_ip, other_port);
+
+    constexpr uint8_t host = 1, other_peer = 2, stranger = 3;
+    const Gekko::InputMsg combined{0, 1, 2, false, {17, 29}};
+    {
+        Gekko::MessageSystem spectator;
+        spectator.Init(2, 1, 1, true);
+        add_remote(spectator, 0, host);
+        deliver(spectator, stranger, Gekko::SpectatorInputs, combined);
+        CHECK(spectator.GetLastAddedInputFrom(0) == -1 && spectator.GetLastAddedInputFrom(1) == -1);
+        deliver(spectator, host, Gekko::SpectatorInputs, combined);
+        const auto& first = spectator.GetNetPlayerQueue(0);
+        const auto& second = spectator.GetNetPlayerQueue(1);
+        CHECK(first.size() == 1 && second.size() == 1 && first.front()[0] == 17 && second.front()[0] == 29);
+
+        Frame frame = -1;
+        std::vector<uint8_t> state;
+        const Gekko::SpectatorStateMsg snapshot{12, 1, 0, {43}};
+        deliver(spectator, stranger, Gekko::SpectatorState, snapshot);
+        CHECK(!spectator.TakeSpectatorState(frame, state));
+        deliver(spectator, host, Gekko::SpectatorState, snapshot);
+        CHECK(spectator.TakeSpectatorState(frame, state) && frame == 12 && state.size() == 1 && state.front() == 43);
+    }
+    {
+        Gekko::MessageSystem player;
+        player.Init(2, 1);
+        add_remote(player, 0, host);
+        add_remote(player, 1, other_peer);
+        deliver(player, host, Gekko::SpectatorInputs, combined);
+        CHECK(player.GetLastAddedInputFrom(0) == -1 && player.GetLastAddedInputFrom(1) == -1);
+        const Gekko::InputMsg player_input{0, 1, 1, false, {41}};
+        deliver(player, other_peer, Gekko::Inputs, player_input);
+        const auto& inputs = player.GetNetPlayerQueue(1);
+        CHECK(inputs.size() == 1 && inputs.front()[0] == 41 && player.GetLastAddedInputFrom(0) == -1);
+
+        const Gekko::DisconnectClaimMsg claim{1, 0, 0, {41}};
+        deliver(player, stranger, Gekko::DisconnectClaim, claim);
+        CHECK(player.remotes[1]->GetStatus() == Gekko::Connected);
+        deliver(player, host, Gekko::DisconnectClaim, claim);
+        CHECK(player.remotes[1]->GetStatus() == Gekko::Connected && player.remotes[0]->peer_claims.empty());
+        deliver(player, other_peer, Gekko::DisconnectClaim, claim);
+        CHECK(player.remotes[1]->GetStatus() == Gekko::Disconnected && player.remotes[1]->peer_claims.count(1) == 1);
+    }
+    {
+        Gekko::MessageSystem player;
+        player.Init(3, 1);
+        player.locals.push_back(std::make_unique<Gekko::Player>(0, GekkoLocalPlayer, nullptr));
+        add_remote(player, 1, host);
+        add_remote(player, 2, host);  // Two actors share the other playing endpoint.
+        uint8_t spectator_id = stranger;
+        Gekko::NetAddress spectator_address(&spectator_id, sizeof spectator_id);
+        player.spectators.push_back(std::make_unique<Gekko::Player>(3, GekkoSpectator, &spectator_address));
+
+        const Gekko::DisconnectClaimMsg claim{2, 0, 0, {41}};
+        deliver(player, stranger, Gekko::DisconnectClaim, claim);
+        CHECK(player.remotes[1]->GetStatus() == Gekko::Connected && player.GetLastAddedInputFrom(2) == -1);
+        deliver(player, host, Gekko::DisconnectClaim, claim);
+        CHECK(player.remotes[1]->GetStatus() == Gekko::Disconnected && player.GetLastAddedInputFrom(2) == 0);
+    }
+    {
+        Gekko::MessageSystem player;
+        player.Init(3, 1);
+        player.locals.push_back(std::make_unique<Gekko::Player>(0, GekkoLocalPlayer, nullptr));
+        add_remote(player, 1, host);
+        add_remote(player, 2, other_peer);
+        const Gekko::DisconnectClaimMsg claim{2, 0, 1, {41, 42}};
+        deliver(player, host, Gekko::DisconnectClaim, claim);
+        CHECK(player.remotes[1]->GetStatus() == Gekko::Disconnected && player.remotes[1]->disconnect_frame == 1);
+        const auto& inputs = player.GetNetPlayerQueue(2);
+        CHECK(inputs.size() == 2 && inputs.front()[0] == 41 && inputs.back()[0] == 42);
+        const auto& claims = player.remotes[0]->peer_claims;
+        CHECK(claims.count(2) && claims.at(2) == 1);
+    }
+    std::printf("%s packet admission (%d checks, %d failed)\n", g_fail ? "FAIL" : "ok", g_n, g_fail);
+}
+
+int main(int argc, char** argv)
+{
+    packet_admission();
+    if (argc == 2 && std::strcmp(argv[1], "--admission-only") == 0) return g_fail ? 1 : 0;
+
     // ---- Endpoint: 6-byte wire form, independent of padding ----
     {
         alignas(Endpoint) unsigned char raw[sizeof(Endpoint)];
