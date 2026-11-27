@@ -3,6 +3,7 @@
 #include <cassert>
 #include <climits>
 #include <cstring>
+#include <random>  // jsp: Draw the wire magic from the platform's random device.
 
 #include "zpp/zpp_bits.h"
 
@@ -15,9 +16,9 @@ Gekko::MessageSystem::MessageSystem()
     _last_sent_network_check = 0;
     _disconnect_timeout = NetStats::DISCONNECT_TIMEOUT;
 
-	// gen magic for session
-	std::srand((unsigned int)std::time(nullptr));
-	_session_magic = std::rand();
+    // jsp: Draw a fresh nonzero magic without time-seeding a process-global generator.
+    std::random_device random;
+    _session_magic = std::uniform_int_distribution<unsigned>(1, UINT16_MAX)(random);
 
     session_events = SessionEventSystem();
 }
@@ -834,8 +835,17 @@ void Gekko::MessageSystem::SendDataTo(NetData* pkt, GekkoNetAdapter* host)
 
 void Gekko::MessageSystem::ParsePacket(NetAddress& addr, NetPacket& pkt, u32 packet_size)
 {
+    // jsp: Combined input and state streams belong to the spectator's sole remote actor, its host.
+    const bool spectator_stream = pkt.header.type == SpectatorInputs || pkt.header.type == SpectatorState;
+    if (addr.GetSize() == 0 ||
+        (spectator_stream && (!_accept_spectator_state || remotes.empty() || !remotes.front()->address.Equals(addr))) ||
+        (pkt.header.type == Inputs && _accept_spectator_state)) {
+        return;
+    }
+
     u64 now = TimeSinceEpoch();
-    // update receive timers.
+    // jsp: Only endpoints registered as actors can reach the packet handlers.
+    bool admitted = false;
     std::vector<std::unique_ptr<Player>>* current = &remotes;
     for (u32 i = 0; i < 2; i++)
     {
@@ -845,10 +855,15 @@ void Gekko::MessageSystem::ParsePacket(NetAddress& addr, NetPacket& pkt, u32 pac
 
         for (auto& player : *current) {
             if (player->address.Equals(addr)) {
+                admitted = true;
                 player->stats.last_received_message = now;
                 player->stats.bytes_received_accum += packet_size;
             }
         }
+    }
+
+    if (!admitted) {
+        return;
     }
 
     // handle packet.
@@ -1315,16 +1330,33 @@ void Gekko::MessageSystem::OnDisconnectClaim(NetAddress& addr, NetPacket& pkt)
         return;
     }
 
-    // the carried inputs must cover the claimed frame range.
-    const u64 expected = (u64)(body->last_frame - body->start_frame + 1) * _input_size;
-    if (body->last_frame < body->start_frame || body->inputs.size() < expected) {
+    auto plyr = GetPlayerByHandle(body->player);
+
+    // jsp: Claims name a remote actor with a bound endpoint. Two playing endpoints
+    // cannot relay claims. A larger room can recover a missing actor's inputs from
+    // another playing endpoint. Spectators do not count as playing endpoints.
+    if (!plyr || plyr->GetType() != GekkoRemotePlayer || plyr->address.GetSize() == 0) {
         return;
     }
 
-    auto plyr = GetPlayerByHandle(body->player);
+    if (!plyr->address.Equals(addr)) {
+        bool sender_is_remote = false;
+        bool has_third_endpoint = !locals.empty();  // All local actors share one endpoint.
+        for (const auto& peer : remotes) {
+            if (peer->address.Equals(addr)) {
+                sender_is_remote = true;
+            } else if (peer->address.GetSize() && !peer->address.Equals(plyr->address)) {
+                has_third_endpoint = true;
+            }
+        }
+        if (!sender_is_remote || !has_third_endpoint) {
+            return;
+        }
+    }
 
-    // claims about our own actors are handled by the disconnect message instead.
-    if (!plyr || plyr->GetType() != GekkoRemotePlayer) {
+    // the carried inputs must cover the claimed frame range.
+    if (body->last_frame < body->start_frame ||
+        body->inputs.size() < (u64)((i64)body->last_frame - body->start_frame + 1) * _input_size) {
         return;
     }
 

@@ -4,6 +4,8 @@ What changed in each version, newest first. Each version has two parts: **For pl
 
 ## [Unreleased]
 
+- **Rollback (experimental):** Reject packets from endpoints outside the session, accept spectator streams only from the host, and bind disconnect claims to the actor's endpoint. Rollback session magic comes from the system random device.
+
 ## [0.7.1] - 2026-11-26
 
 ### For players
